@@ -37,7 +37,6 @@ class AskRequest(BaseModel):
     language: Literal["en", "vi"] = "en"
 
 
-
 class ConversationCreate(BaseModel):
     title: str | None = None
 
@@ -348,7 +347,7 @@ async def ask_question(
 
     await repo.add_message(conversation.id, "user", req.question)
     data = await get_ai_service(db).ask(
-        current_user, req.question, conversation_id=conversation.id
+        current_user, req.question, conversation_id=conversation.id, language=req.language
     )
     await repo.add_message(
         conversation.id,

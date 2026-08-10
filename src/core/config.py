@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
+    # Only verified QNSC Entra identities are provisioned automatically. New
+    # identities receive the least-privileged built-in Staff role.
+    ENTRA_AUTO_PROVISION_DOMAIN: str = "qnsc.vn"
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None

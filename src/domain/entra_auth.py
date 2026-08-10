@@ -86,7 +86,10 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     key_data = next((item for item in keys if item.get("kid") == kid), None)
     if not key_data:
         raise ValueError("Microsoft signing key is unknown")
-    key = jwk.construct(key_data)
+    # Entra's JWKS can omit the optional `alg` member. The token header was
+    # already validated as RS256 above, so pass that validated algorithm
+    # explicitly instead of asking python-jose to infer it from the key.
+    key = jwk.construct(key_data, algorithm=algorithm)
     claims = jwt.decode(
         id_token,
         key,
