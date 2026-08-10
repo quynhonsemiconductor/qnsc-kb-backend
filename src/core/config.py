@@ -96,11 +96,11 @@ class Settings(BaseSettings):
     # no third-party key gates indexing or search.
     #
     # It is paid for in image size and memory. The API embeds the search QUERY on every
-    # search, so the fp32 ONNX export lives in the api image as well as the worker's —
-    # ~2.2 GB each, and no torch anywhere (PR #54): the `ml` group is a local-checkout
-    # reference, not a shipped dependency. Choosing a hosted model instead
-    # (gemini-embedding-001, text-embedding-3-small) is a one-line change here plus the
-    # migration below, and src/lib/embeddings.py already carries that path.
+    # search, so the weights and torch live in the api image as well as the worker's —
+    # the `ml` dependency group is installed in both, and neither is small. Choosing a
+    # hosted model instead (gemini-embedding-001, text-embedding-3-small) is a one-line
+    # change here plus the migration below, and src/lib/embeddings.py already carries
+    # that path.
     #
     # This value fixes EMBEDDING_DIMENSION, which fixes the pgvector column width and the
     # HNSW index AT MIGRATION TIME. Changing it later needs a migration and a full

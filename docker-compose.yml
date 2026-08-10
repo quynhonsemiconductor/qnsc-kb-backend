@@ -36,13 +36,21 @@ services:
   api:
     build:
       context: .
-      dockerfile: docker/Dockerfile.api
-    entrypoint: ["/app/docker/entrypoint.sh"]
+      dockerfile: Dockerfile
+      target: api
+      args:
+        # Local builds skip the ~2.3 GB weight bake, so a rebuild stays quick. The
+        # weights are fetched on first use into the hfcache volume below instead, once
+        # for all three services.
+        BAKE_EMBEDDING_MODEL: "false"
     ports:
       - "8000:8000"
     volumes:
       - .:/app
       - ./connector_sources:/app/storage/connectors
+      # BAKE_EMBEDDING_MODEL=false above means the weights are downloaded on first use.
+      # Without this volume that is ~2.3 GB again on every `docker compose up --build`.
+      - hfcache:/opt/huggingface
     # Restrict reloads to application source.  Test runs and Celery's local
     # schedule database must not restart the API and reload the embedding
     # model during ordinary local development.
@@ -75,6 +83,7 @@ services:
         BAKE_EMBEDDING_ONNX: "false"
     volumes:
       - .:/app
+      - hfcache:/opt/huggingface
     command: celery -A src.workers.celery_app worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=info
     mem_limit: 2g
     mem_reservation: 512m
@@ -114,6 +123,7 @@ services:
         BAKE_EMBEDDING_ONNX: "false"
     volumes:
       - .:/app
+      - hfcache:/opt/huggingface
     command: celery -A src.workers.celery_app beat --loglevel=info
     mem_limit: 256m
     mem_reservation: 64m
@@ -139,3 +149,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  hfcache:

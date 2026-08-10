@@ -8,7 +8,7 @@ def test_migrations_have_one_current_head():
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20260810_50"]
+    assert script.get_heads() == ["20260810_51"]
 
 
 def test_production_compose_is_explicitly_hardened():
