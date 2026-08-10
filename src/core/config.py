@@ -137,7 +137,7 @@ class Settings(BaseSettings):
     RAG_CONTEXT_MAX_TOKENS: int = 3500
     RAG_PARENT_CONTEXT_CHARS: int = 2400
     RAG_MAX_PARENTS_PER_ARTICLE: int = 3
-    PROMPT_VERSION: str = "v2.0-grounded-extended-sections"
+    PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
     RETRIEVAL_VERSION: str = "v2-parent-budget-confidence"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
