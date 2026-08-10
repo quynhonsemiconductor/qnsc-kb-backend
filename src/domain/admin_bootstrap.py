@@ -85,14 +85,7 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> User | None:
     admin_role = await db.scalar(
         select(Role)
         .where(Role.name == "Admin", Role.company_domain.is_(None))
-        # BOTH collections eager on purpose. `user.roles = [admin_role]` below is an
-        # assignment, and an assignment fires the backref mutation on admin_role.users —
-        # whose collection is otherwise unloaded, so the ORM lazily loads it in the
-        # middle of plain attribute code, outside any awaitable context. Under an async
-        # session that is MissingGreenlet, and it only bites a FRESH database: develop
-        # and every long-lived environment take the early return above, because they
-        # already have an administrator. That masking is why this shipped.
-        .options(selectinload(Role.permissions), selectinload(Role.users))
+        .options(selectinload(Role.permissions))
     )
     if admin_role is None:
         # bootstrap_rbac creates this unconditionally, so its absence means the RBAC
@@ -115,14 +108,8 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> User | None:
     db.add(user)
 
     try:
-        # Attach the role BEFORE the flush, while the user is still pending. Collection
-        # assignment GETs the old value first, and on a PENDING object that merely
-        # initialises an empty collection in memory; after a flush the user is
-        # persistent, the same GET lazily loads from the database, and under an async
-        # session that is MissingGreenlet from inside plain attribute code. The
-        # selectinload on Role above covers the backref side for the same reason.
-        user.roles = [admin_role]
         await db.flush()
+        user.roles = [admin_role]
         await db.commit()
     except IntegrityError:
         # Another replica won the race and created it first. Nothing to repair.

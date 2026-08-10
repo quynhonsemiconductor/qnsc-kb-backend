@@ -32,6 +32,14 @@ def test_production_compose_is_explicitly_hardened():
     assert compose.count("MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}") == 2
     assert compose.count("MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:?set MICROSOFT_CLIENT_SECRET}") == 2
     assert compose.count("MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:?set MICROSOFT_TENANT_ID}") == 2
+    # The bootstrap administrator is a GLOBAL admin. An unset password must fail the
+    # compose invocation rather than fall back to the one published in .env.example.
+    assert "BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD}" in compose
+    assert "BOOTSTRAP_ADMIN_PASSWORD:-" not in compose
+    # Migrations are not run from any service's entrypoint any more — the `migrator`
+    # image target owns them, behind a compose profile, so a scale-out cannot fire N
+    # concurrent migrations. Locally that means `alembic upgrade head` by hand.
+    assert "target: migrator" in compose
     dev_compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     assert 'entrypoint: ["/app/docker/entrypoint.sh"]' in dev_compose
     assert "AUTO_CREATE_SCHEMA=false" in dev_compose
