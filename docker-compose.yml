@@ -36,13 +36,8 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: api
-      args:
-        # Local builds skip the ~2.2 GB ONNX copy so a rebuild stays quick. The
-        # artefact cannot be fetched (it is produced by an export), so testing
-        # EMBEDDING_RUNTIME=onnx locally means building without this override.
-        BAKE_EMBEDDING_ONNX: "false"
+      dockerfile: docker/Dockerfile.api
+    entrypoint: ["/app/docker/entrypoint.sh"]
     ports:
       - "8000:8000"
     volumes:

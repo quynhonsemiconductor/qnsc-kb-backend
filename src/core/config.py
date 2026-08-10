@@ -1,14 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 import re
-
-
-# The password the bootstrap administrator gets when nothing else is configured. It is
-# written down in this repository on purpose — a local checkout should just work — which
-# is exactly why validate_production refuses to start with it. Defined here rather than
-# beside the bootstrap code so that check has no import cycle to reach it.
-DEVELOPMENT_DEFAULT_PASSWORD = "Admin123@"
 
 
 def is_cloudflare_r2_endpoint(value: str | None) -> bool:
@@ -115,29 +108,6 @@ class Settings(BaseSettings):
     # spaces, and their distance is meaningless rather than merely wrong.
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     EMBEDDING_VERSION: str = "bge-m3-v1"
-
-    # HOW the model runs, kept separate from WHICH model runs. "torch" is
-    # sentence-transformers and is what the stored corpus was embedded with; "onnx" runs
-    # the identical graph on onnxruntime with no torch and no transformers, which is
-    # ~2 GB less in every image that embeds. Same vectors either way — the parity test
-    # in tests/unit/test_embedding_backends.py is what proves that for a given model.
-    EMBEDDING_RUNTIME: str = "torch"
-    # Where the baked ONNX export lives: model.onnx + tokenizer.json.
-    EMBEDDING_ONNX_DIR: str = "/opt/embedding-onnx"
-    # bge-* are CLS-pooled. An ONNX export does not carry the pooling config that
-    # sentence-transformers reads, so it is stated rather than inferred — the wrong
-    # choice yields valid vectors in the wrong space and degrades retrieval silently.
-    EMBEDDING_ONNX_POOLING: str = "cls"
-    # A 0.5 vCPU task oversubscribes itself with onnxruntime's default thread pool and
-    # spends longer scheduling than embedding.
-    EMBEDDING_ONNX_THREADS: int = 1
-    # Must equal the torch backend's effective max_seq_length (sentence_bert_config.json
-    # — 8192 for bge-m3): the stored corpus was embedded with full-length inputs, and a
-    # runtime that truncates earlier lands long inputs in a different space without any
-    # error. The long-input parity case in test_embedding_backends.py enforces the
-    # agreement; the value is per-model like EMBEDDING_DIMENSION.
-    EMBEDDING_MAX_TOKENS: int = 8192
-    EMBEDDING_BATCH_SIZE: int = 32
     CHUNKING_VERSION: str = "v2-structure-aware"
     EMBEDDING_DIMENSION: int | None = None
     LLM_MODEL: str = "gemma-4-26b-a4b-it"
@@ -160,7 +130,7 @@ class Settings(BaseSettings):
     RAG_CONTEXT_MAX_TOKENS: int = 3500
     RAG_PARENT_CONTEXT_CHARS: int = 2400
     RAG_MAX_PARENTS_PER_ARTICLE: int = 3
-    PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
+    PROMPT_VERSION: str = "v2.0-grounded-extended-sections"
     RETRIEVAL_VERSION: str = "v2-parent-budget-confidence"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
@@ -176,18 +146,6 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
-    # Only verified QNSC Entra identities are provisioned automatically. New
-    # identities receive the least-privileged built-in Staff role.
-    ENTRA_AUTO_PROVISION_DOMAIN: str = "qnsc.vn"
-    # Addresses that are provisioned as global administrators instead of Staff, comma
-    # separated. Consulted ONLY when the account is first created — it is a bootstrap
-    # default, not a standing authority, so a role changed later in the admin UI is never
-    # overwritten by a sign-in. Removing someone here does not demote them.
-    #
-    # Safe to express as email addresses because the tenant is pinned: an id_token only
-    # reaches this check if Entra issued it for MICROSOFT_TENANT_ID, so the addresses are
-    # ones the organisation controls.
-    ENTRA_ADMIN_EMAILS: str = ""
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None
@@ -439,29 +397,6 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "MICROSOFT_TENANT_ID must be a specific Entra tenant GUID in production"
             )
-
-        # LAST on purpose. This is the newest check, and putting it earlier made it
-        # shadow every one above: a settings object left deliberately broken to exercise
-        # the CORS or R2 rule would fail on the bootstrap password instead, and the rule
-        # actually under test would go unverified.
-        if self.BOOTSTRAP_ADMIN_ENABLED:
-            # The account this creates is a GLOBAL administrator: it bypasses tenant RLS
-            # and can read every company's data. A password that ships in this repository
-            # would make that reachable by anyone who can read GitHub and find the host.
-            if self.BOOTSTRAP_ADMIN_PASSWORD == DEVELOPMENT_DEFAULT_PASSWORD:
-                raise RuntimeError(
-                    "BOOTSTRAP_ADMIN_PASSWORD must be set in production; it is still the "
-                    "development default. Set BOOTSTRAP_ADMIN_ENABLED=false if this "
-                    "deployment provisions its administrator some other way."
-                )
-            if len(self.BOOTSTRAP_ADMIN_PASSWORD) < 12:
-                raise RuntimeError(
-                    "BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters in production"
-                )
-            if "@" not in self.BOOTSTRAP_ADMIN_EMAIL:
-                raise RuntimeError(
-                    "BOOTSTRAP_ADMIN_EMAIL must be an email address in production"
-                )
 
 
 settings = Settings()

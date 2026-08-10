@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-import jwt
+from jose import jwk, jwt
 
 from src.core.config import settings
 
@@ -70,19 +70,12 @@ async def exchange_code(code: str) -> dict[str, Any]:
 
 async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     """Verify signature, audience, nonce, and tenant claims before mapping."""
-    # ONLY the header is read before the signature is checked, and only for the two
-    # values that are needed to find the key at all: which key signed it, and with what
-    # algorithm. The tenant and issuer claims are validated further down, against the
-    # VERIFIED payload — python-jose's get_unverified_claims() invited reading them here,
-    # but nothing actually requires it: the JWKS below is fetched from the CONFIGURED
-    # tenant, never from a tenant the token asks for.
     unverified_header = jwt.get_unverified_header(id_token)
+    unverified_claims = jwt.get_unverified_claims(id_token)
     kid = str(unverified_header.get("kid") or "")
     if not kid:
         raise ValueError("Microsoft ID token has no key identifier")
-    algorithm = str(unverified_header.get("alg") or "")
-    if algorithm != "RS256":
-        raise ValueError("Microsoft ID token algorithm is not allowed")
+    algorithm, _tenant_id = _validate_id_token_metadata(unverified_header, unverified_claims)
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, trust_env=False) as client:
         response = await client.get(
             f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/discovery/v2.0/keys"
@@ -93,10 +86,7 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     key_data = next((item for item in keys if item.get("kid") == kid), None)
     if not key_data:
         raise ValueError("Microsoft signing key is unknown")
-    # Entra's JWKS can omit the optional `alg` member. The token header was
-    # already validated as RS256 above, so pass that validated algorithm
-    # explicitly instead of asking PyJWT to infer it from the key.
-    key = jwt.PyJWK.from_dict(key_data, algorithm=algorithm).key
+    key = jwk.construct(key_data)
     claims = jwt.decode(
         id_token,
         key,
@@ -104,10 +94,6 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
         audience=settings.MICROSOFT_CLIENT_ID,
         options={"verify_iss": False},
     )
-    # Tenant and issuer are checked HERE, on the verified payload, rather than on a
-    # pre-signature read of the same claims. Same rules, applied to data an attacker
-    # cannot author.
-    _validate_id_token_metadata(unverified_header, claims)
     if claims.get("nonce") != expected_nonce:
         raise ValueError("Microsoft ID token nonce is invalid")
     subject = str(claims.get("oid") or claims.get("sub") or "").strip()

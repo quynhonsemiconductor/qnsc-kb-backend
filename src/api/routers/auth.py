@@ -1,6 +1,5 @@
 import uuid
 import hashlib
-import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from fastapi import APIRouter, Body, Depends, status, HTTPException, Query, Request, Response, Cookie
@@ -1116,10 +1115,11 @@ async def entra_login() -> dict[str, str]:
     return {"authorization_url": entra_auth.authorization_url(state, nonce), "state_expires_in": "600"}
 
 
-@router.get("/entra/callback")
+@router.get("/entra/callback", response_model=TokenResponse, response_model_exclude_none=True)
 async def entra_callback(
     code: str,
     state: str,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     """Exchange and verify Entra claims, then link to an existing account."""
@@ -1128,10 +1128,10 @@ async def entra_callback(
     try:
         state_claims = jwt.decode(state, settings.SECRET_KEY, algorithms=["HS256"])
         if state_claims.get("type") != "entra_login" or not state_claims.get("nonce"):
-            raise jwt.InvalidTokenError("Invalid Entra login state")
+            raise JWTError("Invalid Entra login state")
         tokens = await entra_auth.exchange_code(code)
         claims = await entra_auth.verify_id_token(str(tokens.get("id_token") or ""), str(state_claims["nonce"]))
-    except (jwt.PyJWTError, ValueError, KeyError) as exc:
+    except (JWTError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=401, detail="Microsoft sign-in could not be verified") from exc
     email = str(claims["email"]).lower()
     await set_database_context(db, email.rsplit("@", 1)[1])
@@ -1140,35 +1140,7 @@ async def entra_callback(
         ExternalIdentity.subject == str(claims["subject"]),
     ))).scalar_one_or_none()
     user = await UserRepository(db).get_by_id(identity.user_id) if identity else await UserRepository(db).get_by_email(email)
-    if user is None:
-        domain = email.rsplit("@", 1)[1]
-        allowed_domain = settings.ENTRA_AUTO_PROVISION_DOMAIN.strip().lower()
-        if domain != allowed_domain:
-            raise HTTPException(status_code=403, detail="Your Microsoft account is not eligible for automatic KB provisioning")
-        # bootstrap_rbac below reads this column: "Admin" attaches the GLOBAL admin role
-        # (company_domain NULL), anything else the company-scoped equivalent. It assigns
-        # only to a user with no roles yet, so this can never re-promote an existing one.
-        admin_emails = {
-            address.strip().lower()
-            for address in settings.ENTRA_ADMIN_EMAILS.split(",")
-            if address.strip()
-        }
-        user = User(
-            email=email,
-            name=str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
-            password_hash=get_password_hash(secrets.token_urlsafe(32)),
-            company_domain=domain,
-            role="Admin" if email in admin_emails else "Staff",
-            active=True,
-        )
-        db.add(user)
-        await db.flush()
-        await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
-        if user is None:
-            raise HTTPException(status_code=500, detail="Could not provision the Microsoft account")
-        await AuditRepository(db).record(user.id, "entra_user_provision", "user", str(user.id), outcome="success")
-    if not user.active:
+    if not user or not user.active:
         raise HTTPException(status_code=403, detail="Your Microsoft account is not linked to an active internal KB account")
     if user.email.lower() != email:
         raise HTTPException(status_code=403, detail="The Microsoft account email does not match the linked internal account")
@@ -1189,9 +1161,5 @@ async def entra_callback(
     refresh = service.create_refresh_token(user)
     await _store_refresh_session(db, user, refresh)
     await db.commit()
-    redirect = RedirectResponse(
-        url=f"{settings.FRONTEND_URL.rstrip('/')}/login?entra=success",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
-    _set_auth_cookies(redirect, access, refresh)
-    return redirect
+    _set_auth_cookies(response, access, refresh)
+    return {"access_token": access, "token_type": "bearer", "user": _user_response(user)}

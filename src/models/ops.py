@@ -14,18 +14,9 @@ class Connector(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_sync: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     config_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     company_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False, default="local")
-    # NOTE: there was a `sync_interval_minutes` column here, mapped NOT NULL, that no
-    # Alembic revision ever created. SQLAlchemy put it in the SELECT list for every query
-    # loading a Connector, so Postgres rejected the statement:
-    #   asyncpg.exceptions.UndefinedColumnError:
-    #   column connectors.sync_interval_minutes does not exist
-    # It failed a Celery task every ten minutes in develop while /health/ready still
-    # returned 200 — the connection was fine, so only the worker log showed it.
-    #
-    # REMOVED rather than migrated: `grep -rn sync_interval` returned exactly one line,
-    # this declaration. Nothing read it, nothing wrote it, no API exposed it, and its own
-    # comment said scheduling uses connector config and job mode instead. Adding the
-    # column would have satisfied a mapping nobody uses.
+    # Retained for compatibility with pre-Alembic connector rows. Current
+    # scheduling uses connector config and job mode; no API exposes this field.
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     oauth_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     oauth_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
