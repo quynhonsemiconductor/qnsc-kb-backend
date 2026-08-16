@@ -360,7 +360,7 @@ def test_access_token_carries_auth_version():
 
 def test_embedding_failure_is_not_converted_to_zero_vector(monkeypatch):
     monkeypatch.setattr(
-        embeddings.BGEModelSingleton,
+        embeddings.OnnxEmbeddingModelSingleton,
         "get_model",
         classmethod(
             lambda cls: (_ for _ in ()).throw(RuntimeError("model unavailable"))

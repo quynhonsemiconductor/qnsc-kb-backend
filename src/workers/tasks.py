@@ -4,7 +4,7 @@ import structlog
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from sqlalchemy import select, update
+from sqlalchemy import delete, select
 from celery.signals import worker_ready, worker_process_init, task_prerun, task_failure
 from src.workers.celery_app import celery_app
 from src.api.deps import SessionLocal, engine, set_database_context
@@ -12,7 +12,6 @@ from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.domain.permissions import PermissionService
 from src.core.config import settings
-from src.models.chunk import ParentChunk, ArticleChunk
 from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob
 from src.models.ai import AiCache
 from src.workers.loop import reset_worker_loop, sync_run
@@ -26,13 +25,18 @@ def worker_process_init_handler(**kwargs):
     reset_worker_loop()
     engine.sync_engine.dispose(close=False)
 
+
 @worker_ready.connect
 def worker_ready_handler(sender=None, **kwargs):
     logger.info("Celery worker ready", worker=str(sender))
 
+
 @task_prerun.connect
 def task_prerun_handler(task_id=None, task=None, **kwargs):
-    logger.info("Celery task started", task_name=getattr(task, "name", None), task_id=task_id)
+    logger.info(
+        "Celery task started", task_name=getattr(task, "name", None), task_id=task_id
+    )
+
 
 @task_failure.connect
 def task_failure_handler(task_id=None, exception=None, sender=None, **kwargs):
@@ -43,20 +47,23 @@ def task_failure_handler(task_id=None, exception=None, sender=None, **kwargs):
         error=str(exception),
     )
 
+
 @celery_app.task(name="handle_domain_event_task")
 def handle_domain_event_task(event_type: str, payload: dict):
-    logger.info("Celery event worker received event", event_type=event_type, payload=payload)
-    
+    logger.info(
+        "Celery event worker received event", event_type=event_type, payload=payload
+    )
+
     if event_type in ["ArticlePublished", "ArticleUpdated"]:
         article_id = payload.get("article_id")
         if article_id:
             generate_embeddings_task.delay(article_id)
-            
+
     elif event_type == "PermissionChanged":
         article_id = payload.get("article_id")
         if article_id:
             recompute_permissions_task.delay(article_id)
-            
+
     elif event_type == "ArticleDeleted":
         article_id = payload.get("article_id")
         if article_id:
@@ -64,6 +71,7 @@ def handle_domain_event_task(event_type: str, payload: dict):
 
     outbox_id = payload.get("_outbox_id")
     if outbox_id:
+
         async def mark_dispatched():
             async with SessionLocal() as db:
                 await set_database_context(db, None, True)
@@ -72,6 +80,7 @@ def handle_domain_event_task(event_type: str, payload: dict):
                     event.status = "dispatched"
                     event.last_error = None
                     await db.commit()
+
         sync_run(mark_dispatched())
 
 
@@ -82,7 +91,10 @@ def replay_outbox_task():
             await set_database_context(db, None, True)
             result = await db.execute(
                 select(OutboxEvent)
-                .where(OutboxEvent.status.in_(["pending", "failed", "processing"]), OutboxEvent.next_attempt_at <= datetime.utcnow())
+                .where(
+                    OutboxEvent.status.in_(["pending", "failed", "processing"]),
+                    OutboxEvent.next_attempt_at <= datetime.utcnow(),
+                )
                 .order_by(OutboxEvent.created_at)
                 .limit(100)
             )
@@ -90,28 +102,37 @@ def replay_outbox_task():
             for event in events:
                 event.status = "processing"
                 event.attempts += 1
-                event.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(30, 2 ** min(event.attempts, 5)))
+                event.next_attempt_at = datetime.utcnow() + timedelta(
+                    minutes=min(30, 2 ** min(event.attempts, 5))
+                )
                 await db.commit()
                 payload = dict(event.payload)
                 payload["_outbox_id"] = str(event.id)
                 handle_domain_event_task.delay(event.event_type, payload)
+
     sync_run(replay())
 
 
 @celery_app.task(name="prune_operational_metrics")
 def prune_operational_metrics() -> None:
     """Bound telemetry growth and remove physically expired answer caches."""
+
     async def prune() -> None:
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             cutoff = datetime.utcnow() - timedelta(days=settings.METRICS_RETENTION_DAYS)
             await db.execute(
-                ApiRequestMetric.__table__.delete().where(ApiRequestMetric.created_at < cutoff)
+                ApiRequestMetric.__table__.delete().where(
+                    ApiRequestMetric.created_at < cutoff
+                )
             )
             # Cache answers can contain authorized document passages. Their
             # six-hour expiry must remove storage as well as disable reads.
-            await db.execute(AiCache.__table__.delete().where(AiCache.expires_at < datetime.utcnow()))
+            await db.execute(
+                AiCache.__table__.delete().where(AiCache.expires_at < datetime.utcnow())
+            )
             await db.commit()
+
     sync_run(prune())
 
 
@@ -186,19 +207,30 @@ def cleanup_orphaned_source_objects() -> int:
     retry_backoff=True,
     retry_kwargs={"max_retries": 2},
 )
-def restructure_pending_draft_task(draft_id_str: str, company_domain: str, user_id_str: str):
+def restructure_pending_draft_task(
+    draft_id_str: str, company_domain: str, user_id_str: str
+):
     """Format a stored upload after the upload request has completed."""
+
     async def process():
         from src.domain.content_restructure import restructure_document
         from src.models import User
-        from src.models.governance import AuditLog, PendingDraft
+        from src.models.governance import AuditLog, DraftCandidate, PendingDraft
+        from src.models.user import Department
+        from src.domain.department_routing import route_document_candidates
         from src.domain.llm_config import load_runtime_config
         from src.repositories.feature_flags import FeatureFlagRepository
 
         async with SessionLocal() as db:
             # This is an internal task for a draft that was already authorized
             # and persisted by the request. Keep the tenant context explicit.
-            await set_database_context(db, company_domain, True, user_id=user_id_str, global_governance_access=True)
+            await set_database_context(
+                db,
+                company_domain,
+                True,
+                user_id=user_id_str,
+                global_governance_access=True,
+            )
             # Celery has its own Python process and does not run API startup;
             # load the administrator's saved provider before calling the LLM.
             await load_runtime_config(db)
@@ -206,9 +238,17 @@ def restructure_pending_draft_task(draft_id_str: str, company_domain: str, user_
             if not draft or draft.status != "pending":
                 return
             user = await db.get(User, uuid.UUID(user_id_str))
-            enabled = bool(settings.RESTRUCTURE_ENABLED and user and await FeatureFlagRepository(db).is_enabled("ai.document_restructure", user))
+            enabled = bool(
+                settings.RESTRUCTURE_ENABLED
+                and user
+                and await FeatureFlagRepository(db).is_enabled(
+                    "ai.document_restructure", user
+                )
+            )
             source_text = draft.summary or "\n\n".join(
-                str(page.get("text", "")) for page in (draft.page_texts or []) if page.get("text")
+                str(page.get("text", ""))
+                for page in (draft.page_texts or [])
+                if page.get("text")
             )
             draft.restructure_status = "processing"
             draft.restructure_error = None
@@ -216,19 +256,60 @@ def restructure_pending_draft_task(draft_id_str: str, company_domain: str, user_
             draft.restructure_decision = "not_reviewed"
             await db.commit()
             try:
-                result = await restructure_document(draft.title, source_text, enabled=enabled)
+                departments = list(
+                    (
+                        await db.execute(
+                            select(Department).where(
+                                Department.company_domain == draft.company_domain,
+                                Department.active.is_(True),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                result = await restructure_document(
+                    draft.title,
+                    source_text,
+                    enabled=enabled,
+                    department_descriptions=[
+                        (department.name, department.description or "")
+                        for department in departments
+                    ],
+                )
                 draft.restructured_body_md = result.body_md
                 draft.restructure_candidate_md = result.candidate_body_md
-                draft.restructure_decision = "pending_review" if result.candidate_body_md else ("ai_ready" if result.status == "llm" else "lossless_ready")
+                draft.restructure_decision = (
+                    "pending_review"
+                    if result.candidate_body_md
+                    else ("ai_ready" if result.status == "llm" else "lossless_ready")
+                )
                 draft.restructure_status = result.status
                 draft.restructure_model = result.model
                 draft.restructure_error = result.error
-                db.add(AuditLog(
-                    user_id=user.id if user else None,
-                    action="restructure",
-                    target_type="draft",
-                    target_id=str(draft.id),
-                ))
+                # Batch review operates on the formatted reading view, not raw extraction.
+                # Recreate candidates only after formatting has completed, then use the
+                # active department descriptions to choose an editable default route.
+                await db.execute(
+                    delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
+                )
+                for item in route_document_candidates(
+                    draft.title, result.body_md, departments
+                ):
+                    db.add(
+                        DraftCandidate(
+                            draft_id=draft.id,
+                            **item,
+                        )
+                    )
+                db.add(
+                    AuditLog(
+                        user_id=user.id if user else None,
+                        action="restructure",
+                        target_type="draft",
+                        target_id=str(draft.id),
+                    )
+                )
                 await db.commit()
                 logger.info(
                     "Pending draft AI formatting completed",
@@ -244,17 +325,21 @@ def restructure_pending_draft_task(draft_id_str: str, company_domain: str, user_
                 draft.restructure_model = "lossless-markdown"
                 draft.restructure_error = f"AI formatting failed ({str(exc) or 'unknown error'}); retry from Pending Drafts."
                 await db.commit()
-                logger.exception("Pending draft AI formatting failed", draft_id=str(draft.id))
+                logger.exception(
+                    "Pending draft AI formatting failed", draft_id=str(draft.id)
+                )
 
     return sync_run(process())
+
 
 @celery_app.task(name="generate_embeddings_task")
 def generate_embeddings_task(article_id_str: str):
     article_id = uuid.UUID(article_id_str)
     logger.info("Generating embeddings for article", article_id=article_id)
-    
+
     async def process():
         from src.domain.indexing import index_article
+
         await index_article(article_id)
 
     try:
@@ -275,7 +360,11 @@ async def run_reprocess_index_job(job_id_str: str) -> None:
         if not job:
             return
         ids = [uuid.UUID(str(item)) for item in (job.target_article_ids or [])]
-        stmt = select(Article.id).where(Article.company_domain == job.company_domain, Article.status == "published", Article.lifecycle_status == "active")
+        stmt = select(Article.id).where(
+            Article.company_domain == job.company_domain,
+            Article.status == "published",
+            Article.lifecycle_status == "active",
+        )
         if ids:
             stmt = stmt.where(Article.id.in_(ids))
         article_ids = [item for item in (await db.execute(stmt)).scalars().all()]
@@ -291,14 +380,18 @@ async def run_reprocess_index_job(job_id_str: str) -> None:
             await index_article(article_id)
             async with SessionLocal() as progress_db:
                 await set_database_context(progress_db, None, True)
-                progress = await progress_db.get(IndexReprocessJob, uuid.UUID(job_id_str))
+                progress = await progress_db.get(
+                    IndexReprocessJob, uuid.UUID(job_id_str)
+                )
                 if progress:
                     progress.completed += 1
                     await progress_db.commit()
         except Exception as exc:
             async with SessionLocal() as progress_db:
                 await set_database_context(progress_db, None, True)
-                progress = await progress_db.get(IndexReprocessJob, uuid.UUID(job_id_str))
+                progress = await progress_db.get(
+                    IndexReprocessJob, uuid.UUID(job_id_str)
+                )
                 if progress:
                     progress.failed += 1
                     progress.last_error = str(exc)[:2000]
@@ -317,39 +410,50 @@ def reprocess_index_job_task(job_id_str: str):
     """Celery adapter for the shared async reprocess implementation."""
     sync_run(run_reprocess_index_job(job_id_str))
 
+
 @celery_app.task(name="recompute_permissions_task")
 def recompute_permissions_task(article_id_str: str):
     article_id = uuid.UUID(article_id_str)
-    logger.info("Recomputing permission bitmask snapshot on chunks", article_id=article_id)
-    
+    logger.info(
+        "Recomputing permission bitmask snapshot on chunks", article_id=article_id
+    )
+
     async def process():
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             article_repo = ArticleRepository(db)
             chunk_repo = ChunkRepository(db)
-            
+
             article = await article_repo.get_by_id(article_id)
             if not article:
-                logger.warn("Article not found, skipping permission recomputation", article_id=article_id)
+                logger.warn(
+                    "Article not found, skipping permission recomputation",
+                    article_id=article_id,
+                )
                 return
-                
+
             bitmap = PermissionService.calculate_article_bitmask(article)
             await chunk_repo.update_permissions(
                 article_id=article_id,
                 bitmap=bitmap,
                 sensitivity=article.sensitivity,
                 visibility=article.sensitivity,
-                dept=article.dept
+                dept=article.dept,
             )
-            logger.info("Permission bitmap updated successfully", article_id=article_id, bitmap=bitmap)
+            logger.info(
+                "Permission bitmap updated successfully",
+                article_id=article_id,
+                bitmap=bitmap,
+            )
 
     sync_run(process())
+
 
 @celery_app.task(name="delete_article_chunks_task")
 def delete_article_chunks_task(article_id_str: str):
     article_id = uuid.UUID(article_id_str)
     logger.info("Deleting chunks for removed article", article_id=article_id)
-    
+
     async def process():
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
@@ -359,12 +463,20 @@ def delete_article_chunks_task(article_id_str: str):
 
     sync_run(process())
 
-@celery_app.task(name="sync_cloud_connector_task", autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+
+@celery_app.task(
+    name="sync_cloud_connector_task",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)
 def sync_cloud_connector_task(connector_id_str: str, job_id_str: str):
     """Run an idempotent provider delta sync from a durable cursor."""
+
     async def process():
         from src.domain.cloud_sync import sync_cloud_connector
         from src.models.ops import Connector, ConnectorJob
+
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             connector = await db.get(Connector, uuid.UUID(connector_id_str))
@@ -372,36 +484,79 @@ def sync_cloud_connector_task(connector_id_str: str, job_id_str: str):
             if not connector or not job:
                 return
             await sync_cloud_connector(db, connector, job)
+
     sync_run(process())
 
 
 @celery_app.task(name="schedule_cloud_connector_syncs")
 def schedule_cloud_connector_syncs():
     """Polling fallback: wake every active cloud connector periodically."""
+
     async def process():
         from datetime import timedelta
         from src.models.ops import Connector, ConnectorJob
         from src.models.connectors import SourceScope
+
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            connectors = (await db.execute(select(Connector).where(Connector.system.in_(["sharepoint", "google_drive"]), Connector.status.in_(["active", "error"])))).scalars().all()
+            connectors = (
+                (
+                    await db.execute(
+                        select(Connector).where(
+                            Connector.system.in_(["sharepoint", "google_drive"]),
+                            Connector.status.in_(["active", "error"]),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             for connector in connectors:
                 sync_mode = (connector.config_json or {}).get("sync_mode", "daily")
                 if sync_mode == "manual":
                     continue
-                interval = timedelta(days=1) if sync_mode == "daily" else timedelta(minutes=10)
-                if connector.last_sync and connector.last_sync > datetime.utcnow() - interval:
+                interval = (
+                    timedelta(days=1) if sync_mode == "daily" else timedelta(minutes=10)
+                )
+                if (
+                    connector.last_sync
+                    and connector.last_sync > datetime.utcnow() - interval
+                ):
                     continue
-                selected = (await db.execute(select(SourceScope.id).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)).limit(1))).scalar_one_or_none()
+                selected = (
+                    await db.execute(
+                        select(SourceScope.id)
+                        .where(
+                            SourceScope.connector_id == connector.id,
+                            SourceScope.selected.is_(True),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
                 if not selected:
                     continue
-                recent = (await db.execute(select(ConnectorJob.id).where(ConnectorJob.connector_id == connector.id, ConnectorJob.status.in_(["queued", "running"])).limit(1))).scalar_one_or_none()
+                recent = (
+                    await db.execute(
+                        select(ConnectorJob.id)
+                        .where(
+                            ConnectorJob.connector_id == connector.id,
+                            ConnectorJob.status.in_(["queued", "running"]),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
                 if recent:
                     continue
-                job = ConnectorJob(connector_id=connector.id, requested_by=connector.created_by, status="queued", attempts=0)
+                job = ConnectorJob(
+                    connector_id=connector.id,
+                    requested_by=connector.created_by,
+                    status="queued",
+                    attempts=0,
+                )
                 db.add(job)
                 await db.commit()
                 sync_cloud_connector_task.delay(str(connector.id), str(job.id))
+
     sync_run(process())
 
 
@@ -418,6 +573,7 @@ def renew_webhook_subscriptions():
     Runs every 10 minutes against a 20-minute horizon, so a subscription gets several
     attempts before it expires and one failed run is not enough to drop it.
     """
+
     async def process():
         from datetime import timedelta
 
@@ -428,19 +584,27 @@ def renew_webhook_subscriptions():
         horizon = datetime.utcnow() + timedelta(minutes=20)
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            due = (await db.execute(
-                select(WebhookSubscription).where(
-                    WebhookSubscription.active.is_(True),
-                    WebhookSubscription.expires_at.isnot(None),
-                    WebhookSubscription.expires_at <= horizon,
+            due = (
+                (
+                    await db.execute(
+                        select(WebhookSubscription).where(
+                            WebhookSubscription.active.is_(True),
+                            WebhookSubscription.expires_at.isnot(None),
+                            WebhookSubscription.expires_at <= horizon,
+                        )
+                    )
                 )
-            )).scalars().all()
+                .scalars()
+                .all()
+            )
             for subscription in due:
                 connector = await db.get(Connector, subscription.connector_id)
                 if connector is None or connector.status not in ("active", "error"):
                     continue
                 try:
-                    renewed = await adapter_for(connector).renew_webhook(subscription.provider_subscription_id)
+                    renewed = await adapter_for(connector).renew_webhook(
+                        subscription.provider_subscription_id
+                    )
                 except ConnectorProviderError as exc:
                     # The subscription is gone at the provider, or the token no longer
                     # grants it. Deactivate rather than retry forever: the polling loop in

@@ -8,7 +8,19 @@ from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from src.core.config import settings
-from src.api.routers import auth, articles, search, ai, interactions, governance, meta, connectors, knowledge, llm, notifications
+from src.api.routers import (
+    auth,
+    articles,
+    search,
+    ai,
+    interactions,
+    governance,
+    meta,
+    connectors,
+    knowledge,
+    llm,
+    notifications,
+)
 from src.api.deps import SessionLocal, engine, init_db, set_database_context
 from src.domain.events import event_bus
 from src.models.article import Article
@@ -16,11 +28,22 @@ from src.models.chunk import ArticleChunk
 from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
 from src.core.tracing import configure_tracing, get_tracer, trace
-from src.lib.embeddings import warm_up as warm_up_embeddings
+from src.lib.embeddings import OnnxEmbeddingModelSingleton
 import structlog
 
 logger = structlog.get_logger()
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
+
+async def _preload_embedding_model() -> None:
+    """Warm ONNX weights without preventing the API from becoming healthy."""
+    try:
+        await asyncio.to_thread(OnnxEmbeddingModelSingleton.get_model)
+    except Exception as exc:
+        logger.warning(
+            "Embedding model preload failed; keyword search remains available",
+            error=str(exc),
+        )
 
 
 def _request_id_from(request) -> str:
@@ -35,20 +58,28 @@ def _metric_path_for(request) -> str:
     return template if isinstance(template, str) else "/unmatched"
 
 
-async def record_request_metric(request_id: str, method: str, path: str, status_code: int, duration_ms: float) -> None:
+async def record_request_metric(
+    request_id: str, method: str, path: str, status_code: int, duration_ms: float
+) -> None:
     record_request(method, path, status_code, duration_ms)
     try:
         async with SessionLocal() as db:
-            db.add(ApiRequestMetric(
-                request_id=request_id,
-                method=method,
-                path=path,
-                status_code=status_code,
-                duration_ms=duration_ms,
-            ))
+            db.add(
+                ApiRequestMetric(
+                    request_id=request_id,
+                    method=method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                )
+            )
             await db.commit()
     except Exception as exc:
-        logger.warning("Could not persist API request metric", request_id=request_id, error=str(exc))
+        logger.warning(
+            "Could not persist API request metric",
+            request_id=request_id,
+            error=str(exc),
+        )
 
 
 async def reconcile_published_indexes() -> None:
@@ -56,14 +87,24 @@ async def reconcile_published_indexes() -> None:
     async with SessionLocal() as db:
         await set_database_context(db, None, True)
         result = await db.execute(
-            select(Article.id, Article.index_status, func.count(ArticleChunk.id).label("chunk_count"))
+            select(
+                Article.id,
+                Article.index_status,
+                func.count(ArticleChunk.id).label("chunk_count"),
+            )
             .outerjoin(ArticleChunk, ArticleChunk.article_id == Article.id)
             .where(Article.status == "published")
             .group_by(Article.id, Article.index_status)
         )
         rows = result.all()
-        ready_ids = [article_id for article_id, index_status, chunk_count in rows if index_status == "pending" and chunk_count > 0]
-        missing_ids = [article_id for article_id, _, chunk_count in rows if chunk_count == 0]
+        ready_ids = [
+            article_id
+            for article_id, index_status, chunk_count in rows
+            if index_status == "pending" and chunk_count > 0
+        ]
+        missing_ids = [
+            article_id for article_id, _, chunk_count in rows if chunk_count == 0
+        ]
 
         for article_id in ready_ids:
             await db.execute(
@@ -84,6 +125,7 @@ async def reconcile_published_indexes() -> None:
             queued_for_indexing=len(missing_ids),
         )
 
+
 async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
@@ -99,7 +141,9 @@ async def initialize_resources() -> None:
             break
         except Exception as exc:
             if attempt == 3:
-                logger.exception("Failed to initialize database", error=str(exc), attempts=attempt)
+                logger.exception(
+                    "Failed to initialize database", error=str(exc), attempts=attempt
+                )
                 raise
             logger.warning(
                 "Database initialization failed; retrying",
@@ -112,14 +156,12 @@ async def initialize_resources() -> None:
             await engine.dispose()
             await asyncio.sleep(attempt * 2)
 
-    # Keep model initialization out of request paths. Each API process loads
-    # its singleton once at startup; subsequent chat, search, and indexing
-    # calls reuse the same in-memory model.
-    if settings.EMBEDDING_MODEL != "mock":
-        try:
-            await asyncio.to_thread(warm_up_embeddings)
-        except Exception as exc:
-            logger.warning("Embedding model preload failed; keyword search remains available", error=str(exc))
+    # Do not make API readiness depend on a multi-second ONNX session load.
+    # The singleton still avoids repeated loading when the first embedding is
+    # requested, while the background warmup normally completes before then.
+    if settings.OPENAI_API_KEY != "mock" and settings.EMBEDDING_MODEL != "mock":
+        asyncio.create_task(_preload_embedding_model())
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -127,12 +169,15 @@ async def lifespan(app: FastAPI):
     await initialize_resources()
     yield
 
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json" if settings.ENABLE_API_DOCS else None,
+    openapi_url=(
+        f"{settings.API_V1_STR}/openapi.json" if settings.ENABLE_API_DOCS else None
+    ),
     docs_url="/docs" if settings.ENABLE_API_DOCS else None,
     redoc_url="/redoc" if settings.ENABLE_API_DOCS else None,
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # Set CORS middleware
@@ -144,12 +189,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.middleware("http")
 async def request_logging_middleware(request, call_next):
     started = time.perf_counter()
     request_id = _request_id_from(request)
     request.state.request_id = request_id
-    logger.info("API request started", request_id=request_id, method=request.method, path=request.url.path)
+    logger.info(
+        "API request started",
+        request_id=request_id,
+        method=request.method,
+        path=request.url.path,
+    )
     tracer = get_tracer()
     span_context = tracer.start_as_current_span("http.request") if tracer else None
     try:
@@ -179,13 +230,17 @@ async def request_logging_middleware(request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
         if request.url.path.startswith(settings.API_V1_STR + "/"):
             # API responses can contain private article and AI content.  Do
             # not let browsers or shared proxies retain them after logout.
             response.headers["Cache-Control"] = "no-store, private"
         if settings.ENVIRONMENT.lower() in {"production", "prod"}:
-            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
         response.headers["X-Request-ID"] = request_id
         return response
     except Exception as exc:
@@ -209,18 +264,38 @@ async def request_logging_middleware(request, call_next):
         if span_context:
             span_context.__exit__(None, None, None)
 
+
 # Routers
 app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["auth"])
-app.include_router(articles.router, prefix=f"{settings.API_V1_STR}/articles", tags=["articles"])
-app.include_router(search.router, prefix=f"{settings.API_V1_STR}/search", tags=["search"])
+app.include_router(
+    articles.router, prefix=f"{settings.API_V1_STR}/articles", tags=["articles"]
+)
+app.include_router(
+    search.router, prefix=f"{settings.API_V1_STR}/search", tags=["search"]
+)
 app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["ai"])
-app.include_router(interactions.router, prefix=f"{settings.API_V1_STR}/interactions", tags=["interactions"])
-app.include_router(governance.router, prefix=f"{settings.API_V1_STR}/governance", tags=["governance"])
+app.include_router(
+    interactions.router,
+    prefix=f"{settings.API_V1_STR}/interactions",
+    tags=["interactions"],
+)
+app.include_router(
+    governance.router, prefix=f"{settings.API_V1_STR}/governance", tags=["governance"]
+)
 app.include_router(meta.router, prefix=f"{settings.API_V1_STR}/meta", tags=["meta"])
-app.include_router(connectors.router, prefix=f"{settings.API_V1_STR}/connectors", tags=["connectors"])
-app.include_router(knowledge.router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"])
+app.include_router(
+    connectors.router, prefix=f"{settings.API_V1_STR}/connectors", tags=["connectors"]
+)
+app.include_router(
+    knowledge.router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["knowledge"]
+)
 app.include_router(llm.router, prefix=f"{settings.API_V1_STR}/admin/llm", tags=["llm"])
-app.include_router(notifications.router, prefix=f"{settings.API_V1_STR}/notifications", tags=["notifications"])
+app.include_router(
+    notifications.router,
+    prefix=f"{settings.API_V1_STR}/notifications",
+    tags=["notifications"],
+)
+
 
 @app.get("/")
 async def root():
@@ -246,13 +321,24 @@ async def health_ready():
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
         from redis.asyncio import Redis
-        redis = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+
+        redis = Redis.from_url(
+            settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2
+        )
         try:
             await redis.ping()
         finally:
             await redis.aclose()
-        return {"status": "ready", "database": "ok", "redis": "ok", "job_mode": settings.JOB_MODE}
+        return {
+            "status": "ready",
+            "database": "ok",
+            "redis": "ok",
+            "job_mode": settings.JOB_MODE,
+        }
     except Exception as exc:
         logger.error("Readiness check failed", error=str(exc))
         from fastapi import HTTPException
-        raise HTTPException(status_code=503, detail={"status": "not_ready", "database": "unavailable"})
+
+        raise HTTPException(
+            status_code=503, detail={"status": "not_ready", "database": "unavailable"}
+        )

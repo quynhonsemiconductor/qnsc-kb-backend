@@ -3,6 +3,7 @@
 The active provider is selected by the administrator's persisted workspace
 configuration. OpenAI, GLM, and Groq all use their OpenAI-compatible chat API.
 """
+
 from __future__ import annotations
 
 import json
@@ -42,20 +43,29 @@ def resolve_provider(model_override: str | None = None) -> Provider | None:
     )
 
 
-def _gemini_contents(messages: list[dict[str, str]]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    system_message = next((item for item in messages if item.get("role") == "system"), None)
+def _gemini_contents(
+    messages: list[dict[str, str]]
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    system_message = next(
+        (item for item in messages if item.get("role") == "system"), None
+    )
     contents: list[dict[str, Any]] = []
     for message in messages:
         role = message.get("role")
         if role == "system":
             continue
-        contents.append({
-            "role": "model" if role == "assistant" else "user",
-            "parts": [{"text": message.get("content", "")}],
-        })
+        contents.append(
+            {
+                "role": "model" if role == "assistant" else "user",
+                "parts": [{"text": message.get("content", "")}],
+            }
+        )
     return (
-        {"parts": [{"text": system_message.get("content", "")}]}
-        if system_message else None,
+        (
+            {"parts": [{"text": system_message.get("content", "")}]}
+            if system_message
+            else None
+        ),
         contents,
     )
 
@@ -81,7 +91,11 @@ def _payload(
         if system_instruction:
             payload["systemInstruction"] = system_instruction
         return payload
-    payload = {"model": provider.model, "messages": messages, "temperature": temperature}
+    payload = {
+        "model": provider.model,
+        "messages": messages,
+        "temperature": temperature,
+    }
     if thinking is not None and provider.name == "glm":
         payload["thinking"] = {"type": "enabled" if thinking else "disabled"}
     if max_tokens is not None:
@@ -92,7 +106,10 @@ def _payload(
 def _headers(provider: Provider) -> dict[str, str]:
     if provider.native_gemini:
         return {"x-goog-api-key": provider.api_key, "Content-Type": "application/json"}
-    return {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {provider.api_key}",
+        "Content-Type": "application/json",
+    }
 
 
 def _gemini_url(provider: Provider, streaming: bool) -> str:
@@ -139,7 +156,14 @@ async def complete(
         if provider.native_gemini and on_token:
             url = _gemini_url(provider, streaming=True)
             answer = ""
-            async with client.stream("POST", url, headers=_headers(provider), json=_payload(provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens)) as response:
+            async with client.stream(
+                "POST",
+                url,
+                headers=_headers(provider),
+                json=_payload(
+                    provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens
+                ),
+            ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
@@ -158,8 +182,75 @@ async def complete(
                     tokens = _extract_usage(data)
             return answer, locals().get("tokens", 0), provider.model, provider.name
 
-        url = _gemini_url(provider, streaming=False) if provider.native_gemini else provider.url
-        payload = _payload(provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens)
+        if provider.name == "glm":
+            # GLM's synchronous endpoint returns only after it has completed
+            # both its internal reasoning and final content. For a lossless
+            # document rewrite that can leave an otherwise healthy connection
+            # idle until httpx raises ReadTimeout. Use its OpenAI-compatible
+            # SSE format so each received event keeps the read timeout alive.
+            payload = _payload(
+                provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens
+            )
+            payload["stream"] = True
+
+            async def request_stream() -> tuple[str, int]:
+                answer = ""
+                tokens = 0
+                async with client.stream(
+                    "POST",
+                    provider.url,
+                    headers={**_headers(provider), "Accept": "text/event-stream"},
+                    json=payload,
+                ) as response:
+                    if response.is_error:
+                        detail = (
+                            (await response.aread())
+                            .decode(errors="replace")[:500]
+                            .replace("\n", " ")
+                        )
+                        raise RuntimeError(
+                            f"{provider.name} request failed with HTTP "
+                            f"{response.status_code}: {detail}"
+                        )
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw:
+                            continue
+                        if raw == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        delta = choices[0].get("delta") if choices else None
+                        text = str((delta or {}).get("content") or "")
+                        if text:
+                            answer += text
+                            if on_token:
+                                await on_token(text)
+                        tokens = _extract_usage(data) or tokens
+                return answer, tokens
+
+            # A new request is safe here because a failed stream is discarded;
+            # no partial document is ever persisted. One retry handles brief
+            # provider queueing or network interruptions without blocking
+            # forever behind a slow model.
+            answer, tokens = await with_exponential_retry(
+                request_stream, attempts=2, base_delay=1.0
+            )
+            return answer, tokens, provider.model, provider.name
+
+        url = (
+            _gemini_url(provider, streaming=False)
+            if provider.native_gemini
+            else provider.url
+        )
+        payload = _payload(
+            provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens
+        )
 
         async def request_completion() -> httpx.Response:
             response = await client.post(url, headers=_headers(provider), json=payload)
@@ -167,7 +258,9 @@ async def complete(
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 detail = response.text[:500].replace("\n", " ")
-                raise RuntimeError(f"{provider.name} request failed with HTTP {response.status_code}: {detail}") from exc
+                raise RuntimeError(
+                    f"{provider.name} request failed with HTTP {response.status_code}: {detail}"
+                ) from exc
             return response
 
         # Formatting is optional. A single bounded request keeps the review
@@ -175,7 +268,11 @@ async def complete(
         # a local lossless fallback when the provider is slow or unavailable.
         response = await with_exponential_retry(request_completion, attempts=1)
         data = response.json()
-        answer = _extract_gemini_text(data) if provider.native_gemini else _extract_openai_text(data)
+        answer = (
+            _extract_gemini_text(data)
+            if provider.native_gemini
+            else _extract_openai_text(data)
+        )
         if on_token:
             await on_token(answer)
         return answer, _extract_usage(data), provider.model, provider.name

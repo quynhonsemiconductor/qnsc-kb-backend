@@ -280,9 +280,8 @@ variable "embedding_model" {
     what creates the column. It did not, once, and the column was built 1024 wide for a
     model that emits 768.
 
-    The old default was BAAI/bge-m3, a local SentenceTransformer baked into the image.
-    That is gone: embeddings are a hosted API call now, which is what removed torch and
-    2.3 GB of weights from a container whose job was to embed a search query.
+    The deployed default uses a hosted embedding API, avoiding the local ONNX runtime and
+    2.3 GB of model assets in a container whose job was to embed a search query.
   EOT
 }
 

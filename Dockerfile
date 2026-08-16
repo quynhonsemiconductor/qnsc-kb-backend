@@ -15,7 +15,7 @@
 #
 #   2. Each target carries only what it runs. paddle is ~1 GB and only the worker extracts
 #      text from scanned files, so the OCR stack stops at the worker. The embedding stack
-#      (torch + weights) reaches BOTH api and worker, because EMBEDDING_MODEL is a local
+#      (ONNX Runtime + weights) reaches BOTH api and worker, because EMBEDDING_MODEL is a local
 #      model and the api embeds the search query on every search — that is the deliberate
 #      cost of not sending text to a hosted embedder. The migrator gets neither.
 #
@@ -44,7 +44,7 @@ RUN pip install --no-cache-dir poetry && \
     poetry install --no-root --only main
 
 # ---------------------------------------------------------------------------
-# deps-ml — the same, plus torch and sentence-transformers. api and worker.
+# deps-ml — the same, plus ONNX Runtime and Transformers. api and worker.
 #
 # Not optional in practice: EMBEDDING_MODEL defaults to BAAI/bge-m3, and
 # src/lib/embeddings.py loads it in-process. Without this group the api answers /health
@@ -68,7 +68,7 @@ FROM deps-ml AS deps-ml-ocr
 
 # Same rule as above, and the list must name EVERY group the worker needs, not just the
 # one being added: `--only main,ocr` here resolves without ml, so the worker would ship
-# paddle and no torch and fail on the first chunk it tried to embed.
+# paddle and no ONNX embedding runtime and fail on the first chunk it tried to embed.
 RUN poetry install --no-root --only main,ml,ocr
 
 # ---------------------------------------------------------------------------
@@ -95,10 +95,10 @@ RUN useradd --create-home --uid 10001 appuser && \
     chown -R appuser:appuser /app
 
 # ---------------------------------------------------------------------------
-# runtime-ml — the api's base, carrying torch, sentence-transformers and (by default) the
+# runtime-ml — the api's base, carrying ONNX Runtime, Transformers and (by default) the
 # model weights themselves.
 #
-# BAKING THE WEIGHTS IS THE POINT. sentence-transformers downloads on first use, so an
+# BAKING THE ONNX ASSETS IS THE POINT. The runtime downloads them on first use, so an
 # unbaked image pays ~2.3 GB and several minutes on the first search AFTER the task is
 # already serving traffic — repeatedly, on every replacement. Baked, it is paid once at
 # build time. Local builds pass BAKE_EMBEDDING_MODEL=false and use the developer's own
@@ -122,7 +122,7 @@ ENV HF_HOME=/opt/huggingface
 
 RUN mkdir -p "$HF_HOME" && \
     if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
-        python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL}')"; \
+        python -c "from huggingface_hub import snapshot_download; snapshot_download('${EMBEDDING_MODEL}', allow_patterns=['onnx/*', 'config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'vocab.txt', 'vocab.json', 'merges.txt', 'sentencepiece.bpe.model', 'spiece.model'])"; \
     fi && \
     chown -R appuser:appuser "$HF_HOME"
 

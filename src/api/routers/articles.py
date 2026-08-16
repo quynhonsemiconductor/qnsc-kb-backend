@@ -71,9 +71,17 @@ _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 
 def _add_split_candidates(db: AsyncSession, draft: PendingDraft, text: str) -> None:
-    """Persist ordered F23 candidates beside the review envelope."""
-    for item in split_document_candidates(draft.title, text):
-        db.add(DraftCandidate(draft_id=draft.id, **item))
+    """Persist ordered candidates from an already formatted reading view.
+
+    Use the ORM relationship rather than ``draft.id`` directly: a newly
+    created draft receives its UUID when SQLAlchemy flushes it.  The
+    relationship makes the unit of work insert the draft first and propagate
+    its ID to each candidate.
+    """
+    for item in split_document_candidates(
+        draft.title, text, prefer_markdown_sections=True
+    ):
+        db.add(DraftCandidate(draft=draft, **item))
 
 
 TagInput = Annotated[str, Field(min_length=1, max_length=50)]
@@ -554,6 +562,28 @@ async def upload_source(
             IngestionFingerprint.source_hash == source_hash,
         )
     )
+    if fingerprint and fingerprint.status == "uploading":
+        # Older browser-to-R2 attempts can be abandoned before completion.
+        # They have no extracted content and are intentionally hidden from the
+        # review queue, so release the reservation before this authenticated
+        # API upload creates the real pending draft.
+        abandoned_draft = (
+            await db.get(PendingDraft, fingerprint.draft_id)
+            if fingerprint.draft_id
+            else None
+        )
+        if abandoned_draft and abandoned_draft.status == "draft":
+            if abandoned_draft.storage_key:
+                try:
+                    await asyncio.to_thread(delete_source, abandoned_draft.storage_key)
+                except Exception:
+                    logger.warning(
+                        "Could not remove abandoned presigned upload object",
+                        draft_id=str(abandoned_draft.id),
+                    )
+            await db.delete(abandoned_draft)
+        await db.delete(fingerprint)
+        await db.flush()
     if fingerprint and fingerprint.status in {"pending", "approved"}:
         raise HTTPException(
             status_code=409,
@@ -648,7 +678,6 @@ async def upload_source(
             created_by=current_user.id,
         )
     )
-    _add_split_candidates(db, draft, extracted)
     try:
         await GovernanceRepository(db).create_draft(draft)
         await GovernanceService(
@@ -843,14 +872,65 @@ async def create_source_upload_intent(
             IngestionFingerprint.source_hash == request.source_hash.lower(),
         )
     )
-    if fingerprint and fingerprint.status in {"uploading", "pending", "approved"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "duplicate_document",
-                "message": "This document already exists or is being uploaded.",
-            },
+    if fingerprint:
+        # A browser can fail after the intent has been saved but before its PUT
+        # reaches R2.  The draft is deliberately not shown in Pending Drafts
+        # until completion, so let its uploader retry that same reservation
+        # instead of reporting an invisible upload as a duplicate.
+        existing_draft = (
+            await db.get(PendingDraft, fingerprint.draft_id)
+            if fingerprint.draft_id
+            else None
         )
+        if (
+            fingerprint.status == "uploading"
+            and existing_draft
+            and existing_draft.status == "draft"
+            and existing_draft.created_by == current_user.id
+            and existing_draft.storage_key
+        ):
+            try:
+                upload_url = await asyncio.to_thread(
+                    create_presigned_source_url,
+                    existing_draft.storage_key,
+                    operation="put_object",
+                    expires_in=900,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail="Private R2 upload storage is unavailable"
+                ) from exc
+            await AuditRepository(db).record(
+                current_user.id,
+                "source_upload_intent_reissued",
+                "draft",
+                str(existing_draft.id),
+            )
+            return {
+                "draft_id": str(existing_draft.id),
+                "upload_url": upload_url,
+                "expires_in": 900,
+                "required_headers": {},
+                "status": existing_draft.status,
+                "filename": existing_draft.original_filename or filename,
+            }
+        if fingerprint.status in {"pending", "approved"} or (
+            fingerprint.status == "uploading"
+            and existing_draft
+            and existing_draft.status == "draft"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_document",
+                    "message": "This document already exists or is being uploaded.",
+                },
+            )
+        # Recover reservations orphaned by an older failed intent (or a draft
+        # that was cancelled before completion).  Without this, the unique
+        # fingerprint constraint makes every later retry look duplicate.
+        await db.delete(fingerprint)
+        await db.flush()
 
     storage_key = source_storage_key(
         request.source_hash.lower(), filename, current_user.company_domain
@@ -909,10 +989,18 @@ async def create_source_upload_intent(
     except Exception as exc:
         await db.rollback()
         try:
+            stale_fingerprint = await db.scalar(
+                select(IngestionFingerprint).where(
+                    IngestionFingerprint.company_domain == current_user.company_domain,
+                    IngestionFingerprint.source_hash == request.source_hash.lower(),
+                )
+            )
+            if stale_fingerprint:
+                await db.delete(stale_fingerprint)
             stale = await db.get(PendingDraft, draft.id)
             if stale:
                 await db.delete(stale)
-                await db.commit()
+            await db.commit()
         except Exception:
             await db.rollback()
         raise HTTPException(
@@ -1066,8 +1154,6 @@ async def complete_source_upload(
         **(draft.content_metadata or {}),
         "upload_mode": "presigned_complete",
     }
-    if not getattr(draft, "candidates", None):
-        _add_split_candidates(db, draft, extracted)
     fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
             IngestionFingerprint.company_domain == draft.company_domain,
@@ -1386,7 +1472,7 @@ async def create_article(
             "submission_kind": "manual",
         },
     )
-    _add_split_candidates(db, draft, article_in.body_md)
+    _add_split_candidates(db, draft, draft_body)
     db.add(
         IngestionFingerprint(
             company_domain=current_user.company_domain,
@@ -1671,7 +1757,7 @@ async def update_article(
             "suggested_update_article_id": str(current.id),
         },
     )
-    _add_split_candidates(db, draft, body_md)
+    _add_split_candidates(db, draft, draft_body)
     db.add(
         IngestionFingerprint(
             company_domain=current.company_domain,

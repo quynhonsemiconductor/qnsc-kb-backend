@@ -1,17 +1,18 @@
 """Embedding providers.
 
 Two implementations behind one pair of functions, selected by the SHAPE of
-EMBEDDING_MODEL — `bge-*`, `minilm` and `sentence-transformers/*` are loaded in-process,
+EMBEDDING_MODEL — `bge-*`, `minilm` and Sentence Transformers model IDs are loaded in-process,
 anything else is sent to an HTTP API:
 
-  local   — SentenceTransformer in-process. The default. Requires torch +
-            sentence-transformers, the `ml` dependency group, which the api and worker
-            images therefore both install.
+  local   — ONNX Runtime in-process. The default. Requires onnxruntime + transformers,
+            the `ml` dependency group, which the api and worker images therefore both
+            install. Local models must publish an `onnx/model.onnx` graph and a standard
+            Hugging Face tokenizer at the repository root.
   hosted  — an HTTP embedding API (Gemini's batchEmbedContents shape). Kept working, and
             what the deployment used briefly, but not the default.
 
 WHAT THE LOCAL DEFAULT COSTS. The API embeds the search QUERY on every search, so the
-model lives in the API image as well as the worker's: ~2.3 GB of weights plus torch, in a
+model lives in the API image as well as the worker's: ~2.3 GB of ONNX weights, in a
 container that otherwise needs neither. That drives the image size, the task memory floor
 before it can serve a request, the registry bill and the cold-start time — on a spot
 instance, where a task can be replaced at any moment, all of it is paid again and again
@@ -27,19 +28,18 @@ setting for the whole system, and changing it means re-embedding every chunk.
 retrieval. Never set it in an environment that serves anyone: a zero vector makes an
 indexing outage look healthy.
 """
+
 from __future__ import annotations
 
 import math
 import threading
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import httpx
 import structlog
 
 from src.core.config import settings
-
-if TYPE_CHECKING:
-    from sentence_transformers import SentenceTransformer
 
 logger = structlog.get_logger()
 
@@ -51,11 +51,88 @@ def _is_mock() -> bool:
 def _uses_local_model() -> bool:
     """Local models are the ones this process would have to load itself."""
     model = settings.EMBEDDING_MODEL.lower()
-    return any(marker in model for marker in ("bge-", "minilm", "sentence-transformers/"))
+    return any(
+        marker in model for marker in ("bge-", "minilm", "sentence-transformers/")
+    )
 
 
-# ── Local (optional) ─────────────────────────────────────────────────────────
-class BGEModelSingleton:
+# ── Local ONNX (optional) ────────────────────────────────────────────────────
+class OnnxEmbeddingModel:
+    """ONNX inference with the CLS pooling used by BGE-style embedding models."""
+
+    # Keep the download small without putting the tokenizer in the graph directory.
+    # Hugging Face model repositories conventionally keep tokenizer assets at their root.
+    _MODEL_FILES = (
+        "onnx/*",
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.txt",
+        "vocab.json",
+        "merges.txt",
+        "sentencepiece.bpe.model",
+        "spiece.model",
+    )
+
+    def __init__(self, model_name: str) -> None:
+        try:
+            from huggingface_hub import snapshot_download
+            from onnxruntime import InferenceSession
+            from transformers import AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Local embeddings require the optional 'ml' dependency group "
+                "(onnxruntime, transformers). Install it with `poetry install --with ml`."
+            ) from exc
+
+        snapshot_root = Path(
+            snapshot_download(repo_id=model_name, allow_patterns=self._MODEL_FILES)
+        )
+        model_file = snapshot_root / "onnx" / "model.onnx"
+        if not model_file.is_file():
+            raise RuntimeError(
+                f"{model_name!r} does not publish onnx/model.onnx. "
+                "Use a model repository with pre-exported ONNX assets."
+            )
+
+        self._tokenizer = AutoTokenizer.from_pretrained(snapshot_root)
+        self._session = InferenceSession(
+            str(model_file), providers=["CPUExecutionProvider"]
+        )
+        self._input_names = {input_.name for input_ in self._session.get_inputs()}
+
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        import numpy as np
+
+        features = self._tokenizer(
+            texts, padding=True, truncation=True, return_tensors="np"
+        )
+        # Hugging Face fast tokenizers commonly return int32 NumPy arrays on Windows,
+        # while the BGE-M3 ONNX graph declares token inputs as int64.
+        inputs = {
+            name: np.asarray(features[name], dtype=np.int64)
+            for name in self._input_names
+            if name in features
+        }
+        missing_inputs = self._input_names - inputs.keys()
+        if missing_inputs:
+            raise RuntimeError(
+                f"Tokenizer did not provide required ONNX inputs: {sorted(missing_inputs)}"
+            )
+
+        # BGE-M3's SentenceTransformer configuration specifies CLS pooling. The ONNX
+        # graph returns token embeddings, so retain token 0 and normalize it to preserve
+        # the cosine-distance invariant used by pgvector.
+        token_embeddings = self._session.run(None, inputs)[0]
+        vectors = token_embeddings[:, 0, :]
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        if np.any(norms == 0):
+            raise RuntimeError("ONNX model returned a zero embedding")
+        return (vectors / norms).tolist()
+
+
+class OnnxEmbeddingModelSingleton:
     _model = None
     _lock = threading.Lock()
 
@@ -64,32 +141,25 @@ class BGEModelSingleton:
         if cls._model is None:
             with cls._lock:
                 if cls._model is None:
-                    logger.info("Initializing SentenceTransformer model (loading weights)...", model=settings.EMBEDDING_MODEL)
+                    logger.info(
+                        "Initializing ONNX embedding model (loading weights)...",
+                        model=settings.EMBEDDING_MODEL,
+                    )
                     try:
-                        from sentence_transformers import SentenceTransformer
-
-                        cls._model = SentenceTransformer(settings.EMBEDDING_MODEL)
-                        logger.info("SentenceTransformer model loaded successfully.")
-                    except ImportError as exc:
-                        # A deployed image does not carry torch. Reaching here means the
-                        # configured model is a local one in an environment built for
-                        # hosted embeddings — a configuration error, not a runtime fault.
-                        raise RuntimeError(
-                            f"EMBEDDING_MODEL={settings.EMBEDDING_MODEL!r} needs the optional 'ml' "
-                            "dependency group (torch, sentence-transformers), which is not installed. "
-                            "Use a hosted model, or install with `poetry install --with ml`."
-                        ) from exc
+                        cls._model = OnnxEmbeddingModel(settings.EMBEDDING_MODEL)
+                        logger.info("ONNX embedding model loaded successfully.")
                     except Exception as e:
-                        logger.error("Failed to load SentenceTransformer model", error=str(e), model=settings.EMBEDDING_MODEL)
+                        logger.error(
+                            "Failed to load ONNX embedding model",
+                            error=str(e),
+                            model=settings.EMBEDDING_MODEL,
+                        )
                         raise e
         return cls._model
 
 
 def _local_embeddings(texts: list[str]) -> list[list[float]]:
-    model = BGEModelSingleton.get_model()
-    # Normalisation lets cosine distance and dot product agree.
-    vectors = model.encode(texts, normalize_embeddings=True, batch_size=32)
-    return [vector.tolist() for vector in vectors]
+    return OnnxEmbeddingModelSingleton.get_model().encode(texts)
 
 
 # ── Hosted ───────────────────────────────────────────────────────────────────
@@ -106,7 +176,9 @@ def _hosted_embeddings(texts: list[str]) -> list[list[float]]:
         )
 
     model = settings.EMBEDDING_MODEL
-    url = f"{settings.GEMINI_API_BASE_URL.rstrip('/')}/models/{model}:batchEmbedContents"
+    url = (
+        f"{settings.GEMINI_API_BASE_URL.rstrip('/')}/models/{model}:batchEmbedContents"
+    )
     payload = {
         "requests": [
             {
@@ -141,8 +213,8 @@ def _hosted_embeddings(texts: list[str]) -> list[list[float]]:
             f"embedding API returned {len(vectors)} vectors for {len(texts)} inputs"
         )
     # Truncated vectors come back UNNORMALISED — measured L2 of 0.586 at 768 dimensions,
-    # where the full-width 3072 output is unit length. The local model this replaced
-    # always normalised (`normalize_embeddings=True`), and the tuned constants
+    # where the full-width 3072 output is unit length. The local ONNX model always
+    # normalises its CLS embeddings, and the tuned constants
     # VECTOR_DISTANCE_THRESHOLD and RAG_MIN_RELEVANCE_SCORE were chosen against unit
     # vectors, so normalising here keeps the invariant the rest of the pipeline assumes
     # rather than quietly shifting every score.
@@ -177,7 +249,9 @@ def get_bge_embedding(text: str) -> list[float]:
     try:
         return _embed_batch([text])[0]
     except Exception as e:
-        logger.error("Error generating embedding", error=str(e), model=settings.EMBEDDING_MODEL)
+        logger.error(
+            "Error generating embedding", error=str(e), model=settings.EMBEDDING_MODEL
+        )
         # Never silently insert a zero vector. It makes an indexing outage look
         # healthy and contaminates retrieval with meaningless candidates.
         raise RuntimeError("Embedding generation failed") from e

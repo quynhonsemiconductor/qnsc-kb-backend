@@ -103,8 +103,8 @@ class Settings(BaseSettings):
     # no third-party key gates indexing or search.
     #
     # It is paid for in image size and memory. The API embeds the search QUERY on every
-    # search, so the weights and torch live in the api image as well as the worker's —
-    # the `ml` dependency group is installed in both, and neither is small. Choosing a
+    # search, so the ONNX graph and runtime live in the api image as well as the worker's
+    # — the `ml` dependency group is installed in both, and neither is small. Choosing a
     # hosted model instead (gemini-embedding-001, text-embedding-3-small) is a one-line
     # change here plus the migration below, and src/lib/embeddings.py already carries
     # that path.
@@ -120,11 +120,16 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gemma-4-26b-a4b-it"
     RESTRUCTURE_ENABLED: bool = True
     RESTRUCTURE_MODEL: str | None = None
-    RESTRUCTURE_MAX_CHARS: int = 60000
+    # GLM-5 has a 200K context window shared by prompt and generation. 120K
+    # characters leaves practical headroom for the system prompt and a 64K
+    # lossless Markdown response, even for token-dense source languages.
+    RESTRUCTURE_MAX_CHARS: int = 120000
     # Formatting is an optional enhancement. Keep review responsive and use
     # the lossless local fallback when the configured provider is slow.
-    RESTRUCTURE_TIMEOUT_SECONDS: float = 120.0
-    RESTRUCTURE_MAX_OUTPUT_TOKENS: int = 16384
+    RESTRUCTURE_TIMEOUT_SECONDS: float = 300.0
+    # A lossless reading view can approach the source length. Keep enough
+    # space for long documents while retaining a finite cost/time safeguard.
+    RESTRUCTURE_MAX_OUTPUT_TOKENS: int = 65536
     RESTRUCTURE_NUMERIC_COVERAGE_THRESHOLD: float = 0.90
     AI_RATE_LIMIT_PER_MINUTE: int = 30
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
@@ -224,9 +229,19 @@ class Settings(BaseSettings):
         # DATABASE_URL has a non-empty default, so testing its truthiness would treat
         # the localhost default as a deliberate choice and ignore the injected parts.
         if self.DATABASE_HOST:
-            if "DATABASE_URL" not in self.model_fields_set and self.DATABASE_USER and self.DATABASE_PASSWORD:
-                self.DATABASE_URL = self._compose_dsn(self.DATABASE_USER, self.DATABASE_PASSWORD)
-            if not self.MIGRATION_DATABASE_URL and self.MIGRATION_DATABASE_USER and self.MIGRATION_DATABASE_PASSWORD:
+            if (
+                "DATABASE_URL" not in self.model_fields_set
+                and self.DATABASE_USER
+                and self.DATABASE_PASSWORD
+            ):
+                self.DATABASE_URL = self._compose_dsn(
+                    self.DATABASE_USER, self.DATABASE_PASSWORD
+                )
+            if (
+                not self.MIGRATION_DATABASE_URL
+                and self.MIGRATION_DATABASE_USER
+                and self.MIGRATION_DATABASE_PASSWORD
+            ):
                 self.MIGRATION_DATABASE_URL = self._compose_dsn(
                     self.MIGRATION_DATABASE_USER, self.MIGRATION_DATABASE_PASSWORD
                 )

@@ -1,59 +1,97 @@
 """Deterministic structure-aware document splitting for review candidates."""
+
 from __future__ import annotations
 
 import re
 from typing import Any
 
-from src.rag.chunker import create_parent_child_chunks
+
+# A review candidate is an approval unit, not a retrieval chunk.  Retrieval is
+# split separately after approval, so making candidates as small as the 1,800
+# character index parents turns every AI heading into an unnecessary article.
+# Keep a normal document intact; only exceptionally long formatted documents
+# need more than one review card.
+_MAX_REVIEW_CANDIDATE_CHARS = 48_000
 
 
 def _candidate_title(body: str, index: int, fallback: str) -> tuple[str, str | None]:
     for line in body.splitlines():
         clean = line.strip()
         if re.match(r"^#{1,6}\s+\S", clean):
-            return clean.lstrip("#").strip()[:255] or f"{fallback} — part {index}", clean.lstrip("#").strip()[:255]
+            return (
+                clean.lstrip("#").strip()[:255] or f"{fallback} — part {index}",
+                clean.lstrip("#").strip()[:255],
+            )
     return f"{fallback} — part {index}"[:255], None
 
 
-def split_document_candidates(title: str, text: str) -> list[dict[str, Any]]:
+def _large_document_candidates(title: str, text: str) -> list[dict[str, Any]]:
+    """Split only a document that cannot sensibly be reviewed in one card.
+
+    Prefer paragraph boundaries and never use the retrieval chunker's small
+    parent size here.  Each result remains a substantial, lossless review
+    unit; the reviewer can still manually split it when needed.
+    """
+    candidates: list[dict[str, Any]] = []
+    start = 0
+    index = 1
+    while start < len(text):
+        end = min(start + _MAX_REVIEW_CANDIDATE_CHARS, len(text))
+        if end < len(text):
+            boundary = max(text.rfind("\n\n", start, end), text.rfind("\n", start, end))
+            if boundary > start + (_MAX_REVIEW_CANDIDATE_CHARS // 2):
+                end = boundary
+        body = text[start:end].strip()
+        # A long unbroken line still has to make forward progress.
+        if not body:
+            end = min(start + _MAX_REVIEW_CANDIDATE_CHARS, len(text))
+            body = text[start:end].strip()
+        candidate_title, heading = _candidate_title(body, index, title)
+        candidates.append(
+            {
+                "position": index,
+                "title": candidate_title,
+                "body_md": body,
+                "source_start": start,
+                "source_end": end,
+                "heading": heading,
+            }
+        )
+        start = end
+        while start < len(text) and text[start].isspace():
+            start += 1
+        index += 1
+    return candidates
+
+
+def split_document_candidates(
+    title: str, text: str, *, prefer_markdown_sections: bool = False
+) -> list[dict[str, Any]]:
     """Return ordered candidates with source character offsets.
 
-    Headings are preserved by the parent/child chunker.  The 1,800 character
-    parent boundary and 500 character child boundary are the recorded MVP
-    split rule; candidate bodies remain lossless source slices.
+    A candidate is normally the entire formatted document.  Its later index
+    representation is chunked independently, so review must not inherit the
+    small parent/child retrieval boundaries.
     """
     clean_text = text.strip()
     if not clean_text:
         return []
-    parents = create_parent_child_chunks(clean_text)
-    candidates: list[dict[str, Any]] = []
-    cursor = 0
-    for index, parent in enumerate(parents, start=1):
-        body = str(parent.get("parent_text") or "").strip()
-        if not body:
-            continue
-        start = clean_text.find(body, cursor)
-        if start < 0:
-            start = cursor
-        end = start + len(body)
-        cursor = end
-        candidate_title, heading = _candidate_title(body, index, title)
-        candidates.append({
-            "position": index,
-            "title": candidate_title,
-            "body_md": body,
-            "source_start": start,
-            "source_end": end,
-            "heading": heading or parent.get("heading"),
-        })
-    return candidates or [{
-        "position": 1,
-        "title": title[:255],
-        "body_md": clean_text,
-        "source_start": 0,
-        "source_end": len(clean_text),
-        "heading": None,
-    }]
+    if len(clean_text) <= _MAX_REVIEW_CANDIDATE_CHARS:
+        candidate_title, heading = _candidate_title(clean_text, 1, title)
+        return [
+            {
+                "position": 1,
+                "title": candidate_title,
+                "body_md": clean_text,
+                "source_start": 0,
+                "source_end": len(clean_text),
+                "heading": heading,
+            }
+        ]
+    # For unusually long documents, use broad review-sized ranges rather than
+    # treating every Markdown heading as a separate knowledge article.  The
+    # argument remains for call compatibility and has no effect on this rule.
+    return _large_document_candidates(title, clean_text)
 
 
 def splitter_metrics(documents: list[tuple[str, str]]) -> dict[str, Any]:
@@ -65,17 +103,27 @@ def splitter_metrics(documents: list[tuple[str, str]]) -> dict[str, Any]:
         candidates = split_document_candidates(name, text)
         article_count += len(candidates)
         candidate_text = "\n".join(str(item["body_md"]) for item in candidates)
-        original_headings = [line.strip().lstrip("#").strip() for line in text.splitlines() if re.match(r"^#{1,6}\s+\S", line.strip())]
+        original_headings = [
+            line.strip().lstrip("#").strip()
+            for line in text.splitlines()
+            if re.match(r"^#{1,6}\s+\S", line.strip())
+        ]
         preserved = all(heading in candidate_text for heading in original_headings)
         if not preserved:
             manual_correction_count += 1
-        rows.append({"document": name, "article_count": len(candidates), "headings_preserved": preserved})
+        rows.append(
+            {
+                "document": name,
+                "article_count": len(candidates),
+                "headings_preserved": preserved,
+            }
+        )
     count = len(documents)
     return {
         "document_count": count,
         "article_count": article_count,
         "manual_correction_count": manual_correction_count,
         "manual_correction_share": (manual_correction_count / count) if count else 0.0,
-        "rule": "hybrid heading-aware parent chunks ~1800 characters with ~500-character children; short sections merge when bounded packing preserves order",
+        "rule": "one formatted review document up to 48,000 characters; exceptionally long documents split at broad paragraph boundaries",
         "documents": rows,
     }

@@ -10,6 +10,7 @@ from sqlalchemy import select, func
 from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.models.article import Article
+from src.models.user import Department
 from src.models.governance import (
     ApproverRule,
     DraftTransition,
@@ -34,9 +35,43 @@ from src.domain.review import ReviewService
 from src.domain.rbac import AuthorizationService
 from src.domain.departments import resolve_active_department
 from src.domain.content_restructure import build_restructure_report, split_into_chunks
+from src.domain.department_routing import suggest_departments
 from src.domain.llm_client import resolve_provider
 
 router = APIRouter()
+
+
+async def _ensure_candidate_routing(
+    db: AsyncSession, company_domain: str, candidates: list[DraftCandidate]
+) -> None:
+    """Backfill recommendations for candidates created before async formatting finishes."""
+    pending = [
+        item
+        for item in candidates
+        if item.department_suggestions is None and item.proposed_department is None
+    ]
+    if not pending:
+        return
+    departments = list(
+        (
+            await db.execute(
+                select(Department).where(
+                    Department.company_domain == company_domain,
+                    Department.active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for item in pending:
+        ids, suggestions, proposed = suggest_departments(
+            item.title, item.body_md, departments
+        )
+        item.department_ids = ids
+        item.department_suggestions = suggestions
+        item.proposed_department = proposed
+    await db.commit()
 
 
 def _r2_is_configured() -> bool:
@@ -100,11 +135,12 @@ class RestructureDecisionRequest(BaseModel):
 
 
 class CandidateOperationRequest(BaseModel):
-    operation: str = Field(pattern="^(merge|split|rename|discard)$")
+    operation: str = Field(pattern="^(merge|split|rename|discard|set_departments)$")
     candidate_id: uuid.UUID
     other_candidate_id: uuid.UUID | None = None
     title: str | None = Field(default=None, max_length=255)
     split_at: int | None = Field(default=None, gt=0)
+    department_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
     note: str | None = Field(default=None, max_length=2000)
 
 
@@ -346,9 +382,17 @@ async def list_draft_candidates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    candidates = await GovernanceService(
-        GovernanceRepository(db), ArticleRepository(db)
-    ).list_candidates(current_user, id)
+    service = GovernanceService(GovernanceRepository(db), ArticleRepository(db))
+    # Authorize through the service before inspecting the draft status.
+    candidates = list(await service.list_candidates(current_user, id))
+    draft = await service._get_draft_for_user(id, current_user)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    # Candidates created by older uploads must not be exposed before their
+    # reading view has completed either. New uploads do not create them yet.
+    if draft.restructure_status in {"queued", "processing"}:
+        return []
+    await _ensure_candidate_routing(db, draft.company_domain, candidates)
     return [
         {
             "id": str(item.id),
@@ -359,6 +403,9 @@ async def list_draft_candidates(
             "source_start": item.source_start,
             "source_end": item.source_end,
             "heading": item.heading,
+            "department_ids": item.department_ids or [],
+            "department_suggestions": item.department_suggestions or [],
+            "proposed_department": item.proposed_department,
             "status": item.status,
             "review_note": item.review_note,
         }
@@ -383,6 +430,7 @@ async def review_draft_candidate(
         req.other_candidate_id,
         req.title,
         req.split_at,
+        req.department_ids,
         req.note,
     )
     return [
@@ -395,6 +443,9 @@ async def review_draft_candidate(
             "source_start": item.source_start,
             "source_end": item.source_end,
             "heading": item.heading,
+            "department_ids": item.department_ids or [],
+            "department_suggestions": item.department_suggestions or [],
+            "proposed_department": item.proposed_department,
             "status": item.status,
             "review_note": item.review_note,
         }
