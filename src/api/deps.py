@@ -149,7 +149,9 @@ async def get_current_user(
         raise credentials_exception
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        if payload.get("type") == "refresh":
+        if payload.get("type") != "access":
+            # Access endpoints accept access tokens only; refresh/state tokens
+            # are rejected even though they share the signing key.
             raise credentials_exception
         email = payload.get("sub")
         if not isinstance(email, str):
@@ -193,24 +195,3 @@ def require_permission(permission: str, scope: str = "company"):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing permission: {permission}")
         return current_user
     return permission_checker
-
-
-def require_role(roles: list[str]):
-    # Compatibility dependency for existing routers. The decision is now made
-    # from the seeded permission catalog, not only from users.role.
-    permission = "governance.read"
-    if roles == ["Admin"]:
-        permission = "role.manage"
-    elif set(roles) <= {"Admin", "CEO"}:
-        permission = "user.manage"
-    elif set(roles) <= {"Admin", "Reviewer"}:
-        permission = "article.review"
-
-    def role_checker(current_user: User = Depends(get_current_user)) -> User:
-        if not AuthorizationService.has_permission(current_user, permission, requested_scope="company"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied. Required permission: {permission}"
-            )
-        return current_user
-    return role_checker

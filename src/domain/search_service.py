@@ -188,6 +188,8 @@ class SearchService:
                 "chunking_version": getattr(chunk, "chunking_version", None),
                 "page_number": chunk.page_number if chunk.page_number is not None else (parent.page_number if parent else None),
                 "source_url": f"/api/v1/articles/{article.id}/source" + (f"?page={chunk.page_number or parent.page_number}" if (chunk.page_number or (parent and parent.page_number)) else ""),
+                "owner_email": getattr(getattr(article, "owner", None), "email", None),
+                "last_reviewed": article.last_reviewed.isoformat() if article.last_reviewed else None,
                 "score": score
             })
 

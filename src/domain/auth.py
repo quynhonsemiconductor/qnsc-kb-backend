@@ -75,8 +75,6 @@ class AuthService:
                 # Find max bitmask position and increment
                 all_groups = await self.user_repo.get_all_groups(company_domain)
                 max_pos = max([g.bitmask_position for g in all_groups]) if all_groups else 0
-                if max_pos + 1 >= 62:
-                    raise HTTPException(status_code=422, detail="The maximum number of access groups has been reached")
                 dept_group = AccessGroup(name=dept_group_name, company_domain=company_domain, bitmask_position=max_pos + 1)
                 dept_group = await self.user_repo.create_group(dept_group, commit=False)
             user.groups.append(dept_group)

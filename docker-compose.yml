@@ -1,10 +1,10 @@
-version: '3.8'
-
 services:
   db:
     image: ankane/pgvector:v0.5.1
     ports:
-      - "5432:5432"
+      # Loopback-only: dev Postgres uses well-known credentials and must not
+      # be reachable from the LAN.
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -22,13 +22,14 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--requirepass", "devredis"]
     volumes:
       - redisdata:/data
     mem_limit: 128m
     mem_reservation: 32m
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli -a devredis ping | grep PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -44,7 +45,7 @@ services:
         # for all three services.
         BAKE_EMBEDDING_MODEL: "false"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - .:/app
       - ./connector_sources:/app/storage/connectors
@@ -59,7 +60,7 @@ services:
     mem_reservation: 512m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:devredis@redis:6379/0
     depends_on:
       db:
         condition: service_healthy
@@ -89,7 +90,7 @@ services:
     mem_reservation: 512m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:devredis@redis:6379/0
       - AUTO_CREATE_SCHEMA=false
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
       - OMP_NUM_THREADS=1
@@ -129,7 +130,7 @@ services:
     mem_reservation: 64m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:devredis@redis:6379/0
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}

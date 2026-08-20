@@ -42,6 +42,7 @@ class AiMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     grounded_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     extended_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     citations: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     usage_log_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("ai_usage_logs.id", ondelete="SET NULL"), nullable=True)
 
     conversation: Mapped[AiConversation] = relationship("AiConversation", back_populates="messages")

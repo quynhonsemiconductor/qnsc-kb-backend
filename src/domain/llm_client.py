@@ -84,7 +84,11 @@ def _payload(
             "contents": contents,
             "generationConfig": {
                 "temperature": temperature,
-                "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
+                "maxOutputTokens": (
+                    max_tokens
+                    if max_tokens is not None
+                    else settings.GEMINI_MAX_OUTPUT_TOKENS
+                ),
                 "thinkingConfig": {"thinkingLevel": settings.GEMINI_THINKING_LEVEL},
             },
         }

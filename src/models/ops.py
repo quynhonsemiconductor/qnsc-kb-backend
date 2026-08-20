@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import ForeignKey, String, Text, Integer, JSON, Float, DateTime, UniqueConstraint, Index
+from sqlalchemy import Boolean, ForeignKey, String, Text, Integer, JSON, Float, DateTime, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -67,6 +67,8 @@ class NotificationQueue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)  # pending, sent, failed
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 class DeadLetterJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "dead_letter_jobs"
@@ -139,8 +141,26 @@ class EvalQuestion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     expected_answer: Mapped[str] = mapped_column(Text, nullable=False)
     expected_chunk_ids: Mapped[str] = mapped_column(Text, nullable=False)  # JSON list of parent chunk IDs
     category: Mapped[str] = mapped_column(String(50), nullable=False)
+    eval_set_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    eval_set: Mapped["EvalSet | None"] = relationship("EvalSet", back_populates="questions")
+    runs: Mapped[list["EvalRun"]] = relationship("EvalRun", back_populates="question")
 
-    runs: Mapped[list["EvalRun"]] = relationship("EvalRun", back_populates="question", cascade="all, delete-orphan")
+
+class EvalSet(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Versioned, approver-owned acceptance corpus."""
+
+    __tablename__ = "eval_sets"
+    __table_args__ = (UniqueConstraint("company_domain", "name", "version", name="uq_eval_set_company_name_version"),)
+
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    environment: Mapped[str] = mapped_column(String(50), nullable=False, default="uat")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    questions: Mapped[list[EvalQuestion]] = relationship("EvalQuestion", back_populates="eval_set")
 
 class EvalRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "eval_runs"
@@ -151,5 +171,9 @@ class EvalRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     context_recall: Mapped[float] = mapped_column(Float, nullable=False)
     faithfulness: Mapped[float] = mapped_column(Float, nullable=False)
     answer_correctness: Mapped[float] = mapped_column(Float, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # True only when the answer exposed a citation outside the authorized
+    # retrieval set used for this evaluation run.
+    permission_leakage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     question: Mapped[EvalQuestion] = relationship("EvalQuestion", back_populates="runs")

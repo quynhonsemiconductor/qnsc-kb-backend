@@ -53,5 +53,17 @@ celery_app.conf.update(
             "task": "cleanup_orphaned_source_objects",
             "schedule": 86400.0,
         },
+        "deliver-notification-queue": {
+            "task": "deliver_notification_queue",
+            "schedule": 30.0,
+        },
+        "verify-review-deadlines": {
+            "task": "verify_review_deadlines",
+            "schedule": 86400.0,
+        },
+        "escalate-overdue-drafts": {
+            "task": "escalate_overdue_drafts",
+            "schedule": 21600.0,
+        },
     },
 )

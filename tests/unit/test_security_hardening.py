@@ -89,6 +89,7 @@ def test_production_rejects_an_insecure_credentialed_cors_origin():
 
 def test_production_requires_r2_credentials():
     settings = Settings(
+        _env_file=None,
         ENVIRONMENT="production",
         SECRET_KEY="a" * 32,
         DATA_ENCRYPTION_KEY="d" * 32,
@@ -200,6 +201,7 @@ def test_health_r2_signal_requires_an_endpoint_or_account(monkeypatch):
 
 def test_production_rejects_insecure_connector_callback_urls():
     settings = Settings(
+        _env_file=None,
         ENVIRONMENT="production",
         SECRET_KEY="a" * 32,
         DATA_ENCRYPTION_KEY="d" * 32,

@@ -1,7 +1,8 @@
 [
   {
     "id": "grounded-policy",
-    "answer": "Employees must submit travel requests before booking flights.",
+    "question": "When must employees submit travel requests?",
+    "answer": "Employees must submit travel requests before booking any flights.",
     "expected_answer": "Employees must submit travel requests before booking flights.",
     "context": "The corporate travel policy requires employees to submit a travel request before booking flights.",
     "retrieved_chunk_ids": ["travel-policy-1"],
@@ -9,7 +10,8 @@
   },
   {
     "id": "grounded-sop",
-    "answer": "Restart the service, verify health checks, and escalate if the checks remain red.",
+    "question": "What does the outage SOP say to do when health checks stay red?",
+    "answer": "Restart the service and verify health checks; escalate if the checks remain red.",
     "expected_answer": "Restart the service, verify health checks, and escalate if the checks remain red.",
     "context": "The outage SOP says to restart the service, verify health checks, and escalate when checks remain red.",
     "retrieved_chunk_ids": ["outage-sop-1"],
@@ -17,7 +19,8 @@
   },
   {
     "id": "vietnamese-grounded-policy",
-    "answer": "Nhân viên phải gửi yêu cầu công tác trước khi đặt vé máy bay.",
+    "question": "Nhân viên phải làm gì trước khi đặt vé máy bay?",
+    "answer": "Nhân viên phải nộp yêu cầu công tác trước khi đặt vé máy bay.",
     "expected_answer": "Nhân viên phải gửi yêu cầu công tác trước khi đặt vé máy bay.",
     "context": "Chính sách công tác yêu cầu nhân viên gửi yêu cầu công tác trước khi đặt vé máy bay.",
     "retrieved_chunk_ids": ["travel-policy-vi-1"],
@@ -25,15 +28,17 @@
   },
   {
     "id": "no-answer",
+    "question": "What is the cafeteria menu for next week?",
     "answer": "The requested information was not found in the knowledge base.",
-    "expected_answer": "The requested information was not found in the knowledge base.",
+    "expected_answer": "No results: the requested information was not found in the knowledge base.",
     "context": "",
     "retrieved_chunk_ids": [],
     "expected_chunk_ids": []
   },
   {
     "id": "definition-grounding",
-    "answer": "RTO is the target time to restore a service after disruption.",
+    "question": "What is RTO?",
+    "answer": "RTO is the target time to restore a service after a disruption.",
     "expected_answer": "RTO is the target time to restore a service after disruption.",
     "context": "Recovery Time Objective (RTO) is the target time to restore a service after a disruption.",
     "retrieved_chunk_ids": ["bc-dr-1"],
@@ -41,9 +46,10 @@
   },
   {
     "id": "restricted-document-citation",
+    "question": "How often are access reviews required?",
     "answer": "Access reviews are required quarterly [security-policy-1].",
     "expected_answer": "Access reviews are required quarterly.",
-    "context": "The security policy requires quarterly access reviews.",
+    "context": "The security policy requires quarterly access reviews. Reviews are required every quarter.",
     "retrieved_chunk_ids": ["security-policy-1"],
     "expected_chunk_ids": ["security-policy-1"]
   }

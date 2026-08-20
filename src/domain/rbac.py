@@ -6,6 +6,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from src.models import Permission, Role, RolePermission, User
 
 SCOPES = {"own", "department", "company", "global"}
@@ -128,7 +129,7 @@ class AuthorizationService:
 
     @classmethod
     def can_access_article_departments(cls, user: User, article: object) -> bool:
-        """Require membership in at least one article department.
+        """Evaluate the shared audience boundary for an Article.
 
         Global article readers and full-company Admin/CEO identities are the
         deliberate exceptions. Ownership is not used as a read boundary;
@@ -136,7 +137,19 @@ class AuthorizationService:
         """
         if cls.has_permission(user, "article.read", requested_scope="global") or cls.has_full_company_article_access(user):
             return True
-        return bool(cls.member_department_names(user) & cls.article_department_names(article))
+        member_departments = cls.member_department_names(user)
+        article_departments = cls.article_department_names(article)
+        if member_departments & article_departments:
+            return True
+        user_group_ids = {group.id for group in getattr(user, "groups", []) or []}
+        article_group_ids = {group.id for group in getattr(article, "access_groups", []) or []}
+        # Access groups are read audiences just like departments.  They may
+        # cross the organisation tree, but are not used for approval routing.
+        if user_group_ids & article_group_ids:
+            return True
+        user_access_ids = {department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"}
+        article_access_ids = {department.id for department in getattr(article, "departments", []) if getattr(department, "kind", "org") == "access"}
+        return bool(user_access_ids & article_access_ids)
 
     @classmethod
     def restrict_article_metadata(cls, user: User, article: object) -> None:
@@ -145,9 +158,15 @@ class AuthorizationService:
             return
         member_departments = cls.member_department_names(user)
         visible = [department for department in getattr(article, "departments", []) if department.name in member_departments]
-        article.departments = visible
+        # These are persistent, session-attached ORM entities.  Assigning the
+        # relationship normally marks the association table dirty; a search
+        # request commits its SearchLog in the same session, which would then
+        # flush and delete departments the viewer was never allowed to see.
+        # Set the in-memory display value as already committed so serializers
+        # see the redacted view without creating a persistence mutation.
+        set_committed_value(article, "departments", visible)
         if getattr(article, "dept", None) not in member_departments and visible:
-            article.dept = visible[0].name
+            set_committed_value(article, "dept", visible[0].name)
 
     @classmethod
     def has_department_ownership(cls, user: User) -> bool:

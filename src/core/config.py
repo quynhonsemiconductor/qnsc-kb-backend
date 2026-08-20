@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # Schema lifecycle is owned exclusively by Alembic migrations.
     AUTO_CREATE_SCHEMA: bool = False
     JOB_MODE: str = "inline"
+    # How often the inline-mode outbox recovery loop retries failed/stale
+    # events (the Celery beat equivalent is replay_outbox_task).
+    OUTBOX_RECOVERY_INTERVAL_SECONDS: int = 300
     ENABLE_API_DOCS: bool = True
     ENABLE_RLS: bool = False
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
@@ -148,6 +151,14 @@ class Settings(BaseSettings):
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
     RAG_ALLOW_EXTENDED_ON_REFUSAL: bool = False
+    # Character budget for conversation history injected into the prompt.
+    # Bounds total prompt size (history + RAG context + system prompt) so long
+    # conversations cannot overflow smaller models' context windows.
+    RAG_HISTORY_MAX_CHARS: int = 9000
+    # Output cap for the main RAG generation path. Without it, provider-side
+    # output length is unbounded (cost/latency exposure); only Gemini enforced
+    # its own cap before this setting existed.
+    RAG_MAX_ANSWER_TOKENS: int = 2048
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
     OIDC_CLIENT_SECRET: str | None = None
@@ -158,9 +169,14 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
-    # Only verified QNSC Entra identities are provisioned automatically. New
-    # identities receive the least-privileged built-in Staff role.
-    ENTRA_AUTO_PROVISION_DOMAIN: str = "qnsc.vn"
+    # Entra is an authentication provider, not an account-provisioning path.
+    # A user must have a matching, unexpired invitation.
+    ENTRA_AUTO_PROVISION_DOMAIN: str = ""
+    MICROSOFT_GRAPH_SENDER: str | None = None
+    MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
+    SYSTEM_DATA_OWNER_EMAIL: str | None = None
+    DEFAULT_LANGUAGE: str = "vi"
+    REVIEW_SLA_DAYS: int = 3
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None
@@ -273,18 +289,24 @@ class Settings(BaseSettings):
         ]
 
     def validate_production(self) -> None:
-        if self.ENVIRONMENT.lower() not in {"production", "prod"}:
+        environment = self.ENVIRONMENT.lower()
+        if environment in {"development", "dev", "local"}:
             return
+        # Secret-material checks apply to ANY non-development environment. The
+        # committed default SECRET_KEY signs access/refresh JWTs and (without a
+        # DEK) encrypts stored connector tokens; a staging/uat/demo deployment
+        # with it is a production incident waiting to happen, so the gate must
+        # not key off the exact string "production".
         if (
             self.SECRET_KEY in {"", "super-secret-key-change-in-production"}
             or len(self.SECRET_KEY) < 32
         ):
             raise RuntimeError(
-                "SECRET_KEY must be a strong, externally supplied value in production"
+                "SECRET_KEY must be a strong, externally supplied value outside development"
             )
         if not self.DATA_ENCRYPTION_KEY or len(self.DATA_ENCRYPTION_KEY) < 32:
             raise RuntimeError(
-                "DATA_ENCRYPTION_KEY must be a separate, strong externally supplied value in production"
+                "DATA_ENCRYPTION_KEY must be a separate, strong externally supplied value outside development"
             )
         if any(
             len(key.strip()) < 32
@@ -294,6 +316,8 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "PREVIOUS_DATA_ENCRYPTION_KEYS entries must each be at least 32 characters"
             )
+        if environment not in {"production", "prod"}:
+            return
         if self.AUTO_CREATE_SCHEMA:
             raise RuntimeError(
                 "AUTO_CREATE_SCHEMA must be false in production; use Alembic migrations"

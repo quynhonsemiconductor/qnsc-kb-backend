@@ -34,7 +34,10 @@ logger = structlog.get_logger()
 class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     conversation_id: uuid.UUID | None = None
-    language: Literal["en", "vi"] = "en"
+    article_id: uuid.UUID | None = None
+    confirm_edit: bool = False
+    edit_instruction: str | None = Field(default=None, max_length=4000)
+    language: Literal["en", "vi"] = "vi"
 
 
 class ConversationCreate(BaseModel):
@@ -109,6 +112,7 @@ async def _hydrate_citations(
                 ParentChunk.child_chunks
             ),
             selectinload(ArticleChunk.article),
+            selectinload(ArticleChunk.article).selectinload(Article.owner),
         )
         .where(*conditions)
     )
@@ -149,6 +153,8 @@ async def _hydrate_citations(
                     "page_number": page_number,
                     "source_url": f"/api/v1/articles/{chunk.article_id}/source"
                     + (f"?page={page_number}" if page_number else ""),
+                    "owner_email": getattr(getattr(article, "owner", None), "email", None),
+                    "last_reviewed": getattr(article, "last_reviewed", None).isoformat() if getattr(article, "last_reviewed", None) else None,
                 }
             )
         # Every persisted citation must identify a concrete retrieved chunk.
@@ -183,6 +189,29 @@ def _parse_historical_citations(value: str | None) -> tuple[list[dict], bool]:
             continue
         citations.append(item)
     return citations, malformed
+
+
+def _is_safe_historical_status_message(message: Any) -> bool:
+    """Keep legacy non-source status messages visible after a refresh."""
+    if getattr(message, "role", None) != "assistant":
+        return False
+    content = str(getattr(message, "content", "") or "").strip().lower()
+    markers = (
+        "i could not produce a grounded answer",
+        "i could not identify a specific article",
+        "i understand this is an update request",
+        "i found the article",
+        "an edit request was created",
+        "was updated because you have permission",
+        "tôi không thể tạo câu trả lời có căn cứ",
+        "tôi không tìm thấy tài liệu được cấp quyền nào",
+        "chưa xác định được tài liệu nào",
+        "tôi hiểu đây là yêu cầu cập nhật",
+        "tôi tìm thấy tài liệu",
+        "đã tạo yêu cầu cập nhật",
+        "đã cập nhật",
+    )
+    return any(marker in content for marker in markers)
 
 
 @router.get("/conversations")
@@ -238,11 +267,18 @@ async def get_conversation_messages(
             if message.role == "assistant"
             else set()
         )
-        inaccessible_source = message.role == "assistant" and (
-            not raw_citations
-            or malformed_citations
-            or len(citations) < len(raw_citations)
-            or answer_markers != stored_markers
+        action_data = getattr(message, "action_data", None)
+        action_data = action_data if isinstance(action_data, dict) else None
+        inaccessible_source = (
+            message.role == "assistant"
+            and not action_data
+            and not _is_safe_historical_status_message(message)
+            and (
+                not raw_citations
+                or malformed_citations
+                or len(citations) < len(raw_citations)
+                or answer_markers != stored_markers
+            )
         )
         response.append(
             {
@@ -273,6 +309,8 @@ async def get_conversation_messages(
                     else False
                 ),
                 "citations": [] if inaccessible_source else citations,
+                "action": action_data.get("action") if action_data else None,
+                "action_data": action_data,
                 "usage_log_id": (
                     str(message.usage_log_id) if message.usage_log_id else None
                 ),
@@ -347,7 +385,9 @@ async def ask_question(
 
     await repo.add_message(conversation.id, "user", req.question)
     data = await get_ai_service(db).ask(
-        current_user, req.question, conversation_id=conversation.id, language=req.language
+        current_user, req.question, conversation_id=conversation.id, language=req.language,
+        article_id=req.article_id, confirm_edit=req.confirm_edit,
+        edit_instruction=req.edit_instruction,
     )
     await repo.add_message(
         conversation.id,
@@ -357,6 +397,7 @@ async def ask_question(
         uuid.UUID(data["log_id"]) if data.get("log_id") else None,
         data.get("answer_grounded"),
         data.get("answer_extended"),
+        data.get("action_data"),
     )
     data["conversation_id"] = str(conversation.id)
     return data
@@ -451,6 +492,9 @@ async def ask_question_stream(
                     req.question,
                     conversation_id=uuid.UUID(conversation_id),
                     language=req.language,
+                    article_id=req.article_id,
+                    confirm_edit=req.confirm_edit,
+                    edit_instruction=req.edit_instruction,
                     on_token=on_token,
                     on_replace=on_replace,
                 )
@@ -492,9 +536,10 @@ async def ask_question_stream(
                 uuid.UUID(data["log_id"]) if data.get("log_id") else None,
                 data.get("answer_grounded"),
                 data.get("answer_extended"),
+                data.get("action_data"),
             )
             yield f"data: {json.dumps({'type': 'sources', 'sources': data.get('citations', [])})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request')})}\n\n"
 
     return StreamingResponse(
         event_stream(),

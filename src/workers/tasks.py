@@ -12,7 +12,10 @@ from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.domain.permissions import PermissionService
 from src.core.config import settings
-from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob
+from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue
+from src.models.governance import PendingDraft
+from src.models.user import User
+from src.services.email import get_email_sender
 from src.models.ai import AiCache
 from src.workers.loop import reset_worker_loop, sync_run
 
@@ -136,6 +139,92 @@ def prune_operational_metrics() -> None:
     sync_run(prune())
 
 
+@celery_app.task(name="deliver_notification_queue")
+def deliver_notification_queue() -> None:
+    """Deliver queued email notifications and persist an auditable outcome."""
+    async def deliver() -> None:
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            rows = (await db.execute(
+                select(NotificationQueue)
+                .where(NotificationQueue.type == "email", NotificationQueue.status.in_(["pending", "failed"]))
+                .order_by(NotificationQueue.created_at)
+                .limit(100)
+                .with_for_update(skip_locked=True)
+            )).scalars().all()
+            sender = get_email_sender()
+            for row in rows:
+                row.attempts += 1
+                payload = row.payload or {}
+                try:
+                    await sender.send(
+                        to=str(payload["to"]),
+                        subject=str(payload.get("subject") or "QNSC notification"),
+                        text=str(payload.get("text") or ""),
+                        html=str(payload["html"]) if payload.get("html") else None,
+                    )
+                    row.status = "sent"
+                    row.sent_at = datetime.utcnow()
+                    row.last_error = None
+                except Exception as exc:
+                    row.status = "failed"
+                    row.last_error = str(exc)[:1000]
+            await db.commit()
+
+    sync_run(deliver())
+
+
+@celery_app.task(name="verify_review_deadlines")
+def verify_review_deadlines() -> None:
+    async def verify() -> None:
+        from src.domain.review import ReviewService
+        from src.models.article import Article
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            domains = (await db.execute(select(Article.company_domain).distinct())).scalars().all()
+            for domain in domains:
+                await ReviewService(ArticleRepository(db)).verify_review_deadlines(str(domain))
+    sync_run(verify())
+
+
+@celery_app.task(name="escalate_overdue_drafts")
+def escalate_overdue_drafts() -> None:
+    """Escalate drafts past the approval SLA to their submitter and approver."""
+    async def escalate() -> None:
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            cutoff = datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)
+            drafts = (await db.execute(select(PendingDraft).where(
+                PendingDraft.status == "pending",
+                PendingDraft.assigned_at.is_not(None),
+                PendingDraft.assigned_at < cutoff,
+            ).limit(500))).scalars().all()
+            users = {item.id: item for item in (await db.execute(select(User).where(User.id.in_({uid for draft in drafts for uid in (draft.created_by, draft.assigned_approver_id) if uid})))).scalars().all()} if drafts else {}
+            for draft in drafts:
+                for user_id in {draft.created_by, draft.assigned_approver_id} - {None}:
+                    recipient = users.get(user_id)
+                    if not recipient:
+                        continue
+                    recent = await db.scalar(select(NotificationQueue.id).where(
+                        NotificationQueue.recipient_user_id == recipient.id,
+                        NotificationQueue.type == "email",
+                        NotificationQueue.created_at >= datetime.utcnow() - timedelta(hours=24),
+                        NotificationQueue.payload["event"].as_string() == "draft_overdue",
+                        NotificationQueue.payload["draft_id"].as_string() == str(draft.id),
+                    ).limit(1))
+                    if recent:
+                        continue
+                    db.add(NotificationQueue(
+                        recipient_user_id=recipient.id,
+                        type="email",
+                        payload={"event": "draft_overdue", "draft_id": str(draft.id), "to": recipient.email,
+                                 "subject": f"Approval overdue: {draft.title}",
+                                 "text": f"The draft '{draft.title}' has been awaiting approval beyond the {settings.REVIEW_SLA_DAYS}-day SLA."},
+                    ))
+            await db.commit()
+    sync_run(escalate())
+
+
 async def _run_orphan_source_cleanup() -> int:
     """Delete old private R2 objects that have no database reference."""
     from src.domain.source_storage import delete_source, list_source_objects
@@ -201,6 +290,131 @@ def cleanup_orphaned_source_objects() -> int:
     return sync_run(_run_orphan_source_cleanup())
 
 
+async def run_restructure_pending_draft(
+    draft_id_str: str, company_domain: str, user_id_str: str
+) -> None:
+    """Format a stored upload, on the caller's async event loop.
+
+    Shared by the Celery task and inline-mode dispatch so the feature works
+    identically in both deployment job modes.
+    """
+    from src.domain.content_restructure import restructure_document
+    from src.models import User
+    from src.models.governance import AuditLog, DraftCandidate, PendingDraft
+    from src.models.user import Department
+    from src.domain.department_routing import route_document_candidates
+    from src.domain.llm_config import load_runtime_config
+    from src.repositories.feature_flags import FeatureFlagRepository
+
+    async with SessionLocal() as db:
+        # This is an internal task for a draft that was already authorized
+        # and persisted by the request. Keep the tenant context explicit.
+        await set_database_context(
+            db,
+            company_domain,
+            True,
+            user_id=user_id_str,
+            global_governance_access=True,
+        )
+        # Celery has its own Python process and does not run API startup;
+        # load the administrator's saved provider before calling the LLM.
+        await load_runtime_config(db)
+        draft = await db.get(PendingDraft, uuid.UUID(draft_id_str))
+        if not draft or draft.status != "pending":
+            return
+        user = await db.get(User, uuid.UUID(user_id_str))
+        enabled = bool(
+            settings.RESTRUCTURE_ENABLED
+            and user
+            and await FeatureFlagRepository(db).is_enabled(
+                "ai.document_restructure", user
+            )
+        )
+        source_text = draft.summary or "\n\n".join(
+            str(page.get("text", ""))
+            for page in (draft.page_texts or [])
+            if page.get("text")
+        )
+        draft.restructure_status = "processing"
+        draft.restructure_error = None
+        draft.restructure_candidate_md = None
+        draft.restructure_decision = "not_reviewed"
+        await db.commit()
+        try:
+            departments = list(
+                (
+                    await db.execute(
+                        select(Department).where(
+                            Department.company_domain == draft.company_domain,
+                            Department.active.is_(True),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            result = await restructure_document(
+                draft.title,
+                source_text,
+                enabled=enabled,
+                department_descriptions=[
+                    (department.name, department.description or "")
+                    for department in departments
+                ],
+            )
+            draft.restructured_body_md = result.body_md
+            draft.restructure_candidate_md = result.candidate_body_md
+            draft.restructure_decision = (
+                "pending_review"
+                if result.candidate_body_md
+                else ("ai_ready" if result.status == "llm" else "lossless_ready")
+            )
+            draft.restructure_status = result.status
+            draft.restructure_model = result.model
+            draft.restructure_error = result.error
+            # Batch review operates on the formatted reading view, not raw extraction.
+            # Recreate candidates only after formatting has completed, then use the
+            # active department descriptions to choose an editable default route.
+            await db.execute(
+                delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
+            )
+            for item in route_document_candidates(
+                draft.title, result.body_md, departments
+            ):
+                db.add(
+                    DraftCandidate(
+                        draft_id=draft.id,
+                        **item,
+                    )
+                )
+            db.add(
+                AuditLog(
+                    user_id=user.id if user else None,
+                    action="restructure",
+                    target_type="draft",
+                    target_id=str(draft.id),
+                )
+            )
+            await db.commit()
+            logger.info(
+                "Pending draft AI formatting completed",
+                draft_id=str(draft.id),
+                restructure_status=result.status,
+                restructure_model=result.model,
+            )
+        except Exception as exc:
+            draft.restructured_body_md = source_text
+            draft.restructure_candidate_md = None
+            draft.restructure_decision = "lossless_ready"
+            draft.restructure_status = "fallback_formatting"
+            draft.restructure_model = "lossless-markdown"
+            draft.restructure_error = f"AI formatting failed ({str(exc) or 'unknown error'}); retry from Pending Drafts."
+            await db.commit()
+            logger.exception(
+                "Pending draft AI formatting failed", draft_id=str(draft.id)
+            )
+
+
 @celery_app.task(
     name="restructure_pending_draft_task",
     autoretry_for=(Exception,),
@@ -211,125 +425,45 @@ def restructure_pending_draft_task(
     draft_id_str: str, company_domain: str, user_id_str: str
 ):
     """Format a stored upload after the upload request has completed."""
+    sync_run(run_restructure_pending_draft(draft_id_str, company_domain, user_id_str))
 
-    async def process():
-        from src.domain.content_restructure import restructure_document
-        from src.models import User
-        from src.models.governance import AuditLog, DraftCandidate, PendingDraft
-        from src.models.user import Department
-        from src.domain.department_routing import route_document_candidates
-        from src.domain.llm_config import load_runtime_config
-        from src.repositories.feature_flags import FeatureFlagRepository
 
-        async with SessionLocal() as db:
-            # This is an internal task for a draft that was already authorized
-            # and persisted by the request. Keep the tenant context explicit.
-            await set_database_context(
-                db,
-                company_domain,
-                True,
-                user_id=user_id_str,
-                global_governance_access=True,
-            )
-            # Celery has its own Python process and does not run API startup;
-            # load the administrator's saved provider before calling the LLM.
-            await load_runtime_config(db)
-            draft = await db.get(PendingDraft, uuid.UUID(draft_id_str))
-            if not draft or draft.status != "pending":
-                return
-            user = await db.get(User, uuid.UUID(user_id_str))
-            enabled = bool(
-                settings.RESTRUCTURE_ENABLED
-                and user
-                and await FeatureFlagRepository(db).is_enabled(
-                    "ai.document_restructure", user
-                )
-            )
-            source_text = draft.summary or "\n\n".join(
-                str(page.get("text", ""))
-                for page in (draft.page_texts or [])
-                if page.get("text")
-            )
-            draft.restructure_status = "processing"
-            draft.restructure_error = None
-            draft.restructure_candidate_md = None
-            draft.restructure_decision = "not_reviewed"
-            await db.commit()
-            try:
-                departments = list(
-                    (
-                        await db.execute(
-                            select(Department).where(
-                                Department.company_domain == draft.company_domain,
-                                Department.active.is_(True),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                result = await restructure_document(
-                    draft.title,
-                    source_text,
-                    enabled=enabled,
-                    department_descriptions=[
-                        (department.name, department.description or "")
-                        for department in departments
-                    ],
-                )
-                draft.restructured_body_md = result.body_md
-                draft.restructure_candidate_md = result.candidate_body_md
-                draft.restructure_decision = (
-                    "pending_review"
-                    if result.candidate_body_md
-                    else ("ai_ready" if result.status == "llm" else "lossless_ready")
-                )
-                draft.restructure_status = result.status
-                draft.restructure_model = result.model
-                draft.restructure_error = result.error
-                # Batch review operates on the formatted reading view, not raw extraction.
-                # Recreate candidates only after formatting has completed, then use the
-                # active department descriptions to choose an editable default route.
-                await db.execute(
-                    delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
-                )
-                for item in route_document_candidates(
-                    draft.title, result.body_md, departments
-                ):
-                    db.add(
-                        DraftCandidate(
-                            draft_id=draft.id,
-                            **item,
-                        )
-                    )
-                db.add(
-                    AuditLog(
-                        user_id=user.id if user else None,
-                        action="restructure",
-                        target_type="draft",
-                        target_id=str(draft.id),
-                    )
-                )
-                await db.commit()
-                logger.info(
-                    "Pending draft AI formatting completed",
-                    draft_id=str(draft.id),
-                    restructure_status=result.status,
-                    restructure_model=result.model,
-                )
-            except Exception as exc:
-                draft.restructured_body_md = source_text
-                draft.restructure_candidate_md = None
-                draft.restructure_decision = "lossless_ready"
-                draft.restructure_status = "fallback_formatting"
-                draft.restructure_model = "lossless-markdown"
-                draft.restructure_error = f"AI formatting failed ({str(exc) or 'unknown error'}); retry from Pending Drafts."
-                await db.commit()
-                logger.exception(
-                    "Pending draft AI formatting failed", draft_id=str(draft.id)
-                )
+def dispatch_restructure_pending_draft(
+    draft_id_str: str, company_domain: str, user_id_str: str
+) -> bool:
+    """Dispatch AI draft formatting according to the deployment job mode.
 
-    return sync_run(process())
+    Returns False only when the Celery dispatch itself failed (e.g. missing
+    broker), so callers can mark the draft as fallback-formatted.
+    """
+    if settings.JOB_MODE == "celery":
+        try:
+            restructure_pending_draft_task.delay(
+                draft_id_str, company_domain, user_id_str
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Could not queue source restructuring", draft_id=draft_id_str
+            )
+            return False
+
+    async def _run() -> None:
+        try:
+            await run_restructure_pending_draft(
+                draft_id_str, company_domain, user_id_str
+            )
+        except Exception:
+            logger.exception(
+                "Inline source restructuring failed", draft_id=draft_id_str
+            )
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        # No running loop (script context): run to completion inline.
+        sync_run(_run())
+    return True
 
 
 @celery_app.task(name="generate_embeddings_task")
@@ -437,7 +571,7 @@ def recompute_permissions_task(article_id_str: str):
                 article_id=article_id,
                 bitmap=bitmap,
                 sensitivity=article.sensitivity,
-                visibility=article.sensitivity,
+                visibility=article.visibility,
                 dept=article.dept,
             )
             logger.info(

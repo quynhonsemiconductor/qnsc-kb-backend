@@ -37,12 +37,13 @@ from src.models.user import (
     DepartmentManager,
     User,
     user_departments,
+    Invitation,
 )
 from src.models.user import ExternalIdentity
 from src.models.article import Article, article_departments
 from src.models.chunk import ArticleChunk
 from src.models.governance import Gap, PendingDraft
-from src.models.ops import FeatureFlag
+from src.models.ops import FeatureFlag, NotificationQueue
 from src.models.sessions import RefreshSession
 from src.domain.rbac import AuthorizationService, SCOPES, bootstrap_rbac
 from src.domain.departments import (
@@ -113,7 +114,7 @@ class TokenResponse(BaseModel):
 class ManagedUserCreate(BaseModel):
     email: EmailStr
     name: str = Field(min_length=1, max_length=150)
-    password: str = Field(min_length=12, max_length=72)
+    password: str | None = Field(default=None, min_length=12, max_length=72)
     dept: str | None = Field(default=None, max_length=100)
     department_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
     role: str = Field(default="Staff", min_length=1, max_length=100)
@@ -131,6 +132,26 @@ class ManagedUserUpdate(BaseModel):
     active: bool | None = None
     role_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=20)
     owned_department_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
+
+
+class InvitationCreate(BaseModel):
+    email: EmailStr
+    name: str = Field(min_length=1, max_length=255)
+    role: str = Field(default="Staff", min_length=1, max_length=50)
+    audience_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
+
+
+class InvitationResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: str
+    role: str
+    company_domain: str
+    audience_ids: list[str] | None
+    expires_at: datetime
+    used_at: datetime | None
+    revoked_at: datetime | None
+    status: str
 
 
 class RoleCreate(BaseModel):
@@ -162,12 +183,14 @@ class DepartmentInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=10, max_length=500)
     company_domain: str | None = Field(default=None, max_length=255)
+    contact_email: EmailStr | None = None
 
 
 class DepartmentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, min_length=10, max_length=500)
     active: bool | None = None
+    contact_email: EmailStr | None = None
 
 
 def _user_response(user: Any) -> dict[str, Any]:
@@ -489,11 +512,8 @@ async def list_departments(
         select(Department)
         .options(selectinload(Department.managers).selectinload(DepartmentManager.user))
         .order_by(Department.company_domain, Department.name)
+        .where(Department.company_domain == current_user.company_domain)
     )
-    # This deployment is intentionally a single-company knowledge base.  Keep
-    # the legacy company_domain column for data isolation/migrations, but do
-    # not expose or aggregate another company's departments in this product.
-    stmt = stmt.where(Department.company_domain == current_user.company_domain)
     if not can_manage:
         stmt = stmt.where(Department.active.is_(True))
     rows = (await db.execute(stmt)).scalars().all()
@@ -504,13 +524,11 @@ async def list_departments(
             "description": item.description,
             "company_domain": item.company_domain,
             "active": item.active,
+            "kind": item.kind,
+            "contact_email": item.contact_email,
             "owner": next(
                 (
-                    {
-                        "id": assignment.user.id,
-                        "name": assignment.user.name,
-                        "email": assignment.user.email,
-                    }
+                    {"id": assignment.user.id, "name": assignment.user.name, "email": assignment.user.email}
                     for assignment in item.managers
                     if assignment.active and assignment.user and assignment.user.active
                 ),
@@ -519,6 +537,137 @@ async def list_departments(
         }
         for item in rows
     ]
+
+
+def _invitation_status(item: Invitation) -> str:
+    if item.revoked_at:
+        return "revoked"
+    if item.used_at:
+        return "accepted"
+    if item.expires_at <= datetime.utcnow():
+        return "expired"
+    return "pending"
+
+
+def _invitation_response(item: Invitation) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "email": item.email,
+        "name": item.name,
+        "role": item.role,
+        "company_domain": item.company_domain,
+        "audience_ids": item.audience_ids,
+        "expires_at": item.expires_at,
+        "used_at": item.used_at,
+        "revoked_at": item.revoked_at,
+        "status": _invitation_status(item),
+    }
+
+
+@router.get("/invitations", response_model=list[InvitationResponse])
+async def list_invitations(
+    current_user: Any = Depends(require_permission("user.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    rows = (await db.execute(
+        select(Invitation)
+        .where(Invitation.company_domain == current_user.company_domain)
+        .order_by(Invitation.created_at.desc())
+        .limit(500)
+    )).scalars().all()
+    return [_invitation_response(item) for item in rows]
+
+
+@router.post("/invitations", response_model=InvitationResponse, status_code=status.HTTP_201_CREATED)
+async def create_invitation(
+    payload: InvitationCreate,
+    current_user: Any = Depends(require_permission("user.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    email = str(payload.email).lower()
+    domain = email.rsplit("@", 1)[-1]
+    if domain != current_user.company_domain and not AuthorizationService.has_permission(current_user, "user.manage", requested_scope="global"):
+        raise HTTPException(status_code=403, detail="Employee email must remain in the company domain")
+    if payload.role not in MANAGED_PRIMARY_ROLES:
+        raise HTTPException(status_code=422, detail="Unsupported employee role")
+    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if existing and existing.active:
+        raise HTTPException(status_code=409, detail="An active account already exists for this email")
+    audience_ids = [str(item) for item in (payload.audience_ids or [])]
+    if audience_ids:
+        count = int((await db.execute(
+            select(func.count()).select_from(Department).where(
+                Department.id.in_(payload.audience_ids),
+                Department.company_domain == current_user.company_domain,
+                Department.active.is_(True),
+            )
+        )).scalar_one())
+        if count != len(set(audience_ids)):
+            raise HTTPException(status_code=422, detail="One or more audiences are not available in this company")
+    raw_token = secrets.token_urlsafe(32)
+    invitation = Invitation(
+        email=email,
+        name=payload.name.strip(),
+        role=payload.role,
+        company_domain=domain,
+        audience_ids=audience_ids or None,
+        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        expires_at=datetime.utcnow() + timedelta(days=7),
+        invited_by=current_user.id,
+    )
+    db.add(invitation)
+    db.add(NotificationQueue(
+        # Use the inviter as the queue owner for pre-account email delivery;
+        # the actual destination is the payload address.  This also keeps the
+        # existing recipient-scoped notification RLS policy valid.
+        recipient_user_id=current_user.id,
+        type="email",
+        payload={
+            "to": email,
+            "subject": "Your QNSC Knowledge Base invitation",
+            "text": f"You have been invited to QNSC Knowledge Base. Sign in with Microsoft within 7 days: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
+        },
+    ))
+    await db.commit()
+    await db.refresh(invitation)
+    await AuditRepository(db).record(current_user.id, "invitation_create", "invitation", str(invitation.id), detail={"email": email, "role": payload.role})
+    return _invitation_response(invitation)
+
+
+@router.post("/invitations/{invitation_id}/resend", response_model=InvitationResponse)
+async def resend_invitation(
+    invitation_id: uuid.UUID,
+    current_user: Any = Depends(require_permission("user.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    item = (await db.execute(select(Invitation).where(Invitation.id == invitation_id, Invitation.company_domain == current_user.company_domain))).scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if item.used_at or item.revoked_at:
+        raise HTTPException(status_code=409, detail="This invitation can no longer be resent")
+    raw_token = secrets.token_urlsafe(32)
+    item.token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    item.expires_at = datetime.utcnow() + timedelta(days=7)
+    db.add(NotificationQueue(recipient_user_id=current_user.id, type="email", payload={"to": item.email, "subject": "Your QNSC Knowledge Base invitation", "text": f"Your invitation was renewed. Sign in with Microsoft: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}"}))
+    await db.commit()
+    await AuditRepository(db).record(current_user.id, "invitation_resend", "invitation", str(item.id))
+    return _invitation_response(item)
+
+
+@router.post("/invitations/{invitation_id}/revoke", response_model=InvitationResponse)
+async def revoke_invitation(
+    invitation_id: uuid.UUID,
+    current_user: Any = Depends(require_permission("user.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    item = (await db.execute(select(Invitation).where(Invitation.id == invitation_id, Invitation.company_domain == current_user.company_domain))).scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if not item.used_at:
+        item.revoked_at = datetime.utcnow()
+    await db.commit()
+    await AuditRepository(db).record(current_user.id, "invitation_revoke", "invitation", str(item.id))
+    return _invitation_response(item)
 
 
 @router.post("/departments", status_code=status.HTTP_201_CREATED)
@@ -568,11 +717,6 @@ async def create_department(
             )
             + 1
         )
-        if next_position >= 62:
-            raise HTTPException(
-                status_code=422,
-                detail="The maximum number of access groups has been reached",
-            )
         db.add(
             AccessGroup(
                 name=f"dept_{name.lower()}",
@@ -585,6 +729,8 @@ async def create_department(
         name=name,
         description=payload.description.strip(),
         active=True,
+        kind="org",
+        contact_email=str(payload.contact_email).lower() if payload.contact_email else None,
     )
     db.add(item)
     await db.commit()
@@ -598,6 +744,8 @@ async def create_department(
         "description": item.description,
         "company_domain": item.company_domain,
         "active": item.active,
+        "kind": item.kind,
+        "contact_email": item.contact_email,
     }
 
 
@@ -622,7 +770,7 @@ async def update_department(
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     item = await _department_for_management(db, department_id, current_user)
-    if payload.name is None and payload.description is None and payload.active is None:
+    if payload.name is None and payload.description is None and payload.active is None and payload.contact_email is None:
         raise HTTPException(
             status_code=422, detail="Provide a new name, description, or active status"
         )
@@ -721,6 +869,8 @@ async def update_department(
         item.description = payload.description.strip()
     if payload.active is not None:
         item.active = payload.active
+    if payload.contact_email is not None:
+        item.contact_email = str(payload.contact_email).lower()
     await db.commit()
     await db.refresh(item)
     await AuditRepository(db).record(
@@ -732,6 +882,8 @@ async def update_department(
         "description": item.description,
         "company_domain": item.company_domain,
         "active": item.active,
+        "kind": item.kind,
+        "contact_email": item.contact_email,
     }
 
 
@@ -876,11 +1028,6 @@ async def create_access_group(
         )
         + 1
     )
-    if next_position >= 62:
-        raise HTTPException(
-            status_code=422,
-            detail="The maximum number of access groups has been reached",
-        )
     group = AccessGroup(
         name=name, company_domain=company_domain, bitmask_position=next_position
     )
@@ -926,6 +1073,29 @@ async def replace_access_group_members(
         current_user.id, "group_members_update", "access_group", str(group.id)
     )
     return {"id": group.id, "member_ids": [str(user.id) for user in users]}
+
+
+@router.get("/groups/{group_id}/members")
+async def list_access_group_members(
+    group_id: uuid.UUID,
+    current_user: Any = Depends(require_permission("user.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Return the tenant-scoped members for the access-group admin surface."""
+    can_manage_globally = AuthorizationService.has_permission(
+        current_user, "user.manage", requested_scope="global"
+    )
+    group = await UserRepository(db).get_group_by_id(
+        group_id,
+        company_domain=None if can_manage_globally else current_user.company_domain,
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Access group not found")
+    await db.refresh(group, attribute_names=["users"])
+    return [
+        {"id": str(user.id), "name": user.name, "email": user.email, "active": user.active}
+        for user in sorted(group.users, key=lambda item: (item.name.lower(), item.email.lower()))
+    ]
 
 
 @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -1218,6 +1388,22 @@ async def update_managed_user(
             raise HTTPException(
                 status_code=400, detail="You cannot deactivate your own account"
             )
+        if not user_in.active:
+            owned = [
+                assignment.department
+                for assignment in user.department_ownerships
+                if assignment.active and assignment.department.active
+            ]
+            if owned:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Reassign every organisational audience owned by this user before deactivation",
+                )
+            await db.execute(
+                update(PendingDraft)
+                .where(PendingDraft.assigned_approver_id == user.id, PendingDraft.status == "pending")
+                .values(assigned_approver_id=None, assigned_by=None, assigned_at=None)
+            )
         user.active = user_in.active
     if user_in.password:
         from src.core.security import get_password_hash
@@ -1254,9 +1440,22 @@ async def deactivate_user(
         raise HTTPException(
             status_code=400, detail="You cannot deactivate your own account"
         )
+    owned = [
+        assignment.department
+        for assignment in user.department_ownerships
+        if assignment.active and assignment.department.active
+    ]
+    if owned:
+        raise HTTPException(
+            status_code=409,
+            detail="Reassign every organisational audience owned by this user before deactivation",
+        )
     user.active = False
-    for assignment in user.department_ownerships:
-        assignment.active = False
+    await db.execute(
+        update(PendingDraft)
+        .where(PendingDraft.assigned_approver_id == user.id, PendingDraft.status == "pending")
+        .values(assigned_approver_id=None, assigned_by=None, assigned_at=None)
+    )
     await _revoke_refresh_sessions(db, user.id)
     if user.role == "CEO" or any(role.name == "CEO" for role in user.roles):
         await _set_primary_role(db, user, "Staff")
@@ -2004,20 +2203,30 @@ async def entra_callback(
         if identity
         else await UserRepository(db).get_by_email(email)
     )
+    invitation = None
     if user is None:
-        domain = email.rsplit("@", 1)[1]
-        allowed_domain = settings.ENTRA_AUTO_PROVISION_DOMAIN.strip().lower()
-        if domain != allowed_domain:
+        invitation = (await db.execute(
+            select(Invitation).where(
+                Invitation.email == email,
+                Invitation.company_domain == email.rsplit("@", 1)[-1],
+                Invitation.used_at.is_(None),
+                Invitation.revoked_at.is_(None),
+                Invitation.expires_at > datetime.utcnow(),
+            ).order_by(Invitation.created_at.desc())
+        )).scalars().first()
+    if user is None:
+        if invitation is None:
             raise HTTPException(
                 status_code=403,
-                detail="Your Microsoft account is not eligible for automatic KB provisioning",
+                detail="Your Microsoft account has no active QNSC invitation",
             )
+        domain = invitation.company_domain
         user = User(
             email=email,
-            name=str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
+            name=invitation.name or str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
             password_hash=get_password_hash(secrets.token_urlsafe(32)),
             company_domain=domain,
-            role="Staff",
+            role=invitation.role,
             active=True,
         )
         db.add(user)
@@ -2029,8 +2238,16 @@ async def entra_callback(
                 status_code=500, detail="Could not provision the Microsoft account"
             )
         await AuditRepository(db).record(
-            user.id, "entra_user_provision", "user", str(user.id), outcome="success"
+            user.id, "entra_user_provision", "user", str(user.id), outcome="success", detail={"invitation_id": str(invitation.id)}
         )
+        invitation.used_at = datetime.utcnow()
+        invitation.accepted_user_id = user.id
+        if invitation.audience_ids:
+            memberships = (await db.execute(select(Department).where(Department.id.in_([uuid.UUID(item) for item in invitation.audience_ids]), Department.company_domain == user.company_domain))).scalars().all()
+            user.departments = list(memberships)
+            if memberships:
+                user.dept = memberships[0].name
+        await db.flush()
     if not user.active:
         raise HTTPException(
             status_code=403,

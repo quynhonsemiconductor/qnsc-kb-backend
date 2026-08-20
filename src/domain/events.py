@@ -153,4 +153,78 @@ class EventBus:
                 event.last_error = error
                 await db.commit()
 
+    async def recover_outbox_once(
+        self,
+        max_attempts: int = 5,
+        stale_minutes: int = 10,
+        batch_limit: int = 20,
+    ) -> int:
+        """Retry inline-mode outbox events that died with their process.
+
+        The Celery beat ``replay_outbox_task`` never runs in inline deployments,
+        so failed events (and events orphaned "pending"/"processing" by a
+        process crash) would otherwise never retry and the table grows
+        forever. Only events older than ``stale_minutes`` are retried: a fresh
+        pending row usually belongs to a lifecycle task that is still running,
+        and the lifecycle work is idempotent anyway (advisory-locked
+        delete-then-recreate), so a delayed duplicate is safe.
+        """
+        from datetime import timedelta
+        from sqlalchemy import select as sa_select
+        from src.api.deps import SessionLocal
+        from src.models.ops import OutboxEvent
+
+        now = datetime.utcnow()
+        stale_before = now - timedelta(minutes=stale_minutes)
+        recovered = 0
+        async with SessionLocal() as db:
+            events = (
+                (
+                    await db.execute(
+                        sa_select(OutboxEvent)
+                        .where(
+                            OutboxEvent.status.in_(
+                                ["failed", "pending", "processing"]
+                            ),
+                            OutboxEvent.next_attempt_at <= now,
+                            OutboxEvent.created_at < stale_before,
+                        )
+                        .order_by(OutboxEvent.created_at)
+                        .limit(batch_limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            retryable: list[OutboxEvent] = []
+            for event in events:
+                if event.attempts >= max_attempts:
+                    # Terminal state: stop retrying but keep the row for
+                    # inspection (its DLQ record was already written).
+                    event.status = "dead"
+                    continue
+                event.attempts += 1
+                event.next_attempt_at = now + timedelta(
+                    minutes=min(30, 2 ** min(event.attempts, 5))
+                )
+                retryable.append(event)
+            if events:
+                await db.commit()
+            for event in retryable:
+                payload = dict(event.payload)
+                payload["_outbox_id"] = str(event.id)
+                article_id = payload.get("article_id")
+                if article_id:
+                    task = asyncio.create_task(
+                        self._run_article_lifecycle(
+                            event.event_type, uuid.UUID(article_id), payload
+                        )
+                    )
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
+                else:
+                    await self._mark_outbox(str(event.id), "completed", None)
+                recovered += 1
+        return recovered
+
 event_bus = EventBus()

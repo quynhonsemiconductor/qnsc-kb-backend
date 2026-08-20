@@ -23,6 +23,7 @@ on:
     # means editing a PR title cancels the in-flight real run and replaces it with one
     # that has nothing to do.
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 concurrency:
   group: ci-backend-${{ github.ref }}
@@ -151,8 +152,49 @@ jobs:
       - name: Unit tests
         run: poetry run pytest -q
 
-      - name: RAG regression gate
+      # Offline mode only sanity-checks the scoring functions against
+      # fixtures — it deliberately does NOT claim to measure RAG quality.
+      # The real pipeline gate runs via `run-eval-live` below.
+      - name: RAG scorer sanity check (offline)
         run: poetry run python scripts/run_eval.py --input evaluation/golden.json
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2b. Live RAG pipeline gate.
+  #
+  # Runs the golden questions against a deployed stack through the real
+  # retrieval → LLM → citation path. Manual (workflow_dispatch) so it can be
+  # pointed at staging with credentials from the environment secrets; wire it
+  # into the release gate once a staging environment is standing.
+  # ─────────────────────────────────────────────────────────────────────────
+  run-eval-live:
+    name: RAG regression gate (live)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Run live evaluation
+        env:
+          EVAL_API_BASE: ${{ vars.EVAL_API_BASE }}
+          EVAL_EMAIL: ${{ secrets.EVAL_EMAIL }}
+          EVAL_PASSWORD: ${{ secrets.EVAL_PASSWORD }}
+        run: |
+          poetry run python scripts/run_eval.py \
+            --input evaluation/golden.json \
+            --api-base "$EVAL_API_BASE" \
+            --email "$EVAL_EMAIL" \
+            --password "$EVAL_PASSWORD"
 
   # ─────────────────────────────────────────────────────────────────────────
   # 3. Migration upgrade path.

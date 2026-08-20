@@ -1,5 +1,15 @@
+# Default container logging: bounded rotation so json-file logs cannot
+# exhaust the host disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   edge:
+    logging: *default-logging
+    mem_limit: 256m
     image: caddy:2.8-alpine
     restart: unless-stopped
     ports:
@@ -18,6 +28,8 @@ services:
         condition: service_started
 
   frontend:
+    logging: *default-logging
+    mem_limit: 128m
     build:
       context: ../qnsc-kb-frontend
       dockerfile: Dockerfile
@@ -26,6 +38,9 @@ services:
     restart: unless-stopped
 
   db:
+    logging: *default-logging
+    mem_limit: 2g
+    mem_reservation: 512m
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
@@ -44,6 +59,9 @@ services:
       retries: 6
 
   redis:
+    logging: *default-logging
+    mem_limit: 256m
+    mem_reservation: 64m
     image: redis:7.4-alpine
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
@@ -56,6 +74,8 @@ services:
       retries: 6
 
   clamav:
+    logging: *default-logging
+    mem_limit: 3g
     image: clamav/clamav:1.4
     restart: unless-stopped
     healthcheck:
@@ -68,6 +88,9 @@ services:
   # below. Run it once before starting the stack:
   #   docker compose -f docker-compose.production.yml --profile migrate run --rm migrator
   api:
+    logging: *default-logging
+    mem_limit: 2g
+    mem_reservation: 512m
     build:
       context: .
       dockerfile: Dockerfile
@@ -139,6 +162,13 @@ services:
         condition: service_healthy
 
   worker:
+    logging: *default-logging
+    mem_limit: 3g
+    mem_reservation: 1g
+    # Workers run OCR (per-file timeouts up to 300s) and embedding batches:
+    # allow in-flight jobs to finish on SIGTERM instead of being SIGKILLed
+    # ~10s into shutdown.
+    stop_grace_period: 10m
     build:
       context: .
       dockerfile: Dockerfile
@@ -189,6 +219,10 @@ services:
         condition: service_healthy
 
   beat:
+    logging: *default-logging
+    mem_limit: 256m
+    mem_reservation: 64m
+    stop_grace_period: 1m
     build:
       context: .
       dockerfile: Dockerfile
@@ -216,6 +250,7 @@ services:
   #   docker compose -f docker-compose.production.yml --profile migrate run --rm migrator
   migrator:
     profiles: ["migrate"]
+    logging: *default-logging
     build:
       context: .
       dockerfile: Dockerfile

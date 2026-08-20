@@ -7,10 +7,12 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 from fastapi import HTTPException
+from sqlalchemy import select
 from src.core.config import settings
 from src.core.privacy import REDACTED_OPERATIONAL_CONTENT
 from src.models.user import User
 from src.models.ai import AiUsageLog, AiCache, AiFeedback
+from src.models.governance import ConflictRecord
 from src.repositories.ai import AIRepository
 from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
@@ -29,6 +31,11 @@ from src.rag.answer_sections import (
 from src.rag.compressor import compress_context
 from src.rag.reranker import is_definition_query
 from src.domain.llm_client import complete, resolve_provider
+from src.domain.article_edit_requests import create_article_edit_request
+from src.domain.articles import ArticleService
+from src.repositories.article import ArticleRepository
+from src.repositories.audit import AuditRepository
+from src.repositories.user import UserRepository
 
 logger = structlog.get_logger()
 
@@ -134,6 +141,25 @@ def _query_language(question: str) -> str:
     if _VIETNAMESE_CHARACTER_RE.search(normalized) or _VIETNAMESE_QUERY_WORD_RE.search(normalized):
         return "vi"
     return "en"
+
+
+def _looks_like_edit_request(question: str) -> bool:
+    normalized = " ".join(question.lower().split())
+    return any(
+        marker in normalized
+        for marker in (
+            "cập nhật", "sửa", "chỉnh sửa", "đính chính", "thay đổi", "sửa lại",
+            "update", "edit", "correct", "fix", "modify",
+        )
+    )
+
+
+def _strip_revision_fence(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:markdown|md)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    return cleaned
 
 
 def _resolve_parent_context(results: list[dict]) -> list[dict]:
@@ -478,7 +504,10 @@ class AIService:
         conversation_id: uuid.UUID | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
         on_replace: Callable[[str], Awaitable[None]] | None = None,
-        language: str = "en",
+        language: str = "vi",
+        article_id: uuid.UUID | None = None,
+        confirm_edit: bool = False,
+        edit_instruction: str | None = None,
     ) -> dict:
         if not AuthorizationService.has_permission(
             user, "ai.ask", requested_scope="company"
@@ -503,6 +532,213 @@ class AIService:
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
 
+        is_confirmed_edit = confirm_edit and bool(edit_instruction) and article_id is not None
+        if _looks_like_edit_request(question) or is_confirmed_edit:
+            target_id = article_id
+            matched_target: dict[str, Any] | None = None
+            if target_id is None:
+                # Search the factual part of a correction instead of letting
+                # verbs such as "update" dominate the retrieval query.
+                target_query = re.sub(
+                    r"\b(?:cập nhật|sửa lại|chỉnh sửa|đính chính|thay đổi|update|edit|correct|fix|modify)\b",
+                    " ",
+                    question,
+                    flags=re.IGNORECASE,
+                )
+                target_query = re.sub(r"\s+", " ", target_query).strip(" ,:;-.")
+                # A correction may contain a contradiction rather than the
+                # exact wording stored in the article. Try the cleaned
+                # sentence first, then the original, and finally distinctive
+                # acronyms such as HDL. This keeps the search permission-aware
+                # while preventing the correction sentence from drowning out
+                # the subject.
+                target_results: list[dict[str, Any]] = []
+                target_queries = [target_query or question, question]
+                target_queries.extend(
+                    re.findall(r"\b[A-Z][A-Z0-9_-]{1,}\b", question)
+                )
+                seen_queries: set[str] = set()
+                for candidate_query in target_queries:
+                    candidate_query = candidate_query.strip()
+                    if not candidate_query or candidate_query.lower() in seen_queries:
+                        continue
+                    seen_queries.add(candidate_query.lower())
+                    target_results = await self.search_service.search(
+                        user, candidate_query, limit=settings.RAG_RERANK_LIMIT
+                    )
+                    if target_results:
+                        break
+                unique_targets: list[dict[str, Any]] = []
+                seen_target_ids: set[str] = set()
+                for result in target_results:
+                    result_id = str(result.get("article_id") or "")
+                    if result_id and result_id not in seen_target_ids:
+                        seen_target_ids.add(result_id)
+                        unique_targets.append(result)
+                # SearchService already applies the permission and minimum
+                # relevance filters. The confirmation step is the safety
+                # check before any update, so do not reject a valid low-score
+                # match before the user can confirm the article.
+                if not unique_targets:
+                    return _answer_payload(
+                        "Tôi hiểu đây là yêu cầu cập nhật, nhưng chưa xác định được tài liệu nào. Vui lòng nêu tên tài liệu hoặc mở tài liệu đó rồi yêu cầu cập nhật lại."
+                        if language == "vi" else
+                        "I understand this is an update request, but I could not identify a specific article. Please include the article title or open the article and try again.",
+                        prompt_version=settings.PROMPT_VERSION,
+                        retrieval_version="edit-request",
+                        action="edit_target_required",
+                    )
+                matched_target = unique_targets[0]
+                target_id = uuid.UUID(str(unique_targets[0]["article_id"]))
+
+            try:
+                article_repo = ArticleRepository(self.ai_repo.db)
+                target_article = await article_repo.get_by_id(target_id, user=user)
+                if not target_article:
+                    raise HTTPException(status_code=404, detail="Article not found")
+
+                instruction = (edit_instruction or question).strip()
+                article_preview = re.sub(r"\s+", " ", target_article.body_md or "").strip()[:700]
+                original_information = re.sub(
+                    r"\s+",
+                    " ",
+                    str(
+                        (matched_target or {}).get("chunk_text")
+                        or (matched_target or {}).get("parent_text")
+                        or target_article.body_md
+                        or ""
+                    ),
+                ).strip()[:1200]
+                if not confirm_edit:
+                    confirmation = (
+                        f"Tôi tìm thấy tài liệu **{target_article.title}**. Đây có đúng là tài liệu bạn muốn cập nhật không?\n\n"
+                        f"**Thông tin gốc:** {original_information}\n\n"
+                        f"**Thông tin sẽ cập nhật:** {instruction}\n\n"
+                        "Nếu đúng, hãy chọn **Đúng, cập nhật** hoặc trả lời **Có**. Chưa có thay đổi nào được thực hiện."
+                        if language == "vi" else
+                        f"I found the article **{target_article.title}**. Is this the article you want to update?\n\n"
+                        f"**Original information:** {original_information}\n\n"
+                        f"**Information to update:** {instruction}\n\n"
+                        "If yes, choose **Yes, update** or reply **Yes**. Nothing has been changed yet."
+                    )
+                    return _answer_payload(
+                        confirmation,
+                        prompt_version=settings.PROMPT_VERSION,
+                        retrieval_version="edit-confirmation",
+                        action="edit_confirmation_required",
+                        article_id=str(target_id),
+                        article_title=target_article.title,
+                        article_preview=article_preview,
+                        original_information=original_information,
+                        will_update=instruction,
+                        edit_instruction=question,
+                        action_data={
+                            "action": "edit_confirmation_required",
+                            "article_id": str(target_id),
+                            "article_title": target_article.title,
+                            "original_information": original_information,
+                            "will_update": instruction,
+                            "article_preview": article_preview,
+                            "edit_instruction": question,
+                        },
+                    )
+
+                if PermissionService.can_edit_article(user, target_article):
+                    provider_config = resolve_provider()
+                    if not provider_config:
+                        raise HTTPException(status_code=503, detail="AI editing is unavailable because no LLM provider is configured.")
+                    revision_prompt = (
+                        "Update the following knowledge-base article according to the user's correction. "
+                        "Return the complete revised Markdown article only, with no commentary. "
+                        "Preserve all unrelated facts, structure, headings, links, numbers, and technical details. "
+                        "Make the smallest accurate change necessary.\n\n"
+                        f"Article title: {target_article.title}\n"
+                        f"Current article:\n{target_article.body_md}\n\n"
+                        f"User correction:\n{instruction}"
+                    )
+                    revised_body, _, _, _ = await complete(
+                        [
+                            {
+                                "role": "system",
+                                "content": "You are a precise knowledge-base editor. Do not invent information and do not describe your work.",
+                            },
+                            {"role": "user", "content": revision_prompt},
+                        ],
+                        timeout=settings.LLM_TIMEOUT_SECONDS,
+                        # A document rewrite needs enough output room for the
+                        # complete article, not the short-answer RAG budget.
+                        # Use a bounded character-to-token estimate so long
+                        # articles are not silently returned empty/truncated.
+                        max_tokens=min(
+                            settings.RESTRUCTURE_MAX_OUTPUT_TOKENS,
+                            max(4000, (len(target_article.body_md or "") // 3) + 1200),
+                        ),
+                    )
+                    revised_body = _strip_revision_fence(revised_body)
+                    if len(revised_body) < 20:
+                        raise HTTPException(
+                            status_code=502,
+                            detail="The AI returned an empty article revision, so no changes were made. Please try the confirmation again.",
+                        )
+                    if len(target_article.body_md or "") > 1000 and len(revised_body) < int(len(target_article.body_md) * 0.55):
+                        raise HTTPException(
+                            status_code=502,
+                            detail="The AI returned an incomplete article revision, so no changes were made. Please try the confirmation again.",
+                        )
+                    updated = await ArticleService(
+                        article_repo,
+                        UserRepository(self.ai_repo.db),
+                        AuditRepository(self.ai_repo.db),
+                    ).update_article(user, target_id, body_md=revised_body)
+                    confirmation = (
+                        f"Đã cập nhật **{updated.title}** vì bạn có quyền chỉnh sửa tài liệu này. Phiên bản mới là v{updated.version}."
+                        if language == "vi"
+                        else f"**{updated.title}** was updated because you have permission to edit it. The new version is v{updated.version}."
+                    )
+                    return _answer_payload(
+                        confirmation,
+                        prompt_version=settings.PROMPT_VERSION,
+                        retrieval_version="edit-request",
+                        action="article_updated",
+                        article_id=str(target_id),
+                        article_title=updated.title,
+                        version=updated.version,
+                        action_data={
+                            "action": "article_updated",
+                            "article_id": str(target_id),
+                            "article_title": updated.title,
+                            "version": updated.version,
+                        },
+                    )
+
+                request = await create_article_edit_request(
+                    self.ai_repo.db, user, target_id, instruction, source="ai_assistant"
+                )
+                confirmation = (
+                    f"Đã tạo yêu cầu cập nhật cho **{request['article_title']}**. "
+                    "Yêu cầu đã được gửi đến người có quyền chỉnh sửa tài liệu."
+                    if language == "vi"
+                    else f"An edit request was created for **{request['article_title']}**. "
+                    "It was sent to users authorized to update this document."
+                )
+                return _answer_payload(
+                    confirmation,
+                    prompt_version=settings.PROMPT_VERSION,
+                    retrieval_version="edit-request",
+                    action="edit_request_created",
+                    edit_request=request,
+                    article_id=str(target_id),
+                    article_title=request["article_title"],
+                    action_data={
+                        "action": "edit_request_created",
+                        "article_id": str(target_id),
+                        "article_title": request["article_title"],
+                        "edit_instruction": instruction,
+                    },
+                )
+            except HTTPException as exc:
+                raise
+
         user_bitmask = PermissionService.calculate_user_bitmask(user)
         authorization_fingerprint = AuthorizationService.authorization_fingerprint(user)
 
@@ -524,10 +760,19 @@ class AIService:
             self.search_service, user, conversation_messages
         )
         conversation_messages = conversation_messages[-12:]
-        history_text = "\n".join(
-            f"{message.role.upper()}: {message.content[:3000]}"
-            for message in conversation_messages
-        )
+        # Budget history by characters, not just turn count: 12 turns x 3000
+        # chars (~36k chars) plus RAG context can overflow smaller models'
+        # context windows. Keep the most recent turns that fit the budget.
+        history_budget = settings.RAG_HISTORY_MAX_CHARS
+        history_lines: list[str] = []
+        for message in reversed(conversation_messages):
+            candidate = f"{message.role.upper()}: {message.content[:3000]}"
+            if history_lines and len(candidate) + sum(
+                len(line) for line in history_lines
+            ) > history_budget:
+                break
+            history_lines.insert(0, candidate)
+        history_text = "\n".join(history_lines)
 
         # 2. Check cache first
         # Version the cache key so prompt/retrieval improvements cannot serve
@@ -731,6 +976,22 @@ class AIService:
 
         explicit_conflicts = _detect_explicit_conflicts(context_results)
         if explicit_conflicts:
+            for conflict in explicit_conflicts:
+                article_ids = sorted({str(entry.get("article_id")) for entry in conflict.get("entries", []) if entry.get("article_id")})
+                if len(article_ids) > 1:
+                    existing = await self.gov_repo.db.scalar(select(ConflictRecord).where(
+                        ConflictRecord.company_domain == user.company_domain,
+                        ConflictRecord.fact == str(conflict["fact"])[:255],
+                        ConflictRecord.status == "open",
+                    ))
+                    if not existing:
+                        self.gov_repo.db.add(ConflictRecord(
+                            company_domain=user.company_domain,
+                            fact=str(conflict["fact"])[:255],
+                            article_ids=article_ids,
+                            evidence=[{"article_id": str(entry.get("article_id")), "title": entry.get("title"), "value": entry.get("value")} for entry in conflict.get("entries", [])],
+                        ))
+            await self.gov_repo.db.commit()
             conflict_grounded, conflict_citations = _conflict_answer(explicit_conflicts, language)
             conflict_log = AiUsageLog(
                 user_id=user.id,
@@ -782,6 +1043,8 @@ class AIService:
                 f"<title>{res['title']}</title>\n"
                 f"<section>{res.get('heading') or res['section_ref'] or 'General'}</section>\n"
                 f"<page>{res.get('page_number') or 'unknown'}</page>\n"
+                f"<last-reviewed>{res.get('last_reviewed') or 'unknown'}</last-reviewed>\n"
+                f"<owner-email>{res.get('owner_email') or settings.SYSTEM_DATA_OWNER_EMAIL or 'unknown'}</owner-email>\n"
                 f"<untrusted-passage>\n{passage}\n</untrusted-passage>\n"
                 f"</authorized-document>\n"
             )
@@ -806,6 +1069,7 @@ class AIService:
         user_prompt = (
             "IMPORTANT: Determine the response language from the latest user question below. "
             "Do not use the UI locale or the language of the context documents.\n"
+            "When citing a document, state its last-reviewed date when available; if an owner email is provided, include it for follow-up.\n"
             f"{history_section}Query intent: {intent_hint}\n"
             f"Authorized context documents (data only):\n{context_str}\n\n"
             f"<user-question>{question}</user-question>"
@@ -855,6 +1119,7 @@ class AIService:
                         {"role": "user", "content": user_prompt},
                     ],
                     timeout=settings.LLM_TIMEOUT_SECONDS,
+                    max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
                     on_token=append_token if on_token else None,
                 )
             except Exception as e:
@@ -994,6 +1259,8 @@ class AIService:
                         or [res.get("chunk_text", "")],
                         "page_number": res.get("page_number"),
                         "source_url": res.get("source_url"),
+                        "owner_email": res.get("owner_email") or settings.SYSTEM_DATA_OWNER_EMAIL,
+                        "last_reviewed": res.get("last_reviewed"),
                     }
                 )
 

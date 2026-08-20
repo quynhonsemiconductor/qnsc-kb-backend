@@ -8,7 +8,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -65,7 +65,7 @@ async def _persist_connector_draft(
             outcome="applied",
         )
     )
-    for item in split_document_candidates(draft.title, text):
+    for item in split_document_candidates(draft.title, text, page_texts=draft.page_texts):
         db.add(DraftCandidate(draft_id=draft.id, **item))
     actor = await db.get(User, draft.created_by) if draft.created_by else None
     if actor:
@@ -125,7 +125,7 @@ async def _replace_split_candidates(
 ) -> None:
     """Keep an existing pending connector draft aligned with its new source text."""
     await db.execute(delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id))
-    for item in split_document_candidates(draft.title, text):
+    for item in split_document_candidates(draft.title, text, page_texts=draft.page_texts):
         db.add(DraftCandidate(draft_id=draft.id, **item))
 
 
@@ -364,14 +364,20 @@ async def _save_permissions(
             and item.get("principal_id")
         }
     )
+    identity_provider = (
+        "microsoft_entra" if connector.system == "sharepoint" else connector.system
+    )
     identities = (
         (
             await db.execute(
                 select(ExternalIdentity)
                 .join(User, User.id == ExternalIdentity.user_id)
                 .where(
-                    ExternalIdentity.provider == "microsoft_entra",
-                    ExternalIdentity.subject.in_(user_ids),
+                    ExternalIdentity.provider == identity_provider,
+                    (
+                        ExternalIdentity.subject.in_(user_ids)
+                        | func.lower(ExternalIdentity.email).in_({item.lower() for item in user_ids})
+                    ),
                     User.company_domain == connector.company_domain,
                     User.active.is_(True),
                 )
@@ -383,6 +389,28 @@ async def _save_permissions(
         else []
     )
     mapped_user_ids = {str(item.subject): str(item.user_id) for item in identities}
+    mapped_user_ids.update(
+        {
+            str(item.email).lower(): str(item.user_id)
+            for item in identities
+            if item.email
+        }
+    )
+    # Google Drive ACLs commonly expose an email address without an external
+    # identity row. Map it to the active tenant-local account when available.
+    if connector.system == "google_drive" and user_ids:
+        email_users = (
+            await db.execute(
+                select(User).where(
+                    func.lower(User.email).in_({item.lower() for item in user_ids}),
+                    User.company_domain == connector.company_domain,
+                    User.active.is_(True),
+                )
+            )
+        ).scalars().all()
+        mapped_user_ids.update(
+            {str(item.email).lower(): str(item.id) for item in email_users}
+        )
     unmapped_principal_ids = sorted(
         f"{item.get('principal_type', 'unknown')}:{item.get('principal_id', '')}"
         for item in permissions
@@ -390,9 +418,15 @@ async def _save_permissions(
         and item.get("principal_id")
     )
     previous_metadata = document.metadata_json or {}
+    acl_present_key = (
+        "sharepoint_acl_present"
+        if connector.system == "sharepoint"
+        else "provider_acl_present"
+    )
     next_metadata = {
         **previous_metadata,
-        "sharepoint_acl_present": True,
+        acl_present_key: True,
+        "provider_acl_present": True,
         "mapped_access_group_ids": sorted(
             {str(item.access_group_id) for item in mappings}
         ),
@@ -414,6 +448,7 @@ async def _save_permissions(
         previous_metadata.get(key) != next_metadata.get(key)
         for key in (
             "sharepoint_acl_present",
+            "provider_acl_present",
             "mapped_access_group_ids",
             "unmapped_group_ids",
             "mapped_source_user_ids",
@@ -537,6 +572,10 @@ async def _apply_mapped_groups(
     metadata = document.metadata_json or {}
     # Preserve the internal policy once. Future source updates can therefore
     # only narrow it, even when the provider ACL is changed repeatedly.
+    # Older unit fixtures passed a lightweight connector object; retain the
+    # historical SharePoint source marker for those callers while real
+    # connectors use their provider name.
+    permission_source = getattr(connector, "system", "sharepoint")
     if "internal_acl_snapshot" not in metadata:
         metadata["internal_acl_snapshot"] = {
             "visibility": article.visibility,
@@ -544,7 +583,7 @@ async def _apply_mapped_groups(
             "allow_user_ids": [
                 str(item.user_id)
                 for item in article.user_permissions
-                if item.effect == "allow" and item.source != "sharepoint"
+                if item.effect == "allow" and item.source != permission_source
             ],
         }
     internal = metadata["internal_acl_snapshot"]
@@ -583,7 +622,10 @@ async def _apply_mapped_groups(
             or metadata.get("unmapped_source_user_ids")
             or metadata.get("unmapped_principal_ids")
         ),
-        acl_present=bool(metadata.get("sharepoint_acl_present")),
+        acl_present=bool(
+            metadata.get("provider_acl_present")
+            or metadata.get("sharepoint_acl_present")
+        ),
     )
     effective_group_ids = set(acl["group_ids"])
     article.access_groups = (
@@ -607,7 +649,7 @@ async def _apply_mapped_groups(
     await db.execute(
         delete(ArticleUserPermission).where(
             ArticleUserPermission.article_id == article.id,
-            ArticleUserPermission.source == "sharepoint",
+            ArticleUserPermission.source == permission_source,
         )
     )
     effective_user_ids = set(acl["direct_user_ids"])
@@ -617,7 +659,7 @@ async def _apply_mapped_groups(
                 article_id=article.id,
                 user_id=uuid.UUID(user_id),
                 effect="allow",
-                source="sharepoint",
+                source=permission_source,
             )
         )
     for user_id in set(internal.get("allow_user_ids", [])) - set(
@@ -628,7 +670,7 @@ async def _apply_mapped_groups(
                 article_id=article.id,
                 user_id=uuid.UUID(str(user_id)),
                 effect="deny",
-                source="sharepoint",
+                source=permission_source,
             )
         )
     article.visibility = str(acl["visibility"])
@@ -700,10 +742,13 @@ async def _ingest_content(
             await db.execute(
                 select(Article)
                 .where(Article.id == document.article_id)
-                .options(selectinload(Article.access_groups))
+                .options(selectinload(Article.access_groups), selectinload(Article.sources))
             )
         ).scalar_one_or_none()
         if article and article.lifecycle_status == "active":
+            article.source_changed = True
+            article.source_changed_at = datetime.utcnow()
+            article.source_previous_hash = next((source.source_hash for source in getattr(article, "sources", []) if source.source_system == connector.system), None)
             # Connector content is external input and must pass the same
             # independent approval path as a manually submitted revision.
             existing = (

@@ -1,11 +1,12 @@
 """Idempotently provision a global QNSC administrator for SSO bootstrap.
 
 Usage:
-    poetry run python scripts/provision_admin.py
+    ADMIN_EMAIL=... ADMIN_PASSWORD=... poetry run python scripts/provision_admin.py
 
-The account receives the system Admin role. The development bootstrap defaults
-to admin@qnsc.vn / Admin123@; production deployments should override both
-credentials through environment variables.
+The account receives the system Admin role — it bypasses tenant RLS and can
+read every company's data, so the password must always be supplied through
+ADMIN_PASSWORD (no repo-committed default). The script deliberately resets the
+password and re-grants Admin on every run; point it at the intended account.
 """
 
 from __future__ import annotations
@@ -33,7 +34,12 @@ async def provision() -> None:
         raise SystemExit("ADMIN_EMAIL must be a valid email address")
     company_domain = email.rsplit("@", 1)[1]
     display_name = os.environ.get("ADMIN_NAME", "Admin").strip() or "Admin"
-    password = os.environ.get("ADMIN_PASSWORD", "Admin123@")
+    password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if len(password) < 12:
+        raise SystemExit(
+            "ADMIN_PASSWORD must be supplied and at least 12 characters long; "
+            "this account bypasses tenant isolation."
+        )
 
     async with SessionLocal() as db:
         user = await db.scalar(

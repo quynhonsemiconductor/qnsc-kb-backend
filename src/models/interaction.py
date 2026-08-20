@@ -33,5 +33,13 @@ class Bookmark(Base, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True)
 
+
+class ArticleFollower(Base, TimestampMixin):
+    """A user following an article for version/source-change notifications."""
+
+    __tablename__ = "article_followers"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True)
+
     article: Mapped["Article"] = relationship("Article")
     user: Mapped["User"] = relationship("User")

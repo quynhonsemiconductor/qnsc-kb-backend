@@ -65,7 +65,7 @@ def _large_document_candidates(title: str, text: str) -> list[dict[str, Any]]:
 
 
 def split_document_candidates(
-    title: str, text: str, *, prefer_markdown_sections: bool = False
+    title: str, text: str, *, prefer_markdown_sections: bool = False, page_texts: list[dict] | None = None
 ) -> list[dict[str, Any]]:
     """Return ordered candidates with source character offsets.
 
@@ -76,6 +76,22 @@ def split_document_candidates(
     clean_text = text.strip()
     if not clean_text:
         return []
+    def position(start: int, end: int, heading: str | None) -> dict[str, Any]:
+        result: dict[str, Any] = {"offset_start": start, "offset_end": end, "section": heading}
+        if page_texts:
+            cursor = 0
+            first = last = None
+            for page in page_texts:
+                page_start = cursor
+                page_end = cursor + len(str(page.get("text") or ""))
+                if first is None and end > page_start:
+                    first = page.get("page_number")
+                if start < page_end:
+                    last = page.get("page_number")
+                cursor = page_end
+            result["page_start"] = first
+            result["page_end"] = last or first
+        return result
     if len(clean_text) <= _MAX_REVIEW_CANDIDATE_CHARS:
         candidate_title, heading = _candidate_title(clean_text, 1, title)
         return [
@@ -86,12 +102,16 @@ def split_document_candidates(
                 "source_start": 0,
                 "source_end": len(clean_text),
                 "heading": heading,
+                "source_position": position(0, len(clean_text), heading),
             }
         ]
     # For unusually long documents, use broad review-sized ranges rather than
     # treating every Markdown heading as a separate knowledge article.  The
     # argument remains for call compatibility and has no effect on this rule.
-    return _large_document_candidates(title, clean_text)
+    candidates = _large_document_candidates(title, clean_text)
+    for item in candidates:
+        item["source_position"] = position(item["source_start"], item["source_end"], item.get("heading"))
+    return candidates
 
 
 def splitter_metrics(documents: list[tuple[str, str]]) -> dict[str, Any]:

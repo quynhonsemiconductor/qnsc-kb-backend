@@ -6,7 +6,7 @@ import uuid
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from src.core.config import settings
 from src.api.routers import (
     auth,
@@ -43,6 +43,39 @@ async def _preload_embedding_model() -> None:
         logger.warning(
             "Embedding model preload failed; keyword search remains available",
             error=str(exc),
+        )
+
+
+async def verify_rls_policies() -> None:
+    """Fail fast when production RLS policies are missing.
+
+    The tenant-RLS migrations only create policies when ENABLE_RLS is set in
+    the environment *at migration time*. If an operator runs Alembic without
+    it, the revision is recorded as applied with no policies created and
+    re-running does nothing. The application-level SQL predicates still
+    enforce isolation, but RLS is the second layer production relies on, so
+    a production startup must refuse to serve without it.
+    """
+    if settings.ENVIRONMENT.lower() not in {"production", "prod"}:
+        return
+    async with SessionLocal() as db:
+        await set_database_context(db, None, True)
+        count = (
+            await db.execute(
+                text(
+                    "SELECT count(*) FROM pg_policies "
+                    "WHERE schemaname = 'public' "
+                    "AND tablename = 'articles' AND policyname = 'tenant_articles'"
+                )
+            )
+        ).scalar_one()
+    if count == 0:
+        raise RuntimeError(
+            "Tenant RLS policies are missing. The RLS migrations only apply when "
+            "ENABLE_RLS=true is set in the environment when Alembic runs; the "
+            "revision was likely recorded without them. Re-run migrations with "
+            "ENABLE_RLS=true against a database where the RLS revisions have not "
+            "yet been applied, or restore from a properly migrated backup."
         )
 
 
@@ -130,6 +163,11 @@ async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
     configure_tracing()
+    # Structured JSON logs to stdout (the production-hardening doc's contract
+    # with the log aggregation pipeline).
+    from src.lib.observability import setup_logging
+
+    setup_logging()
     for attempt in range(1, 4):
         try:
             # PostgreSQL can need a few seconds to finish crash recovery after
@@ -137,6 +175,7 @@ async def initialize_resources() -> None:
             # application startup only verifies/bootstraps runtime data.
             await asyncio.wait_for(init_db(), timeout=60)
             logger.info("Database initialized successfully", attempt=attempt)
+            await verify_rls_policies()
             await reconcile_published_indexes()
             break
         except Exception as exc:
@@ -163,11 +202,64 @@ async def initialize_resources() -> None:
         asyncio.create_task(_preload_embedding_model())
 
 
+async def _inline_outbox_recovery_loop() -> None:
+    """Inline-mode replacement for the Celery beat replay task.
+
+    Retries outbox events that failed or were orphaned by a process restart.
+    Without it, inline deployments never replay events and the outbox grows
+    forever.
+    """
+    while True:
+        await asyncio.sleep(settings.OUTBOX_RECOVERY_INTERVAL_SECONDS)
+        try:
+            recovered = await event_bus.recover_outbox_once()
+            if recovered:
+                logger.info("Inline outbox recovery pass", recovered=recovered)
+            # Terminal outbox rows have no replay value; bound table growth
+            # the same way prune_operational_metrics bounds telemetry.
+            from datetime import datetime, timedelta
+            from sqlalchemy import delete as sa_delete
+
+            from src.api.deps import SessionLocal
+            from src.models.ops import OutboxEvent
+
+            cutoff = datetime.utcnow() - timedelta(
+                days=settings.METRICS_RETENTION_DAYS
+            )
+            async with SessionLocal() as db:
+                result = await db.execute(
+                    sa_delete(OutboxEvent).where(
+                        OutboxEvent.status.in_(["completed", "dead"]),
+                        OutboxEvent.created_at < cutoff,
+                    )
+                )
+                await db.commit()
+            if result.rowcount:
+                logger.info(
+                    "Pruned terminal outbox events", pruned=result.rowcount
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Inline outbox recovery pass failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Database migrations/readiness must complete before serving traffic.
     await initialize_resources()
-    yield
+    recovery_task: asyncio.Task | None = None
+    if settings.JOB_MODE.lower() != "celery":
+        recovery_task = asyncio.create_task(_inline_outbox_recovery_loop())
+    try:
+        yield
+    finally:
+        if recovery_task:
+            recovery_task.cancel()
+            try:
+                await recovery_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(

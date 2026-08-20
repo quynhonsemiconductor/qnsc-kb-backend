@@ -9,6 +9,10 @@ from sqlalchemy import (
     Boolean,
     UniqueConstraint,
     Index,
+    DateTime,
+    Text,
+    JSON,
+    and_,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
@@ -70,6 +74,8 @@ class Department(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False, default="org", server_default="org")
+    contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     managers: Mapped[list["DepartmentManager"]] = relationship(
@@ -173,3 +179,33 @@ class ExternalIdentity(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     user: Mapped[User] = relationship("User", back_populates="identities")
+
+
+class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Single-use Entra invitation, scoped to a tenant and email address."""
+
+    __tablename__ = "invitations"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_invitations_token_hash"),
+        Index("ix_invitations_email_domain", "email", "company_domain"),
+    )
+    # Unified audience view. Legacy AccessGroup/user_groups remain writable
+    # during migration, while new authorization can read the single
+    # Department table for kind='access'.
+    access_audiences: Mapped[list[Department]] = relationship(
+        "Department", secondary=user_departments, viewonly=True,
+        primaryjoin=lambda: User.id == user_departments.c.user_id,
+        secondaryjoin=lambda: and_(Department.id == user_departments.c.department_id, Department.kind == "access"),
+    )
+
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="Staff")
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    audience_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    accepted_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

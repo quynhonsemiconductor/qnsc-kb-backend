@@ -28,10 +28,17 @@ class ArticleService:
         self.audit_repo = audit_repo
 
     async def _audit(
-        self, user_id: uuid.UUID, action: str, article_id: uuid.UUID
+        self,
+        user_id: uuid.UUID,
+        action: str,
+        article_id: uuid.UUID,
+        *,
+        commit: bool = True,
     ) -> None:
         if self.audit_repo:
-            await self.audit_repo.record(user_id, action, "article", str(article_id))
+            await self.audit_repo.record(
+                user_id, action, "article", str(article_id), commit=commit
+            )
 
     def ensure_can_create(self, user: User, dept: str) -> None:
         """Fail before any costly side effect, including AI restructuring."""
@@ -59,7 +66,7 @@ class ArticleService:
         type_: str,
         sensitivity: str,
         tags: list[str],
-        language: str = "en",
+        language: str = "vi",
         access_group_ids: list[uuid.UUID] | None = None,
         next_review: datetime | None = None,
         external_id: str | None = None,
@@ -124,49 +131,60 @@ class ArticleService:
             departments=[department],
         )
 
-        created_article = await self.article_repo.create(article)
-        logger.info(
-            "Article created",
-            article_id=str(created_article.id),
-            status=created_article.status,
-            owner_id=str(user.id),
-            owner_role=user.role,
-            sensitivity=created_article.sensitivity,
-        )
+        # Single transaction: article row, tags, version snapshot, and audit
+        # entries commit together (the approve_draft pattern). A crash between
+        # the steps can no longer leave a published article without a version
+        # snapshot or audit trail; events publish only after the commit.
+        try:
+            created_article = await self.article_repo.create(article, commit=False)
+            logger.info(
+                "Article created",
+                article_id=str(created_article.id),
+                status=created_article.status,
+                owner_id=str(user.id),
+                owner_role=user.role,
+                sensitivity=created_article.sensitivity,
+            )
 
-        # Save tags
-        if tags:
-            await self.article_repo.sync_tags(created_article.id, tags)
+            # Save tags
+            if tags:
+                await self.article_repo.sync_tags(
+                    created_article.id, tags, commit=False
+                )
 
-        # Re-fetch article with tags
+            # Save initial version snapshot
+            snapshot = {
+                "title": created_article.title,
+                "body_md": created_article.body_md,
+                "original_body_md": original_body_md or created_article.body_md,
+                "dept": created_article.dept,
+                "domain": created_article.domain,
+                "type": created_article.type,
+                "sensitivity": created_article.sensitivity,
+                "language": created_article.language,
+                "tags": tags,
+            }
+            version = ArticleVersion(
+                article_id=created_article.id,
+                version=1,
+                snapshot=snapshot,
+                edited_by=user.id,
+            )
+            await self.article_repo.create_version(version, commit=False)
+            await self._audit(user.id, "create", created_article.id, commit=False)
+            if created_article.status == "published":
+                await self._audit(user.id, "publish", created_article.id, commit=False)
+            await self.article_repo.db.commit()
+        except Exception:
+            await self.article_repo.db.rollback()
+            raise
+
+        # Re-fetch article with tags for the response payload.
         updated_article = await self.article_repo.get_by_id(created_article.id)
         if not updated_article:
             raise HTTPException(
                 status_code=500, detail="Failed to retrieve created article"
             )
-
-        # Save initial version snapshot
-        snapshot = {
-            "title": updated_article.title,
-            "body_md": updated_article.body_md,
-            "original_body_md": original_body_md or updated_article.body_md,
-            "dept": updated_article.dept,
-            "domain": updated_article.domain,
-            "type": updated_article.type,
-            "sensitivity": updated_article.sensitivity,
-            "language": updated_article.language,
-            "tags": tags,
-        }
-        version = ArticleVersion(
-            article_id=updated_article.id,
-            version=1,
-            snapshot=snapshot,
-            edited_by=user.id,
-        )
-        await self.article_repo.create_version(version)
-        await self._audit(user.id, "create", updated_article.id)
-        if updated_article.status == "published":
-            await self._audit(user.id, "publish", updated_article.id)
 
         # Trigger event if published
         if updated_article.status == "published":
@@ -301,24 +319,13 @@ class ArticleService:
             content_changed = True
 
         if status_ is not None and status_ != article.status:
-            if status_ not in {"draft", "pending_review", "published", "archived"}:
-                raise HTTPException(status_code=422, detail="Invalid article status")
-            if status_ == "published" and not any(
-                AuthorizationService.has_permission(
-                    user, "article.publish", article, scope
-                )
-                for scope in ("own", "department", "company", "global")
-            ):
-                raise HTTPException(
-                    status_code=403, detail="Not authorized to publish articles"
-                )
-            published_transition = (
-                status_ == "published" and article.status != "published"
+            # Status transitions are owned by the governance approval flow.
+            # This legacy branch allowed a direct publish when wired up and is
+            # intentionally rejected here; nothing reachable passes status_.
+            raise HTTPException(
+                status_code=400,
+                detail="Article status changes must be approved through the review workflow",
             )
-            article.status = status_
-            if status_ == "published":
-                article.last_reviewed = datetime.utcnow()
-            content_changed = True
 
         if next_review is not None:
             article.next_review = next_review
@@ -327,45 +334,68 @@ class ArticleService:
         if content_changed:
             article.version += 1
 
-        updated_article = await self.article_repo.update(article)
+        # Single transaction across article update, tags, version snapshot,
+        # and audit entries; events publish only after the commit.
+        try:
+            updated_article = await self.article_repo.update(article, commit=False)
+
+            if tags is not None:
+                await self.article_repo.sync_tags(
+                    updated_article.id, tags, commit=False
+                )
+                # Reload the relationship so the version snapshot records the
+                # new tag rows, not the pre-sync collection.
+                await self.article_repo.db.refresh(
+                    updated_article, attribute_names=["tags"]
+                )
+
+            if content_changed:
+                tag_strings = [t.tag for t in updated_article.tags]
+                snapshot = {
+                    "title": updated_article.title,
+                    "body_md": updated_article.body_md,
+                    "dept": updated_article.dept,
+                    "domain": updated_article.domain,
+                    "type": updated_article.type,
+                    "sensitivity": updated_article.sensitivity,
+                    "language": updated_article.language,
+                    "tags": tag_strings,
+                }
+                version = ArticleVersion(
+                    article_id=updated_article.id,
+                    version=updated_article.version,
+                    snapshot=snapshot,
+                    edited_by=user.id,
+                )
+                await self.article_repo.create_version(version, commit=False)
+
+            if permissions_changed:
+                await self._audit(
+                    user.id, "permission_change", updated_article.id, commit=False
+                )
+            if content_changed:
+                await self._audit(user.id, "update", updated_article.id, commit=False)
+                if updated_article.status == "published" and published_transition:
+                    await self._audit(
+                        user.id, "publish", updated_article.id, commit=False
+                    )
+            await self.article_repo.db.commit()
+        except Exception:
+            await self.article_repo.db.rollback()
+            raise
 
         if tags is not None:
-            await self.article_repo.sync_tags(updated_article.id, tags)
-            # Re-fetch tags
+            # Re-fetch so the response reflects the persisted tag rows.
             updated_article = await self.article_repo.get_by_id(updated_article.id)
-
-        if content_changed:
-            tag_strings = [t.tag for t in updated_article.tags]
-            snapshot = {
-                "title": updated_article.title,
-                "body_md": updated_article.body_md,
-                "dept": updated_article.dept,
-                "domain": updated_article.domain,
-                "type": updated_article.type,
-                "sensitivity": updated_article.sensitivity,
-                "language": updated_article.language,
-                "tags": tag_strings,
-            }
-            version = ArticleVersion(
-                article_id=updated_article.id,
-                version=updated_article.version,
-                snapshot=snapshot,
-                edited_by=user.id,
-            )
-            await self.article_repo.create_version(version)
 
         # Trigger events
         if permissions_changed:
             await event_bus.publish(
                 "PermissionChanged", {"article_id": str(updated_article.id)}
             )
-            await self._audit(user.id, "permission_change", updated_article.id)
 
         if content_changed:
-            await self._audit(user.id, "update", updated_article.id)
             if updated_article.status == "published":
-                if published_transition:
-                    await self._audit(user.id, "publish", updated_article.id)
                 logger.info(
                     "Published article re-indexing event queued",
                     article_id=str(updated_article.id),
@@ -406,8 +436,16 @@ class ArticleService:
                 status_code=403, detail="Not authorized to delete this article"
             )
 
-        await self.article_repo.soft_delete(article_id, user=user)
-        await self._audit(user.id, "delete", article_id)
+        try:
+            deleted = await self.article_repo.soft_delete(
+                article_id, user=user, commit=False
+            )
+            if deleted:
+                await self._audit(user.id, "delete", article_id, commit=False)
+            await self.article_repo.db.commit()
+        except Exception:
+            await self.article_repo.db.rollback()
+            raise
         await event_bus.publish("ArticleDeleted", {"article_id": str(article_id)})
 
     async def get_history(
@@ -483,37 +521,46 @@ class ArticleService:
         article.lifecycle_status = "active"
         article.index_status = "pending"
         article.index_error = None
-        restored_article = await self.article_repo.update(article)
 
-        tags = snapshot.get("tags")
-        if isinstance(tags, list):
-            await self.article_repo.sync_tags(article.id, [str(tag) for tag in tags])
-            restored_article = await self.article_repo.get_by_id(article.id, user=user)
-        if not restored_article:
-            raise HTTPException(
-                status_code=500, detail="Failed to reload restored article"
-            )
+        # Single transaction: restored article, tags, new version snapshot,
+        # and audit entry commit together; the event publishes after commit.
+        try:
+            restored_article = await self.article_repo.update(article, commit=False)
 
-        restored_snapshot = {
-            "title": restored_article.title,
-            "body_md": restored_article.body_md,
-            "dept": restored_article.dept,
-            "domain": restored_article.domain,
-            "type": restored_article.type,
-            "sensitivity": restored_article.sensitivity,
-            "language": restored_article.language,
-            "tags": [tag.tag for tag in restored_article.tags],
-            "restored_from_version": version_num,
-        }
-        await self.article_repo.create_version(
-            ArticleVersion(
-                article_id=restored_article.id,
-                version=restored_article.version,
-                snapshot=restored_snapshot,
-                edited_by=user.id,
+            tags = snapshot.get("tags")
+            if isinstance(tags, list):
+                await self.article_repo.sync_tags(
+                    article.id, [str(tag) for tag in tags], commit=False
+                )
+                await self.article_repo.db.refresh(
+                    restored_article, attribute_names=["tags"]
+                )
+
+            restored_snapshot = {
+                "title": restored_article.title,
+                "body_md": restored_article.body_md,
+                "dept": restored_article.dept,
+                "domain": restored_article.domain,
+                "type": restored_article.type,
+                "sensitivity": restored_article.sensitivity,
+                "language": restored_article.language,
+                "tags": [tag.tag for tag in restored_article.tags],
+                "restored_from_version": version_num,
+            }
+            await self.article_repo.create_version(
+                ArticleVersion(
+                    article_id=restored_article.id,
+                    version=restored_article.version,
+                    snapshot=restored_snapshot,
+                    edited_by=user.id,
+                ),
+                commit=False,
             )
-        )
-        await self._audit(user.id, "restore_version", restored_article.id)
+            await self._audit(user.id, "restore_version", restored_article.id, commit=False)
+            await self.article_repo.db.commit()
+        except Exception:
+            await self.article_repo.db.rollback()
+            raise
 
         if restored_article.status == "published":
             await event_bus.publish(

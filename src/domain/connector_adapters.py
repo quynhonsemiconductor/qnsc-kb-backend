@@ -398,17 +398,34 @@ class GoogleDriveAdapter(ConnectorAdapter):
             return response.json()
 
     async def discover_scopes(self) -> list[dict[str, Any]]:
-        drives = await self._request("GET", f"{self.api}/drives?pageSize=100&fields=drives(id,name,webViewLink,nextPageToken)")
-        result = [{"external_scope_id": item["id"], "scope_type": "shared_drive", "display_name": item.get("name", item["id"]), "config": {"drive_id": item["id"], "web_url": item.get("webViewLink")}} for item in drives.get("drives", [])]  # type: ignore[union-attr]
+        drives: list[dict[str, Any]] = []
+        drive_page_token: str | None = None
+        while True:
+            query = {"pageSize": "100", "fields": "nextPageToken,drives(id,name,webViewLink)"}
+            if drive_page_token:
+                query["pageToken"] = drive_page_token
+            page = await self._request("GET", f"{self.api}/drives?{urlencode(query)}")
+            drives.extend(page.get("drives", []))  # type: ignore[union-attr]
+            drive_page_token = page.get("nextPageToken")  # type: ignore[union-attr]
+            if not drive_page_token:
+                break
+
+        result = [{"external_scope_id": item["id"], "scope_type": "shared_drive", "display_name": item.get("name", item["id"]), "config": {"drive_id": item["id"], "web_url": item.get("webViewLink")}} for item in drives]
         result.append({"external_scope_id": "user", "scope_type": "drive", "display_name": "My Drive", "config": {"corpus": "user"}})
-        for drive in [*drives.get("drives", []), {"id": None, "name": "My Drive"}]:  # type: ignore[union-attr]
-            params = {"q": "mimeType = 'application/vnd.google-apps.folder' and trashed = false", "pageSize": "100", "fields": "files(id,name,parents,webViewLink,driveId)", "includeItemsFromAllDrives": "true", "supportsAllDrives": "true"}
+        for drive in [*drives, {"id": None, "name": "My Drive"}]:
+            params: dict[str, str] = {"q": "mimeType = 'application/vnd.google-apps.folder' and trashed = false", "pageSize": "100", "fields": "nextPageToken,files(id,name,parents,webViewLink,driveId)", "includeItemsFromAllDrives": "true", "supportsAllDrives": "true"}
             if drive.get("id"):
                 params.update({"corpora": "drive", "driveId": drive["id"]})
-            folders = await self._request("GET", f"{self.api}/files?{urlencode(params)}")
-            for folder in folders.get("files", []):  # type: ignore[union-attr]
-                drive_id = drive.get("id") or "user"
-                result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "folder", "display_name": f"{drive.get('name', 'My Drive')} / {folder.get('name', folder['id'])}", "config": {"drive_id": drive.get("id"), "folder_id": folder["id"], "corpus": drive_id, "web_url": folder.get("webViewLink")}})
+            folder_page_token: str | None = None
+            while True:
+                page_params = {**params, **({"pageToken": folder_page_token} if folder_page_token else {})}
+                folders = await self._request("GET", f"{self.api}/files?{urlencode(page_params)}")
+                for folder in folders.get("files", []):  # type: ignore[union-attr]
+                    drive_id = drive.get("id") or "user"
+                    result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "folder", "display_name": f"{drive.get('name', 'My Drive')} / {folder.get('name', folder['id'])}", "config": {"drive_id": drive.get("id"), "folder_id": folder["id"], "corpus": drive_id, "web_url": folder.get("webViewLink")}})
+                folder_page_token = folders.get("nextPageToken")  # type: ignore[union-attr]
+                if not folder_page_token:
+                    break
         return result
 
     async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
@@ -454,7 +471,11 @@ class GoogleDriveAdapter(ConnectorAdapter):
         result = []
         for item in data.get("permissions", []):  # type: ignore[union-attr]
             principal_type = item.get("type", "user")
-            principal_id = item.get("id") or item.get("emailAddress") or item.get("domain")
+            # Google exposes a stable permission id, but the email is the
+            # useful tenant-local identity for reconciling access to an
+            # internal account. Keep the id as a fallback for principals that
+            # do not expose an address (for example legacy group entries).
+            principal_id = item.get("emailAddress") or item.get("id") or item.get("domain")
             if principal_id:
                 result.append({"principal_type": principal_type, "principal_id": str(principal_id), "role": str(item.get("role", "reader"))})
         return result

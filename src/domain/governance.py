@@ -20,6 +20,7 @@ from src.models.article import (
     ArticleVersion,
     DocumentSource,
 )
+from src.models.interaction import ArticleFollower
 from src.models.user import User, AccessGroup, Department
 from src.repositories.user import UserRepository
 from src.models.connectors import ExternalDocument, ExternalGroupMapping
@@ -57,6 +58,7 @@ class GovernanceService:
         target_type: str,
         target_id: str | None = None,
         outcome: str = "success",
+        detail: dict | None = None,
     ) -> AuditLog:
         log = AuditLog(
             user_id=user_id,
@@ -64,6 +66,7 @@ class GovernanceService:
             target_type=target_type,
             target_id=target_id,
             outcome=outcome,
+            detail_json=detail,
         )
         return await self.gov_repo.log_audit(log)
 
@@ -421,8 +424,8 @@ class GovernanceService:
         return await self.list_candidates(user, draft_id)
 
     async def commit_candidates(
-        self, user: User, draft_id: uuid.UUID
-    ) -> list[PendingDraft]:
+        self, user: User, draft_id: uuid.UUID, *, detailed: bool = False
+    ) -> list[PendingDraft] | dict[str, object]:
         parent = await self._get_draft_for_user(draft_id, user, for_update=True)
         if not parent:
             raise HTTPException(status_code=404, detail="Draft not found")
@@ -450,6 +453,7 @@ class GovernanceService:
             )
         db = self.gov_repo.db
         children: list[PendingDraft] = []
+        results: list[dict[str, object]] = []
         base_metadata = dict(parent.content_metadata or {})
         selected_candidate_ids = {
             department_id
@@ -482,10 +486,8 @@ class GovernanceService:
             # Existing pre-routing candidates retain the parent route until a reviewer
             # opens them. New formatted candidates always carry an explicit selection.
             if not selected_departments and item.department_ids:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Choose at least one active department for candidate {item.position}",
-                )
+                results.append({"candidate_id": str(item.id), "position": item.position, "status": "failed", "error": "Choose at least one active department"})
+                continue
             child_hash = hashlib.sha256(
                 f"{parent.source_hash}:{item.position}:{item.body_md}".encode("utf-8")
             ).hexdigest()
@@ -496,6 +498,7 @@ class GovernanceService:
                     "start": item.source_start,
                     "end": item.source_end,
                     "heading": item.heading,
+                    **(getattr(item, "source_position", None) or {}),
                 },
                 "department_ids": [
                     str(department.id) for department in selected_departments
@@ -539,6 +542,9 @@ class GovernanceService:
             )
             children.append(child)
             item.status = "committed"
+            results.append({"candidate_id": str(item.id), "position": item.position, "status": "created", "draft_id": str(child.id), "title": child.title})
+        if not children:
+            raise HTTPException(status_code=422, detail="No valid candidates could be committed")
         await self._transition_draft(
             parent, user, "rejected", "Split candidates committed as independent drafts"
         )
@@ -547,6 +553,8 @@ class GovernanceService:
         for child in children:
             await self.submit_draft(user, child.id, "Committed from batch review")
         await self.log_audit(user.id, "batch_commit", "draft", str(parent.id))
+        if detailed:
+            return {"parent_draft_id": str(parent.id), "results": results, "drafts": children}
         return children
 
     async def assign_approver(
@@ -555,6 +563,7 @@ class GovernanceService:
         draft_id: uuid.UUID,
         approver_id: uuid.UUID | None = None,
         use_rule: bool = False,
+        reason: str | None = None,
     ) -> PendingDraft:
         draft = await self._get_draft_for_user(draft_id, user)
         if not draft:
@@ -619,6 +628,11 @@ class GovernanceService:
                 detail="Selected user does not have approval permission for this draft",
             )
 
+        previous_approver_id = draft.assigned_approver_id
+        if previous_approver_id == approver.id:
+            raise HTTPException(
+                status_code=409, detail="The selected approver is already assigned"
+            )
         draft.assigned_approver_id = approver.id
         draft.assigned_by = user.id
         draft.assigned_at = datetime.utcnow()
@@ -628,19 +642,42 @@ class GovernanceService:
                 recipient_user_id=approver.id,
                 type="in_app",
                 payload={
-                    "event": "draft_assigned",
+                    "event": "draft_reassigned" if previous_approver_id else "draft_assigned",
                     "draft_id": str(draft.id),
                     "approver_id": str(approver.id),
+                    "previous_approver_id": str(previous_approver_id) if previous_approver_id else None,
                     "assigned_by": str(user.id),
+                    "reason": reason.strip() if reason and reason.strip() else None,
                 },
             )
         )
+        if previous_approver_id:
+            self.gov_repo.db.add(
+                NotificationQueue(
+                    recipient_user_id=previous_approver_id,
+                    type="in_app",
+                    payload={
+                        "event": "draft_reassigned_away",
+                        "draft_id": str(draft.id),
+                        "previous_approver_id": str(previous_approver_id),
+                        "approver_id": str(approver.id),
+                        "assigned_by": str(user.id),
+                        "reason": reason.strip() if reason and reason.strip() else None,
+                    },
+                )
+            )
         await self.gov_repo.db.commit()
         await self.log_audit(
             user.id,
-            "assign_approver_rule" if use_rule else "assign_approver",
+            "reassign_approver" if previous_approver_id else ("assign_approver_rule" if use_rule else "assign_approver"),
             "draft",
             str(draft.id),
+            detail={
+                "previous_approver_id": str(previous_approver_id) if previous_approver_id else None,
+                "new_approver_id": str(approver.id),
+                "reason": reason.strip() if reason and reason.strip() else None,
+                "used_rule": use_rule,
+            },
         )
         return updated
 
@@ -1141,6 +1178,8 @@ class GovernanceService:
                 created_article.next_review = next_review
                 created_article.status = "published"
                 created_article.lifecycle_status = "active"
+                created_article.source_changed = False
+                created_article.source_changed_at = None
                 created_article.version = next_version
                 created_article.last_reviewed = datetime.utcnow()
                 created_article.index_status = "pending"
@@ -1231,7 +1270,8 @@ class GovernanceService:
                     domain=str(metadata.get("domain") or "Ingestion"),
                     type=category,
                     sensitivity=sensitivity,
-                    language=str(metadata.get("language") or "en"),
+                    language=str(metadata.get("language") or "vi"),
+                    self_approved=bool(draft.created_by and draft.created_by == user.id),
                     next_review=next_review,
                     owner_id=user.id,
                     status="published",
@@ -1344,9 +1384,10 @@ class GovernanceService:
                 [
                     AuditLog(
                         user_id=user.id,
-                        action="approve",
+                        action=("self_approve" if draft.created_by and draft.created_by == user.id else "approve"),
                         target_type="draft",
                         target_id=str(draft.id),
+                        detail_json={"self_approved": bool(draft.created_by and draft.created_by == user.id)},
                     ),
                     AuditLog(
                         user_id=user.id,
@@ -1369,6 +1410,14 @@ class GovernanceService:
                         },
                     )
                 )
+            follower_ids = (await db.execute(select(ArticleFollower.user_id).where(ArticleFollower.article_id == created_article.id))).scalars().all()
+            for follower_id in follower_ids:
+                if follower_id != user.id and follower_id != draft.created_by:
+                    db.add(NotificationQueue(
+                        recipient_user_id=follower_id,
+                        type="in_app",
+                        payload={"event": "article_version_published", "article_id": str(created_article.id), "version": next_version, "source_changed": bool(update_target)},
+                    ))
             await db.commit()
         except Exception:
             if hasattr(db, "rollback"):

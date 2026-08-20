@@ -1,6 +1,7 @@
 import uuid
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from dataclasses import asdict
 from typing import Any
 from fastapi import APIRouter, Depends, Query, status, HTTPException
@@ -26,7 +27,7 @@ from src.domain.ai_service import AIService
 from src.domain.search_service import SearchService
 from src.repositories.chunk import ChunkRepository
 from src.repositories.ai import AIRepository
-from src.models.ops import EvalQuestion, EvalRun, IndexReprocessJob, Connector
+from src.models.ops import EvalQuestion, EvalSet, EvalRun, IndexReprocessJob, Connector
 from src.rag.evaluator import answer_correctness, context_recall, lexical_faithfulness
 from src.core.config import is_cloudflare_r2_endpoint, settings
 from src.models.ops import FeatureFlag
@@ -39,6 +40,19 @@ from src.domain.department_routing import suggest_departments
 from src.domain.llm_client import resolve_provider
 
 router = APIRouter()
+
+
+def _permission_leakage_detected(retrieved: list[dict[str, Any]], citations: list[dict[str, Any]] | None) -> bool:
+    """Detect citations that were not present in the authorized retrieval set."""
+    authorized_chunk_ids = {
+        str(item["chunk_id"]) for item in retrieved if item.get("chunk_id")
+    }
+    cited_chunk_ids = {
+        str(item.get("chunk_id"))
+        for item in (citations or [])
+        if isinstance(item, dict) and item.get("chunk_id")
+    }
+    return bool(cited_chunk_ids - authorized_chunk_ids)
 
 
 async def _ensure_candidate_routing(
@@ -103,7 +117,7 @@ class ApproveRequest(BaseModel):
     update_article_id: uuid.UUID | None = None
     treat_as_new: bool = False
     review_note: str | None = Field(default=None, max_length=2000)
-    visibility: str | None = Field(default=None, pattern="^(public|department|users)$")
+    visibility: str | None = Field(default=None, pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
     denied_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
 
@@ -115,6 +129,7 @@ class AssignRequest(BaseModel):
 class AssignApproverRequest(BaseModel):
     approver_id: uuid.UUID | None = None
     use_rule: bool = False
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class ApproverRuleRequest(BaseModel):
@@ -149,6 +164,13 @@ class EvalQuestionCreate(BaseModel):
     expected_answer: str
     expected_chunk_ids: list[str] = []
     category: str = "general"
+    eval_set_id: uuid.UUID | None = None
+
+
+class EvalSetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=50)
+    environment: str = Field(default="uat", max_length=50)
 
 
 class FeatureFlagUpdate(BaseModel):
@@ -198,6 +220,7 @@ def _audit_response(audit: Any) -> dict[str, Any]:
         "target_type": audit.target_type,
         "target_id": audit.target_id,
         "outcome": audit.outcome,
+        "detail": audit.detail_json,
         "created_at": audit.created_at,
         "user": (
             {"id": audit.user.id, "name": audit.user.name, "email": audit.user.email}
@@ -272,6 +295,8 @@ async def list_pending_drafts(
                 ),
                 "assigned_by": str(draft.assigned_by) if draft.assigned_by else None,
                 "assigned_at": draft.assigned_at,
+                "review_due_at": draft.assigned_at + timedelta(days=settings.REVIEW_SLA_DAYS) if draft.assigned_at else None,
+                "review_overdue": bool(draft.assigned_at and draft.assigned_at < datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)),
                 "reviewed_by": str(draft.reviewed_by) if draft.reviewed_by else None,
                 "reviewed_at": draft.reviewed_at,
                 "created_at": draft.created_at,
@@ -312,7 +337,9 @@ async def assign_draft_approver(
 ) -> Any:
     draft = await GovernanceService(
         GovernanceRepository(db), ArticleRepository(db)
-    ).assign_approver(current_user, id, req.approver_id, req.use_rule)
+    ).assign_approver(
+        current_user, id, req.approver_id, req.use_rule, req.reason
+    )
     return {
         "id": str(draft.id),
         "status": draft.status,
@@ -402,6 +429,7 @@ async def list_draft_candidates(
             "body_md": item.body_md,
             "source_start": item.source_start,
             "source_end": item.source_end,
+            "source_position": getattr(item, "source_position", None),
             "heading": item.heading,
             "department_ids": item.department_ids or [],
             "department_suggestions": item.department_suggestions or [],
@@ -461,9 +489,10 @@ async def commit_draft_candidates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    children = await GovernanceService(
+    result = await GovernanceService(
         GovernanceRepository(db), ArticleRepository(db)
-    ).commit_candidates(current_user, id)
+    ).commit_candidates(current_user, id, detailed=True)
+    children = result["drafts"]
     return {
         "parent_draft_id": str(id),
         "drafts": [
@@ -476,6 +505,7 @@ async def commit_draft_candidates(
             for item in children
         ],
         "draft_count": len(children),
+        "results": result["results"],
     }
 
 
@@ -706,13 +736,11 @@ async def restructure_draft(
     draft.restructure_candidate_md = None
     draft.restructure_decision = "not_reviewed"
     draft = await gov_repo.update_draft(draft)
-    try:
-        from src.workers.tasks import restructure_pending_draft_task
+    from src.workers.tasks import dispatch_restructure_pending_draft
 
-        restructure_pending_draft_task.delay(
-            str(draft.id), current_user.company_domain, str(current_user.id)
-        )
-    except Exception:
+    if not dispatch_restructure_pending_draft(
+        str(draft.id), current_user.company_domain, str(current_user.id)
+    ):
         draft.restructure_status = "fallback_formatting"
         draft.restructure_model = "lossless-markdown"
         draft.restructure_error = "AI formatting could not be queued; the lossless reading view is still available."
@@ -1025,6 +1053,57 @@ async def retry_index_reprocess(
     return _index_job_response(job)
 
 
+@router.get("/eval-sets")
+async def list_eval_sets(
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    rows = (await db.execute(select(EvalSet).where(EvalSet.company_domain == current_user.company_domain).order_by(EvalSet.created_at.desc()))).scalars().all()
+    return [{"id": str(item.id), "name": item.name, "version": item.version, "environment": item.environment, "status": item.status, "approved_by": str(item.approved_by) if item.approved_by else None, "approved_at": item.approved_at} for item in rows]
+
+
+@router.post("/eval-sets", status_code=status.HTTP_201_CREATED)
+async def create_eval_set(
+    req: EvalSetCreate,
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    item = EvalSet(company_domain=current_user.company_domain, name=req.name.strip(), version=req.version.strip(), environment=req.environment.strip(), status="draft")
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return {"id": str(item.id), "name": item.name, "version": item.version, "environment": item.environment, "status": item.status}
+
+
+@router.post("/eval-sets/{id}/approve")
+async def approve_eval_set(id: uuid.UUID, current_user: User = Depends(require_permission("governance.read", scope="global")), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    item = await db.scalar(select(EvalSet).where(EvalSet.id == id, EvalSet.company_domain == current_user.company_domain))
+    if not item:
+        raise HTTPException(status_code=404, detail="Evaluation set not found")
+    item.status = "approved"
+    item.approved_by = current_user.id
+    item.approved_at = datetime.utcnow()
+    await db.commit()
+    return {"id": str(item.id), "status": item.status, "approved_at": item.approved_at}
+
+
+@router.get("/eval-report")
+async def eval_report(
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    rows = (await db.execute(select(EvalRun).order_by(EvalRun.created_at.desc()).limit(500))).scalars().all()
+    if not rows:
+        return {"sample_count": 0, "kpis": {"citation_recall": 0, "groundedness": 0, "correctness": 0, "latency_ms": 0}, "permission_leakage": 0, "verdict": "NO-GO", "reason": "No evaluation runs exist"}
+    citation = sum(item.context_recall for item in rows) / len(rows)
+    grounded = sum(item.faithfulness for item in rows) / len(rows)
+    correctness = sum(item.answer_correctness for item in rows) / len(rows)
+    latency = sum(item.latency_ms for item in rows) / len(rows)
+    permission_leakage = sum(1 for item in rows if item.permission_leakage)
+    go = citation >= 0.95 and grounded >= 0.90 and correctness >= 0.90 and latency <= 4000 and permission_leakage == 0
+    return {"sample_count": len(rows), "kpis": {"citation_recall": round(citation, 4), "groundedness": round(grounded, 4), "correctness": round(correctness, 4), "latency_ms": round(latency)}, "permission_leakage": permission_leakage, "verdict": "GO" if go else "NO-GO", "thresholds": {"citation_recall": 0.95, "groundedness": 0.90, "correctness": 0.90, "latency_ms": 4000}}
+
+
 @router.get("/eval-runs")
 async def get_eval_runs(
     current_user: User = Depends(require_permission("governance.read", scope="global")),
@@ -1047,6 +1126,7 @@ async def list_eval_questions(
             "expected_answer": item.expected_answer,
             "expected_chunk_ids": json.loads(item.expected_chunk_ids or "[]"),
             "category": item.category,
+            "eval_set_id": str(item.eval_set_id) if item.eval_set_id else None,
         }
         for item in questions
     ]
@@ -1064,6 +1144,7 @@ async def create_eval_question(
             expected_answer=req.expected_answer,
             expected_chunk_ids=json.dumps(req.expected_chunk_ids),
             category=req.category,
+            eval_set_id=req.eval_set_id,
         )
     )
     return {"id": str(item.id), "question": item.question, "category": item.category}
@@ -1084,6 +1165,7 @@ async def run_eval_question(
 
     gov_repo = GovernanceRepository(db)
     search_service = SearchService(ChunkRepository(db), gov_repo)
+    started = time.perf_counter()
     retrieved = await search_service.search(current_user, question.question, limit=10)
     expected_ids = json.loads(question.expected_chunk_ids or "[]")
     retrieval_score = context_recall(
@@ -1095,6 +1177,9 @@ async def run_eval_question(
     )
     faithfulness_score = lexical_faithfulness(answer["answer"], context)
     correctness_score = answer_correctness(answer["answer"], question.expected_answer)
+    permission_leakage = _permission_leakage_detected(
+        retrieved, answer.get("citations")
+    )
     run = await ops_repo.create_eval_run(
         EvalRun(
             eval_question_id=question.id,
@@ -1103,6 +1188,8 @@ async def run_eval_question(
             context_recall=retrieval_score,
             faithfulness=faithfulness_score,
             answer_correctness=correctness_score,
+            latency_ms=round((time.perf_counter() - started) * 1000),
+            permission_leakage=permission_leakage,
         )
     )
     return {
@@ -1111,6 +1198,8 @@ async def run_eval_question(
         "context_recall": retrieval_score,
         "faithfulness": faithfulness_score,
         "answer_correctness": correctness_score,
+        "latency_ms": run.latency_ms,
+        "permission_leakage": permission_leakage,
         "created_at": run.created_at,
     }
 

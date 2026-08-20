@@ -134,6 +134,7 @@ class DraftCandidate(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     body_md: Mapped[str] = mapped_column(Text, nullable=False)
     source_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_position: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     heading: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Reviewer-editable routing chosen from the department suggestions generated
     # after the document has been formatted and split.
@@ -219,6 +220,48 @@ class Gap(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(50), default="open", nullable=False)
 
 
+class ArticleEditRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """A correction request from a reader who cannot edit an article directly."""
+
+    __tablename__ = "article_edit_requests"
+    __table_args__ = (
+        Index("ix_article_edit_requests_company_status", "company_domain", "status"),
+        Index("ix_article_edit_requests_article", "article_id"),
+    )
+
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    request_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # open, accepted, rejected, completed
+    status: Mapped[str] = mapped_column(String(30), default="open", nullable=False)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ConflictRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Persisted, reviewable contradiction detected across published articles."""
+
+    __tablename__ = "conflict_records"
+    __table_args__ = (Index("ix_conflicts_company_status", "company_domain", "status"),)
+
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    fact: Mapped[str] = mapped_column(String(255), nullable=False)
+    article_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="open", server_default="open", nullable=False)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class AuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "audit_logs"
 
@@ -234,5 +277,8 @@ class AuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     outcome: Mapped[str] = mapped_column(
         String(30), nullable=False, default="success", server_default="success"
     )
+    # Structured before/after/context data.  Keep the compact legacy columns
+    # for filtering and make details optional so historical rows remain valid.
+    detail_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     user: Mapped["User | None"] = relationship("User")

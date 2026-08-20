@@ -100,10 +100,13 @@ class ArticleRepository:
                 explicit_allow,
             ]
             group_ids = [group.id for group in getattr(user, "groups", [])]
+            access_audience_ids = [department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"]
             if group_ids:
                 permission_conditions.append(
                     Article.access_groups.any(article_access.c.group_id.in_(group_ids))
                 )
+            if access_audience_ids:
+                permission_conditions.append(Article.departments.any(Department.id.in_(access_audience_ids)))
             if AuthorizationService.has_permission(
                 user, "article.read", requested_scope="department"
             ):
@@ -117,10 +120,12 @@ class ArticleRepository:
                             ),
                         )
                     )
+            # Departments and access groups are the same read-time audience
+            # concept.  Do not require both, otherwise a cross-department
+            # access-group member is incorrectly denied.
             non_user_scope = and_(
                 Article.visibility != "users",
-                department_scope,
-                or_(*permission_conditions),
+                or_(department_scope, *permission_conditions),
             )
             user_scope = and_(Article.visibility == "users", explicit_allow)
             filters.append(or_(non_user_scope, user_scope))
@@ -140,10 +145,13 @@ class ArticleRepository:
         )
         source_acl_allows: list[Any] = [source_explicit_allow]
         group_ids = [group.id for group in getattr(user, "groups", [])]
+        access_audience_ids = [department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"]
         if group_ids:
             source_acl_allows.append(
                 Article.access_groups.any(article_access.c.group_id.in_(group_ids))
             )
+        if access_audience_ids:
+            source_acl_allows.append(Article.departments.any(Department.id.in_(access_audience_ids)))
         filters.append(
             or_(
                 not_(source_acl_article),
@@ -253,7 +261,10 @@ class ArticleRepository:
         type_: str | None = None,
         sensitivity: str | None = None,
         status: str | None = None,
+        topic: str | None = None,
         search_query: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> Sequence[Article]:
         stmt = select(Article).options(
             selectinload(Article.access_groups),
@@ -282,15 +293,24 @@ class ArticleRepository:
             filters.append(Article.sensitivity == sensitivity)
         if status:
             filters.append(Article.status == status)
+        if topic:
+            filters.append(
+                ~Article.tags.any() if topic == "General knowledge"
+                else Article.tags.any(ArticleTag.tag == topic)
+            )
         if search_query:
             filters.append(Article.title.ilike(f"%{search_query}%"))
 
         if filters:
             stmt = stmt.where(and_(*filters))
 
-        result = await self.db.execute(
-            stmt.order_by(Article.updated_at.desc(), Article.created_at.desc())
-        )
+        # Unbounded list queries load and serialize the whole authorized
+        # corpus per call; the API layer always bounds the page size.
+        if limit is None:
+            limit = 200
+        stmt = stmt.order_by(Article.updated_at.desc(), Article.created_at.desc())
+        stmt = stmt.offset(offset).limit(limit)
+        result = await self.db.execute(stmt)
         articles = result.scalars().all()
         for article in articles:
             AuthorizationService.restrict_article_metadata(user, article)
@@ -345,31 +365,43 @@ class ArticleRepository:
             AuthorizationService.restrict_article_metadata(user, candidate)
         return candidates[:limit]
 
-    async def create(self, article: Article) -> Article:
+    async def create(self, article: Article, *, commit: bool = True) -> Article:
         self.db.add(article)
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
         await self.db.refresh(article)
         return article
 
-    async def update(self, article: Article) -> Article:
+    async def update(self, article: Article, *, commit: bool = True) -> Article:
         self.db.add(article)
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
         await self.db.refresh(article)
         return article
 
     async def soft_delete(
-        self, article_id: uuid.UUID, user: User | None = None
+        self, article_id: uuid.UUID, user: User | None = None, *, commit: bool = True
     ) -> bool:
         stmt = update(Article).where(Article.id == article_id)
         if user is not None:
             stmt = stmt.where(and_(*self._authorized_article_filters(user)))
         result = await self.db.execute(stmt.values(status="deleted"))
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
         return result.rowcount > 0
 
-    async def create_version(self, version: ArticleVersion) -> ArticleVersion:
+    async def create_version(
+        self, version: ArticleVersion, *, commit: bool = True
+    ) -> ArticleVersion:
         self.db.add(version)
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
         await self.db.refresh(version)
         return version
 
@@ -427,3 +459,7 @@ class ArticleRepository:
             self.db.add(ArticleTag(article_id=article_id, tag=t))
         if commit:
             await self.db.commit()
+        else:
+            # Make the new rows visible to relationship reloads inside the
+            # caller's transaction (sessions run with autoflush=False).
+            await self.db.flush()

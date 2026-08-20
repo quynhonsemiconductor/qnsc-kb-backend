@@ -29,7 +29,7 @@ class CommentResponse(BaseModel):
     article_id: uuid.UUID
     user_id: uuid.UUID
     text: str
-    created_at: datetime if "datetime" in locals() else Any
+    created_at: datetime
     user: UserBrief
 
     model_config = ConfigDict(from_attributes=True)

@@ -1,5 +1,10 @@
 {$PUBLIC_HOSTNAME} {
     encode gzip
+    # The app enforces a 25 MB upload limit itself, but only after the body
+    # has been streamed; reject oversized bodies at the edge instead.
+    request_body {
+        max_size 30MB
+    }
     header {
         -Server
         X-Content-Type-Options "nosniff"

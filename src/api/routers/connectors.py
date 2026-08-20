@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 import hashlib
 import hmac
 import json
@@ -376,6 +377,40 @@ async def discover_scopes(
     return scopes
 
 
+@router.get("/{connector_id}/preview")
+async def preview_connector(
+    connector_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(require_permission("connector.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Preview the provider corpus without creating documents or drafts."""
+    connector = await _connector_for_user(db, connector_id, current_user)
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if connector.system == "local_folder":
+        raise HTTPException(status_code=422, detail="Preview is not available for local folders")
+    scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)))).scalars().all()
+    if not scopes:
+        raise HTTPException(status_code=409, detail="Select at least one SharePoint library or folder before previewing")
+    adapter = adapter_for(connector)
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for scope in scopes:
+        try:
+            changes, _ = await adapter.incremental_changes({"external_scope_id": scope.external_scope_id, "config": scope.config_json or {}}, None)
+            for item in changes:
+                if item.state != "deleted":
+                    items.append({"external_id": item.external_id, "name": item.name, "mime_type": item.mime_type, "web_url": item.web_url, "revision": item.revision, "scope": scope.display_name})
+                if len(items) >= limit:
+                    break
+        except ConnectorProviderError as exc:
+            errors.append(f"{scope.display_name}: {exc}")
+        if len(items) >= limit:
+            break
+    return {"connector_id": str(connector.id), "provider": connector.system, "scopes": len(scopes), "files": items[:limit], "files_returned": min(len(items), limit), "truncated": len(items) > limit, "errors": errors, "writes_performed": False}
+
+
 @router.put("/{connector_id}/scopes")
 async def select_scopes(
     connector_id: uuid.UUID,
@@ -597,6 +632,48 @@ async def delete_group_mapping(
         for article_id in changed_article_ids:
             await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
 
+async def _run_cloud_sync_inline(connector_id: uuid.UUID, job_id: uuid.UUID) -> None:
+    """Inline-mode cloud sync on a dedicated session, mirroring the Celery task.
+
+    Runs detached on the API event loop (same tradeoff as other inline-mode
+    lifecycle work): the HTTP response returns immediately and a process
+    restart abandons the job, which the connector's queued-job expiry and the
+    next manual/scheduled sync recover from.
+    """
+    from src.domain.cloud_sync import sync_cloud_connector
+    from src.models.ops import Connector as ConnectorModel
+    from src.models.ops import ConnectorJob as ConnectorJobModel
+
+    try:
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            connector = await db.get(ConnectorModel, connector_id)
+            job = await db.get(ConnectorJobModel, job_id)
+            if not connector or not job:
+                return
+            await sync_cloud_connector(db, connector, job)
+    except Exception:
+        import structlog
+
+        structlog.get_logger().exception(
+            "Inline cloud connector sync failed", connector_id=str(connector_id)
+        )
+
+
+def _dispatch_cloud_sync(connector_id: uuid.UUID, job_id: uuid.UUID) -> None:
+    """Dispatch a queued cloud-sync job according to the deployment job mode.
+
+    Calling Celery's .delay() without a broker raises and leaves the job row
+    stuck "queued", so inline deployments must run the same work in-process.
+    """
+    if settings.JOB_MODE == "celery":
+        from src.workers.tasks import sync_cloud_connector_task
+
+        sync_cloud_connector_task.delay(str(connector_id), str(job_id))
+    else:
+        asyncio.create_task(_run_cloud_sync_inline(connector_id, job_id))
+
+
 @router.post("/{connector_id}/sync")
 async def sync_connector(
     connector_id: uuid.UUID,
@@ -609,7 +686,6 @@ async def sync_connector(
     if connector.system != "local_folder":
         if not connector.oauth_access_token and not connector.oauth_refresh_token:
             raise HTTPException(status_code=409, detail="Authorize the connector before syncing")
-        from src.workers.tasks import sync_cloud_connector_task
         active_job = (await db.execute(
             select(ConnectorJob)
             .where(ConnectorJob.connector_id == connector.id, ConnectorJob.status.in_(["queued", "running"]))
@@ -627,7 +703,7 @@ async def sync_connector(
         job = ConnectorJob(connector_id=connector.id, requested_by=current_user.id, status="queued", attempts=0)
         db.add(job)
         await db.commit()
-        sync_cloud_connector_task.delay(str(connector.id), str(job.id))
+        _dispatch_cloud_sync(connector.id, job.id)
         return {"connector_id": str(connector.id), "job_id": str(job.id), "status": "queued", "last_sync": connector.last_sync}
     job = await sync_local_folder(db, connector, current_user.id)
     return {"connector_id": str(connector.id), "job_id": str(job.id), "status": job.status, "last_sync": connector.last_sync}
@@ -655,13 +731,69 @@ async def list_connector_jobs(
     return result
 
 
+@router.get("/{connector_id}/source-tree")
+async def connector_source_tree(
+    connector_id: uuid.UUID,
+    current_user: User = Depends(require_permission("connector.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Expose the provider folder/file hierarchy already observed by sync."""
+    connector = await _connector_for_user(db, connector_id, current_user)
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)).order_by(SourceScope.display_name))).scalars().all()
+    documents = (await db.execute(select(ExternalDocument).where(ExternalDocument.connector_id == connector.id, ExternalDocument.state != "deleted").order_by(ExternalDocument.name))).scalars().all()
+    by_scope: dict[uuid.UUID, list[ExternalDocument]] = {}
+    for document in documents:
+        if document.scope_id:
+            by_scope.setdefault(document.scope_id, []).append(document)
+    result_scopes = []
+    for scope in scopes:
+        rows = by_scope.get(scope.id, [])
+        nodes = [{"id": document.external_id, "name": document.name, "parent_external_id": document.parent_external_id, "is_folder": bool(document.mime_type and document.mime_type.endswith(".folder")), "state": document.state, "article_id": str(document.article_id) if document.article_id else None, "web_url": document.web_url} for document in rows]
+        result_scopes.append({"id": str(scope.id), "external_scope_id": scope.external_scope_id, "display_name": scope.display_name, "scope_type": scope.scope_type, "nodes": nodes})
+    return {"connector_id": str(connector.id), "connector_name": connector.name, "system": connector.system, "scopes": result_scopes, "files_indexed": len(documents)}
+
+
+@router.get("/{connector_id}/readme")
+async def connector_readme(
+    connector_id: uuid.UUID,
+    current_user: User = Depends(require_permission("connector.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Generate a reviewable source README from current connector metadata."""
+    connector = await _connector_for_user(db, connector_id, current_user)
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)).order_by(SourceScope.display_name))).scalars().all()
+    jobs = (await db.execute(select(ConnectorJob).where(ConnectorJob.connector_id == connector.id).order_by(ConnectorJob.created_at.desc()).limit(5))).scalars().all()
+    lines = [f"# {connector.name}", "", f"- Provider: {connector.system}", f"- Sync mode: {(connector.config_json or {}).get('sync_mode', 'manual')}", f"- Last sync: {connector.last_sync.isoformat() if connector.last_sync else 'Not synced'}", "", "## Selected locations", ""]
+    if scopes:
+        lines.extend(f"- {scope.display_name} ({scope.scope_type})" for scope in scopes)
+    else:
+        lines.append("- No locations selected")
+    lines.extend(["", "## Recent sync activity", ""])
+    if jobs:
+        lines.extend(f"- {job.created_at.isoformat() if job.created_at else 'Unknown'} — {job.status} — {job.summary_json.get('changes_seen', 0) if isinstance(job.summary_json, dict) else 0} changes" for job in jobs)
+    else:
+        lines.append("- No sync jobs recorded")
+    lines.extend(["", "## Access boundary", "", "Provider ACLs are intersected with internal article policy. Unmapped or ambiguous principals fail closed."])
+    return {"connector_id": str(connector.id), "generated_at": datetime.utcnow(), "markdown": "\n".join(lines)}
+
+
 async def _enqueue_webhook(request: Request, provider: str) -> Response:
     headers = request.headers
     subscription_id = headers.get("x-goog-channel-id") if provider == "google_drive" else None
     client_state = headers.get("x-goog-channel-token") if provider == "google_drive" else None
     if not subscription_id:
+        # Webhook endpoints are public by design: cap the body before parsing so
+        # unsolicited payloads cannot consume unbounded memory. Real change
+        # notifications are a few KB; 1 MB is a generous ceiling.
+        content_length = headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > 1_048_576:
+            return Response(status_code=202)
         try:
-            payload = await request.json()
+            payload = json.loads((await request.body())[:1_048_576])
         except (ValueError, UnicodeDecodeError):
             # Webhook endpoints are public by design. Malformed or unsolicited
             # bodies must be harmless and must not turn into a 500 response.
@@ -673,7 +805,6 @@ async def _enqueue_webhook(request: Request, provider: str) -> Response:
         subscription_id = payload.get("subscriptionId") or first_value.get("subscriptionId")
         client_state = client_state or payload.get("clientState") or first_value.get("clientState")
     if subscription_id:
-        from src.workers.tasks import sync_cloud_connector_task
         async with SessionLocal() as db_session:
             await set_database_context(db_session, None, True)
             subscription = (await db_session.execute(select(WebhookSubscription).where(WebhookSubscription.provider_subscription_id == subscription_id, WebhookSubscription.active.is_(True)))).scalar_one_or_none()
@@ -683,7 +814,7 @@ async def _enqueue_webhook(request: Request, provider: str) -> Response:
                 connector_job = ConnectorJob(connector_id=subscription.connector_id, status="queued", attempts=0)
                 db_session.add(connector_job)
                 await db_session.commit()
-                sync_cloud_connector_task.delay(str(subscription.connector_id), str(connector_job.id))
+                _dispatch_cloud_sync(subscription.connector_id, connector_job.id)
     return Response(status_code=202)
 
 

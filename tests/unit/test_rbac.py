@@ -1,6 +1,7 @@
 import uuid
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import inspect
 
 from src.domain.rbac import AuthorizationService, DEFAULT_ROLE_PERMISSIONS
 from src.api.routers.auth import _apply_department_ownership, _ensure_owned_departments_are_memberships, _validate_role_assignment_authority
@@ -42,6 +43,19 @@ def test_scope_is_checked_against_resource():
     other = Article(company_domain="acme.test", owner_id=uuid.uuid4())
     assert AuthorizationService.has_permission(user, "article.edit", own, "own")
     assert not AuthorizationService.has_permission(user, "article.edit", other, "own")
+
+
+def test_restrict_metadata_does_not_mark_article_relationships_dirty():
+    user = User(role="Staff", company_domain="acme.test", dept="Ops")
+    visible = Department(id=uuid.uuid4(), company_domain="acme.test", name="Ops", active=True)
+    hidden = Department(id=uuid.uuid4(), company_domain="acme.test", name="Security", active=True)
+    user.departments = [visible]
+    article = Article(company_domain="acme.test", dept="Ops", departments=[visible, hidden])
+
+    AuthorizationService.restrict_article_metadata(user, article)
+
+    assert [department.name for department in article.departments] == ["Ops"]
+    assert not inspect(article).attrs.departments.history.has_changes()
 
 
 def test_global_admin_bypass():

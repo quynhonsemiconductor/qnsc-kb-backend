@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import uuid
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from typing import Annotated, Any, Sequence
@@ -19,7 +20,8 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.api.deps import get_db, get_current_user
 from src.models import User
 from src.repositories.article import ArticleRepository
@@ -41,13 +43,16 @@ from src.domain.source_storage import (
     safe_source_media_type,
     source_should_display_inline,
 )
-from src.models.article import Article, DocumentSource
+from src.models.article import Article, DocumentSource, TagCatalog
+from src.models.interaction import ArticleFollower
 from src.models.governance import (
+    ArticleEditRequest,
     DraftTransition,
     DraftCandidate,
     PendingDraft,
     IngestionFingerprint,
 )
+from src.models.ops import NotificationQueue
 from src.repositories.governance import GovernanceRepository
 from src.repositories.feature_flags import FeatureFlagRepository
 from src.core.config import settings
@@ -59,6 +64,7 @@ from src.domain.governance import GovernanceService
 from src.domain.llm_client import complete, resolve_provider
 from src.domain.events import event_bus
 from src.domain.permissions import PermissionService
+from src.domain.article_edit_requests import create_article_edit_request as create_edit_request
 from src.domain.rbac import AuthorizationService
 from src.domain.departments import resolve_active_department, resolve_active_departments
 from src.domain.departments import lock_company_access_groups
@@ -79,7 +85,7 @@ def _add_split_candidates(db: AsyncSession, draft: PendingDraft, text: str) -> N
     its ID to each candidate.
     """
     for item in split_document_candidates(
-        draft.title, text, prefer_markdown_sections=True
+        draft.title, text, prefer_markdown_sections=True, page_texts=draft.page_texts
     ):
         db.add(DraftCandidate(draft=draft, **item))
 
@@ -147,10 +153,10 @@ class ArticleCreate(BaseModel):
     body_md: str = Field(min_length=1, max_length=2_000_000)
     dept: str | None = Field(default=None, min_length=1, max_length=100)
     department_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
-    language: str = Field(default="en", min_length=2, max_length=20)
+    language: str = Field(default="vi", min_length=2, max_length=20)
     tags: list[TagInput] = Field(default_factory=list, max_length=20)
     next_review: datetime | None = None
-    visibility: str = Field(default="public", pattern="^(public|department|users)$")
+    visibility: str = Field(default="public", pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
     denied_user_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
@@ -164,9 +170,13 @@ class ArticleUpdate(BaseModel):
     status: str | None = Field(default=None, min_length=1, max_length=30)
     tags: list[TagInput] | None = Field(default=None, max_length=20)
     next_review: datetime | None = None
-    visibility: str | None = Field(default=None, pattern="^(public|department|users)$")
+    visibility: str | None = Field(default=None, pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
     denied_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+
+
+class ArticleEditRequestCreate(BaseModel):
+    request_text: str = Field(min_length=5, max_length=5_000)
 
 
 class AutoTagRequest(BaseModel):
@@ -229,6 +239,9 @@ class ArticleResponse(BaseModel):
     explicit_user_ids: list[uuid.UUID] = []
     explicit_denied_user_ids: list[uuid.UUID] = []
     language: str
+    self_approved: bool = False
+    source_changed: bool = False
+    source_changed_at: datetime | None = None
     owner_id: uuid.UUID | None = None
     owner: OwnerResponse | None = None
     status: str
@@ -370,6 +383,13 @@ async def auto_tag_articles(
         )
 
     suggestions_by_id: dict[str, list[str]] = {}
+    try:
+        catalogue = set((await db.execute(select(TagCatalog.normalized_tag).where(TagCatalog.company_domain == current_user.company_domain, TagCatalog.active.is_(True)))).scalars().all())
+    except AttributeError:
+        # Lightweight unit doubles may not expose a database; production
+        # requests always use the tenant catalogue query above.
+        catalogue = None
+    normalize_tag = lambda value: re.sub(r"\s+", " ", "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)).strip().casefold())
     for item in raw_results:
         if not isinstance(item, dict) or not item.get("id"):
             continue
@@ -386,6 +406,13 @@ async def auto_tag_articles(
                 and value not in cleaned_tags
             ):
                 cleaned_tags.append(value)
+        # AI may propose only customer-approved vocabulary. An empty catalogue
+        # deliberately produces no automatic suggestions until the customer
+        # has loaded its taxonomy.
+        if catalogue == set():
+            cleaned_tags = []
+        elif catalogue is not None:
+            cleaned_tags = [tag for tag in cleaned_tags if normalize_tag(tag) in catalogue]
         suggestions_by_id[str(item["id"])] = cleaned_tags[:8]
 
     results = []
@@ -693,16 +720,14 @@ async def upload_source(
             )
         raise
     if restructuring_enabled:
-        try:
-            # Queue only after the draft transaction is committed so the
-            # worker can immediately load the stored source text and update
-            # the same pending draft safely.
-            from src.workers.tasks import restructure_pending_draft_task
+        # Dispatch only after the draft transaction is committed so the
+        # formatter can immediately load the stored source text and update
+        # the same pending draft safely.
+        from src.workers.tasks import dispatch_restructure_pending_draft
 
-            restructure_pending_draft_task.delay(
-                str(draft.id), current_user.company_domain, str(current_user.id)
-            )
-        except Exception as exc:
+        if not dispatch_restructure_pending_draft(
+            str(draft.id), current_user.company_domain, str(current_user.id)
+        ):
             # A missing broker must not turn a successful upload into a
             # failure. Reviewers can still retry formatting from the queue.
             draft.restructure_status = "fallback_formatting"
@@ -711,11 +736,6 @@ async def upload_source(
                 "AI formatting could not be queued; retry from Pending Drafts."
             )
             await db.commit()
-            logger.warning(
-                "Could not queue source restructuring",
-                draft_id=str(draft.id),
-                error=str(exc),
-            )
     logger.info(
         "Source upload queued as pending draft",
         draft_id=str(draft.id),
@@ -1171,24 +1191,17 @@ async def complete_source_upload(
         current_user.id, "source_upload_complete", "draft", str(updated.id)
     )
     if restructuring_enabled:
-        try:
-            from src.workers.tasks import restructure_pending_draft_task
+        from src.workers.tasks import dispatch_restructure_pending_draft
 
-            restructure_pending_draft_task.delay(
-                str(updated.id), current_user.company_domain, str(current_user.id)
-            )
-        except Exception as exc:
+        if not dispatch_restructure_pending_draft(
+            str(updated.id), current_user.company_domain, str(current_user.id)
+        ):
             updated.restructure_status = "fallback_formatting"
             updated.restructure_model = "lossless-markdown"
             updated.restructure_error = (
                 "AI formatting could not be queued; retry from Pending Drafts."
             )
             await db.commit()
-            logger.warning(
-                "Could not queue presigned source restructuring",
-                draft_id=str(updated.id),
-                error=str(exc),
-            )
     return {
         "id": str(updated.id),
         "title": updated.title,
@@ -1501,15 +1514,51 @@ async def create_article(
 @router.get("/", response_model=list[ArticleResponse])
 async def list_articles(
     dept: str | None = Query(None),
+    topic: str | None = Query(None, max_length=80),
     status: str | None = Query(None),
     q: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     article_repo = ArticleRepository(db)
     return await article_repo.list_articles(
-        user=current_user, dept=dept, status=status, search_query=q
+        user=current_user, dept=dept, topic=topic, status=status, search_query=q,
+        limit=limit, offset=offset,
     )
+
+
+@router.post("/{id}/follow", status_code=status.HTTP_201_CREATED)
+async def follow_article(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    article = await ArticleRepository(db).get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    existing = await db.scalar(select(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    if not existing:
+        # Make the idempotent operation race-safe: two tabs may both observe
+        # no row before either commits.
+        await db.execute(pg_insert(ArticleFollower).values(user_id=current_user.id, article_id=id).on_conflict_do_nothing())
+        await db.commit()
+    return {"article_id": str(id), "following": True}
+
+
+@router.delete("/{id}/follow", status_code=status.HTTP_204_NO_CONTENT)
+async def unfollow_article(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> None:
+    article = await ArticleRepository(db).get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    await db.execute(delete(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    await db.commit()
+
+
+@router.get("/{id}/follow")
+async def article_follow_status(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    article = await ArticleRepository(db).get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    followed = await db.scalar(select(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    return {"article_id": str(id), "following": bool(followed)}
 
 
 @router.get("/{id}/related", response_model=list[ArticleResponse])
@@ -1539,6 +1588,17 @@ async def get_article(
     article = await article_service.get_article(current_user, id)
     AuthorizationService.restrict_article_metadata(current_user, article)
     return article
+
+
+@router.post("/{id}/edit-requests", status_code=status.HTTP_201_CREATED)
+async def create_article_edit_request(
+    id: uuid.UUID,
+    request_in: ArticleEditRequestCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Record a reader correction and notify users who can edit this article."""
+    return await create_edit_request(db, current_user, id, request_in.request_text, source="manual")
 
 
 @router.put("/{id}", response_model=DraftSubmissionResponse)
