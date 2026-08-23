@@ -79,7 +79,7 @@ variable "allowed_email_domains" {
 
 variable "entra_admin_emails" {
   type    = list(string)
-  default = ["nghiavt@qnsc.vn", "sinhhpt@qnsc.vn"]
+  default = ["nghiavt@qnsc.vn", "sinhhpt@qnsc.vn", "quangld@qnsc.vn", "hieuvbm@qnsc.vn"]
 
   description = <<-EOT
     Provisioned as GLOBAL administrators on their FIRST Entra sign-in, rather than Staff.
