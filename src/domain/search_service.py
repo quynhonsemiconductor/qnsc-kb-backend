@@ -13,18 +13,56 @@ from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
-from src.rag.reranker import normalize_query, rerank_chunks, score_retrieval_text
+from src.rag.reranker import (
+    normalize_query,
+    rerank_chunks_with_scores,
+    retrieval_score,
+)
 from src.models.ops import SearchLog
 from src.repositories.feature_flags import FeatureFlagRepository
 
 logger = structlog.get_logger()
 
 import asyncio
+from collections import OrderedDict
 from src.lib.embeddings import get_bge_embedding, get_bge_embeddings
 
+# Embedding one query is a full forward pass of the model — the most expensive single
+# step in a search, and a pure function of (text, model version). Queries repeat heavily
+# in a knowledge base: the same question from different people, a retry, the AI path
+# searching twice in one turn. This keeps the last few hundred.
+#
+# Keyed by DIGEST, not by the query itself, so no user's question text is retained in
+# process memory. The entry is a tuple, and a copy is handed out, so no caller can
+# mutate what the next one reads.
+_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str], tuple[float, ...]]" = OrderedDict()
+_QUERY_EMBEDDING_CACHE_MAX = 256
+
+
+def _query_embedding_key(text: str) -> tuple[str, str]:
+    return (
+        settings.EMBEDDING_VERSION,
+        hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    )
+
+
+def reset_query_embedding_cache() -> None:
+    """Drop the cache. For tests, and for a deliberate model/version switch."""
+    _QUERY_EMBEDDING_CACHE.clear()
+
+
 async def get_text_embedding(text: str) -> list[float] | None:
+    key = _query_embedding_key(text)
+    cached = _QUERY_EMBEDDING_CACHE.get(key)
+    if cached is not None:
+        _QUERY_EMBEDDING_CACHE.move_to_end(key)
+        return list(cached)
     try:
         embedding = await asyncio.to_thread(get_bge_embedding, text)
+        if embedding:
+            _QUERY_EMBEDDING_CACHE[key] = tuple(embedding)
+            while len(_QUERY_EMBEDDING_CACHE) > _QUERY_EMBEDDING_CACHE_MAX:
+                _QUERY_EMBEDDING_CACHE.popitem(last=False)
         logger.info(
             "Search embedding generated",
             query_length=len(text),
@@ -126,21 +164,26 @@ class SearchService:
             filters=effective_filters
         )
         reranking_enabled = not self.feature_flags or await self.feature_flags.is_enabled("rag.reranker", user)
-        chunks = rerank_chunks(retrieval_query, candidates, limit=limit) if reranking_enabled else candidates[:limit]
+        # Scored ONCE, here. The threshold below and the score reported per result both
+        # reuse these values rather than scoring the same passage again.
+        if reranking_enabled:
+            ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=limit)
+        else:
+            ranked = [
+                (chunk, retrieval_score(retrieval_query, chunk))
+                for chunk in candidates[:limit]
+            ]
         # Vector similarity alone is not enough: short or vague inputs can be
         # close to an unrelated document in embedding space. Keep a result only
         # when the reranked passage has at least one meaningful lexical signal.
         relevance_threshold = settings.RAG_MIN_RELEVANCE_SCORE
-        chunks = [
-            chunk for chunk in chunks
-            if getattr(chunk, "article", None) is not None and PermissionService.can_view_article(user, chunk.article)
-            if score_retrieval_text(
-                retrieval_query,
-                getattr(chunk, "chunk_text", "") or getattr(getattr(chunk, "parent_chunk", None), "text", ""),
-                getattr(getattr(chunk, "article", None), "title", ""),
-                getattr(getattr(chunk, "parent_chunk", None), "section_ref", ""),
-            ) >= relevance_threshold
+        scored_chunks = [
+            (chunk, score) for chunk, score in ranked
+            if getattr(chunk, "article", None) is not None
+            and PermissionService.can_view_article(user, chunk.article)
+            and score >= relevance_threshold
         ]
+        chunks = [chunk for chunk, _score in scored_chunks]
         logger.info(
             "Search repository completed",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
@@ -163,13 +206,11 @@ class SearchService:
 
         # 4. Format search results
         formatted_results = []
-        for idx, chunk in enumerate(chunks):
+        for idx, (chunk, score) in enumerate(scored_chunks):
             parent = chunk.parent_chunk
             article = chunk.article
             AuthorizationService.restrict_article_metadata(user, article)
-            
-            score = score_retrieval_text(retrieval_query, chunk.chunk_text, article.title, parent.section_ref if parent else "")
-            
+
             formatted_results.append({
                 "chunk_id": str(chunk.id),
                 "parent_chunk_id": str(chunk.parent_chunk_id),

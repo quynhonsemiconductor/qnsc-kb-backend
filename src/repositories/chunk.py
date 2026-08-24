@@ -15,6 +15,29 @@ from src.repositories.article import ArticleRepository
 
 logger = structlog.get_logger()
 
+#: Everything a retrieved chunk is asked for AFTER the query returns. The async session
+#: cannot lazy-load, so anything missing here is not a slow path — it is a MissingGreenlet
+#: at request time. Each entry names its consumer so it is clear what removing one breaks:
+#:
+#:   parent_chunk.child_chunks  the parent passage and `child_texts` in the response
+#:   article.owner              `owner_email` in the response
+#:   article.access_groups      PermissionService.can_view_article (restricted sensitivity)
+#:   article.departments        AuthorizationService.can_access_article_departments
+#:   article.user_permissions   PermissionService._explicit_user_effect
+#:   article.sources            PermissionService._sharepoint_acl_allows
+#:
+#: `sources` is the trap: permissions reads it as getattr(article, "sources", []), so it
+#: does not appear in a search for `.sources` and looks unused.
+RETRIEVAL_LOAD_OPTIONS = (
+    selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
+    selectinload(ArticleChunk.article).selectinload(Article.owner),
+    selectinload(ArticleChunk.article).selectinload(Article.access_groups),
+    selectinload(ArticleChunk.article).selectinload(Article.departments),
+    selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
+    selectinload(ArticleChunk.article).selectinload(Article.sources),
+)
+
+
 class ChunkRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -53,25 +76,24 @@ class ChunkRepository:
         return result.scalar_one_or_none()
 
     async def authorized_chunk_ids(self, user: object, chunk_ids: list[uuid.UUID]) -> set[str]:
-        """Return only citation chunks still visible to the current user."""
+        """Return only citation chunks still visible to the current user.
+
+        Selects the id COLUMN, not the entity. Authorization is decided entirely by
+        _authorized_article_filters in SQL, so the five eager loads this used to carry
+        (sources, owner, access_groups, departments, user_permissions) issued five extra
+        round trips and materialised whole object graphs per citation check, and every
+        one of them was discarded — the method only ever returned ids.
+        """
         if not chunk_ids:
             return set()
-        from src.domain.rbac import AuthorizationService
 
         conditions = [ArticleChunk.id.in_(chunk_ids), Article.status == "published", *ArticleRepository._authorized_article_filters(user)]
         result = await self.db.execute(
-            select(ArticleChunk)
+            select(ArticleChunk.id)
             .join(Article, Article.id == ArticleChunk.article_id)
-            .options(
-                selectinload(ArticleChunk.article).selectinload(Article.sources),
-                selectinload(ArticleChunk.article).selectinload(Article.owner),
-                selectinload(ArticleChunk.article).selectinload(Article.access_groups),
-                selectinload(ArticleChunk.article).selectinload(Article.departments),
-                selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
-            )
             .where(*conditions)
         )
-        return {str(chunk.id) for chunk in result.scalars().all()}
+        return {str(chunk_id) for chunk_id in result.scalars().all()}
 
     async def update_permissions(self, article_id: uuid.UUID, bitmap: int, sensitivity: str, visibility: str, dept: str) -> None:
         await self.db.execute(
@@ -117,11 +139,9 @@ class ChunkRepository:
         # explicit-user visibility and explicit denies are relational policy
         # records and are included in the same SQL statement.
         where_clauses.extend(ArticleRepository._authorized_article_filters(user))
-        explicit_allow = exists(select(ArticleUserPermission.id).where(
-            ArticleUserPermission.article_id == Article.id,
-            ArticleUserPermission.user_id == user.id,
-            ArticleUserPermission.effect == "allow",
-        ))
+        # An explicit ALLOW is already part of the shared Article predicate above; only
+        # the DENY needs adding here. This used to build an unused `explicit_allow`
+        # EXISTS on every search.
         explicit_deny = exists(select(ArticleUserPermission.id).where(
             ArticleUserPermission.article_id == Article.id,
             ArticleUserPermission.user_id == user.id,
@@ -217,14 +237,7 @@ class ChunkRepository:
                 )
                 .order_by(ArticleChunk.embedding.cosine_distance(query_embedding))
                 .limit(max(settings.RAG_CANDIDATE_POOL_SIZE, limit))
-                .options(
-                    selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
-                    selectinload(ArticleChunk.article).selectinload(Article.sources),
-                    selectinload(ArticleChunk.article).selectinload(Article.owner),
-                    selectinload(ArticleChunk.article).selectinload(Article.access_groups),
-                    selectinload(ArticleChunk.article).selectinload(Article.departments),
-                    selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
-                )
+                .options(*RETRIEVAL_LOAD_OPTIONS)
             )
             vec_res = await self.db.execute(vector_stmt)
             vector_results = vec_res.scalars().all()
@@ -266,14 +279,7 @@ class ChunkRepository:
                 ).desc()
             )
             .limit(max(settings.RAG_CANDIDATE_POOL_SIZE, limit))
-            .options(
-                selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
-                selectinload(ArticleChunk.article).selectinload(Article.sources),
-                selectinload(ArticleChunk.article).selectinload(Article.owner),
-                selectinload(ArticleChunk.article).selectinload(Article.access_groups),
-                selectinload(ArticleChunk.article).selectinload(Article.departments),
-                selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
-            )
+            .options(*RETRIEVAL_LOAD_OPTIONS)
         )
         key_res = await self.db.execute(keyword_stmt)
         keyword_results = key_res.scalars().all()

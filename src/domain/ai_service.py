@@ -23,6 +23,7 @@ from src.rag.citations import extract_citation_ids
 from src.rag.answer_sections import (
     EXTENDED_SENTINEL,
     GROUNDED_SENTINEL,
+    IncrementalAnswerStream,
     normalize_answer_markdown,
     render_answer_sections,
     split_answer_sections,
@@ -1105,13 +1106,20 @@ class AIService:
         else:
             try:
 
+                # Releases each token as soon as it cannot be part of a section
+                # sentinel, so the answer builds up on screen while the provider is
+                # still generating. The final rendered answer still replaces this
+                # atomically below, so what the reader ends up with is unchanged.
+                incremental = IncrementalAnswerStream()
+
                 async def append_token(token: str) -> None:
                     nonlocal answer, streamed_answer
                     answer += token
                     streamed_answer += token
-                    # Buffer the raw provider stream. The section sentinels are
-                    # not safe to expose incrementally; the rendered answer is
-                    # emitted atomically after parsing.
+                    if on_token:
+                        safe = incremental.feed(token)
+                        if safe:
+                            await on_token(safe)
 
                 answer, tokens_used, llm_model, provider = await complete(
                     [

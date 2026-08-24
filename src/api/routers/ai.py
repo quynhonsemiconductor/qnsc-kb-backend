@@ -191,6 +191,52 @@ def _parse_historical_citations(value: str | None) -> tuple[list[dict], bool]:
     return citations, malformed
 
 
+def _answer_provenance(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Action data for a stored answer, recording WHY it carries no citations.
+
+    On reload, "generated without sources" and "sources later revoked" both look like an
+    answer with no citations — but only the second may be withheld. Deciding that from
+    the answer's wording (see _is_safe_historical_status_message) cannot survive a prompt
+    change, a new language, or anything the model phrases its own way, so an answer that
+    genuinely found nothing to cite disappeared behind the revocation notice. The
+    generator knows which case it is; it records it here instead.
+    """
+    action_data = data.get("action_data")
+    stored = dict(action_data) if isinstance(action_data, dict) else {}
+    if not data.get("citations"):
+        stored.setdefault("grounding", "uncited")
+    return stored or None
+
+
+async def _record_failed_turn(
+    repo: AIRepository, db: AsyncSession, conversation_id: uuid.UUID, detail: str
+) -> None:
+    """Persist the failed half of a turn so the turn survives a reload.
+
+    The question is stored before generation starts, so a failure that returned early
+    left a user message with no reply: on reload the turn looked like it was never asked,
+    with nothing to say it had failed. Marked ``failed`` so the frontend can offer a retry
+    and so _authorized_conversation_history never replays it to the model as an answer.
+
+    Best-effort by design: the reader must still receive the error event, so a failure to
+    record one is logged and swallowed rather than replacing the error with a silent hang.
+    """
+    try:
+        # The generation task shared this session; a database-level failure would leave
+        # its transaction unusable, and this write must not fail for that reason.
+        await db.rollback()
+        await repo.add_message(
+            conversation_id,
+            "assistant",
+            detail,
+            action_data={"failed": True, "grounding": "uncited"},
+        )
+    except Exception:
+        logger.exception(
+            "Could not record the failed AI turn", conversation_id=str(conversation_id)
+        )
+
+
 def _is_safe_historical_status_message(message: Any) -> bool:
     """Keep legacy non-source status messages visible after a refresh."""
     if getattr(message, "role", None) != "assistant":
@@ -311,6 +357,7 @@ async def get_conversation_messages(
                 "citations": [] if inaccessible_source else citations,
                 "action": action_data.get("action") if action_data else None,
                 "action_data": action_data,
+                "failed": bool(action_data and action_data.get("failed")),
                 "usage_log_id": (
                     str(message.usage_log_id) if message.usage_log_id else None
                 ),
@@ -397,7 +444,7 @@ async def ask_question(
         uuid.UUID(data["log_id"]) if data.get("log_id") else None,
         data.get("answer_grounded"),
         data.get("answer_extended"),
-        data.get("action_data"),
+        _answer_provenance(data),
     )
     data["conversation_id"] = str(conversation.id)
     return data
@@ -517,10 +564,19 @@ async def ask_question_stream(
                     status_code=exc.status_code,
                     detail=str(exc.detail),
                 )
+                await _record_failed_turn(
+                    stream_repo, stream_db, uuid.UUID(conversation_id), str(exc.detail)
+                )
                 yield f"data: {json.dumps({'type': 'error', 'detail': str(exc.detail)})}\n\n"
                 return
             except Exception as exc:
                 logger.exception("AI stream task failed unexpectedly", error=str(exc))
+                await _record_failed_turn(
+                    stream_repo,
+                    stream_db,
+                    uuid.UUID(conversation_id),
+                    "AI generation failed. Please try again.",
+                )
                 yield f"data: {json.dumps({'type': 'error', 'detail': 'AI generation failed. Please try again.'})}\n\n"
                 return
             if not streamed_content:
@@ -536,7 +592,7 @@ async def ask_question_stream(
                 uuid.UUID(data["log_id"]) if data.get("log_id") else None,
                 data.get("answer_grounded"),
                 data.get("answer_extended"),
-                data.get("action_data"),
+                _answer_provenance(data),
             )
             yield f"data: {json.dumps({'type': 'sources', 'sources': data.get('citations', [])})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request')})}\n\n"
