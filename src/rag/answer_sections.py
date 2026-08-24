@@ -9,7 +9,14 @@ GROUNDED_HEADING = "## Answer from the Knowledge Base"
 EXTENDED_HEADING = "## Additional context (general knowledge — not from the Knowledge Base, not cited)"
 
 _SENTINEL_LINE_RE = re.compile(r"^\s*<<<(GROUNDED|EXTENDED)>>>\s*$", re.IGNORECASE)
-_CITATION_MARKER_RE = re.compile(r"\[(?:Source ID:\s*)?C?\d+\]", re.IGNORECASE)
+# Matches the bare `[C1]` the prompt asks for AND the enriched bracket a model writes
+# when it is also told to surface review dates and owners: `[C4: 2026-08-08, a@b.c]`.
+# The extended section must carry no marker in either shape — nothing there is
+# attributable to the knowledge base.
+_CITATION_MARKER_RE = re.compile(
+    r"\[[^\[\]]{0,240}?\bC\d{1,3}\b[^\[\]]{0,240}?\]|\[(?:Source ID:\s*)?\d{1,2}\]",
+    re.IGNORECASE,
+)
 
 
 def _sentinel_lines(text: str) -> list[tuple[str, int, int]]:

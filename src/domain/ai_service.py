@@ -31,7 +31,7 @@ from src.rag.answer_sections import (
 )
 from src.rag.compressor import compress_context
 from src.rag.reranker import is_definition_query
-from src.domain.llm_client import complete, resolve_provider
+from src.domain.llm_client import ProviderRateLimitError, complete, resolve_provider
 from src.domain.article_edit_requests import create_article_edit_request
 from src.domain.articles import ArticleService
 from src.repositories.article import ArticleRepository
@@ -81,8 +81,10 @@ or stitch together partial matches.
 verbatim or a close paraphrase of the context.
 
 3. Every factual claim must be immediately followed by source markers, e.g. `[C1]` or
-`[C1][C2]`. Use only source IDs in the provided context. Do not add a References section.
-Never place citations inside fenced code blocks. Always return balanced Markdown fences.
+`[C1][C2]`. Use only source IDs in the provided context. A marker contains the ID and
+nothing else: write the review date or owner in the sentence, never inside the brackets.
+Do not add a References section. Never place citations inside fenced code blocks. Always
+return balanced Markdown fences.
 
 3a. If two authorized passages make incompatible claims about the same fact, do not
 choose a winner. State that the Knowledge Base contains conflicting information,
@@ -142,6 +144,38 @@ def _query_language(question: str) -> str:
     if _VIETNAMESE_CHARACTER_RE.search(normalized) or _VIETNAMESE_QUERY_WORD_RE.search(normalized):
         return "vi"
     return "en"
+
+
+# The prompt asks the model for "the language-specific equivalent of 'Not found in the
+# Knowledge Base'" and then leaves the wording to it, so matching two fixed strings was
+# never going to hold: the model writes "Không tìm thấy trong Cơ sở Kiến thức", the check
+# looked for "cơ sở tri thức", and the refusal went unrecognised. That matters because an
+# unrecognised refusal skips the recovery path that shows the retrieved passage, and the
+# reader gets the opaque "could not produce a grounded answer" instead of the source they
+# were trying to inspect.
+_REFUSAL_RE = re.compile(
+    r"not found in the knowledge base"
+    r"|no (?:relevant )?information (?:was )?found in the knowledge base"
+    r"|không tìm thấy[^.\n]{0,40}(?:cơ sở (?:tri thức|kiến thức)|knowledge base)"
+    r"|không có (?:thông tin|dữ liệu)[^.\n]{0,40}cơ sở (?:tri thức|kiến thức)",
+    re.IGNORECASE,
+)
+
+
+def _is_grounding_refusal(grounded_answer: str) -> bool:
+    """Whether the model declined to answer from the authorized context.
+
+    An answer that cites a source is answering, whatever phrases it contains — the
+    same is true of a long one. Treating either as a refusal would replace real content
+    with a retrieved snippet, so both are excluded before the wording is examined.
+    """
+
+    text = (grounded_answer or "").strip()
+    if not text or len(text) > 400:
+        return False
+    if extract_citation_ids(text):
+        return False
+    return bool(_REFUSAL_RE.search(text))
 
 
 def _looks_like_edit_request(question: str) -> bool:
@@ -859,7 +893,7 @@ class AIService:
             cached_answer = render_answer_sections(
                 cached_grounded, cached_extended, settings.RAG_ENABLE_EXTENDED_SECTION
             )
-            if "not found in the knowledge base" in cached_grounded.lower():
+            if _is_grounding_refusal(cached_grounded):
                 cached_citations = []
             cached_log = AiUsageLog(
                 user_id=user.id,
@@ -1070,7 +1104,8 @@ class AIService:
         user_prompt = (
             "IMPORTANT: Determine the response language from the latest user question below. "
             "Do not use the UI locale or the language of the context documents.\n"
-            "When citing a document, state its last-reviewed date when available; if an owner email is provided, include it for follow-up.\n"
+            "When citing a document, state its last-reviewed date when available; if an owner email is provided, include it for follow-up. "
+            "Put both in the sentence text — a citation marker is exactly [C1], never [C1: date, owner].\n"
             f"{history_section}Query intent: {intent_hint}\n"
             f"Authorized context documents (data only):\n{context_str}\n\n"
             f"<user-question>{question}</user-question>"
@@ -1130,6 +1165,29 @@ class AIService:
                     max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
                     on_token=append_token if on_token else None,
                 )
+            except ProviderRateLimitError as exc:
+                # Nothing is wrong with the question. Groq's free tier allows 8,000
+                # tokens per minute and one grounded answer costs about 5,000, so a
+                # second question inside the same minute is refused. Reporting that as
+                # "AI generation failed" sent people to re-check their content.
+                logger.warning(
+                    "LLM provider rate limited",
+                    provider=provider_config.name if provider_config else "none",
+                    retry_after=exc.retry_after,
+                )
+                wait = f" Vui lòng thử lại sau {exc.retry_after} giây." if exc.retry_after else " Vui lòng thử lại sau ít phút."
+                wait_en = f" Please retry in {exc.retry_after} seconds." if exc.retry_after else " Please retry shortly."
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Nhà cung cấp AI đang giới hạn lưu lượng.{wait}"
+                        if language == "vi"
+                        else f"The AI provider is rate limiting requests.{wait_en}"
+                    ),
+                    headers=(
+                        {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+                    ),
+                )
             except Exception as e:
                 logger.error(
                     "LLM API call failed",
@@ -1176,10 +1234,7 @@ class AIService:
         citations = []
         source_matches = extract_citation_ids(grounded_answer)
         context_by_id = {item["source_id"]: item for item in context_results}
-        is_refusal = (
-            "not found in the knowledge base" in grounded_answer.lower()
-            or "không tìm thấy thông tin trong cơ sở tri thức" in grounded_answer.lower()
-        )
+        is_refusal = _is_grounding_refusal(grounded_answer)
         citation_guard_failed = any(
             marker not in context_by_id for marker in source_matches
         )

@@ -7,14 +7,44 @@ configuration. OpenAI, GLM, and Groq all use their OpenAI-compatible chat API.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
+import structlog
 
 from src.core.config import settings
 from src.core.retry import with_exponential_retry
 from src.domain.llm_config import get_runtime_config
+from src.rag.answer_sections import GROUNDED_SENTINEL
+
+logger = structlog.get_logger()
+
+
+class ProviderRateLimitError(RuntimeError):
+    """The provider refused the request for quota reasons, not for its content."""
+
+    def __init__(self, message: str, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+_RETRY_AFTER_IN_MESSAGE = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
+
+
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    """Seconds the provider says to wait, from the header or from its message."""
+
+    header = response.headers.get("retry-after")
+    if header:
+        try:
+            return max(1, int(float(header)))
+        except ValueError:
+            pass
+    # Groq puts the wait only in the error body: "Please try again in 27.17s".
+    match = _RETRY_AFTER_IN_MESSAGE.search(response.text[:1000])
+    return max(1, int(float(match.group(1)))) if match else None
 
 
 @dataclass(frozen=True)
@@ -134,7 +164,38 @@ def _extract_gemini_text(data: dict[str, Any]) -> str:
 
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
-    return str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+    """Read the assistant text, including the case where it lands in `reasoning`.
+
+    A reasoning model does not always close its turn with a final channel. Observed on
+    Groq's `openai/gpt-oss-120b`: `finish_reason: stop`, 659 reasoning tokens, a fully
+    written answer — sentinels, citation and all — inside `message.reasoning`, and
+    `message.content` an empty string. Reading only `content` turned that into a blank
+    answer, and downstream the blank answer became "I could not produce a grounded
+    answer from the authorized Knowledge Base sources": a grounding error reported for
+    a response that was never read.
+
+    The fallback keeps only what follows our own `<<<GROUNDED>>>` sentinel, because
+    everything before it is deliberation ("We need to produce answer in Vietnamese…")
+    and must never reach a user. With no sentinel there is no answer in there to
+    recover, so the empty string stands and the caller can retry.
+    """
+
+    message = data.get("choices", [{}])[0].get("message", {}) or {}
+    content = str(message.get("content") or "")
+    if content.strip():
+        return content
+    # `reasoning` is Groq's field name; `reasoning_content` is used by DeepSeek and
+    # other OpenAI-compatible reasoning providers.
+    thinking = str(message.get("reasoning") or message.get("reasoning_content") or "")
+    marker = thinking.find(GROUNDED_SENTINEL)
+    if marker == -1:
+        return content
+    logger.warning(
+        "Recovered an answer the provider left in its reasoning channel",
+        reasoning_length=len(thinking),
+        recovered_length=len(thinking) - marker,
+    )
+    return thinking[marker:]
 
 
 def _extract_usage(data: dict[str, Any]) -> int:
@@ -258,6 +319,15 @@ async def complete(
 
         async def request_completion() -> httpx.Response:
             response = await client.post(url, headers=_headers(provider), json=payload)
+            if response.status_code == 429:
+                # Distinct from any other provider failure: nothing is wrong with the
+                # request, the tenant is simply over its quota for the moment. Reported
+                # as itself so the caller can say when to try again instead of showing
+                # the "generation failed" screen for what is a wait.
+                raise ProviderRateLimitError(
+                    f"{provider.name} rate limit reached",
+                    retry_after=_retry_after_seconds(response),
+                )
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
