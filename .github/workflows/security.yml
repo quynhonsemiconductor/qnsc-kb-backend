@@ -32,6 +32,13 @@ permissions:
   packages: read
 
 jobs:
+  # Replaces Code Scanning Default Setup's `Analyze (actions)` / `CodeQL` as
+  # the required gate — those managed checks don't reliably report on
+  # bot-authored PRs (Dependabot/Renovate), leaving the required check stuck
+  # "Expected" forever.
+  actions-security:
+    uses: QNSC-VN/qnsc-ci/.github/workflows/actions-security.yml@v1
+
   security:
     uses: QNSC-VN/qnsc-ci/.github/workflows/security.yml@v1.10.0
     with:
