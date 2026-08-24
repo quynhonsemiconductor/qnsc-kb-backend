@@ -362,11 +362,9 @@ def test_access_token_carries_auth_version():
 
 def test_embedding_failure_is_not_converted_to_zero_vector(monkeypatch):
     monkeypatch.setattr(
-        embeddings.OnnxEmbeddingModelSingleton,
-        "get_model",
-        classmethod(
-            lambda cls: (_ for _ in ()).throw(RuntimeError("model unavailable"))
-        ),
+        embeddings,
+        "resolve_provider",
+        lambda: (_ for _ in ()).throw(RuntimeError("model unavailable")),
     )
     with pytest.raises(RuntimeError, match="Embedding generation failed"):
         embeddings.get_bge_embedding("test")

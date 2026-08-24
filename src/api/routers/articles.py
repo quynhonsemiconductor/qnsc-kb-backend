@@ -1221,6 +1221,31 @@ async def complete_source_upload(
     }
 
 
+# The file is user-uploaded and untrusted, and it is displayed inside our own review
+# iframe. Both facts have to hold at once:
+#
+#   sandbox allow-scripts  the document runs in an OPAQUE origin, so it can never read
+#                          a cookie, a token or the API as the signed-in user. Scripts
+#                          are permitted because a browser's built-in PDF viewer is
+#                          itself scripted and renders nothing under a bare `sandbox`.
+#                          allow-same-origin is deliberately NOT granted: combined with
+#                          allow-scripts it would let an uploaded HTML file escape.
+#   default-src 'none'     nothing loads and nothing is fetched, so a hostile document
+#                          has no channel to exfiltrate what it can see.
+#   frame-ancestors 'self' only our own UI may frame it.
+#
+# X-Frame-Options is stated here because the global middleware defaults every other
+# response to DENY, which blocks an iframe even same-origin.
+SOURCE_VIEW_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Content-Security-Policy": (
+        "sandbox allow-scripts; default-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'self'"
+    ),
+}
+
+
 @router.get("/{id}/source")
 async def view_article_source(
     id: uuid.UUID,
@@ -1250,10 +1275,6 @@ async def view_article_source(
     disposition = (
         "inline" if source_should_display_inline(download_name) else "attachment"
     )
-    security_headers = {
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
-    }
     try:
         data = await asyncio.to_thread(load_source, source.storage_key)
     except FileNotFoundError as exc:
@@ -1277,7 +1298,7 @@ async def view_article_source(
             content=str(selected_page.get("text") or "").encode("utf-8"),
             media_type="text/plain",
             headers={
-                **security_headers,
+                **SOURCE_VIEW_SECURITY_HEADERS,
                 "X-Source-Page": str(page),
                 "Content-Disposition": f'inline; filename="{download_name}.page-{page}.txt"',
             },
@@ -1286,7 +1307,7 @@ async def view_article_source(
         content=data,
         media_type=media_type,
         headers={
-            **security_headers,
+            **SOURCE_VIEW_SECURITY_HEADERS,
             "Content-Disposition": f'{disposition}; filename="{download_name}"',
         },
     )

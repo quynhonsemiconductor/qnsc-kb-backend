@@ -7,7 +7,7 @@ if not hasattr(bcrypt, "__about__"):
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from jose import jwt
+import jwt
 from src.core.config import settings
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
