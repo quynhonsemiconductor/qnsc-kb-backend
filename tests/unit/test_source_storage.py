@@ -93,7 +93,12 @@ def test_source_media_type_is_derived_from_a_safe_allow_list():
     assert safe_source_media_type("report.pdf") == "application/pdf"
     assert safe_source_media_type("unsafe.svg") == "application/octet-stream"
     assert source_should_display_inline("report.pdf")
-    assert not source_should_display_inline("notes.txt")
+    assert not source_should_display_inline("unsafe.svg")
+    # .txt and .md are now served as text/plain and shown inline: they make up most of
+    # this corpus, and text/plain plus nosniff cannot be parsed as markup. The rule the
+    # allow-list enforces is "nothing a browser will execute", not "nothing textual" —
+    # see tests/unit/test_source_media_types.py.
+    assert source_should_display_inline("notes.txt")
 
 
 def test_r2_source_listing_is_limited_to_the_configured_private_prefix(monkeypatch):
