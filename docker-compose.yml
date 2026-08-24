@@ -40,17 +40,19 @@ services:
       dockerfile: Dockerfile
       target: api
       args:
-        # Local builds skip the ~2.3 GB weight bake, so a rebuild stays quick. The
-        # weights are fetched on first use into the hfcache volume below instead, once
-        # for all three services.
-        BAKE_EMBEDDING_MODEL: "false"
+        # Baked, because the ONNX loader reads the export from disk and has no runtime
+        # download path: unbaked, this container cannot embed at all and every search
+        # silently degrades to keyword-only. It is two files, cached as a build layer,
+        # and it is the same artifact production runs.
+        BAKE_EMBEDDING_MODEL: "true"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - .:/app
       - ./connector_sources:/app/storage/connectors
-      # BAKE_EMBEDDING_MODEL=false above means the weights are downloaded on first use.
-      # Without this volume that is ~2.3 GB again on every `docker compose up --build`.
+      # Shared HuggingFace cache. The ONNX export itself is baked into the image at
+      # /opt/embedding-onnx; this only keeps any incidental hub download out of the
+      # per-container layer.
       - hfcache:/opt/huggingface
     # Restrict reloads to application source.  Test runs and Celery's local
     # schedule database must not restart the API and reload the embedding
@@ -61,6 +63,12 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      # This stack RUNS celery (worker + beat), so the API must not also run the inline
+      # loops. JOB_MODE defaults to "inline", and dev never set it: the API was replaying
+      # the outbox and dispatching connector syncs at the same time as the worker, and a
+      # manual "Sync now" ran the whole provider walk inside the API process instead of on
+      # the worker. Production sets this on both services; dev did not.
+      - JOB_MODE=celery
     depends_on:
       db:
         condition: service_healthy
@@ -81,7 +89,7 @@ services:
       dockerfile: Dockerfile
       target: worker
       args:
-        BAKE_EMBEDDING_ONNX: "false"
+        BAKE_EMBEDDING_MODEL: "true"
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
@@ -91,6 +99,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      - JOB_MODE=celery
       - AUTO_CREATE_SCHEMA=false
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
       - OMP_NUM_THREADS=1
@@ -101,10 +110,18 @@ services:
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
       - MICROSOFT_REDIRECT_URI=${MICROSOFT_REDIRECT_URI:-http://localhost:8000/api/v1/connectors/oauth/callback}
+      - MICROSOFT_CONNECTOR_AUTH_MODE=${MICROSOFT_CONNECTOR_AUTH_MODE:-delegated}
+      - MICROSOFT_GRAPH_SCOPE=${MICROSOFT_GRAPH_SCOPE:-https://graph.microsoft.com/.default}
+      - MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES=${MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES:-1440}
+      - MICROSOFT_SHAREPOINT_SITE_IDS=${MICROSOFT_SHAREPOINT_SITE_IDS:-}
+      - MICROSOFT_ONEDRIVE_USER_IDS=${MICROSOFT_ONEDRIVE_USER_IDS:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/connectors/oauth/callback}
       - CONNECTOR_WEBHOOK_BASE_URL=${CONNECTOR_WEBHOOK_BASE_URL:-}
+      - CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS=${CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS:-30}
+      - CONNECTOR_RECONCILE_INTERVAL_MINUTES=${CONNECTOR_RECONCILE_INTERVAL_MINUTES:-360}
+      - CONNECTOR_AUTO_PUBLISH_MODE=${CONNECTOR_AUTO_PUBLISH_MODE:-governed}
       - OMP_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - TOKENIZERS_PARALLELISM=false
@@ -121,7 +138,7 @@ services:
       dockerfile: Dockerfile
       target: worker
       args:
-        BAKE_EMBEDDING_ONNX: "false"
+        BAKE_EMBEDDING_MODEL: "true"
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
@@ -131,20 +148,54 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      - JOB_MODE=celery
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
       - MICROSOFT_REDIRECT_URI=${MICROSOFT_REDIRECT_URI:-http://localhost:8000/api/v1/connectors/oauth/callback}
+      - MICROSOFT_CONNECTOR_AUTH_MODE=${MICROSOFT_CONNECTOR_AUTH_MODE:-delegated}
+      - MICROSOFT_GRAPH_SCOPE=${MICROSOFT_GRAPH_SCOPE:-https://graph.microsoft.com/.default}
+      - MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES=${MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES:-1440}
+      - MICROSOFT_SHAREPOINT_SITE_IDS=${MICROSOFT_SHAREPOINT_SITE_IDS:-}
+      - MICROSOFT_ONEDRIVE_USER_IDS=${MICROSOFT_ONEDRIVE_USER_IDS:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/connectors/oauth/callback}
       - CONNECTOR_WEBHOOK_BASE_URL=${CONNECTOR_WEBHOOK_BASE_URL:-}
+      - CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS=${CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS:-30}
+      - CONNECTOR_RECONCILE_INTERVAL_MINUTES=${CONNECTOR_RECONCILE_INTERVAL_MINUTES:-360}
+      - CONNECTOR_AUTO_PUBLISH_MODE=${CONNECTOR_AUTO_PUBLISH_MODE:-governed}
       - OMP_NUM_THREADS=1
       - MALLOC_ARENA_MAX=2
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+
+  # Migrations do not run from any service's start-up: a scale-out would fire one per
+  # replica. This is the one place they run, and it mirrors the production stack's
+  # `migrator` service, which dev was missing entirely — leaving no compose path to
+  # apply a migration and no hint that one was needed. A new table therefore surfaced
+  # as `relation "..." does not exist`, thrown by a beat task every 30 seconds.
+  #
+  #   docker compose --profile migrate run --rm migrator
+  #
+  # Behind a profile so `docker compose up` never migrates implicitly. The image's
+  # entrypoint bootstraps the least-privilege role first, which no-ops here because
+  # APP_DATABASE_ROLE is unset in dev, then runs `alembic upgrade head`.
+  migrator:
+    profiles: ["migrate"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrator
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
+    depends_on:
+      db:
         condition: service_healthy
 
 volumes:

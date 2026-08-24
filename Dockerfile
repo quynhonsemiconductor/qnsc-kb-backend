@@ -19,11 +19,17 @@
 #      model and the api embeds the search query on every search — that is the deliberate
 #      cost of not sending text to a hosted embedder. The migrator gets neither.
 #
-# Build locally (skip the ~2.2 GB ONNX copy; the export stage still builds and caches,
-# since a referenced stage cannot be skipped):
-#   docker build --target api  -t qnsc-kb-api . --build-arg BAKE_EMBEDDING_ONNX=false
+# Build:
+#   docker build --target api      -t qnsc-kb-api .
 #   docker build --target worker   -t qnsc-kb-worker .
 #   docker build --target migrator -t qnsc-kb-migrator .
+#
+# The embedding export is baked by default and SHOULD be: the ONNX loader reads it from
+# disk and has no runtime download path, so an unbaked image cannot embed at all — it
+# serves /health and then falls back to keyword-only search on every query. Pass
+# BAKE_EMBEDDING_MODEL=false only where that is intended, i.e. CI proving the image
+# builds. The arg used to be documented as BAKE_EMBEDDING_ONNX, which this file never
+# declared, so the flag silently did nothing wherever it was passed.
 
 # ---------------------------------------------------------------------------
 # deps — the runtime dependency set every target shares. build-essential and libpq-dev
@@ -117,14 +123,33 @@ COPY --from=deps-ml /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=deps-ml /usr/local/bin /usr/local/bin
 
 ARG BAKE_EMBEDDING_MODEL=true
-ARG EMBEDDING_MODEL=BAAI/bge-m3
+ARG EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ENV HF_HOME=/opt/huggingface
+ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
 
-RUN mkdir -p "$HF_HOME" && \
+# Materialise the export where the loader actually looks. This used to snapshot `onnx/*`
+# into the HF cache, but src/lib/embeddings/local_onnx.py reads EMBEDDING_ONNX_DIR and
+# wants exactly two files, model.onnx and tokenizer.json, so nothing ever bridged the
+# two and /opt/embedding-onnx did not exist in any image. That is why every search
+# logged "Error generating local BGE embedding; continuing with keyword search".
+#
+# The model publishes its own ONNX export, so no optimum-cli step and no torch is needed
+# anywhere — the build downloads two files.
+#
+# fp32 (`onnx/model.onnx`), NOT one of the qint8 variants, even though those are smaller
+# and faster on CPU. Quantisation moves the vectors: this repo's own parity gate measured
+# int8 at cosine 0.972-0.987 against the reference, and a query embedded slightly off the
+# space its documents were embedded in degrades retrieval silently. Consistency wins.
+RUN mkdir -p "$HF_HOME" "$EMBEDDING_ONNX_DIR" && \
     if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
-        python -c "from huggingface_hub import snapshot_download; snapshot_download('${EMBEDDING_MODEL}', allow_patterns=['onnx/*', 'config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'vocab.txt', 'vocab.json', 'merges.txt', 'sentencepiece.bpe.model', 'spiece.model'])"; \
+        python -c "\
+from huggingface_hub import hf_hub_download; \
+import shutil, os; \
+target = os.environ['EMBEDDING_ONNX_DIR']; \
+[shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', name), os.path.join(target, os.path.basename(name))) \
+ for name in ('onnx/model.onnx', 'tokenizer.json')]"; \
     fi && \
-    chown -R appuser:appuser "$HF_HOME"
+    chown -R appuser:appuser "$HF_HOME" "$EMBEDDING_ONNX_DIR"
 
 # ---------------------------------------------------------------------------
 # runtime-ml-ocr — the worker's base: the above, plus paddle.
