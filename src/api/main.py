@@ -341,15 +341,47 @@ async def _inline_connector_sync_dispatch_loop() -> None:
             logger.exception("Inline connector dispatch pass failed")
 
 
+# Ten minutes, matching the Celery beat entry. Both modes must maintain subscriptions
+# on the same cadence: a deployment that switches to JOB_MODE=inline to avoid running
+# Redis would otherwise keep every webhook only until its first expiry.
+WEBHOOK_MAINTENANCE_INTERVAL_SECONDS = 600
+
+
+async def _inline_webhook_maintenance_loop() -> None:
+    """Renew and repair provider push subscriptions when Celery is not enabled."""
+
+    from src.domain.webhook_subscriptions import (
+        renew_due_subscriptions,
+        repair_webhook_subscriptions,
+    )
+
+    async def restore_context(session) -> None:
+        await set_database_context(session, None, True)
+
+    while True:
+        await asyncio.sleep(WEBHOOK_MAINTENANCE_INTERVAL_SECONDS)
+        try:
+            async with SessionLocal() as db:
+                await set_database_context(db, None, True)
+                await renew_due_subscriptions(db)
+                await repair_webhook_subscriptions(db, set_context=restore_context)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Inline webhook maintenance pass failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Database migrations/readiness must complete before serving traffic.
     await initialize_resources()
     recovery_task: asyncio.Task | None = None
     connector_dispatch_task: asyncio.Task | None = None
+    webhook_maintenance_task: asyncio.Task | None = None
     if settings.JOB_MODE.lower() != "celery":
         recovery_task = asyncio.create_task(_inline_outbox_recovery_loop())
         connector_dispatch_task = asyncio.create_task(_inline_connector_sync_dispatch_loop())
+        webhook_maintenance_task = asyncio.create_task(_inline_webhook_maintenance_loop())
     try:
         yield
     finally:
@@ -363,6 +395,12 @@ async def lifespan(app: FastAPI):
             connector_dispatch_task.cancel()
             try:
                 await connector_dispatch_task
+            except asyncio.CancelledError:
+                pass
+        if webhook_maintenance_task:
+            webhook_maintenance_task.cancel()
+            try:
+                await webhook_maintenance_task
             except asyncio.CancelledError:
                 pass
 

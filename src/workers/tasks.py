@@ -824,68 +824,31 @@ def dispatch_pending_sync_requests():
 
 @celery_app.task(name="renew_webhook_subscriptions")
 def renew_webhook_subscriptions():
-    """Extend provider push subscriptions before they lapse.
+    """Keep provider push subscriptions alive, and put back the ones that died.
 
-    Microsoft Graph subscriptions on a drive are short-lived — create_webhook asks for one
-    hour — and a lapsed subscription is not an error anyone sees: the provider simply
-    stops calling, the connector keeps reporting `on_update`, and content silently goes
-    stale until someone notices the KB is out of date. Nothing renewed them, so
-    "real-time sync" lasted exactly one hour from the moment it was switched on.
+    Two passes, because renewal alone is not enough: a Graph subscription can be
+    extended in place, a Google Drive channel can only be replaced, and a subscription
+    deleted at the tenant comes back as an error. Both live in the domain layer so the
+    inline (JOB_MODE != celery) dispatch loop runs exactly the same repair.
 
     Runs every 10 minutes against a 20-minute horizon, so a subscription gets several
     attempts before it expires and one failed run is not enough to drop it.
     """
 
     async def process():
-        from datetime import timedelta
+        from src.domain.webhook_subscriptions import (
+            renew_due_subscriptions,
+            repair_webhook_subscriptions,
+        )
 
-        from src.domain.connector_adapters import ConnectorProviderError, adapter_for
-        from src.models.connectors import WebhookSubscription
-        from src.models.ops import Connector
+        async def restore_context(session) -> None:
+            await set_database_context(session, None, True)
 
-        horizon = datetime.utcnow() + timedelta(minutes=20)
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            due = (
-                (
-                    await db.execute(
-                        select(WebhookSubscription).where(
-                            WebhookSubscription.active.is_(True),
-                            WebhookSubscription.expires_at.isnot(None),
-                            WebhookSubscription.expires_at <= horizon,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for subscription in due:
-                connector = await db.get(Connector, subscription.connector_id)
-                if connector is None or connector.status not in ("active", "error"):
-                    continue
-                try:
-                    renewed = await adapter_for(connector).renew_webhook(
-                        subscription.provider_subscription_id
-                    )
-                except ConnectorProviderError as exc:
-                    # The subscription is gone at the provider, or the token no longer
-                    # grants it. Deactivate rather than retry forever: the polling loop in
-                    # schedule_cloud_connector_syncs still covers this connector, so the
-                    # cost is latency, not lost content.
-                    logger.warning(
-                        "Webhook subscription renewal failed",
-                        connector_id=str(connector.id),
-                        subscription_id=subscription.provider_subscription_id,
-                        error=str(exc),
-                    )
-                    subscription.active = False
-                    continue
-                if renewed is None:
-                    # Provider cannot extend in place (Google Drive channels). Retire it so
-                    # the row does not claim a liveness it no longer has.
-                    subscription.active = False
-                    continue
-                subscription.expires_at = renewed
-            await db.commit()
+            await renew_due_subscriptions(db)
+            await repair_webhook_subscriptions(db, set_context=restore_context)
 
     sync_run(process())
+
+

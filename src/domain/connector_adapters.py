@@ -189,6 +189,15 @@ class ConnectorAdapter:
         """
         return None
 
+    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+        """Retire a subscription at the provider.
+
+        Called before a replacement is created, because a provider may refuse a second
+        subscription covering the same resource. Best effort by contract: the caller
+        treats any failure as "already gone" rather than as a reason not to resubscribe.
+        """
+        return None
+
 
 class SharePointAdapter(ConnectorAdapter):
     provider = "sharepoint"
@@ -412,7 +421,17 @@ class SharePointAdapter(ConnectorAdapter):
         }
         if lifecycle_callback_url:
             payload["lifecycleNotificationUrl"] = lifecycle_callback_url
-        result = await self._request("POST", f"{self.graph}/subscriptions", json=payload)
+        # Without this header Graph notifies on CONTENT changes only. A file whose
+        # sharing was revoked never wakes the connector, so a user who lost access at
+        # SharePoint keeps seeing the document in the KB until the next reconciliation
+        # pass — six hours by default. SharePoint and OneDrive for Business support the
+        # header; consumer OneDrive ignores it, which is why it is safe to always send.
+        result = await self._request(
+            "POST",
+            f"{self.graph}/subscriptions",
+            json=payload,
+            headers={"Prefer": "includesecuritywebhooks"},
+        )
         return {
             "subscription_id": result["id"],
             "client_state": client_state,
@@ -432,6 +451,11 @@ class SharePointAdapter(ConnectorAdapter):
             json={"expirationDateTime": expires_at.isoformat(timespec="seconds") + "Z"},
         )
         return expires_at
+
+    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+        # Graph refuses a second subscription with the same changeType and resource
+        # (409 Conflict), so a replacement is only possible once this one is gone.
+        await self._request("DELETE", f"{self.graph}/subscriptions/{provider_subscription_id}")
 
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         drive_id = scope["config"].get("drive_id", scope["external_scope_id"])
@@ -556,8 +580,23 @@ class GoogleDriveAdapter(ConnectorAdapter):
         expiration = result.get("expiration")
         expires_at = datetime.utcfromtimestamp(int(expiration) / 1000) if expiration else datetime.utcnow() + timedelta(days=1)
         # Google sends the channel id in X-Goog-Channel-ID; keep that id as
-        # our subscription key so the webhook can resolve the connector.
-        return {"subscription_id": channel_id, "client_state": client_state, "expires_at": expires_at}  # type: ignore[union-attr]
+        # our subscription key so the webhook can resolve the connector. resourceId is
+        # stored because channels.stop needs BOTH ids — without it a superseded channel
+        # keeps delivering until it expires on its own.
+        return {"subscription_id": channel_id, "client_state": client_state, "expires_at": expires_at, "resource": result.get("resourceId")}  # type: ignore[union-attr]
+
+    async def renew_webhook(self, provider_subscription_id: str) -> datetime | None:
+        # A Drive channel cannot be extended: changes.watch mints a new one and stops
+        # the old. Returning None tells the worker this subscription is spent, and the
+        # repair pass in webhook_subscriptions creates its replacement.
+        return None
+
+    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+        if not resource:
+            # Pre-existing rows predate storing resourceId. Nothing can stop the channel;
+            # it lapses within a day and the notification inbox deduplicates until then.
+            return None
+        await self._request("POST", f"{self.api}/channels/stop", json={"id": provider_subscription_id, "resourceId": resource})
 
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         config = scope["config"]

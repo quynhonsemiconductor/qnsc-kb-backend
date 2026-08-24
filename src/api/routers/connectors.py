@@ -25,6 +25,7 @@ from src.core.config import settings
 from src.domain.rbac import AuthorizationService
 from src.domain.connector_adapters import adapter_for, ConnectorProviderError, SharePointAdapter, GoogleDriveAdapter
 from src.domain.connector_auth import ensure_connector_authorized
+from src.domain.webhook_subscriptions import WebhookConfigurationError, ensure_webhook_subscriptions
 from src.domain.sync_queue import enqueue_connector_sync
 from src.core.secrets import encrypt_secret
 from src.domain.departments import resolve_active_departments
@@ -112,6 +113,11 @@ def _response(connector: Connector) -> dict[str, Any]:
         "path": config.get("path"),
         "sync_mode": config.get("sync_mode", "manual" if connector.system == "local_folder" else "daily"),
         "webhook_enabled": bool(config.get("webhook_enabled")),
+        # webhook_enabled is the admin's INTENT and stays true once switched on. This is
+        # what is actually happening: set by the repair worker when it could not keep a
+        # subscription alive, so "on_update" stops claiming a liveness it does not have.
+        "webhook_degraded": bool(config.get("webhook_degraded_at")),
+        "webhook_degraded_since": config.get("webhook_degraded_at"),
         "department_ids": [str(item) for item in config.get("department_ids", [])],
         "department_names": [str(item) for item in config.get("department_names", [])],
     }
@@ -462,39 +468,17 @@ async def subscribe_webhooks(
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    if connector.system == "local_folder":
-        raise HTTPException(status_code=422, detail="Local folders do not support webhooks")
-    if not settings.CONNECTOR_WEBHOOK_BASE_URL:
-        raise HTTPException(status_code=422, detail="Configure CONNECTOR_WEBHOOK_BASE_URL before enabling update notifications")
-    scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)))).scalars().all()
-    if not scopes:
-        raise HTTPException(status_code=409, detail="Select at least one folder or drive before enabling update notifications")
-    callback = f"{settings.CONNECTOR_WEBHOOK_BASE_URL.rstrip('/')}/api/v1/connectors/webhooks/{connector.system.replace('_', '-')}"
-    lifecycle_callback = f"{callback}/lifecycle" if connector.system == "sharepoint" else None
-    adapter = adapter_for(connector)
-    await ensure_connector_authorized(db, connector)
-    created = []
-    for scope in scopes:
-        old_subscriptions = (await db.execute(select(WebhookSubscription).where(WebhookSubscription.connector_id == connector.id, WebhookSubscription.scope_id == scope.id, WebhookSubscription.active.is_(True)))).scalars().all()
-        for old in old_subscriptions:
-            old.active = False
-        result = await adapter.create_webhook(
-            {"external_scope_id": scope.external_scope_id, "config": scope.config_json or {}},
-            callback,
-            lifecycle_callback,
-        )
-        db.add(WebhookSubscription(
-            connector_id=connector.id,
-            scope_id=scope.id,
-            provider_subscription_id=result["subscription_id"],
-            verification_token_hash=hashlib.sha256(result["client_state"].encode("utf-8")).hexdigest(),
-            resource=result.get("resource"),
-            lifecycle_notification_url=result.get("lifecycle_notification_url"),
-            expires_at=result.get("expires_at"),
-            active=True,
-        ))
-        created.append({"scope_id": str(scope.id), "subscription_id": result["subscription_id"], "expires_at": result.get("expires_at")})
-    connector.config_json = {**(connector.config_json or {}), "webhook_enabled": True, "sync_mode": "on_update"}
+    try:
+        # force: the admin pressing this button means "give me a fresh subscription",
+        # not "leave the one that is about to expire alone".
+        created = await ensure_webhook_subscriptions(db, connector, force=True)
+    except WebhookConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    config = {**(connector.config_json or {}), "webhook_enabled": True, "sync_mode": "on_update"}
+    # The repair worker sets this when it cannot keep a subscription alive; a successful
+    # manual subscribe is exactly the event that clears it.
+    config.pop("webhook_degraded_at", None)
+    connector.config_json = config
     await db.commit()
     return {"connector_id": str(connector.id), "subscriptions": created, "sync_mode": "on_update"}
 
