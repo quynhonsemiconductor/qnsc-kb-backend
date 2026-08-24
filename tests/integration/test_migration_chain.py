@@ -8,7 +8,7 @@ def test_migrations_have_one_current_head():
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20260819_62"]
+    assert script.get_heads() == ["20260820_63"]
 
 
 def test_production_compose_is_explicitly_hardened():
@@ -41,5 +41,12 @@ def test_production_compose_is_explicitly_hardened():
     # concurrent migrations. Locally that means `alembic upgrade head` by hand.
     assert "target: migrator" in compose
     dev_compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
-    assert 'entrypoint: ["/app/docker/entrypoint.sh"]' in dev_compose
+    # No service has an entrypoint script any more: docker/entrypoint.sh is gone and
+    # each service states its own `command`, so nothing can run migrations on start.
+    assert "entrypoint:" not in dev_compose
     assert "AUTO_CREATE_SCHEMA=false" in dev_compose
+    # Dev needs the same migrator, behind the same profile. Without it there was no
+    # compose path to apply a migration at all, so a new table surfaced only as
+    # `relation "..." does not exist` from a beat task, every 30 seconds.
+    assert "target: migrator" in dev_compose
+    assert 'profiles: ["migrate"]' in dev_compose

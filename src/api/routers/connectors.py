@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.api.deps import SessionLocal, get_db, get_current_user, require_permission, set_database_context
@@ -18,12 +18,14 @@ from src.models import User
 from src.models.governance import AuditLog, PendingDraft
 from src.models.user import AccessGroup, ExternalIdentity
 from src.models.ops import Connector, ConnectorJob
-from src.models.connectors import ExternalAclPrincipal, ExternalDocument, ExternalGroupMapping, PermissionSnapshot, SourceScope, SyncCursor, WebhookSubscription
+from src.models.connectors import ConnectorNotification, ExternalAclPrincipal, ExternalDocument, ExternalGroupMapping, PermissionSnapshot, SourceScope, SyncCursor, SyncRequest, WebhookSubscription
 from src.repositories.user import UserRepository
 from src.domain.connectors import sync_local_folder
 from src.core.config import settings
 from src.domain.rbac import AuthorizationService
 from src.domain.connector_adapters import adapter_for, ConnectorProviderError, SharePointAdapter, GoogleDriveAdapter
+from src.domain.connector_auth import ensure_connector_authorized
+from src.domain.sync_queue import enqueue_connector_sync
 from src.core.secrets import encrypt_secret
 from src.domain.departments import resolve_active_departments
 
@@ -95,11 +97,18 @@ async def _apply_connector_departments(db: AsyncSession, connector: Connector, c
 
 def _response(connector: Connector) -> dict[str, Any]:
     config = connector.config_json or {}
+    application_authorized = bool(
+        connector.system == "sharepoint"
+        and settings.microsoft_connector_auth_mode == "application"
+        and settings.MICROSOFT_CLIENT_ID
+        and settings.MICROSOFT_CLIENT_SECRET
+        and settings.MICROSOFT_TENANT_ID
+    )
     return {
         "id": str(connector.id), "name": connector.name, "system": connector.system,
         "status": connector.status, "company_domain": connector.company_domain,
         "last_sync": connector.last_sync, "last_error": connector.last_error,
-        "authorized": bool(connector.oauth_refresh_token or connector.oauth_access_token),
+        "authorized": bool(connector.oauth_refresh_token or connector.oauth_access_token) or application_authorized,
         "path": config.get("path"),
         "sync_mode": config.get("sync_mode", "manual" if connector.system == "local_folder" else "daily"),
         "webhook_enabled": bool(config.get("webhook_enabled")),
@@ -288,6 +297,8 @@ async def start_oauth(
         raise HTTPException(status_code=404, detail="Connector not found")
     if connector.system == "local_folder":
         raise HTTPException(status_code=422, detail="Local folders do not require OAuth")
+    if connector.system == "sharepoint" and settings.microsoft_connector_auth_mode == "application":
+        raise HTTPException(status_code=422, detail="Microsoft connector is using app-only mode; configure Entra application permissions and use Discover scopes directly")
     if connector.system == "sharepoint" and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI)):
         raise HTTPException(status_code=422, detail="Microsoft connector is not configured. Set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, and MICROSOFT_REDIRECT_URI in the API environment.")
     if connector.system == "google_drive" and not all((settings.GOOGLE_CLIENT_ID, settings.GOOGLE_CLIENT_SECRET, settings.GOOGLE_REDIRECT_URI)):
@@ -371,6 +382,7 @@ async def discover_scopes(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
     try:
+        await ensure_connector_authorized(db, connector)
         scopes = await adapter_for(connector).discover_scopes()
     except ConnectorProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -394,6 +406,7 @@ async def preview_connector(
     if not scopes:
         raise HTTPException(status_code=409, detail="Select at least one SharePoint library or folder before previewing")
     adapter = adapter_for(connector)
+    await ensure_connector_authorized(db, connector)
     items: list[dict[str, Any]] = []
     errors: list[str] = []
     for scope in scopes:
@@ -421,6 +434,7 @@ async def select_scopes(
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    await ensure_connector_authorized(db, connector)
     selected = set(request.scope_ids)
     existing = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id))).scalars().all()
     discovered = {str(item["external_scope_id"]): item for item in await adapter_for(connector).discover_scopes()}
@@ -456,11 +470,29 @@ async def subscribe_webhooks(
     if not scopes:
         raise HTTPException(status_code=409, detail="Select at least one folder or drive before enabling update notifications")
     callback = f"{settings.CONNECTOR_WEBHOOK_BASE_URL.rstrip('/')}/api/v1/connectors/webhooks/{connector.system.replace('_', '-')}"
+    lifecycle_callback = f"{callback}/lifecycle" if connector.system == "sharepoint" else None
     adapter = adapter_for(connector)
+    await ensure_connector_authorized(db, connector)
     created = []
     for scope in scopes:
-        result = await adapter.create_webhook({"external_scope_id": scope.external_scope_id, "config": scope.config_json or {}}, callback)
-        db.add(WebhookSubscription(connector_id=connector.id, scope_id=scope.id, provider_subscription_id=result["subscription_id"], verification_token_hash=hashlib.sha256(result["client_state"].encode("utf-8")).hexdigest(), expires_at=result.get("expires_at"), active=True))
+        old_subscriptions = (await db.execute(select(WebhookSubscription).where(WebhookSubscription.connector_id == connector.id, WebhookSubscription.scope_id == scope.id, WebhookSubscription.active.is_(True)))).scalars().all()
+        for old in old_subscriptions:
+            old.active = False
+        result = await adapter.create_webhook(
+            {"external_scope_id": scope.external_scope_id, "config": scope.config_json or {}},
+            callback,
+            lifecycle_callback,
+        )
+        db.add(WebhookSubscription(
+            connector_id=connector.id,
+            scope_id=scope.id,
+            provider_subscription_id=result["subscription_id"],
+            verification_token_hash=hashlib.sha256(result["client_state"].encode("utf-8")).hexdigest(),
+            resource=result.get("resource"),
+            lifecycle_notification_url=result.get("lifecycle_notification_url"),
+            expires_at=result.get("expires_at"),
+            active=True,
+        ))
         created.append({"scope_id": str(scope.id), "subscription_id": result["subscription_id"], "expires_at": result.get("expires_at")})
     connector.config_json = {**(connector.config_json or {}), "webhook_enabled": True, "sync_mode": "on_update"}
     await db.commit()
@@ -632,7 +664,11 @@ async def delete_group_mapping(
         for article_id in changed_article_ids:
             await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
 
-async def _run_cloud_sync_inline(connector_id: uuid.UUID, job_id: uuid.UUID) -> None:
+async def _run_cloud_sync_inline(
+    connector_id: uuid.UUID,
+    job_id: uuid.UUID,
+    sync_request_id: uuid.UUID | None = None,
+) -> None:
     """Inline-mode cloud sync on a dedicated session, mirroring the Celery task.
 
     Runs detached on the API event loop (same tradeoff as other inline-mode
@@ -647,12 +683,32 @@ async def _run_cloud_sync_inline(connector_id: uuid.UUID, job_id: uuid.UUID) -> 
     try:
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
+            if sync_request_id:
+                from src.domain.sync_queue import mark_sync_request_running
+                await mark_sync_request_running(db, sync_request_id)
+            sync_request = await db.get(SyncRequest, sync_request_id) if sync_request_id else None
             connector = await db.get(ConnectorModel, connector_id)
             job = await db.get(ConnectorJobModel, job_id)
             if not connector or not job:
+                if sync_request_id:
+                    from src.domain.sync_queue import finish_sync_request
+                    await finish_sync_request(db, sync_request_id, success=False, error="Connector or job no longer exists", retryable=False)
                 return
-            await sync_cloud_connector(db, connector, job)
+            await sync_cloud_connector(
+                db,
+                connector,
+                job,
+                scope_id=sync_request.scope_id if sync_request else None,
+            )
+            if sync_request_id:
+                from src.domain.sync_queue import finish_sync_request
+                await finish_sync_request(db, sync_request_id, success=True)
     except Exception:
+        if sync_request_id:
+            from src.domain.sync_queue import finish_sync_request
+            async with SessionLocal() as error_db:
+                await set_database_context(error_db, None, True)
+                await finish_sync_request(error_db, sync_request_id, success=False, error="Inline connector sync failed")
         import structlog
 
         structlog.get_logger().exception(
@@ -660,7 +716,11 @@ async def _run_cloud_sync_inline(connector_id: uuid.UUID, job_id: uuid.UUID) -> 
         )
 
 
-def _dispatch_cloud_sync(connector_id: uuid.UUID, job_id: uuid.UUID) -> None:
+def _dispatch_cloud_sync(
+    connector_id: uuid.UUID,
+    job_id: uuid.UUID,
+    sync_request_id: uuid.UUID | None = None,
+) -> None:
     """Dispatch a queued cloud-sync job according to the deployment job mode.
 
     Calling Celery's .delay() without a broker raises and leaves the job row
@@ -669,9 +729,9 @@ def _dispatch_cloud_sync(connector_id: uuid.UUID, job_id: uuid.UUID) -> None:
     if settings.JOB_MODE == "celery":
         from src.workers.tasks import sync_cloud_connector_task
 
-        sync_cloud_connector_task.delay(str(connector_id), str(job_id))
+        sync_cloud_connector_task.delay(str(connector_id), str(job_id), str(sync_request_id) if sync_request_id else None)
     else:
-        asyncio.create_task(_run_cloud_sync_inline(connector_id, job_id))
+        asyncio.create_task(_run_cloud_sync_inline(connector_id, job_id, sync_request_id))
 
 
 @router.post("/{connector_id}/sync")
@@ -684,7 +744,7 @@ async def sync_connector(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
     if connector.system != "local_folder":
-        if not connector.oauth_access_token and not connector.oauth_refresh_token:
+        if settings.microsoft_connector_auth_mode != "application" and not connector.oauth_access_token and not connector.oauth_refresh_token:
             raise HTTPException(status_code=409, detail="Authorize the connector before syncing")
         active_job = (await db.execute(
             select(ConnectorJob)
@@ -700,11 +760,16 @@ async def sync_connector(
             active_job = None
         if active_job:
             return {"connector_id": str(connector.id), "job_id": str(active_job.id), "status": active_job.status, "last_sync": connector.last_sync, "already_running": True}
-        job = ConnectorJob(connector_id=connector.id, requested_by=current_user.id, status="queued", attempts=0)
-        db.add(job)
+        request = await enqueue_connector_sync(db, connector.id, reason="manual", requested_by=current_user.id, priority=10)
+        job = await db.get(ConnectorJob, request.job_id) if request.job_id else None
         await db.commit()
-        _dispatch_cloud_sync(connector.id, job.id)
-        return {"connector_id": str(connector.id), "job_id": str(job.id), "status": "queued", "last_sync": connector.last_sync}
+        if job and request.status == "queued":
+            request.status = "dispatched"
+            request.locked_at = datetime.utcnow()
+            request.attempts += 1
+            await db.commit()
+            _dispatch_cloud_sync(connector.id, job.id, request.id)
+        return {"connector_id": str(connector.id), "job_id": str(job.id) if job else None, "status": request.status, "last_sync": connector.last_sync}
     job = await sync_local_folder(db, connector, current_user.id)
     return {"connector_id": str(connector.id), "job_id": str(job.id), "status": job.status, "last_sync": connector.last_sync}
 
@@ -729,6 +794,57 @@ async def list_connector_jobs(
     for job in jobs:
         result.append(_job_response(job, await _legacy_job_summary(db, job)))
     return result
+
+
+@router.get("/{connector_id}/health")
+async def connector_health(
+    connector_id: uuid.UUID,
+    current_user: User = Depends(require_permission("connector.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Expose freshness, cursor, subscription and queue health for operations."""
+
+    connector = await _connector_for_user(db, connector_id, current_user)
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id))).scalars().all()
+    cursors = (await db.execute(select(SyncCursor).where(SyncCursor.connector_id == connector.id))).scalars().all()
+    subscriptions = (await db.execute(select(WebhookSubscription).where(WebhookSubscription.connector_id == connector.id))).scalars().all()
+    queued = int(await db.scalar(select(func.count(SyncRequest.id)).where(SyncRequest.connector_id == connector.id, SyncRequest.status.in_(("queued", "dispatched", "running")))) or 0)
+    notifications_24h = int(await db.scalar(select(func.count(ConnectorNotification.id)).where(ConnectorNotification.connector_id == connector.id, ConnectorNotification.received_at >= datetime.utcnow() - timedelta(hours=24))) or 0)
+    now = datetime.utcnow()
+    return {
+        "connector_id": str(connector.id),
+        "status": connector.status,
+        "last_sync": connector.last_sync,
+        "last_error": connector.last_error,
+        "queue_depth": queued,
+        "notifications_last_24h": notifications_24h,
+        "scopes": [
+            {
+                "id": str(scope.id),
+                "name": scope.display_name,
+                "cursor_status": next((cursor.status for cursor in cursors if cursor.scope_id == scope.id), "missing"),
+                "full_sync_required": next((cursor.full_sync_required for cursor in cursors if cursor.scope_id == scope.id), True),
+                "last_delta_success": next((cursor.last_success_at for cursor in cursors if cursor.scope_id == scope.id), None),
+                "last_error": next((cursor.last_error for cursor in cursors if cursor.scope_id == scope.id), None),
+            }
+            for scope in scopes
+        ],
+        "subscriptions": [
+            {
+                "id": str(subscription.id),
+                "provider_subscription_id": subscription.provider_subscription_id,
+                "active": subscription.active,
+                "expires_at": subscription.expires_at,
+                "seconds_to_expiry": int((subscription.expires_at - now).total_seconds()) if subscription.expires_at else None,
+                "reauthorization_required": subscription.reauthorization_required,
+                "last_notification_at": subscription.last_notification_at,
+                "last_error": subscription.last_error,
+            }
+            for subscription in subscriptions
+        ],
+    }
 
 
 @router.get("/{connector_id}/source-tree")
@@ -781,40 +897,116 @@ async def connector_readme(
     return {"connector_id": str(connector.id), "generated_at": datetime.utcnow(), "markdown": "\n".join(lines)}
 
 
-async def _enqueue_webhook(request: Request, provider: str) -> Response:
+async def _enqueue_webhook(request: Request, provider: str, lifecycle_only: bool = False) -> Response:
+    """Persist Graph/Drive notifications and enqueue one coalesced delta sync."""
+
     headers = request.headers
+    body: dict[str, Any] = {}
     subscription_id = headers.get("x-goog-channel-id") if provider == "google_drive" else None
     client_state = headers.get("x-goog-channel-token") if provider == "google_drive" else None
-    if not subscription_id:
-        # Webhook endpoints are public by design: cap the body before parsing so
-        # unsolicited payloads cannot consume unbounded memory. Real change
-        # notifications are a few KB; 1 MB is a generous ceiling.
-        content_length = headers.get("content-length")
-        if content_length and content_length.isdigit() and int(content_length) > 1_048_576:
-            return Response(status_code=202)
-        try:
-            payload = json.loads((await request.body())[:1_048_576])
-        except (ValueError, UnicodeDecodeError):
-            # Webhook endpoints are public by design. Malformed or unsolicited
-            # bodies must be harmless and must not turn into a 500 response.
-            return Response(status_code=202)
-        if not isinstance(payload, dict):
-            return Response(status_code=202)
-        values = payload.get("value")
-        first_value = values[0] if isinstance(values, list) and values and isinstance(values[0], dict) else {}
-        subscription_id = payload.get("subscriptionId") or first_value.get("subscriptionId")
-        client_state = client_state or payload.get("clientState") or first_value.get("clientState")
-    if subscription_id:
-        async with SessionLocal() as db_session:
-            await set_database_context(db_session, None, True)
-            subscription = (await db_session.execute(select(WebhookSubscription).where(WebhookSubscription.provider_subscription_id == subscription_id, WebhookSubscription.active.is_(True)))).scalar_one_or_none()
-            expected_token = subscription.verification_token_hash if subscription else None
-            received_token = hashlib.sha256(client_state.encode("utf-8")).hexdigest() if client_state else None
-            if subscription and expected_token and received_token and hmac.compare_digest(expected_token, received_token):
-                connector_job = ConnectorJob(connector_id=subscription.connector_id, status="queued", attempts=0)
-                db_session.add(connector_job)
-                await db_session.commit()
-                _dispatch_cloud_sync(subscription.connector_id, connector_job.id)
+    content_length = headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > 1_048_576:
+        return Response(status_code=202)
+    try:
+        raw = (await request.body())[:1_048_576]
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                body = parsed
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=202)
+
+    values = body.get("value") if isinstance(body.get("value"), list) else []
+    if not values:
+        values = [body] if body else [{
+            "subscriptionId": subscription_id,
+            "clientState": client_state,
+            "changeType": headers.get("x-goog-resource-state"),
+        }]
+
+    dispatches: dict[tuple[uuid.UUID, uuid.UUID, uuid.UUID], None] = {}
+    async with SessionLocal() as db_session:
+        await set_database_context(db_session, None, True)
+        for raw_item in values:
+            item = raw_item if isinstance(raw_item, dict) else {}
+            item_subscription_id = str(item.get("subscriptionId") or body.get("subscriptionId") or subscription_id or "")
+            item_client_state = str(item.get("clientState") or body.get("clientState") or client_state or "")
+            if not item_subscription_id:
+                continue
+            subscription = (
+                await db_session.execute(
+                    select(WebhookSubscription).where(
+                        WebhookSubscription.provider_subscription_id == item_subscription_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if not subscription or not subscription.active:
+                continue
+            expected_token = subscription.verification_token_hash
+            received_token = hashlib.sha256(item_client_state.encode("utf-8")).hexdigest() if item_client_state else None
+            if expected_token and (not received_token or not hmac.compare_digest(expected_token, received_token)):
+                continue
+
+            lifecycle_event = str(item.get("lifecycleEvent") or body.get("lifecycleEvent") or "") or None
+            if lifecycle_only and not lifecycle_event:
+                # The lifecycle URL only ever carries lifecycle events. Anything else
+                # arriving here is unsolicited and must not queue provider work.
+                lifecycle_event = "unknown"
+            change_type = str(item.get("changeType") or body.get("changeType") or "") or None
+            payload_hash = hashlib.sha256(
+                json.dumps({"provider": provider, "subscription": item_subscription_id, "item": item}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            existing = (
+                await db_session.execute(
+                    select(ConnectorNotification.id).where(
+                        ConnectorNotification.provider == provider,
+                        ConnectorNotification.subscription_id == item_subscription_id,
+                        ConnectorNotification.payload_hash == payload_hash,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing:
+                continue
+            notification = ConnectorNotification(
+                connector_id=subscription.connector_id,
+                scope_id=subscription.scope_id,
+                provider=provider,
+                subscription_id=item_subscription_id,
+                payload_hash=payload_hash,
+                resource=item.get("resource"),
+                change_type=change_type,
+                lifecycle_event=lifecycle_event,
+                payload=item,
+                status="received",
+            )
+            db_session.add(notification)
+            now = datetime.utcnow()
+            if lifecycle_event:
+                notification.status = "processed"
+                notification.processed_at = now
+                subscription.last_lifecycle_at = now
+                if lifecycle_event == "reauthorizationRequired":
+                    subscription.reauthorization_required = True
+                    subscription.last_error = "Microsoft Graph requires connector reauthorization"
+                continue
+            subscription.last_notification_at = now
+            notification.status = "queued"
+            sync_request = await enqueue_connector_sync(
+                db_session,
+                subscription.connector_id,
+                scope_id=subscription.scope_id,
+                reason="webhook",
+                priority=10,
+            )
+            if sync_request.job_id and sync_request.status == "queued":
+                sync_request.status = "dispatched"
+                sync_request.locked_at = datetime.utcnow()
+                sync_request.attempts += 1
+                dispatches[(subscription.connector_id, sync_request.job_id, sync_request.id)] = None
+        await db_session.commit()
+
+    for connector_id, job_id, sync_request_id in dispatches:
+        _dispatch_cloud_sync(connector_id, job_id, sync_request_id)
     return Response(status_code=202)
 
 
@@ -825,6 +1017,28 @@ async def sharepoint_webhook(request: Request, validationToken: str | None = Que
     return await _enqueue_webhook(request, "sharepoint")
 
 
+@router.post("/webhooks/sharepoint/lifecycle")
+async def sharepoint_lifecycle_webhook(
+    request: Request, validationToken: str | None = Query(default=None)
+) -> Response:
+    # Graph validates the lifecycleNotificationUrl exactly as it validates the
+    # notificationUrl: it POSTs a validationToken while CREATING the subscription and
+    # expects it echoed back as text/plain. Without this the whole POST /subscriptions
+    # call fails, so enabling update notifications fails for every SharePoint scope.
+    if validationToken:
+        return Response(content=validationToken, media_type="text/plain")
+    return await _enqueue_webhook(request, "sharepoint", lifecycle_only=True)
+
+
 @router.post("/webhooks/google-drive")
 async def google_drive_webhook(request: Request) -> Response:
     return await _enqueue_webhook(request, "google_drive")
+
+
+@router.post("/webhooks/google-drive/lifecycle")
+async def google_drive_lifecycle_webhook(
+    request: Request, validationToken: str | None = Query(default=None)
+) -> Response:
+    if validationToken:
+        return Response(content=validationToken, media_type="text/plain")
+    return await _enqueue_webhook(request, "google_drive", lifecycle_only=True)

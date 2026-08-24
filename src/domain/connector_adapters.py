@@ -157,6 +157,12 @@ class ConnectorAdapter:
     async def discover_scopes(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    # Whether calling incremental_changes with NO cursor enumerates the entire scope.
+    # Only then may "absent from the result" be read as "gone at the provider", which is
+    # what the reconciliation sweep in cloud_sync does. Default False: a provider that
+    # cannot enumerate must never have its corpus deleted for being unmentioned.
+    full_walk_is_authoritative = False
+
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         raise NotImplementedError
 
@@ -166,7 +172,12 @@ class ConnectorAdapter:
     async def download(self, change: NormalizedChange) -> bytes:
         raise NotImplementedError
 
-    async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
+    async def create_webhook(
+        self,
+        scope: dict[str, Any],
+        callback_url: str,
+        lifecycle_callback_url: str | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     async def renew_webhook(self, provider_subscription_id: str) -> datetime | None:
@@ -183,6 +194,9 @@ class SharePointAdapter(ConnectorAdapter):
     provider = "sharepoint"
     graph = "https://graph.microsoft.com/v1.0"
     allowed_api_hosts = frozenset({"graph.microsoft.com"})
+    # A /delta called without a token replays the drive (or folder subtree) from empty
+    # and pages to the end, so the result is the full current state of the scope.
+    full_walk_is_authoritative = True
 
     def oauth_url(self, state: str) -> str:
         params = {
@@ -213,10 +227,23 @@ class SharePointAdapter(ConnectorAdapter):
             return response.json()
 
     async def refresh_token(self) -> dict[str, Any]:
-        refresh = decrypt_secret(self.connector.oauth_refresh_token)
-        if not refresh:
-            raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
         async with httpx.AsyncClient(timeout=30.0) as client:
+            if settings.microsoft_connector_auth_mode == "application":
+                response = await client.post(
+                    f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                    data={
+                        "client_id": settings.MICROSOFT_CLIENT_ID,
+                        "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                        "grant_type": "client_credentials",
+                        "scope": settings.MICROSOFT_GRAPH_SCOPE,
+                    },
+                )
+                if response.status_code >= 400:
+                    raise ConnectorProviderError("Microsoft application token request failed", retryable=False, code=str(response.status_code))
+                return response.json()
+            refresh = decrypt_secret(self.connector.oauth_refresh_token)
+            if not refresh:
+                raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
             response = await client.post(
                 f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
                 data={"client_id": settings.MICROSOFT_CLIENT_ID, "client_secret": settings.MICROSOFT_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh, "scope": "offline_access openid profile User.Read Files.Read.All Sites.Read.All"},
@@ -229,8 +256,32 @@ class SharePointAdapter(ConnectorAdapter):
         # ``/drives`` often returns only a generic library such as
         # "Documents". Resolve SharePoint sites first so reviewers can see the
         # real site/library/folder location instead of guessing where it lives.
-        sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
-        sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
+        auth_mode = settings.microsoft_connector_auth_mode
+        configured_site_ids = [
+            value.strip() for value in settings.MICROSOFT_SHAREPOINT_SITE_IDS.split(",") if value.strip()
+        ]
+        configured_user_ids = [
+            value.strip() for value in settings.MICROSOFT_ONEDRIVE_USER_IDS.split(",") if value.strip()
+        ]
+        if auth_mode == "application" and not configured_site_ids and not configured_user_ids:
+            raise ConnectorProviderError(
+                "Application mode requires MICROSOFT_SHAREPOINT_SITE_IDS or MICROSOFT_ONEDRIVE_USER_IDS",
+                retryable=False,
+                code="scope_allowlist_required",
+            )
+        if configured_site_ids:
+            site_values: list[dict[str, Any]] = []
+            for site_id in configured_site_ids:
+                site_values.append(await self._request(
+                    "GET",
+                    f"{self.graph}/sites/{quote(site_id, safe='')}?$select=id,name,displayName,webUrl",
+                ))
+            sites = site_values
+        elif auth_mode == "application":
+            sites = []
+        else:
+            sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
+            sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
         result: list[dict[str, Any]] = []
 
         for site in sites:
@@ -283,6 +334,49 @@ class SharePointAdapter(ConnectorAdapter):
                             },
                         })
 
+        for user_id in configured_user_ids:
+            drive = await self._request(
+                "GET",
+                f"{self.graph}/users/{quote(user_id, safe='')}/drive?$select=id,name,driveType,webUrl",
+            )
+            drive_id = str(drive.get("id") or "") if isinstance(drive, dict) else ""
+            if not drive_id:
+                continue
+            drive_name = str(drive.get("name") or "OneDrive")
+            location = f"OneDrive / {user_id} / {drive_name}"
+            result.append({
+                "external_scope_id": drive_id,
+                "scope_type": "onedrive_drive",
+                "display_name": location,
+                "config": {
+                    "drive_id": drive_id,
+                    "drive_name": drive_name,
+                    "user_id": user_id,
+                    "web_url": drive.get("webUrl"),
+                    "location_label": location,
+                },
+            })
+            folders = await self._request(
+                "GET",
+                f"{self.graph}/drives/{quote(drive_id, safe='')}/root/children?$select=id,name,folder,webUrl",
+            )
+            for folder in folders.get("value", []):  # type: ignore[union-attr]
+                if folder.get("folder"):
+                    folder_name = str(folder.get("name") or folder.get("id"))
+                    result.append({
+                        "external_scope_id": f"{drive_id}:{folder['id']}",
+                        "scope_type": "onedrive_folder",
+                        "display_name": f"{location} / {folder_name}",
+                        "config": {
+                            "drive_id": drive_id,
+                            "drive_name": drive_name,
+                            "user_id": user_id,
+                            "folder_id": folder["id"],
+                            "web_url": folder.get("webUrl") or drive.get("webUrl"),
+                            "location_label": f"{location} / {folder_name}",
+                        },
+                    })
+
         if result:
             return result
 
@@ -301,23 +395,37 @@ class SharePointAdapter(ConnectorAdapter):
                     result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "sharepoint_folder", "display_name": f"{location} / {folder_name}", "config": {"drive_id": drive_id, "folder_id": folder["id"], "web_url": folder.get("webUrl") or item.get("webUrl"), "location_label": f"{location} / {folder_name}"}})
         return result
 
-    async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
+    async def create_webhook(
+        self,
+        scope: dict[str, Any],
+        callback_url: str,
+        lifecycle_callback_url: str | None = None,
+    ) -> dict[str, Any]:
         client_state = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(hours=1)
-        result = await self._request("POST", f"{self.graph}/subscriptions", json={
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES)
+        payload: dict[str, Any] = {
             "changeType": "updated",
             "notificationUrl": callback_url,
             "resource": f"/drives/{scope['config'].get('drive_id', scope['external_scope_id'])}/root",
             "expirationDateTime": expires_at.isoformat(timespec="seconds") + "Z",
             "clientState": client_state,
-        })
-        return {"subscription_id": result["id"], "client_state": client_state, "expires_at": expires_at}  # type: ignore[index]
+        }
+        if lifecycle_callback_url:
+            payload["lifecycleNotificationUrl"] = lifecycle_callback_url
+        result = await self._request("POST", f"{self.graph}/subscriptions", json=payload)
+        return {
+            "subscription_id": result["id"],
+            "client_state": client_state,
+            "expires_at": expires_at,
+            "resource": payload["resource"],
+            "lifecycle_notification_url": lifecycle_callback_url,
+        }  # type: ignore[index]
 
     async def renew_webhook(self, provider_subscription_id: str) -> datetime | None:
         # Graph caps a drive subscription at roughly 30 days but rejects anything beyond
         # its own maximum, so this asks for the same hour create_webhook does and leans on
         # the renewal task running far more often than that.
-        expires_at = datetime.utcnow() + timedelta(hours=1)
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES)
         await self._request(
             "PATCH",
             f"{self.graph}/subscriptions/{provider_subscription_id}",
@@ -375,6 +483,12 @@ class GoogleDriveAdapter(ConnectorAdapter):
     provider = "google_drive"
     api = "https://www.googleapis.com/drive/v3"
     allowed_api_hosts = frozenset({"www.googleapis.com"})
+    # DELIBERATELY False. With no cursor this adapter asks for startPageToken and pages
+    # from there — changes from NOW ON — so a cursor-less call returns almost nothing.
+    # It is not an enumeration, and treating it as one would delete the whole indexed
+    # corpus of every Drive scope on each reconciliation pass. A real full walk here
+    # means files.list, which this adapter does not implement.
+    full_walk_is_authoritative = False
 
     def oauth_url(self, state: str) -> str:
         params = {"client_id": settings.GOOGLE_CLIENT_ID or "", "redirect_uri": settings.GOOGLE_REDIRECT_URI or "", "response_type": "code", "access_type": "offline", "prompt": "consent", "scope": "https://www.googleapis.com/auth/drive.readonly openid email profile", "state": state}
@@ -428,7 +542,12 @@ class GoogleDriveAdapter(ConnectorAdapter):
                     break
         return result
 
-    async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
+    async def create_webhook(
+        self,
+        scope: dict[str, Any],
+        callback_url: str,
+        lifecycle_callback_url: str | None = None,
+    ) -> dict[str, Any]:
         config = scope["config"]
         start = await self._request("GET", f"{self.api}/changes/startPageToken" + (f"?driveId={config['drive_id']}&supportsAllDrives=true" if config.get("drive_id") else ""))
         channel_id = str(uuid.uuid4())

@@ -12,7 +12,8 @@ from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.domain.permissions import PermissionService
 from src.core.config import settings
-from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue
+from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue, ConnectorJob, Connector
+from src.models.connectors import SyncRequest
 from src.models.governance import PendingDraft
 from src.models.user import User
 from src.services.email import get_email_sender
@@ -604,20 +605,50 @@ def delete_article_chunks_task(article_id_str: str):
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
 )
-def sync_cloud_connector_task(connector_id_str: str, job_id_str: str):
+def sync_cloud_connector_task(connector_id_str: str, job_id_str: str, sync_request_id_str: str | None = None):
     """Run an idempotent provider delta sync from a durable cursor."""
 
     async def process():
         from src.domain.cloud_sync import sync_cloud_connector
-        from src.models.ops import Connector, ConnectorJob
+        from src.domain.sync_queue import finish_sync_request, mark_sync_request_running
 
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
+            sync_request_id = uuid.UUID(sync_request_id_str) if sync_request_id_str else None
+            if sync_request_id:
+                await mark_sync_request_running(db, sync_request_id)
+            sync_request = await db.get(SyncRequest, sync_request_id) if sync_request_id else None
             connector = await db.get(Connector, uuid.UUID(connector_id_str))
             job = await db.get(ConnectorJob, uuid.UUID(job_id_str))
             if not connector or not job:
+                if sync_request_id:
+                    await finish_sync_request(
+                        db,
+                        sync_request_id,
+                        success=False,
+                        error="Connector or job no longer exists",
+                        retryable=False,
+                    )
                 return
-            await sync_cloud_connector(db, connector, job)
+            try:
+                await sync_cloud_connector(
+                    db,
+                    connector,
+                    job,
+                    scope_id=sync_request.scope_id if sync_request else None,
+                )
+            except Exception as exc:
+                if sync_request_id:
+                    await finish_sync_request(
+                        db,
+                        sync_request_id,
+                        success=False,
+                        error=str(exc),
+                        retryable=bool(getattr(exc, "retryable", True)),
+                    )
+                raise
+            if sync_request_id:
+                await finish_sync_request(db, sync_request_id, success=True)
 
     sync_run(process())
 
@@ -628,7 +659,7 @@ def schedule_cloud_connector_syncs():
 
     async def process():
         from datetime import timedelta
-        from src.models.ops import Connector, ConnectorJob
+        from src.domain.sync_queue import claim_sync_request, enqueue_connector_sync
         from src.models.connectors import SourceScope
 
         async with SessionLocal() as db:
@@ -669,27 +700,124 @@ def schedule_cloud_connector_syncs():
                 ).scalar_one_or_none()
                 if not selected:
                     continue
-                recent = (
-                    await db.execute(
-                        select(ConnectorJob.id)
-                        .where(
-                            ConnectorJob.connector_id == connector.id,
-                            ConnectorJob.status.in_(["queued", "running"]),
-                        )
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
-                if recent:
-                    continue
-                job = ConnectorJob(
-                    connector_id=connector.id,
+                request = await enqueue_connector_sync(
+                    db,
+                    connector.id,
+                    reason="polling",
                     requested_by=connector.created_by,
-                    status="queued",
-                    attempts=0,
+                    priority=50,
                 )
-                db.add(job)
                 await db.commit()
-                sync_cloud_connector_task.delay(str(connector.id), str(job.id))
+                # Claim before dispatching. Handing an unclaimed request to Celery left
+                # it in "queued", so dispatch_pending_sync_requests picked the same row
+                # up and ran a second, concurrent sync of the same connector. None means
+                # the dispatcher got there first, which is equally fine.
+                claimed = await claim_sync_request(db, request.id)
+                if claimed and claimed.job_id:
+                    sync_cloud_connector_task.delay(
+                        str(connector.id), str(claimed.job_id), str(claimed.id)
+                    )
+
+    sync_run(process())
+
+
+@celery_app.task(name="reconcile_cloud_connectors")
+def reconcile_cloud_connectors():
+    """Force a complete provider walk on a bounded cadence.
+
+    Webhooks and delta cursors are the fast path. This pass is the safety net
+    for missed notifications, expired delta state, moves, and provider outages.
+    """
+
+    async def process():
+        from src.domain.sync_queue import enqueue_connector_sync
+        from src.models.connectors import SourceScope, SyncCursor
+
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            connectors = (
+                await db.execute(
+                    select(Connector).where(
+                        Connector.system.in_(["sharepoint", "google_drive"]),
+                        Connector.status.in_(["active", "error"]),
+                    )
+                )
+            ).scalars().all()
+            for connector in connectors:
+                selected_scopes = (
+                    await db.execute(
+                        select(SourceScope).where(
+                            SourceScope.connector_id == connector.id,
+                            SourceScope.selected.is_(True),
+                        )
+                    )
+                ).scalars().all()
+                for scope in selected_scopes:
+                    cursor = (
+                        await db.execute(
+                            select(SyncCursor).where(
+                                SyncCursor.connector_id == connector.id,
+                                SyncCursor.scope_id == scope.id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if cursor is None:
+                        cursor = SyncCursor(
+                            connector_id=connector.id,
+                            scope_id=scope.id,
+                            cursor_type="delta" if connector.system == "sharepoint" else "changes",
+                        )
+                        db.add(cursor)
+                    cursor.full_sync_required = True
+                    cursor.status = "reconcile"
+                    request = await enqueue_connector_sync(
+                        db,
+                        connector.id,
+                        scope_id=scope.id,
+                        reason="reconcile",
+                        requested_by=connector.created_by,
+                        priority=40,
+                    )
+                    # Deliberately not dispatched here: dispatch_pending_sync_requests
+                    # claims it under a row lock. The commit below only has to make the
+                    # cursor flag and the coalesced request durable.
+            await db.commit()
+
+    sync_run(process())
+
+
+@celery_app.task(name="dispatch_pending_sync_requests")
+def dispatch_pending_sync_requests():
+    """Recover webhook requests that were persisted before a process restart."""
+
+    async def process():
+        from src.domain.sync_queue import claim_sync_request, recover_stale_sync_requests
+
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            await recover_stale_sync_requests(db)
+            request_ids = (
+                await db.execute(
+                    select(SyncRequest.id)
+                    .where(
+                        SyncRequest.status == "queued",
+                        SyncRequest.available_at <= datetime.utcnow(),
+                    )
+                    .order_by(SyncRequest.priority.asc(), SyncRequest.created_at.asc())
+                    .limit(25)
+                )
+            ).scalars().all()
+        for request_id in request_ids:
+            async with SessionLocal() as claim_db:
+                await set_database_context(claim_db, None, True)
+                claimed = await claim_sync_request(claim_db, request_id)
+                if not claimed or not claimed.job_id:
+                    continue
+                sync_cloud_connector_task.delay(
+                    str(claimed.connector_id),
+                    str(claimed.job_id),
+                    str(claimed.id),
+                )
 
     sync_run(process())
 

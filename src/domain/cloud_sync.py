@@ -13,12 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
-from src.core.secrets import encrypt_secret
 from src.domain.connector_adapters import (
     ConnectorProviderError,
     NormalizedChange,
     adapter_for,
 )
+from src.domain.connector_auth import ensure_connector_authorized
 from src.domain.events import event_bus
 from src.domain.source_extraction import extract_source_markdown, extract_source_pages
 from src.domain.source_storage import delete_source, save_source
@@ -41,18 +41,47 @@ from src.models.governance import (
     DraftCandidate,
     AuditLog,
 )
-from src.models.user import User
+from src.models.user import Department, User
 from src.models.ops import Connector, ConnectorJob
 from src.repositories.governance import GovernanceRepository
 from src.repositories.article import ArticleRepository
 from src.domain.governance import GovernanceService
-from src.domain.document_splitter import split_document_candidates
+from src.domain.department_routing import route_document_candidates
+
+
+async def _routed_candidate_items(
+    db: AsyncSession, connector: Connector, title: str, text: str
+) -> list[dict]:
+    """Add deterministic department suggestions to every connector draft."""
+
+    departments = (
+        await db.execute(
+            select(Department).where(
+                Department.company_domain == connector.company_domain,
+                Department.active.is_(True),
+            )
+        )
+    ).scalars().all()
+    return route_document_candidates(title, text, departments)
 
 
 async def _persist_connector_draft(
     db: AsyncSession, connector: Connector, draft: PendingDraft, text: str
 ) -> None:
     """Persist connector input as Draft, then submit through the same workflow."""
+    publication_mode = settings.CONNECTOR_AUTO_PUBLISH_MODE.strip().lower()
+    if publication_mode != "governed":
+        raise ConnectorProviderError(
+            "CONNECTOR_AUTO_PUBLISH_MODE currently supports only governed publication",
+            retryable=False,
+            code="unsupported_publication_mode",
+        )
+    draft.content_metadata = {
+        **(draft.content_metadata or {}),
+        "connector_publication_mode": publication_mode,
+        "connector_id": str(connector.id),
+        "connector_name": connector.name,
+    }
     db.add(draft)
     await db.flush()
     db.add(
@@ -65,7 +94,7 @@ async def _persist_connector_draft(
             outcome="applied",
         )
     )
-    for item in split_document_candidates(draft.title, text, page_texts=draft.page_texts):
+    for item in await _routed_candidate_items(db, connector, draft.title, text):
         db.add(DraftCandidate(draft_id=draft.id, **item))
     actor = await db.get(User, draft.created_by) if draft.created_by else None
     if actor:
@@ -125,7 +154,17 @@ async def _replace_split_candidates(
 ) -> None:
     """Keep an existing pending connector draft aligned with its new source text."""
     await db.execute(delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id))
-    for item in split_document_candidates(draft.title, text, page_texts=draft.page_texts):
+    # The caller's connector is not stored on PendingDraft, so route using the
+    # tenant key from the draft and keep the helper provider-independent.
+    departments = (
+        await db.execute(
+            select(Department).where(
+                Department.company_domain == draft.company_domain,
+                Department.active.is_(True),
+            )
+        )
+    ).scalars().all()
+    for item in route_document_candidates(draft.title, text, departments):
         db.add(DraftCandidate(draft_id=draft.id, **item))
 
 
@@ -880,31 +919,20 @@ async def _ingest_content(
 
 
 async def sync_cloud_connector(
-    db: AsyncSession, connector: Connector, job: ConnectorJob
+    db: AsyncSession,
+    connector: Connector,
+    job: ConnectorJob,
+    scope_id: uuid.UUID | None = None,
 ) -> None:
     adapter = adapter_for(connector)
-    if connector.oauth_expires_at and connector.oauth_expires_at <= datetime.utcnow():
-        tokens = await adapter.refresh_token()
-        connector.oauth_access_token = encrypt_secret(tokens.get("access_token"))
-        connector.oauth_refresh_token = (
-            encrypt_secret(tokens.get("refresh_token")) or connector.oauth_refresh_token
-        )
-        connector.oauth_expires_at = datetime.utcnow() + timedelta(
-            seconds=int(tokens.get("expires_in", 3600))
-        )
-        await db.commit()
-    scopes = (
-        (
-            await db.execute(
-                select(SourceScope).where(
-                    SourceScope.connector_id == connector.id,
-                    SourceScope.selected.is_(True),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    await ensure_connector_authorized(db, connector)
+    scope_query = select(SourceScope).where(
+        SourceScope.connector_id == connector.id,
+        SourceScope.selected.is_(True),
     )
+    if scope_id is not None:
+        scope_query = scope_query.where(SourceScope.id == scope_id)
+    scopes = (await db.execute(scope_query)).scalars().all()
     if not scopes:
         raise ConnectorProviderError(
             "No connector scopes are selected", retryable=False, code="no_scopes"
@@ -945,14 +973,50 @@ async def sync_cloud_connector(
                     )
                 )
             ).scalar_one_or_none()
-            cursor = cursor_row.cursor_value if cursor_row else None
-            changes, next_cursor = await adapter.incremental_changes(
-                {
-                    "external_scope_id": scope.external_scope_id,
-                    "config": scope.config_json or {},
-                },
-                cursor,
+            reconciliation_requested = not cursor_row or bool(cursor_row.full_sync_required)
+            # A sweep may only conclude "absent means deleted" from a walk that actually
+            # enumerates the scope. Google's changes feed does not: with no cursor it
+            # starts at startPageToken and reports changes from NOW on, so reading its
+            # near-empty result as the full corpus would delete every indexed document
+            # on every reconciliation pass.
+            was_full_reconciliation = (
+                reconciliation_requested and adapter.full_walk_is_authoritative
             )
+            # And such a provider keeps its cursor: discarding it to "start over" asks for
+            # changes since now and silently skips everything since the last run.
+            cursor = (
+                None
+                if was_full_reconciliation
+                else (cursor_row.cursor_value if cursor_row else None)
+            )
+            try:
+                changes, next_cursor = await adapter.incremental_changes(
+                    {
+                        "external_scope_id": scope.external_scope_id,
+                        "config": scope.config_json or {},
+                    },
+                    cursor,
+                )
+            except ConnectorProviderError as exc:
+                if str(exc.code or "") in {"410", "resync_required", "sync_state_not_found", "invalid_delta"}:
+                    if cursor_row is None:
+                        cursor_row = SyncCursor(
+                            connector_id=connector.id,
+                            scope_id=scope.id,
+                            cursor_type=("delta" if connector.system == "sharepoint" else "changes"),
+                        )
+                        db.add(cursor_row)
+                    cursor_row.cursor_value = None
+                    cursor_row.status = "invalid"
+                    cursor_row.full_sync_required = True
+                    cursor_row.last_error = str(exc)[:2000]
+                    await db.commit()
+                    raise ConnectorProviderError(
+                        "Provider delta state expired; a full reconciliation has been scheduled",
+                        retryable=True,
+                        code="resync_required",
+                    ) from exc
+                raise
             for change in changes:
                 summary["changes_seen"] = int(summary["changes_seen"]) + 1
                 scope_summary["changes"] = int(scope_summary["changes"]) + 1
@@ -1054,6 +1118,34 @@ async def sync_cloud_connector(
                             "web_url": change.web_url,
                         }
                     )
+            # `changes` must be non-empty: a full walk of a scope that holds indexed
+            # documents always reports them, so an empty result means the walk did not
+            # happen (a truncated page, a revoked scope) rather than an empty drive.
+            if was_full_reconciliation and changes:
+                # A full delta walk is authoritative for the selected scope.
+                # Items absent from it were removed or are no longer visible;
+                # mark them deleted so stale KB articles cannot survive forever.
+                seen_external_ids = {change.external_id for change in changes}
+                existing_documents = (
+                    await db.execute(
+                        select(ExternalDocument).where(
+                            ExternalDocument.connector_id == connector.id,
+                            ExternalDocument.scope_id == scope.id,
+                            ExternalDocument.state != "deleted",
+                        )
+                    )
+                ).scalars().all()
+                for stale_document in existing_documents:
+                    if stale_document.external_id in seen_external_ids:
+                        continue
+                    stale_keys, stale_article_id = await _handle_deleted_document(
+                        db, stale_document, audit_actor_id
+                    )
+                    cleanup_keys.extend(stale_keys)
+                    if stale_article_id:
+                        await event_bus.publish(
+                            "ArticleDeleted", {"article_id": str(stale_article_id)}
+                        )
             if cursor_row is None:
                 cursor_row = SyncCursor(
                     connector_id=connector.id,
@@ -1065,6 +1157,16 @@ async def sync_cloud_connector(
                 db.add(cursor_row)
             cursor_row.cursor_value = next_cursor or cursor_row.cursor_value
             cursor_row.last_success_at = datetime.utcnow()
+            cursor_row.status = "ready"
+            cursor_row.full_sync_required = False
+            # Stamped when a reconciliation pass RAN, not only when the provider could
+            # walk authoritatively. The inline dispatcher throttles on this field, so
+            # leaving it NULL for a provider that cannot enumerate makes it re-enqueue
+            # that scope on every tick.
+            cursor_row.last_reconcile_at = (
+                datetime.utcnow() if reconciliation_requested else cursor_row.last_reconcile_at
+            )
+            cursor_row.last_error = None
             job.summary_json = summary
             await db.commit()
             await _cleanup_unreferenced_source_keys(db, cleanup_keys)

@@ -3,6 +3,7 @@ import asyncio
 import re
 import time
 import uuid
+from datetime import datetime, timedelta
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +29,7 @@ from src.models.chunk import ArticleChunk
 from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
 from src.core.tracing import configure_tracing, get_tracer, trace
-from src.lib.embeddings import OnnxEmbeddingModelSingleton
+from src.lib.embeddings import warm_up as warm_up_embeddings
 import structlog
 
 logger = structlog.get_logger()
@@ -36,9 +37,9 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 
 async def _preload_embedding_model() -> None:
-    """Warm ONNX weights without preventing the API from becoming healthy."""
+    """Warm the configured embedding backend without blocking API readiness."""
     try:
-        await asyncio.to_thread(OnnxEmbeddingModelSingleton.get_model)
+        await asyncio.to_thread(warm_up_embeddings)
     except Exception as exc:
         logger.warning(
             "Embedding model preload failed; keyword search remains available",
@@ -244,13 +245,111 @@ async def _inline_outbox_recovery_loop() -> None:
             logger.exception("Inline outbox recovery pass failed")
 
 
+async def _inline_connector_sync_dispatch_loop() -> None:
+    """Durably dispatch queued connector work when Celery is not enabled."""
+
+    from src.domain.sync_queue import claim_sync_request, recover_stale_sync_requests
+    from src.domain.sync_queue import enqueue_connector_sync
+    from src.models.connectors import SourceScope, SyncCursor, SyncRequest
+    from src.models.ops import Connector
+
+    while True:
+        await asyncio.sleep(settings.CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS)
+        try:
+            async with SessionLocal() as db:
+                await set_database_context(db, None, True)
+                await recover_stale_sync_requests(db)
+                # Compared as datetimes. `utcnow().timestamp()` reads a naive UTC value
+                # as local time, so the arithmetic shifted by the UTC offset and moved
+                # again across a DST boundary.
+                reconcile_cutoff = datetime.utcnow() - timedelta(
+                    minutes=settings.CONNECTOR_RECONCILE_INTERVAL_MINUTES
+                )
+                connectors = (
+                    await db.execute(
+                        select(Connector).where(
+                            Connector.system.in_(["sharepoint", "google_drive"]),
+                            Connector.status.in_(["active", "error"]),
+                        )
+                    )
+                ).scalars().all()
+                for connector in connectors:
+                    scopes = (
+                        await db.execute(
+                            select(SourceScope).where(
+                                SourceScope.connector_id == connector.id,
+                                SourceScope.selected.is_(True),
+                            )
+                        )
+                    ).scalars().all()
+                    for scope in scopes:
+                        cursor = (
+                            await db.execute(
+                                select(SyncCursor).where(
+                                    SyncCursor.connector_id == connector.id,
+                                    SyncCursor.scope_id == scope.id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if cursor and cursor.last_reconcile_at and cursor.last_reconcile_at > reconcile_cutoff:
+                            continue
+                        if cursor is None:
+                            cursor = SyncCursor(
+                                connector_id=connector.id,
+                                scope_id=scope.id,
+                                cursor_type="delta" if connector.system == "sharepoint" else "changes",
+                            )
+                            db.add(cursor)
+                        cursor.full_sync_required = True
+                        cursor.status = "reconcile"
+                        await enqueue_connector_sync(
+                            db,
+                            connector.id,
+                            scope_id=scope.id,
+                            reason="reconcile",
+                            requested_by=connector.created_by,
+                            priority=40,
+                        )
+                await db.commit()
+                request_ids = (
+                    await db.execute(
+                        select(SyncRequest.id)
+                        .where(
+                            SyncRequest.status == "queued",
+                            SyncRequest.available_at <= datetime.utcnow(),
+                        )
+                        .order_by(SyncRequest.priority.asc(), SyncRequest.created_at.asc())
+                        .limit(25)
+                    )
+                ).scalars().all()
+            from src.api.routers.connectors import _run_cloud_sync_inline
+            for request_id in request_ids:
+                async with SessionLocal() as claim_db:
+                    await set_database_context(claim_db, None, True)
+                    request = await claim_sync_request(claim_db, request_id)
+                if request and request.job_id:
+                    asyncio.create_task(
+                        _run_cloud_sync_inline(
+                            request.connector_id,
+                            request.job_id,
+                            request.id,
+                        )
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Inline connector dispatch pass failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Database migrations/readiness must complete before serving traffic.
     await initialize_resources()
     recovery_task: asyncio.Task | None = None
+    connector_dispatch_task: asyncio.Task | None = None
     if settings.JOB_MODE.lower() != "celery":
         recovery_task = asyncio.create_task(_inline_outbox_recovery_loop())
+        connector_dispatch_task = asyncio.create_task(_inline_connector_sync_dispatch_loop())
     try:
         yield
     finally:
@@ -258,6 +357,12 @@ async def lifespan(app: FastAPI):
             recovery_task.cancel()
             try:
                 await recovery_task
+            except asyncio.CancelledError:
+                pass
+        if connector_dispatch_task:
+            connector_dispatch_task.cancel()
+            try:
+                await connector_dispatch_task
             except asyncio.CancelledError:
                 pass
 
@@ -320,7 +425,12 @@ async def request_logging_middleware(request, call_next):
             round((time.perf_counter() - started) * 1000, 2),
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        # setdefault, not assignment: this used to overwrite whatever the endpoint had
+        # chosen, so `/articles/{id}/source` could not opt in to being framed by our own
+        # source viewer no matter what it set — DENY blocks an iframe even same-origin,
+        # and the citation preview was blocked in the browser. Everything else still
+        # gets DENY, because nothing else has any business being framed.
+        response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = (
             "camera=(), microphone=(), geolocation=()"
