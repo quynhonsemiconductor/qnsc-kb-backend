@@ -13,6 +13,7 @@ import structlog
 
 from src.api.deps import SessionLocal, get_current_user, get_db, set_database_context
 from src.domain.ai_service import AIService, normalize_answer_markdown
+from src.rag.answer_sections import strip_source_metadata
 from src.domain.search_service import SearchService
 from src.domain.rbac import AuthorizationService
 from src.models import User
@@ -308,8 +309,12 @@ async def get_conversation_messages(
             for marker in (_historical_source_id(item) for item in raw_citations)
             if marker
         }
+        # Stripped before markers are read: an owner email inside a stored provenance
+        # blob ("owner: c4@example.com") would otherwise count as a citation to C4 and
+        # make a healthy answer look like it cited a source it never did.
+        grounded_text = strip_source_metadata(message.grounded_content or message.content)
         answer_markers = (
-            set(extract_citation_ids(message.grounded_content or message.content))
+            set(extract_citation_ids(grounded_text))
             if message.role == "assistant"
             else set()
         )
@@ -335,17 +340,17 @@ async def get_conversation_messages(
                 "content": (
                     "This historical answer is no longer available because your access to one or more source documents changed."
                     if message.role == "assistant" and inaccessible_source
-                    else normalize_answer_markdown(message.content)
+                    else strip_source_metadata(normalize_answer_markdown(message.content))
                 ),
                 # Do not leave the original answer in a secondary field after a
                 # cited source has become unauthorized.
                 "answer_grounded": (
-                    (message.grounded_content or message.content)
+                    grounded_text
                     if message.role == "assistant" and not inaccessible_source
                     else ""
                 ),
                 "answer_extended": (
-                    (message.extended_content or "")
+                    strip_source_metadata(message.extended_content or "")
                     if message.role == "assistant" and not inaccessible_source
                     else ""
                 ),

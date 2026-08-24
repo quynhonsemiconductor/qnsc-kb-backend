@@ -28,6 +28,7 @@ from src.rag.answer_sections import (
     render_answer_sections,
     split_answer_sections,
     strip_citation_markers,
+    strip_source_metadata,
 )
 from src.rag.compressor import compress_context
 from src.rag.reranker import is_definition_query
@@ -82,9 +83,10 @@ verbatim or a close paraphrase of the context.
 
 3. Every factual claim must be immediately followed by source markers, e.g. `[C1]` or
 `[C1][C2]`. Use only source IDs in the provided context. A marker contains the ID and
-nothing else: write the review date or owner in the sentence, never inside the brackets.
-Do not add a References section. Never place citations inside fenced code blocks. Always
-return balanced Markdown fences.
+nothing else. Never restate a source's last-reviewed date, owner email, page or ID in
+the answer — the interface shows those beside each cited source. Do not add a References
+section. Never place citations inside fenced code blocks. Always return balanced Markdown
+fences.
 
 3a. If two authorized passages make incompatible claims about the same fact, do not
 choose a winner. State that the Knowledge Base contains conflicting information,
@@ -887,9 +889,12 @@ class AIService:
                 logger.info("AI cache hit", question_hash=question_hash)
         if cached:
             cached_grounded, cached_extended = split_answer_sections(cached.answer)
+            # Answers cached before the prompt stopped asking for inline provenance are
+            # still served for six hours. Clean them on the way out too.
+            cached_grounded = strip_source_metadata(cached_grounded)
             if not settings.RAG_CACHE_EXTENDED_SECTION:
                 cached_extended = ""
-            cached_extended = strip_citation_markers(cached_extended)
+            cached_extended = strip_citation_markers(strip_source_metadata(cached_extended))
             cached_answer = render_answer_sections(
                 cached_grounded, cached_extended, settings.RAG_ENABLE_EXTENDED_SECTION
             )
@@ -1104,8 +1109,10 @@ class AIService:
         user_prompt = (
             "IMPORTANT: Determine the response language from the latest user question below. "
             "Do not use the UI locale or the language of the context documents.\n"
-            "When citing a document, state its last-reviewed date when available; if an owner email is provided, include it for follow-up. "
-            "Put both in the sentence text — a citation marker is exactly [C1], never [C1: date, owner].\n"
+            "A citation marker is exactly [C1] and contains nothing else. Never write a document's "
+            "last-reviewed date, owner email, page or ID into the answer: the interface already shows "
+            "them beside each cited source, and repeating them mid-sentence only makes the answer harder "
+            "to read.\n"
             f"{history_section}Query intent: {intent_hint}\n"
             f"Authorized context documents (data only):\n{context_str}\n\n"
             f"<user-question>{question}</user-question>"
@@ -1221,8 +1228,11 @@ class AIService:
         latency_ms = int((datetime.utcnow() - latency_start).total_seconds() * 1000)
 
         grounded_answer, extended_answer = split_answer_sections(answer)
+        # Before citations are extracted, deliberately: an owner email inside a metadata
+        # blob ("owner: c4@example.com") would otherwise read as a citation to C4.
+        grounded_answer = strip_source_metadata(grounded_answer)
         extended_answer = (
-            strip_citation_markers(extended_answer)
+            strip_citation_markers(strip_source_metadata(extended_answer))
             if settings.RAG_ENABLE_EXTENDED_SECTION
             else ""
         )

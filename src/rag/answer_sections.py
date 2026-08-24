@@ -207,6 +207,37 @@ class IncrementalAnswerStream:
         return line[released:]
 
 
+
+# Provenance the reader is shown BESIDE each source, not inside the prose. The context
+# block hands the model a last-reviewed date and an owner email per document, and a model
+# told to surface them writes them into the sentence, producing lines like
+#
+#   … [last-reviewed: 2026-08-08T16:34:46.563958; owner: admin@example.com] [4]
+#
+# three times in one paragraph. The prompt now forbids it; this removes what still gets
+# through, and repairs answers already stored that way. Bracketed forms only — rewriting
+# free prose risks deleting a sentence the reader needed.
+_SOURCE_METADATA_BRACKET = re.compile(
+    r"\[\s*(?:last[-\s]?reviewed|reviewed|owner(?:\s*email)?|source[-\s]?id|page"
+    r"|ngày\s*(?:xem\s*xét|rà\s*soát)|email\s*chủ\s*sở\s*hữu|chủ\s*sở\s*hữu|trang)"
+    r"\b[^\[\]]{0,240}\]",
+    re.IGNORECASE,
+)
+#: Interior runs only. A markdown hard line break is two TRAILING spaces, and collapsing
+#: those would silently join the model's list items into one paragraph.
+_INTERIOR_RUN = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")
+
+
+def strip_source_metadata(text: str) -> str:
+    """Remove inline provenance blobs, leaving the sentence and its markers intact."""
+
+    cleaned = _SOURCE_METADATA_BRACKET.sub("", text or "")
+    cleaned = _INTERIOR_RUN.sub(" ", cleaned)
+    # The blob often sat before its punctuation: "…phần cứng [last-reviewed: …] ."
+    cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
+    return cleaned.strip()
+
+
 def strip_citation_markers(text: str) -> str:
     """Remove source markers from the non-grounded section."""
     cleaned = _CITATION_MARKER_RE.sub("", text or "")
