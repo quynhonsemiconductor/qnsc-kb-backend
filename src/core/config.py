@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import re
 
 
@@ -116,8 +116,49 @@ class Settings(BaseSettings):
     # HNSW index AT MIGRATION TIME. Changing it later needs a migration and a full
     # re-embed: a query and a chunk embedded by different models are points in unrelated
     # spaces, and their distance is meaningless rather than merely wrong.
-    EMBEDDING_MODEL: str = "BAAI/bge-m3"
-    EMBEDDING_VERSION: str = "bge-m3-v1"
+    # paraphrase-multilingual-MiniLM-L12-v2, chosen for a CPU-only deployment: 12 layers
+    # and 384 dimensions against bge-m3's 24 layers and 1024, which is the difference
+    # between embedding a query in milliseconds and in seconds without a GPU. It is
+    # multilingual, which the Vietnamese corpus needs, and it publishes its own ONNX
+    # export so the image needs no torch and no optimum-cli step.
+    #
+    # It is also what is already in the database: article_chunks.embedding is vector(384)
+    # and the stored chunks were produced by this model, so adopting it as the default
+    # costs no re-indexing. Switching to bge-m3 would mean deleting every chunk and
+    # re-embedding — see the guard in migration 20260810_51.
+    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # Names the MODEL that produced a vector, and hybrid_search filters on it, so a
+    # mislabelled corpus is an invisible corpus. Rows written while this said
+    # "bge-m3-v1" hold MiniLM vectors — provably, since a vector(384) column cannot
+    # hold bge-m3's 1024 — and need re-stamping or re-indexing once.
+    EMBEDDING_VERSION: str = "minilm-l12-v1"
+
+    # HOW the model runs, kept separate from WHICH model runs.
+    #
+    # Defaults to onnx because it is the only value this project's dependencies can
+    # satisfy: the `ml` group is onnxruntime + transformers, and neither torch nor
+    # sentence-transformers is declared anywhere. The default used to be "torch", so a
+    # deployment that changed nothing could not embed at all — every search fell back to
+    # keyword-only and logged an error suggesting an install that would not have helped.
+    #
+    # onnx still requires an export (model.onnx + tokenizer.json) in EMBEDDING_ONNX_DIR;
+    # see src/lib/embeddings/local_onnx.py. Until that exists, embeddings are unavailable
+    # either way — but the failure now names the thing that is actually missing.
+    EMBEDDING_RUNTIME: str = "onnx"
+    EMBEDDING_ONNX_DIR: str = "/opt/embedding-onnx"
+    # PER MODEL, and not inferable from the export: an ONNX graph does not carry the
+    # pooling config sentence-transformers reads. This model's own 1_Pooling/config.json
+    # sets pooling_mode_mean_tokens=true and pooling_mode_cls_token=false, so "mean" is
+    # correct here. The previous default of "cls" (right for bge-*) would have produced
+    # perfectly valid vectors in the wrong space, degrading retrieval with no error.
+    EMBEDDING_ONNX_POOLING: str = "mean"
+    EMBEDDING_ONNX_THREADS: int = 1
+    # This model's sentence_bert_config.json says max_seq_length 128, and its
+    # max_position_embeddings is 512. The previous 8192 (bge-m3's window) would let the
+    # tokenizer emit sequences the graph cannot accept.
+    EMBEDDING_MAX_TOKENS: int = 128
+    EMBEDDING_BATCH_SIZE: int = 32
+
     CHUNKING_VERSION: str = "v2-structure-aware"
     EMBEDDING_DIMENSION: int | None = None
     LLM_MODEL: str = "gemma-4-26b-a4b-it"
@@ -174,6 +215,18 @@ class Settings(BaseSettings):
     ENTRA_AUTO_PROVISION_DOMAIN: str = ""
     MICROSOFT_GRAPH_SENDER: str | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
+    # ``delegated`` keeps the interactive OAuth flow. ``application`` uses the
+    # tenant-approved client-credentials flow for unattended 24/7 ingestion.
+    MICROSOFT_CONNECTOR_AUTH_MODE: str = "delegated"
+    MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES: int = 1440
+    # Comma-separated Entra object IDs. Application mode deliberately avoids
+    # tenant-wide site/user discovery so it works with Sites.Selected and a
+    # least-privilege OneDrive allowlist.
+    MICROSOFT_SHAREPOINT_SITE_IDS: str = ""
+    MICROSOFT_ONEDRIVE_USER_IDS: str = ""
+    CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: int = 30
+    CONNECTOR_RECONCILE_INTERVAL_MINUTES: int = 360
+    CONNECTOR_AUTO_PUBLISH_MODE: str = "governed"
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
@@ -288,6 +341,19 @@ class Settings(BaseSettings):
             origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
         ]
 
+    @property
+    def microsoft_connector_auth_mode(self) -> str:
+        """The Microsoft connector auth mode, normalised in ONE place.
+
+        validate_production compared this stripped while every runtime site compared it
+        with `.lower()` alone, so a value carrying stray whitespace — which is what an
+        environment variable set from a Terraform join or a copied YAML line looks like —
+        passed the boot check and then behaved as "delegated" everywhere afterwards: the
+        app-only worker asked for a delegated refresh token it never had and every sync
+        failed with "not authorized".
+        """
+        return (self.MICROSOFT_CONNECTOR_AUTH_MODE or "").strip().lower()
+
     def validate_production(self) -> None:
         environment = self.ENVIRONMENT.lower()
         if environment in {"development", "dev", "local"}:
@@ -390,6 +456,15 @@ class Settings(BaseSettings):
         ):
             if value:
                 validated_https_url(value, setting_name)
+        connector_auth_mode = self.microsoft_connector_auth_mode
+        if connector_auth_mode not in {"delegated", "application"}:
+            raise RuntimeError(
+                "MICROSOFT_CONNECTOR_AUTH_MODE must be delegated or application"
+            )
+        if connector_auth_mode == "application" and not self.CONNECTOR_WEBHOOK_BASE_URL:
+            raise RuntimeError(
+                "CONNECTOR_WEBHOOK_BASE_URL is required for Microsoft application mode"
+            )
         storage_backend = (self.SOURCE_STORAGE_BACKEND or "").strip().lower()
         storage_bucket = (self.SOURCE_STORAGE_BUCKET or "").strip()
         storage_endpoint = (self.S3_ENDPOINT_URL or "").strip()
@@ -426,18 +501,17 @@ class Settings(BaseSettings):
             raise RuntimeError("MALWARE_SCAN_ENABLED must be true in production")
         if not self.MALWARE_SCANNER_HOST:
             raise RuntimeError("MALWARE_SCANNER_HOST is required in production")
-        if not all(
-            value and value.strip()
-            for value in (
-                self.MICROSOFT_CLIENT_ID,
-                self.MICROSOFT_CLIENT_SECRET,
-                self.MICROSOFT_TENANT_ID,
-                self.MICROSOFT_REDIRECT_URI,
-                self.MICROSOFT_LOGIN_REDIRECT_URI,
-            )
-        ):
+        microsoft_required = (
+            self.MICROSOFT_CLIENT_ID,
+            self.MICROSOFT_CLIENT_SECRET,
+            self.MICROSOFT_TENANT_ID,
+            self.MICROSOFT_LOGIN_REDIRECT_URI,
+        )
+        if self.microsoft_connector_auth_mode == "delegated":
+            microsoft_required = (*microsoft_required, self.MICROSOFT_REDIRECT_URI)
+        if not all(value and value.strip() for value in microsoft_required):
             raise RuntimeError(
-                "Microsoft Entra client, tenant, and redirect settings are required in production"
+                "Microsoft Entra client, tenant, login redirect, and delegated connector redirect settings are required in production"
             )
         if not re.fullmatch(
             r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
