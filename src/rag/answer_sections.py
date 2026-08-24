@@ -8,7 +8,32 @@ EXTENDED_SENTINEL = "<<<EXTENDED>>>"
 GROUNDED_HEADING = "## Answer from the Knowledge Base"
 EXTENDED_HEADING = "## Additional context (general knowledge — not from the Knowledge Base, not cited)"
 
-_SENTINEL_LINE_RE = re.compile(r"^\s*<<<(GROUNDED|EXTENDED)>>>\s*$", re.IGNORECASE)
+# Tolerant on the bracket count by necessity. The sentinels are written by a language
+# model, not by a protocol: glm-4.5-flash emits `<<<GROUNDED>>` — two closing angles —
+# and an exact match then failed to find any section boundary at all. The consequences
+# were not cosmetic. The raw `<<<GROUNDED>>` showed up in the answer, and everything
+# after `<<<EXTENDED>>` — uncited general knowledge, by definition — was folded into the
+# grounded section instead of being separated, stripped of markers, and put under its
+# own "not from the Knowledge Base" heading.
+_SENTINEL_LINE_RE = re.compile(r"^\s*<{2,4}\s*(GROUNDED|EXTENDED)\s*>{2,4}\s*$", re.IGNORECASE)
+_SENTINEL_WORDS = ("GROUNDED", "EXTENDED")
+
+
+def could_begin_a_sentinel(probe: str) -> bool:
+    """Whether `probe` is still a possible start of a sentinel line.
+
+    Used by the incremental stream to decide what to withhold. It must accept the same
+    malformed shapes `_SENTINEL_LINE_RE` does, or a `<<GROUNDED>>` would stream out one
+    character at a time before the completed line was recognised as a boundary.
+    """
+
+    if not probe.startswith("<"):
+        return False
+    body = probe.lstrip("<")
+    if len(probe) - len(body) > 4:
+        return False
+    name = body.rstrip(">").upper()
+    return any(word.startswith(name) for word in _SENTINEL_WORDS)
 # Matches the bare `[C1]` the prompt asks for AND the enriched bracket a model writes
 # when it is also told to surface review dates and owners: `[C4: 2026-08-08, a@b.c]`.
 # The extended section must carry no marker in either shape — nothing there is
@@ -94,7 +119,7 @@ def split_answer_sections(raw: str) -> tuple[str, str]:
 
 #: A line is only ever a fence or a sentinel. While the text received so far could still
 #: grow into one of these, it is held back; the moment it cannot, it is safe to release.
-_HOLD_PREFIXES = ("```", GROUNDED_SENTINEL.lower(), EXTENDED_SENTINEL.lower())
+_FENCE = "```"
 
 
 class IncrementalAnswerStream:
@@ -130,11 +155,11 @@ class IncrementalAnswerStream:
     def _holding(self) -> bool:
         if self._released:
             return False
-        probe = self._line.lstrip().lower()
+        probe = self._line.lstrip()
         if not probe:
             # Leading whitespace only: "   <<<GROUNDED>>>" is still reachable.
             return True
-        return any(candidate.startswith(probe) for candidate in _HOLD_PREFIXES)
+        return _FENCE.startswith(probe) or could_begin_a_sentinel(probe)
 
     def _finish_line(self, out: list[str]) -> None:
         line = self._line

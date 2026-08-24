@@ -150,3 +150,34 @@ def test_the_retry_after_header_wins_when_the_provider_sends_one():
 
     assert _retry_after_seconds(httpx.Response(429, headers={"retry-after": "12"})) == 12
     assert _retry_after_seconds(httpx.Response(429, text="busy")) is None
+
+
+def test_glm_style_reasoning_content_is_read_too():
+    """GLM and DeepSeek name the field `reasoning_content`, Groq names it `reasoning`.
+
+    glm-4.5-flash was observed returning `content: ""` with the text in
+    `reasoning_content` on the very first token.
+    """
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "reasoning_content": "Thinking…\n<<<GROUNDED>>>\nCâu trả lời [C2]",
+                }
+            }
+        ]
+    }
+
+    assert _extract_openai_text(response) == "<<<GROUNDED>>>\nCâu trả lời [C2]"
+
+
+def test_a_pasted_key_keeps_working_when_the_copy_carried_a_space():
+    """A Zhipu key is {32 hex}.{16 alnum}. Saved as "{32}. {16}" — a copy that wrapped —
+    the provider answers `{"code":"1000","message":"Authentication Failed"}`, which
+    reads as an invalid key rather than as a space inside a valid one."""
+    from src.domain.llm_config import normalize_api_key
+
+    assert normalize_api_key("abc123def456. XyZ9") == "abc123def456.XyZ9"
+    assert normalize_api_key("  sk-live-42\n") == "sk-live-42"
+    assert normalize_api_key(None) is None

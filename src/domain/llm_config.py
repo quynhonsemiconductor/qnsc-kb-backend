@@ -34,15 +34,32 @@ _runtime_config: RuntimeLLMConfig | None = None
 _runtime_config_loaded = False
 
 
+def normalize_api_key(api_key: str | None) -> str | None:
+    """Drop every whitespace character from a provider key.
+
+    No provider issues a key containing whitespace, but a key copied out of a console
+    or a PDF arrives with one: a trailing newline, or a space where the copy wrapped.
+    A Zhipu key is `{32 hex}.{16 alnum}`, and one stored as `{32 hex}. {16 alnum}` is
+    rejected with `{"code":"1000","message":"Authentication Failed"}` — a message that
+    points at the key's validity, not at the space in the middle of it. Stripping is
+    applied on write AND on read so a key already saved that way starts working without
+    anyone having to notice the space.
+    """
+
+    if api_key is None:
+        return None
+    return "".join(api_key.split())
+
+
 def encrypt_api_key(api_key: str) -> str:
-    encrypted = encrypt_secret(api_key)
+    encrypted = encrypt_secret(normalize_api_key(api_key))
     if encrypted is None:
         raise ValueError("An API key is required")
     return encrypted
 
 
 def decrypt_api_key(value: str | None) -> str | None:
-    return decrypt_secret(value)
+    return normalize_api_key(decrypt_secret(value))
 
 
 def set_runtime_config(config: RuntimeLLMConfig | None) -> None:

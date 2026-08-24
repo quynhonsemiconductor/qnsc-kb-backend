@@ -31,7 +31,7 @@ from src.rag.answer_sections import (
 )
 from src.rag.compressor import compress_context
 from src.rag.reranker import is_definition_query
-from src.domain.llm_client import ProviderRateLimitError, complete, resolve_provider
+from src.domain.llm_client import ProviderAuthError, ProviderRateLimitError, complete, resolve_provider
 from src.domain.article_edit_requests import create_article_edit_request
 from src.domain.articles import ArticleService
 from src.repositories.article import ArticleRepository
@@ -1186,6 +1186,26 @@ class AIService:
                     ),
                     headers=(
                         {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+                    ),
+                )
+            except ProviderAuthError as exc:
+                # Retrying, rephrasing and re-indexing all fail identically here. Name
+                # the actual problem so an administrator fixes the key instead of the
+                # content: a key copied with a stray space reads as "Authentication
+                # Failed" at the provider and as "AI generation failed" to the user.
+                logger.error(
+                    "LLM provider rejected the configured API key",
+                    provider=provider_config.name if provider_config else "none",
+                    error=str(exc),
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Nhà cung cấp AI từ chối API key đang cấu hình. "
+                        "Quản trị viên cần kiểm tra lại API key và endpoint trong cấu hình LLM."
+                        if language == "vi"
+                        else "The AI provider rejected the configured API key. "
+                        "An administrator needs to check the workspace LLM key and endpoint."
                     ),
                 )
             except Exception as e:

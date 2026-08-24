@@ -30,6 +30,15 @@ class ProviderRateLimitError(RuntimeError):
         self.retry_after = retry_after
 
 
+class ProviderAuthError(RuntimeError):
+    """The provider rejected our credentials.
+
+    Separated from every other provider failure because the fix is somewhere else
+    entirely: nobody can repair this by retrying, rephrasing, or re-indexing. It is the
+    workspace API key, and the operator needs to be told so.
+    """
+
+
 _RETRY_AFTER_IN_MESSAGE = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
 
 
@@ -184,12 +193,23 @@ def _extract_openai_text(data: dict[str, Any]) -> str:
     content = str(message.get("content") or "")
     if content.strip():
         return content
-    # `reasoning` is Groq's field name; `reasoning_content` is used by DeepSeek and
-    # other OpenAI-compatible reasoning providers.
+    # `reasoning` is Groq's field name; `reasoning_content` is GLM's and DeepSeek's.
     thinking = str(message.get("reasoning") or message.get("reasoning_content") or "")
-    marker = thinking.find(GROUNDED_SENTINEL)
+    return _answer_from_reasoning(thinking) or content
+
+
+def _answer_from_reasoning(thinking: str) -> str:
+    """Pull a finished answer out of a reasoning channel, or return nothing.
+
+    Only the text from our own `<<<GROUNDED>>>` sentinel onward is an answer. Whatever
+    precedes it is deliberation and must never be shown, so no sentinel means nothing
+    to recover — better an empty answer the caller can handle than a user reading the
+    model talk to itself.
+    """
+
+    marker = (thinking or "").find(GROUNDED_SENTINEL)
     if marker == -1:
-        return content
+        return ""
     logger.warning(
         "Recovered an answer the provider left in its reasoning channel",
         reasoning_length=len(thinking),
@@ -260,6 +280,12 @@ async def complete(
 
             async def request_stream() -> tuple[str, int]:
                 answer = ""
+                # Held separately and never streamed out: glm-4.5-flash returns its
+                # deliberation in `reasoning_content` and, like other reasoning models,
+                # can finish the answer there without ever opening a content delta.
+                # Reading only `content` turned that into an empty answer, which the RAG
+                # citation guard then reported as "no grounded sources".
+                thinking = ""
                 tokens = 0
                 async with client.stream(
                     "POST",
@@ -273,6 +299,20 @@ async def complete(
                             .decode(errors="replace")[:500]
                             .replace("\n", " ")
                         )
+                        # Classified here as well as on the non-streaming path: GLM is
+                        # the only provider that streams, so an unusable key or an
+                        # exhausted quota reached the user as a generic failure, and
+                        # with_exponential_retry below then retried it for nothing.
+                        if response.status_code in (401, 403):
+                            raise ProviderAuthError(
+                                f"{provider.name} rejected the configured API key "
+                                f"(HTTP {response.status_code}): {detail}"
+                            )
+                        if response.status_code == 429:
+                            raise ProviderRateLimitError(
+                                f"{provider.name} rate limit reached",
+                                retry_after=_retry_after_seconds(response),
+                            )
                         raise RuntimeError(
                             f"{provider.name} request failed with HTTP "
                             f"{response.status_code}: {detail}"
@@ -296,7 +336,18 @@ async def complete(
                             answer += text
                             if on_token:
                                 await on_token(text)
+                        else:
+                            thinking += str(
+                                (delta or {}).get("reasoning_content")
+                                or (delta or {}).get("reasoning")
+                                or ""
+                            )
                         tokens = _extract_usage(data) or tokens
+                if not answer.strip():
+                    recovered = _answer_from_reasoning(thinking)
+                    if recovered and on_token:
+                        await on_token(recovered)
+                    answer = recovered or answer
                 return answer, tokens
 
             # A new request is safe here because a failed stream is discarded;
@@ -304,7 +355,10 @@ async def complete(
             # provider queueing or network interruptions without blocking
             # forever behind a slow model.
             answer, tokens = await with_exponential_retry(
-                request_stream, attempts=2, base_delay=1.0
+                request_stream,
+                attempts=2,
+                base_delay=1.0,
+                give_up_on=(ProviderAuthError, ProviderRateLimitError),
             )
             return answer, tokens, provider.model, provider.name
 
@@ -327,6 +381,11 @@ async def complete(
                 raise ProviderRateLimitError(
                     f"{provider.name} rate limit reached",
                     retry_after=_retry_after_seconds(response),
+                )
+            if response.status_code in (401, 403):
+                raise ProviderAuthError(
+                    f"{provider.name} rejected the configured API key "
+                    f"(HTTP {response.status_code})"
                 )
             try:
                 response.raise_for_status()

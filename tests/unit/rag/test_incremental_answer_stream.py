@@ -117,3 +117,31 @@ def test_the_stream_stays_stopped_after_the_extended_marker():
     assert stream.stopped is True
     assert stream.feed("them noi dung") == ""
     assert stream.finish() == ""
+
+
+def test_a_sentinel_with_the_wrong_bracket_count_is_still_a_boundary():
+    """glm-4.5-flash writes `<<<GROUNDED>>` — two closing angles.
+
+    Matched exactly, no boundary was found at all: the raw sentinel appeared in the
+    answer and the uncited EXTENDED section was folded into the grounded one, which is
+    the single distinction the two-section design exists to keep.
+    """
+    from src.rag.answer_sections import split_answer_sections
+
+    raw = "<<<GROUNDED>>\nCâu trả lời có nguồn [C4]\n\n<<<EXTENDED>>\nKiến thức chung."
+
+    grounded, extended = split_answer_sections(raw)
+
+    assert grounded == "Câu trả lời có nguồn [C4]"
+    assert extended == "Kiến thức chung."
+    assert "<<<" not in grounded and "<<<" not in extended
+
+
+def test_a_malformed_sentinel_is_never_streamed_to_the_reader():
+    from src.rag.answer_sections import IncrementalAnswerStream
+
+    stream = IncrementalAnswerStream()
+    shown = "".join(stream.feed(character) for character in "<<GROUNDED>>\nXin chào")
+    shown += stream.finish()
+
+    assert shown == "Xin chào"
