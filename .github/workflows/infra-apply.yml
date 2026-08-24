@@ -41,7 +41,6 @@ concurrency:
   cancel-in-progress: false # never cancel a running apply
 
 permissions:
-  id-token: write # mandatory for the OIDC AssumeRole
   contents: read
 
 env:
@@ -56,6 +55,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: shared
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # mandatory for the OIDC AssumeRole
 
     # A release pushes main and the vX.Y.Z tag near-simultaneously, so both runs reach
     # this job and would apply the same _shared state concurrently — a state-lock failure
@@ -69,6 +71,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: QNSC-VN/qnsc-ci/actions/setup-tofu-aws@v1.10.0
         with:
@@ -97,9 +101,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: develop # no approval gate
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # mandatory for the OIDC AssumeRole
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: QNSC-VN/qnsc-ci/actions/setup-tofu-aws@v1.10.0
         with:
@@ -203,9 +212,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # mandatory for the OIDC AssumeRole
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: QNSC-VN/qnsc-ci/actions/setup-tofu-aws@v1.10.0
         with:

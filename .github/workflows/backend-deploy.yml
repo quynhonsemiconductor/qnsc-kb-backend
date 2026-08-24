@@ -76,6 +76,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Does this commit change infrastructure?
         id: touched
@@ -163,6 +164,8 @@ jobs:
 
   deploy:
     needs: [wait-for-infra, wait-for-ci]
+    permissions:
+      contents: read
     uses: QNSC-VN/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
     with:
       product: qnsc-kb
