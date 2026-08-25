@@ -149,6 +149,13 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
+      # The Postgres service starts EMPTY. Anything that opens the app's lifespan —
+      # TestClient(app) as a context manager — runs init_db → bootstrap_rbac, which
+      # selects from `permissions` and dies on a schema that was never created. The
+      # deployment entrypoint migrates before the API starts; so does this.
+      - name: Apply migrations to the test database
+        run: poetry run alembic -c migrations/alembic.ini upgrade head
+
       - name: Unit tests
         run: poetry run pytest -q
 
