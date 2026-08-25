@@ -34,8 +34,14 @@
 # ---------------------------------------------------------------------------
 # deps — the runtime dependency set every target shares. build-essential and libpq-dev
 # stay here and never reach a shipped image.
+#
+# 3.13, NOT 3.14 — and this is a ceiling, not a lag. paddlepaddle 3.3.1 publishes
+# cp39 through cp313 and no cp314, so the worker target (the only one carrying OCR)
+# cannot resolve its dependency set on 3.14 at all: `poetry install --only main,ml,ocr`
+# fails outright. The bump to 3.14-slim went in anyway and backend-ci has been failing
+# on main since. Raise this only once paddlepaddle ships a cp314 wheel.
 # ---------------------------------------------------------------------------
-FROM python:3.14-slim AS deps
+FROM python:3.13-slim AS deps
 
 WORKDIR /app
 
@@ -80,7 +86,8 @@ RUN poetry install --no-root --only main,ml,ocr
 # ---------------------------------------------------------------------------
 # runtime — common base. NO application code: see rule 1 above.
 # ---------------------------------------------------------------------------
-FROM python:3.14-slim AS runtime
+# Kept in step with the deps stage above, including its 3.13 ceiling.
+FROM python:3.13-slim AS runtime
 
 WORKDIR /app
 
@@ -176,6 +183,18 @@ FROM runtime-ml AS runtime-ml-ocr
 # Both stages derive from the same base image, so this overlays like-for-like.
 COPY --from=deps-ml-ocr /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml-ocr /usr/local/bin /usr/local/bin
+
+# paddle links against the GNU OpenMP runtime, and paddleocr's opencv against the X11
+# and GL client libraries. None of them are Python packages, so copying site-packages
+# out of the deps stage does not bring them: the deps stage got them from
+# build-essential, which deliberately never reaches a shipped image.
+#
+# The result was an image that BUILT and then raised
+# `ImportError: libgomp.so.1: cannot open shared object file` the first time anything
+# imported paddle. src/domain/source_extraction.py imports it lazily, so the worker
+# started clean and only failed on the first scanned document — in production, where
+# a build-only CI job could never have seen it.
+RUN apt-get update && apt-get install -y --no-install-recommends     libgomp1     libglib2.0-0     libgl1     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # api — FastAPI under uvicorn.

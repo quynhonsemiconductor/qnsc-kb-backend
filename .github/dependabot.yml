@@ -44,6 +44,14 @@ updates:
     labels: ["dependencies", "docker"]
     commit-message:
       prefix: "deps(docker)"
+    ignore:
+      # paddlepaddle publishes no cp314 wheel, so the worker target cannot install its
+      # OCR group on 3.14 — see the ceiling documented at the top of the Dockerfile.
+      # The 3.14 bump was raised and merged once already and left main's CI red; without
+      # this it is simply raised again next Monday. Drop this entry when paddle ships
+      # cp314.
+      - dependency-name: "python"
+        versions: ["3.14.x"]
 
   # Shared Terraform modules from qnsc-tf-modules, pinned by git tag as
   # `?ref=<module>-vX.Y.Z`. WITHOUT THIS ECOSYSTEM every module bump is manual, and that
