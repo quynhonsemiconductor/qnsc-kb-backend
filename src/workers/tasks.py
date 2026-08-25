@@ -599,12 +599,13 @@ def delete_article_chunks_task(article_id_str: str):
     sync_run(process())
 
 
-@celery_app.task(
-    name="sync_cloud_connector_task",
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 3},
-)
+# Deliberately NOT autoretrying. Retry policy for a connector sync lives in the durable
+# queue: finish_sync_request puts the request back with exponential backoff and an
+# attempt ceiling. Celery retrying on top of that meant a failed sync was requeued AND
+# re-executed, so the retry and the queue dispatcher could walk the same drive at the
+# same time, each undoing the other's cursor. One authority for retries, and it is the
+# one that survives a worker restart.
+@celery_app.task(name="sync_cloud_connector_task")
 def sync_cloud_connector_task(connector_id_str: str, job_id_str: str, sync_request_id_str: str | None = None):
     """Run an idempotent provider delta sync from a durable cursor."""
 

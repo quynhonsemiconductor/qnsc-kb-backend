@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import uuid
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.connectors import SyncRequest
@@ -55,8 +55,16 @@ async def enqueue_connector_sync(
         )
     ).scalar_one_or_none()
     if existing:
-        if priority < existing.priority:
+        now = datetime.utcnow()
+        more_urgent = priority < existing.priority
+        if more_urgent:
             existing.priority = priority
+        if more_urgent or reason in {"manual", "webhook"}:
+            # A more urgent reason also clears a retry backoff. Otherwise a person
+            # pressing "sync now", or a fresh provider notification, coalesced onto a
+            # request that an earlier failure had parked half an hour into the future
+            # and nothing happened for half an hour, with no sign of why.
+            existing.available_at = min(existing.available_at, now)
         if reason and existing.reason == "polling":
             existing.reason = reason
         await db.flush()
@@ -84,8 +92,26 @@ async def enqueue_connector_sync(
     return request
 
 
+# Serializes the claim decision itself, per connector. Transaction-scoped, so it is
+# released by the commit at the end of the claim and never outlives the short
+# transaction that takes it — unlike a session-level lock, which would have to survive
+# the many commits a provider walk performs.
+_CONNECTOR_CLAIM_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+
+
 async def claim_sync_request(db: AsyncSession, request_id: uuid.UUID) -> SyncRequest | None:
-    """Claim a queued request with a row lock before dispatching work."""
+    """Claim a queued request, but only while the connector is otherwise idle.
+
+    One provider walk per connector at a time. Nothing enforced that before: polling
+    enqueues a connector-wide request (``scope_id`` NULL) while reconciliation enqueues
+    one per scope, and those never coalesce with each other, so a busy connector could
+    have two or three walks of the SAME drive running at once — each downloading the
+    same files, each racing to write the same delta cursor, and the loser silently
+    rewinding the winner's progress.
+
+    Returning None is not a failure: the request stays ``queued`` and
+    ``dispatch_pending_sync_requests`` offers it again on the next tick.
+    """
 
     request = (
         await db.execute(
@@ -99,6 +125,26 @@ async def claim_sync_request(db: AsyncSession, request_id: uuid.UUID) -> SyncReq
         )
     ).scalar_one_or_none()
     if not request:
+        return None
+    # Postgres only, and asked BEFORE issuing it rather than caught afterwards: a failed
+    # statement aborts the transaction, and every query after it — including the
+    # in-flight check this exists to protect — would fail with it.
+    dialect = getattr(getattr(db, "bind", None), "dialect", None)
+    if getattr(dialect, "name", "") == "postgresql":
+        await db.execute(
+            _CONNECTOR_CLAIM_LOCK, {"key": f"connector-claim:{request.connector_id}"}
+        )
+    in_flight = await db.scalar(
+        select(SyncRequest.id)
+        .where(
+            SyncRequest.connector_id == request.connector_id,
+            SyncRequest.id != request.id,
+            SyncRequest.status.in_(("dispatched", "running")),
+        )
+        .limit(1)
+    )
+    if in_flight is not None:
+        await db.commit()
         return None
     request.status = "dispatched"
     request.locked_at = datetime.utcnow()

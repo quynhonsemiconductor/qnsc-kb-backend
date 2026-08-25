@@ -27,7 +27,7 @@ from src.core.config import settings
 from src.domain.connector_adapters import ConnectorProviderError, adapter_for
 from src.domain.connector_auth import ensure_connector_authorized
 from src.models.connectors import SourceScope, WebhookSubscription
-from src.models.ops import Connector
+from src.models.ops import Connector, NotificationQueue
 
 logger = structlog.get_logger()
 
@@ -276,11 +276,29 @@ async def repair_webhook_subscriptions(db: AsyncSession, *, set_context=None) ->
             connector = await db.get(Connector, connector_id)
             if connector is None:
                 continue
+            already_degraded = bool(config.get("webhook_degraded_at"))
             connector.config_json = {
                 **(connector.config_json or {}),
                 "webhook_degraded_at": config.get("webhook_degraded_at")
                 or datetime.utcnow().isoformat(),
             }
+            if not already_degraded and connector.created_by:
+                # The UI keeps saying "on update" while nothing is listening any more.
+                # Said once, on the transition, so a tenant that cannot subscribe at all
+                # does not deliver a notification every ten minutes forever.
+                db.add(
+                    NotificationQueue(
+                        recipient_user_id=connector.created_by,
+                        type="in_app",
+                        payload={
+                            "event": "connector_webhook_degraded",
+                            "connector_id": str(connector_id),
+                            "connector_name": connector.name,
+                            "provider": connector.system,
+                            "detail": str(exc)[:500],
+                        },
+                    )
+                )
             await db.commit()
             continue
         if created:

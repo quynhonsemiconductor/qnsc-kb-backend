@@ -598,6 +598,53 @@ class GoogleDriveAdapter(ConnectorAdapter):
             return None
         await self._request("POST", f"{self.api}/channels/stop", json={"id": provider_subscription_id, "resourceId": resource})
 
+    async def _parents_of(self, file_id: str, cache: dict[str, list[str]]) -> list[str]:
+        """Return a file's parents, memoized for the lifetime of one walk."""
+
+        if file_id in cache:
+            return cache[file_id]
+        try:
+            data = await self._request(
+                "GET",
+                f"{self.api}/files/{quote(file_id, safe='')}?supportsAllDrives=true&fields=id,parents",
+            )
+        except ConnectorProviderError:
+            # An ancestor we cannot read is an ancestor we cannot claim the file sits
+            # under. Fail closed: the item is left out of a folder scope rather than
+            # pulled into one it may not belong to.
+            data = {}
+        parents = [str(item) for item in (data.get("parents") or [])] if isinstance(data, dict) else []
+        cache[file_id] = parents
+        return parents
+
+    async def _within_folder(
+        self,
+        parents: list[str],
+        folder_id: str,
+        cache: dict[str, list[str]],
+        depth: int = 0,
+    ) -> bool:
+        """Whether any ancestor chain from ``parents`` reaches ``folder_id``.
+
+        Drive's changes feed reports only DIRECT parents, so testing membership with
+        ``folder_id in parents`` matched a selected folder's immediate children and
+        nothing else. Everything one level deeper — the usual shape of a real shared
+        folder — was silently dropped, and the admin who selected the folder saw a
+        fraction of it appear in the KB with no error anywhere to explain the rest.
+        """
+
+        # Drive nesting is shallow in practice; the bound is a cycle guard, not a policy.
+        if depth > 20 or not parents:
+            return False
+        if folder_id in parents:
+            return True
+        for parent in parents:
+            if await self._within_folder(
+                await self._parents_of(parent, cache), folder_id, cache, depth + 1
+            ):
+                return True
+        return False
+
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         config = scope["config"]
         params = {"pageToken": cursor or "", "pageSize": "100", "includeRemoved": "true", "supportsAllDrives": "true", "includeItemsFromAllDrives": "true", "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,webViewLink,version,md5Checksum,trashed,modifiedTime))"}
@@ -606,14 +653,24 @@ class GoogleDriveAdapter(ConnectorAdapter):
             params["pageToken"] = start["startPageToken"]  # type: ignore[index]
         changes: list[NormalizedChange] = []
         next_cursor = None
+        folder_id = config.get("folder_id")
+        ancestry: dict[str, list[str]] = {}
         while params.get("pageToken"):
             query = urlencode(params)
             page = await self._request("GET", f"{self.api}/changes?{query}")
             for entry in page.get("changes", []):  # type: ignore[union-attr]
                 file = entry.get("file") or {}
-                if config.get("folder_id") and config["folder_id"] not in (file.get("parents") or []):
-                    continue
                 removed = bool(entry.get("removed")) or bool(file.get("trashed"))
+                if folder_id and not removed:
+                    if not await self._within_folder(
+                        [str(item) for item in (file.get("parents") or [])], folder_id, ancestry
+                    ):
+                        continue
+                # A removal carries no file resource at all, so it has no parents to
+                # test — the old filter therefore discarded EVERY deletion under a
+                # folder scope and the KB kept serving documents that were gone from
+                # Drive. Emit the tombstone and let the sync layer, which knows what it
+                # actually tracks for this scope, decide whether it is relevant.
                 changes.append(NormalizedChange(
                     external_id=entry["fileId"], corpus_id=config.get("drive_id", "user"), name=file.get("name", entry["fileId"]), state="deleted" if removed else "active", content_changed=bool(file.get("md5Checksum") or file.get("version")), permissions_changed=False, moved=bool(file.get("parents")), revision=str(file.get("version") or file.get("modifiedTime") or "unknown"), mime_type=file.get("mimeType"), parent_external_id=(file.get("parents") or [None])[0], web_url=file.get("webViewLink"), metadata=file,
                 ))

@@ -18,7 +18,7 @@ from src.models import User
 from src.models.governance import AuditLog, PendingDraft
 from src.models.user import AccessGroup, ExternalIdentity
 from src.models.ops import Connector, ConnectorJob
-from src.models.connectors import ConnectorNotification, ExternalAclPrincipal, ExternalDocument, ExternalGroupMapping, PermissionSnapshot, SourceScope, SyncCursor, SyncRequest, WebhookSubscription
+from src.models.connectors import ConnectorNotification, ExternalAclPrincipal, ExternalDocument, ExternalGroupMapping, PermissionSnapshot, SourceScope, SyncCursor, SyncError, SyncRequest, WebhookSubscription
 from src.repositories.user import UserRepository
 from src.domain.connectors import sync_local_folder
 from src.core.config import settings
@@ -26,7 +26,7 @@ from src.domain.rbac import AuthorizationService
 from src.domain.connector_adapters import adapter_for, ConnectorProviderError, SharePointAdapter, GoogleDriveAdapter
 from src.domain.connector_auth import ensure_connector_authorized
 from src.domain.webhook_subscriptions import WebhookConfigurationError, ensure_webhook_subscriptions
-from src.domain.sync_queue import enqueue_connector_sync
+from src.domain.sync_queue import claim_sync_request, enqueue_connector_sync
 from src.core.secrets import encrypt_secret
 from src.domain.departments import resolve_active_departments
 
@@ -745,15 +745,18 @@ async def sync_connector(
         if active_job:
             return {"connector_id": str(connector.id), "job_id": str(active_job.id), "status": active_job.status, "last_sync": connector.last_sync, "already_running": True}
         request = await enqueue_connector_sync(db, connector.id, reason="manual", requested_by=current_user.id, priority=10)
+        request_id = request.id
         job = await db.get(ConnectorJob, request.job_id) if request.job_id else None
         await db.commit()
-        if job and request.status == "queued":
-            request.status = "dispatched"
-            request.locked_at = datetime.utcnow()
-            request.attempts += 1
-            await db.commit()
-            _dispatch_cloud_sync(connector.id, job.id, request.id)
-        return {"connector_id": str(connector.id), "job_id": str(job.id) if job else None, "status": request.status, "last_sync": connector.last_sync}
+        # Claim through the queue rather than flipping the row here. The claim is what
+        # enforces one walk per connector, and hand-marking it "dispatched" bypassed
+        # that check entirely — a manual sync pressed during a reconciliation ran a
+        # second concurrent walk of the same drive.
+        claimed = await claim_sync_request(db, request_id)
+        if claimed and job:
+            _dispatch_cloud_sync(connector.id, job.id, claimed.id)
+        status = claimed.status if claimed else "queued"
+        return {"connector_id": str(connector.id), "job_id": str(job.id) if job else None, "status": status, "last_sync": connector.last_sync}
     job = await sync_local_folder(db, connector, current_user.id)
     return {"connector_id": str(connector.id), "job_id": str(job.id), "status": job.status, "last_sync": connector.last_sync}
 
@@ -796,6 +799,23 @@ async def connector_health(
     subscriptions = (await db.execute(select(WebhookSubscription).where(WebhookSubscription.connector_id == connector.id))).scalars().all()
     queued = int(await db.scalar(select(func.count(SyncRequest.id)).where(SyncRequest.connector_id == connector.id, SyncRequest.status.in_(("queued", "dispatched", "running")))) or 0)
     notifications_24h = int(await db.scalar(select(func.count(ConnectorNotification.id)).where(ConnectorNotification.connector_id == connector.id, ConnectorNotification.received_at >= datetime.utcnow() - timedelta(hours=24))) or 0)
+    # Per-document failures no longer stop the sync, which is what makes them easy to
+    # miss: the job reports "completed" and a handful of files simply never arrive.
+    # Surfacing them here is what turns a silent gap into something an admin can act on.
+    item_errors = (await db.execute(
+        select(SyncError, ExternalDocument.name, ExternalDocument.web_url)
+        .outerjoin(ExternalDocument, ExternalDocument.id == SyncError.external_document_id)
+        .where(SyncError.connector_id == connector.id, SyncError.stage == "ingest")
+        .order_by(SyncError.created_at.desc())
+        .limit(25)
+    )).all()
+    quarantined = int(await db.scalar(
+        select(func.count(ExternalDocument.id)).where(
+            ExternalDocument.connector_id == connector.id,
+            ExternalDocument.state != "deleted",
+            ExternalDocument.metadata_json["ingest_failure"].is_not(None),
+        )
+    ) or 0)
     now = datetime.utcnow()
     return {
         "connector_id": str(connector.id),
@@ -804,6 +824,20 @@ async def connector_health(
         "last_error": connector.last_error,
         "queue_depth": queued,
         "notifications_last_24h": notifications_24h,
+        "documents_needing_attention": quarantined,
+        "recent_document_errors": [
+            {
+                "document_id": str(error.external_document_id) if error.external_document_id else None,
+                "name": name,
+                "web_url": web_url,
+                "code": error.error_code,
+                "message": error.message,
+                "attempts": error.attempts,
+                "retryable": error.retryable,
+                "at": error.created_at,
+            }
+            for error, name, web_url in item_errors
+        ],
         "scopes": [
             {
                 "id": str(scope.id),
@@ -909,6 +943,7 @@ async def _enqueue_webhook(request: Request, provider: str, lifecycle_only: bool
         }]
 
     dispatches: dict[tuple[uuid.UUID, uuid.UUID, uuid.UUID], None] = {}
+    claimable: dict[uuid.UUID, tuple[uuid.UUID, uuid.UUID]] = {}
     async with SessionLocal() as db_session:
         await set_database_context(db_session, None, True)
         for raw_item in values:
@@ -983,11 +1018,19 @@ async def _enqueue_webhook(request: Request, provider: str, lifecycle_only: bool
                 priority=10,
             )
             if sync_request.job_id and sync_request.status == "queued":
-                sync_request.status = "dispatched"
-                sync_request.locked_at = datetime.utcnow()
-                sync_request.attempts += 1
-                dispatches[(subscription.connector_id, sync_request.job_id, sync_request.id)] = None
+                claimable[sync_request.id] = (subscription.connector_id, sync_request.job_id)
         await db_session.commit()
+
+    # Claimed after the notification inbox is durable, and through the queue's own
+    # claim so a connector already walking is not woken a second time in parallel.
+    # Anything the claim declines stays queued for dispatch_pending_sync_requests, so
+    # the notification is never lost — only deferred.
+    for request_id, (connector_id, job_id) in claimable.items():
+        async with SessionLocal() as claim_db:
+            await set_database_context(claim_db, None, True)
+            claimed = await claim_sync_request(claim_db, request_id)
+        if claimed:
+            dispatches[(connector_id, job_id, request_id)] = None
 
     for connector_id, job_id, sync_request_id in dispatches:
         _dispatch_cloud_sync(connector_id, job_id, sync_request_id)
