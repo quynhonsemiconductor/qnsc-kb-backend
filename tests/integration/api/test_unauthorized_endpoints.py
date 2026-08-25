@@ -22,6 +22,33 @@ PUBLIC_ROUTE_FRAGMENTS = (
 )
 
 
+def _walk_routes(routes, prefix: str = ""):
+    """Yield ``(full_path, methods)`` for every endpoint, however it was mounted.
+
+    FastAPI 0.141 / Starlette 1.6 stopped flattening `include_router()` into
+    `app.routes`. Each include is now a `_IncludedRouter` wrapper that carries NO `path`
+    attribute, holds the sub-routes on `original_router.routes` with paths relative to
+    the mount, and keeps the prefix on `include_context.prefix`.
+
+    Reading `route.path` off the top level therefore found only the four routes declared
+    directly on the app, and every `/api/v1/*` endpoint vanished. That is why the caller
+    asserts the inventory is non-empty: this is a security regression test, and an empty
+    inventory would have made it pass while checking nothing.
+    """
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            context = getattr(route, "include_context", None)
+            yield from _walk_routes(
+                included.routes, prefix + (getattr(context, "prefix", "") or "")
+            )
+            continue
+        path = getattr(route, "path", None)
+        if path is None:
+            continue
+        yield prefix + path, set(getattr(route, "methods", set()) or set())
+
+
 def _anonymous_path(path: str) -> str:
     """Replace FastAPI path parameters with safe syntactic examples."""
     values = {
@@ -155,16 +182,12 @@ def test_every_private_api_route_rejects_anonymous_requests(monkeypatch):
     app.dependency_overrides[deps.get_db] = fake_db
     route_cases = []
     try:
-        for route in app.routes:
-            path = getattr(route, "path", "")
+        for path, methods in _walk_routes(app.routes):
             if not path.startswith("/api/v1") or any(
                 fragment in path for fragment in PUBLIC_ROUTE_FRAGMENTS
             ):
                 continue
-            for method in sorted(
-                getattr(route, "methods", set())
-                & {"GET", "POST", "PUT", "PATCH", "DELETE"}
-            ):
+            for method in sorted(methods & {"GET", "POST", "PUT", "PATCH", "DELETE"}):
                 route_cases.append((method, _anonymous_path(path)))
 
         async def run():

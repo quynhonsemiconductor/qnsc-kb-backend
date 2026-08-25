@@ -105,11 +105,16 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> User | None:
         role="Admin",
         active=True,
     )
+    # Attached BEFORE the flush, deliberately. Assigning a relationship on a PERSISTENT
+    # object makes SQLAlchemy load the collection it is about to replace, and that lazy
+    # SELECT is implicit IO the async session cannot perform: it raises MissingGreenlet
+    # and takes API startup down with it on every fresh deployment. A pending object has
+    # no prior collection to load, so the same assignment is free here.
+    user.roles = [admin_role]
     db.add(user)
 
     try:
         await db.flush()
-        user.roles = [admin_role]
         await db.commit()
     except IntegrityError:
         # Another replica won the race and created it first. Nothing to repair.
