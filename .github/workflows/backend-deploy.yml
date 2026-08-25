@@ -164,8 +164,18 @@ jobs:
 
   deploy:
     needs: [wait-for-infra, wait-for-ci]
+    # Must match the UNION of every inner job's own permissions in the reusable
+    # backend-deploy.yml, not just its top-level default (contents: read) —
+    # GitHub validates a reusable call's whole permission chain at trigger
+    # time, and a caller job that only grants the top-level default causes a
+    # startup_failure before any job runs, not a runtime denial on the one
+    # inner job that needed more. id-token/attestations are for the build and
+    # promote jobs' AWS OIDC + provenance attestation steps.
     permissions:
       contents: read
+      id-token: write
+      attestations: write
+      packages: read # build-push-ecr pulls private @qnsc-vn/* from GitHub Packages
     uses: QNSC-VN/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
     with:
       product: qnsc-kb
