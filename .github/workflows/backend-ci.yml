@@ -173,6 +173,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every other checkout in this file sets it; zizmor blocks on artipacked
+          # (credential persistence) at medium severity, and the job needs no git
+          # credential after the clone.
+          persist-credentials: false
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
