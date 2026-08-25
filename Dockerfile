@@ -31,7 +31,7 @@
 # deps — the runtime dependency set every target shares. build-essential and libpq-dev
 # stay here and never reach a shipped image.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS deps
+FROM python:3.14-slim AS deps
 
 WORKDIR /app
 
@@ -125,7 +125,7 @@ RUN pip install --no-cache-dir 'optimum-onnx==0.1.0' && \
 # ---------------------------------------------------------------------------
 # runtime — common base. NO application code: see rule 1 above.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
