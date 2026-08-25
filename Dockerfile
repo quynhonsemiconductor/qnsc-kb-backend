@@ -93,7 +93,13 @@ ENV PYTHONUNBUFFERED=1 \
     # only in the migrator, only once deployed.
     PYTHONPATH=/app
 
-COPY --from=deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
+# The interpreter version lives in the FROM tag, which dependabot bumps on its own;
+# a hardcoded path silently stops matching it. That is exactly what happened when the
+# base moved to 3.14 while these lines still said 3.11 — the build died on
+# "/usr/local/lib/python3.11/site-packages: not found" and main has been red since.
+# Both stages derive from the same base image, so this overlays like-for-like.
+COPY --from=deps /usr/local/lib/ /usr/local/lib/
 COPY --from=deps /usr/local/bin /usr/local/bin
 
 RUN useradd --create-home --uid 10001 appuser && \
@@ -119,7 +125,13 @@ RUN useradd --create-home --uid 10001 appuser && \
 # ---------------------------------------------------------------------------
 FROM runtime AS runtime-ml
 
-COPY --from=deps-ml /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
+# The interpreter version lives in the FROM tag, which dependabot bumps on its own;
+# a hardcoded path silently stops matching it. That is exactly what happened when the
+# base moved to 3.14 while these lines still said 3.11 — the build died on
+# "/usr/local/lib/python3.11/site-packages: not found" and main has been red since.
+# Both stages derive from the same base image, so this overlays like-for-like.
+COPY --from=deps-ml /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml /usr/local/bin /usr/local/bin
 
 ARG BAKE_EMBEDDING_MODEL=true
@@ -156,7 +168,13 @@ target = os.environ['EMBEDDING_ONNX_DIR']; \
 # ---------------------------------------------------------------------------
 FROM runtime-ml AS runtime-ml-ocr
 
-COPY --from=deps-ml-ocr /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
+# The interpreter version lives in the FROM tag, which dependabot bumps on its own;
+# a hardcoded path silently stops matching it. That is exactly what happened when the
+# base moved to 3.14 while these lines still said 3.11 — the build died on
+# "/usr/local/lib/python3.11/site-packages: not found" and main has been red since.
+# Both stages derive from the same base image, so this overlays like-for-like.
+COPY --from=deps-ml-ocr /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml-ocr /usr/local/bin /usr/local/bin
 
 # ---------------------------------------------------------------------------
