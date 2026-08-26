@@ -241,6 +241,11 @@ async def complete(
         if provider.native_gemini and on_token:
             url = _gemini_url(provider, streaming=True)
             answer = ""
+            # Bound before the loop, because the loop may never assign it: a stream
+            # that yields no parseable `data:` line leaves it unset. This used to be
+            # read back with `locals().get("tokens", 0)`, which works but hides the
+            # fact that the name can be unbound and reads as dynamic-scope trickery.
+            tokens = 0
             async with client.stream(
                 "POST",
                 url,
@@ -265,7 +270,7 @@ async def complete(
                         answer += text
                         await on_token(text)
                     tokens = _extract_usage(data)
-            return answer, locals().get("tokens", 0), provider.model, provider.name
+            return answer, tokens, provider.model, provider.name
 
         if provider.name == "glm":
             # GLM's synchronous endpoint returns only after it has completed

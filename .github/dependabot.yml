@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # A release is not adopted the day it appears. Most registry compromises are
+    # caught within days of publication, and a bot that upgrades within hours turns
+    # that window into a merged PR. Applies to the schedule, not to security
+    # advisories, which Dependabot still raises immediately.
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "ci"]
     commit-message:
       prefix: "ci(deps)"
@@ -16,6 +22,12 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # A release is not adopted the day it appears. Most registry compromises are
+    # caught within days of publication, and a bot that upgrades within hours turns
+    # that window into a merged PR. Applies to the schedule, not to security
+    # advisories, which Dependabot still raises immediately.
+    cooldown:
+      default-days: 7
     labels: ["dependencies"]
     commit-message:
       prefix: "deps"
@@ -41,6 +53,12 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # A release is not adopted the day it appears. Most registry compromises are
+    # caught within days of publication, and a bot that upgrades within hours turns
+    # that window into a merged PR. Applies to the schedule, not to security
+    # advisories, which Dependabot still raises immediately.
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "docker"]
     commit-message:
       prefix: "deps(docker)"
@@ -70,6 +88,12 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # A release is not adopted the day it appears. Most registry compromises are
+    # caught within days of publication, and a bot that upgrades within hours turns
+    # that window into a merged PR. Applies to the schedule, not to security
+    # advisories, which Dependabot still raises immediately.
+    cooldown:
+      default-days: 7
     labels: ["dependencies"]
     commit-message:
       prefix: "chore(deps)"
