@@ -92,8 +92,12 @@ module "stack" {
   // one idle task it computes one. It would be inert while billing CloudWatch alarms —
   // and a floor of 1 instead would undo the scale-to-zero within minutes.
   api = {
-    cpu                = 512
-    memory             = 2048
+    // Raised to carry the ClamAV sidecar. clamd carves out 256 CPU / 2048 MB of the
+    // task, and the api scans uploads synchronously, so it needs one in ITS task —
+    // the worker's is in a different network namespace. The remaining 768/2048 is
+    // what the api and the tunnel had before this changed.
+    cpu                = 1024
+    memory             = 4096
     min_count          = 0
     max_count          = 2
     enable_autoscaling = false
