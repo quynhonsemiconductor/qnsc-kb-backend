@@ -440,6 +440,20 @@ module "tunnel_api" {
   app_port                = 8000
   log_group               = local.api_log_group
   region                  = var.region
+
+  // 512, not the module's 128 default. That default is a HARD limit — the module sets
+  // `memory` and `memoryReservation` to the same value — and its own documentation says
+  // to raise it for "a task holding many long-lived SSE connections", which is precisely
+  // what this product is: the AI answer path streams tokens over SSE for the length of a
+  // generation, and source uploads push up to 25 MB through the same connector.
+  //
+  // The sidecar is `essential = true`, so this is not a degraded-tunnel failure mode: if
+  // cloudflared is OOM-killed the TASK dies and is replaced, and every request in flight
+  // is reset with no HTTP response at all. In the browser that surfaces as a bare
+  // "Network Error" with no status and no CORS headers, which is indistinguishable from
+  // the API being down — and it reproduced from outside the browser as an intermittent
+  // connection reset on large multipart POSTs while small requests stayed reliable.
+  memory = 512
 }
 
 // ── API service ───────────────────────────────────────────────────────────────
