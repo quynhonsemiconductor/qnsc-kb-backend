@@ -157,6 +157,12 @@ class ConnectorAdapter:
     async def discover_scopes(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    # Whether calling incremental_changes with NO cursor enumerates the entire scope.
+    # Only then may "absent from the result" be read as "gone at the provider", which is
+    # what the reconciliation sweep in cloud_sync does. Default False: a provider that
+    # cannot enumerate must never have its corpus deleted for being unmentioned.
+    full_walk_is_authoritative = False
+
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         raise NotImplementedError
 
@@ -166,7 +172,12 @@ class ConnectorAdapter:
     async def download(self, change: NormalizedChange) -> bytes:
         raise NotImplementedError
 
-    async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
+    async def create_webhook(
+        self,
+        scope: dict[str, Any],
+        callback_url: str,
+        lifecycle_callback_url: str | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     async def renew_webhook(self, provider_subscription_id: str) -> datetime | None:
@@ -178,11 +189,23 @@ class ConnectorAdapter:
         """
         return None
 
+    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+        """Retire a subscription at the provider.
+
+        Called before a replacement is created, because a provider may refuse a second
+        subscription covering the same resource. Best effort by contract: the caller
+        treats any failure as "already gone" rather than as a reason not to resubscribe.
+        """
+        return None
+
 
 class SharePointAdapter(ConnectorAdapter):
     provider = "sharepoint"
     graph = "https://graph.microsoft.com/v1.0"
     allowed_api_hosts = frozenset({"graph.microsoft.com"})
+    # A /delta called without a token replays the drive (or folder subtree) from empty
+    # and pages to the end, so the result is the full current state of the scope.
+    full_walk_is_authoritative = True
 
     def oauth_url(self, state: str) -> str:
         params = {
@@ -213,10 +236,23 @@ class SharePointAdapter(ConnectorAdapter):
             return response.json()
 
     async def refresh_token(self) -> dict[str, Any]:
-        refresh = decrypt_secret(self.connector.oauth_refresh_token)
-        if not refresh:
-            raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
         async with httpx.AsyncClient(timeout=30.0) as client:
+            if settings.microsoft_connector_auth_mode == "application":
+                response = await client.post(
+                    f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                    data={
+                        "client_id": settings.MICROSOFT_CLIENT_ID,
+                        "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                        "grant_type": "client_credentials",
+                        "scope": settings.MICROSOFT_GRAPH_SCOPE,
+                    },
+                )
+                if response.status_code >= 400:
+                    raise ConnectorProviderError("Microsoft application token request failed", retryable=False, code=str(response.status_code))
+                return response.json()
+            refresh = decrypt_secret(self.connector.oauth_refresh_token)
+            if not refresh:
+                raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
             response = await client.post(
                 f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
                 data={"client_id": settings.MICROSOFT_CLIENT_ID, "client_secret": settings.MICROSOFT_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh, "scope": "offline_access openid profile User.Read Files.Read.All Sites.Read.All"},
@@ -229,8 +265,32 @@ class SharePointAdapter(ConnectorAdapter):
         # ``/drives`` often returns only a generic library such as
         # "Documents". Resolve SharePoint sites first so reviewers can see the
         # real site/library/folder location instead of guessing where it lives.
-        sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
-        sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
+        auth_mode = settings.microsoft_connector_auth_mode
+        configured_site_ids = [
+            value.strip() for value in settings.MICROSOFT_SHAREPOINT_SITE_IDS.split(",") if value.strip()
+        ]
+        configured_user_ids = [
+            value.strip() for value in settings.MICROSOFT_ONEDRIVE_USER_IDS.split(",") if value.strip()
+        ]
+        if auth_mode == "application" and not configured_site_ids and not configured_user_ids:
+            raise ConnectorProviderError(
+                "Application mode requires MICROSOFT_SHAREPOINT_SITE_IDS or MICROSOFT_ONEDRIVE_USER_IDS",
+                retryable=False,
+                code="scope_allowlist_required",
+            )
+        if configured_site_ids:
+            site_values: list[dict[str, Any]] = []
+            for site_id in configured_site_ids:
+                site_values.append(await self._request(
+                    "GET",
+                    f"{self.graph}/sites/{quote(site_id, safe='')}?$select=id,name,displayName,webUrl",
+                ))
+            sites = site_values
+        elif auth_mode == "application":
+            sites = []
+        else:
+            sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
+            sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
         result: list[dict[str, Any]] = []
 
         for site in sites:
@@ -283,6 +343,49 @@ class SharePointAdapter(ConnectorAdapter):
                             },
                         })
 
+        for user_id in configured_user_ids:
+            drive = await self._request(
+                "GET",
+                f"{self.graph}/users/{quote(user_id, safe='')}/drive?$select=id,name,driveType,webUrl",
+            )
+            drive_id = str(drive.get("id") or "") if isinstance(drive, dict) else ""
+            if not drive_id:
+                continue
+            drive_name = str(drive.get("name") or "OneDrive")
+            location = f"OneDrive / {user_id} / {drive_name}"
+            result.append({
+                "external_scope_id": drive_id,
+                "scope_type": "onedrive_drive",
+                "display_name": location,
+                "config": {
+                    "drive_id": drive_id,
+                    "drive_name": drive_name,
+                    "user_id": user_id,
+                    "web_url": drive.get("webUrl"),
+                    "location_label": location,
+                },
+            })
+            folders = await self._request(
+                "GET",
+                f"{self.graph}/drives/{quote(drive_id, safe='')}/root/children?$select=id,name,folder,webUrl",
+            )
+            for folder in folders.get("value", []):  # type: ignore[union-attr]
+                if folder.get("folder"):
+                    folder_name = str(folder.get("name") or folder.get("id"))
+                    result.append({
+                        "external_scope_id": f"{drive_id}:{folder['id']}",
+                        "scope_type": "onedrive_folder",
+                        "display_name": f"{location} / {folder_name}",
+                        "config": {
+                            "drive_id": drive_id,
+                            "drive_name": drive_name,
+                            "user_id": user_id,
+                            "folder_id": folder["id"],
+                            "web_url": folder.get("webUrl") or drive.get("webUrl"),
+                            "location_label": f"{location} / {folder_name}",
+                        },
+                    })
+
         if result:
             return result
 
@@ -301,29 +404,58 @@ class SharePointAdapter(ConnectorAdapter):
                     result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "sharepoint_folder", "display_name": f"{location} / {folder_name}", "config": {"drive_id": drive_id, "folder_id": folder["id"], "web_url": folder.get("webUrl") or item.get("webUrl"), "location_label": f"{location} / {folder_name}"}})
         return result
 
-    async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
+    async def create_webhook(
+        self,
+        scope: dict[str, Any],
+        callback_url: str,
+        lifecycle_callback_url: str | None = None,
+    ) -> dict[str, Any]:
         client_state = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(hours=1)
-        result = await self._request("POST", f"{self.graph}/subscriptions", json={
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES)
+        payload: dict[str, Any] = {
             "changeType": "updated",
             "notificationUrl": callback_url,
             "resource": f"/drives/{scope['config'].get('drive_id', scope['external_scope_id'])}/root",
             "expirationDateTime": expires_at.isoformat(timespec="seconds") + "Z",
             "clientState": client_state,
-        })
-        return {"subscription_id": result["id"], "client_state": client_state, "expires_at": expires_at}  # type: ignore[index]
+        }
+        if lifecycle_callback_url:
+            payload["lifecycleNotificationUrl"] = lifecycle_callback_url
+        # Without this header Graph notifies on CONTENT changes only. A file whose
+        # sharing was revoked never wakes the connector, so a user who lost access at
+        # SharePoint keeps seeing the document in the KB until the next reconciliation
+        # pass — six hours by default. SharePoint and OneDrive for Business support the
+        # header; consumer OneDrive ignores it, which is why it is safe to always send.
+        result = await self._request(
+            "POST",
+            f"{self.graph}/subscriptions",
+            json=payload,
+            headers={"Prefer": "includesecuritywebhooks"},
+        )
+        return {
+            "subscription_id": result["id"],
+            "client_state": client_state,
+            "expires_at": expires_at,
+            "resource": payload["resource"],
+            "lifecycle_notification_url": lifecycle_callback_url,
+        }  # type: ignore[index]
 
     async def renew_webhook(self, provider_subscription_id: str) -> datetime | None:
         # Graph caps a drive subscription at roughly 30 days but rejects anything beyond
         # its own maximum, so this asks for the same hour create_webhook does and leans on
         # the renewal task running far more often than that.
-        expires_at = datetime.utcnow() + timedelta(hours=1)
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES)
         await self._request(
             "PATCH",
             f"{self.graph}/subscriptions/{provider_subscription_id}",
             json={"expirationDateTime": expires_at.isoformat(timespec="seconds") + "Z"},
         )
         return expires_at
+
+    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+        # Graph refuses a second subscription with the same changeType and resource
+        # (409 Conflict), so a replacement is only possible once this one is gone.
+        await self._request("DELETE", f"{self.graph}/subscriptions/{provider_subscription_id}")
 
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         drive_id = scope["config"].get("drive_id", scope["external_scope_id"])
@@ -375,6 +507,12 @@ class GoogleDriveAdapter(ConnectorAdapter):
     provider = "google_drive"
     api = "https://www.googleapis.com/drive/v3"
     allowed_api_hosts = frozenset({"www.googleapis.com"})
+    # DELIBERATELY False. With no cursor this adapter asks for startPageToken and pages
+    # from there — changes from NOW ON — so a cursor-less call returns almost nothing.
+    # It is not an enumeration, and treating it as one would delete the whole indexed
+    # corpus of every Drive scope on each reconciliation pass. A real full walk here
+    # means files.list, which this adapter does not implement.
+    full_walk_is_authoritative = False
 
     def oauth_url(self, state: str) -> str:
         params = {"client_id": settings.GOOGLE_CLIENT_ID or "", "redirect_uri": settings.GOOGLE_REDIRECT_URI or "", "response_type": "code", "access_type": "offline", "prompt": "consent", "scope": "https://www.googleapis.com/auth/drive.readonly openid email profile", "state": state}
@@ -398,20 +536,42 @@ class GoogleDriveAdapter(ConnectorAdapter):
             return response.json()
 
     async def discover_scopes(self) -> list[dict[str, Any]]:
-        drives = await self._request("GET", f"{self.api}/drives?pageSize=100&fields=drives(id,name,webViewLink,nextPageToken)")
-        result = [{"external_scope_id": item["id"], "scope_type": "shared_drive", "display_name": item.get("name", item["id"]), "config": {"drive_id": item["id"], "web_url": item.get("webViewLink")}} for item in drives.get("drives", [])]  # type: ignore[union-attr]
+        drives: list[dict[str, Any]] = []
+        drive_page_token: str | None = None
+        while True:
+            query = {"pageSize": "100", "fields": "nextPageToken,drives(id,name,webViewLink)"}
+            if drive_page_token:
+                query["pageToken"] = drive_page_token
+            page = await self._request("GET", f"{self.api}/drives?{urlencode(query)}")
+            drives.extend(page.get("drives", []))  # type: ignore[union-attr]
+            drive_page_token = page.get("nextPageToken")  # type: ignore[union-attr]
+            if not drive_page_token:
+                break
+
+        result = [{"external_scope_id": item["id"], "scope_type": "shared_drive", "display_name": item.get("name", item["id"]), "config": {"drive_id": item["id"], "web_url": item.get("webViewLink")}} for item in drives]
         result.append({"external_scope_id": "user", "scope_type": "drive", "display_name": "My Drive", "config": {"corpus": "user"}})
-        for drive in [*drives.get("drives", []), {"id": None, "name": "My Drive"}]:  # type: ignore[union-attr]
-            params = {"q": "mimeType = 'application/vnd.google-apps.folder' and trashed = false", "pageSize": "100", "fields": "files(id,name,parents,webViewLink,driveId)", "includeItemsFromAllDrives": "true", "supportsAllDrives": "true"}
+        for drive in [*drives, {"id": None, "name": "My Drive"}]:
+            params: dict[str, str] = {"q": "mimeType = 'application/vnd.google-apps.folder' and trashed = false", "pageSize": "100", "fields": "nextPageToken,files(id,name,parents,webViewLink,driveId)", "includeItemsFromAllDrives": "true", "supportsAllDrives": "true"}
             if drive.get("id"):
                 params.update({"corpora": "drive", "driveId": drive["id"]})
-            folders = await self._request("GET", f"{self.api}/files?{urlencode(params)}")
-            for folder in folders.get("files", []):  # type: ignore[union-attr]
-                drive_id = drive.get("id") or "user"
-                result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "folder", "display_name": f"{drive.get('name', 'My Drive')} / {folder.get('name', folder['id'])}", "config": {"drive_id": drive.get("id"), "folder_id": folder["id"], "corpus": drive_id, "web_url": folder.get("webViewLink")}})
+            folder_page_token: str | None = None
+            while True:
+                page_params = {**params, **({"pageToken": folder_page_token} if folder_page_token else {})}
+                folders = await self._request("GET", f"{self.api}/files?{urlencode(page_params)}")
+                for folder in folders.get("files", []):  # type: ignore[union-attr]
+                    drive_id = drive.get("id") or "user"
+                    result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "folder", "display_name": f"{drive.get('name', 'My Drive')} / {folder.get('name', folder['id'])}", "config": {"drive_id": drive.get("id"), "folder_id": folder["id"], "corpus": drive_id, "web_url": folder.get("webViewLink")}})
+                folder_page_token = folders.get("nextPageToken")  # type: ignore[union-attr]
+                if not folder_page_token:
+                    break
         return result
 
-    async def create_webhook(self, scope: dict[str, Any], callback_url: str) -> dict[str, Any]:
+    async def create_webhook(
+        self,
+        scope: dict[str, Any],
+        callback_url: str,
+        lifecycle_callback_url: str | None = None,
+    ) -> dict[str, Any]:
         config = scope["config"]
         start = await self._request("GET", f"{self.api}/changes/startPageToken" + (f"?driveId={config['drive_id']}&supportsAllDrives=true" if config.get("drive_id") else ""))
         channel_id = str(uuid.uuid4())
@@ -420,8 +580,70 @@ class GoogleDriveAdapter(ConnectorAdapter):
         expiration = result.get("expiration")
         expires_at = datetime.utcfromtimestamp(int(expiration) / 1000) if expiration else datetime.utcnow() + timedelta(days=1)
         # Google sends the channel id in X-Goog-Channel-ID; keep that id as
-        # our subscription key so the webhook can resolve the connector.
-        return {"subscription_id": channel_id, "client_state": client_state, "expires_at": expires_at}  # type: ignore[union-attr]
+        # our subscription key so the webhook can resolve the connector. resourceId is
+        # stored because channels.stop needs BOTH ids — without it a superseded channel
+        # keeps delivering until it expires on its own.
+        return {"subscription_id": channel_id, "client_state": client_state, "expires_at": expires_at, "resource": result.get("resourceId")}  # type: ignore[union-attr]
+
+    async def renew_webhook(self, provider_subscription_id: str) -> datetime | None:
+        # A Drive channel cannot be extended: changes.watch mints a new one and stops
+        # the old. Returning None tells the worker this subscription is spent, and the
+        # repair pass in webhook_subscriptions creates its replacement.
+        return None
+
+    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+        if not resource:
+            # Pre-existing rows predate storing resourceId. Nothing can stop the channel;
+            # it lapses within a day and the notification inbox deduplicates until then.
+            return None
+        await self._request("POST", f"{self.api}/channels/stop", json={"id": provider_subscription_id, "resourceId": resource})
+
+    async def _parents_of(self, file_id: str, cache: dict[str, list[str]]) -> list[str]:
+        """Return a file's parents, memoized for the lifetime of one walk."""
+
+        if file_id in cache:
+            return cache[file_id]
+        try:
+            data = await self._request(
+                "GET",
+                f"{self.api}/files/{quote(file_id, safe='')}?supportsAllDrives=true&fields=id,parents",
+            )
+        except ConnectorProviderError:
+            # An ancestor we cannot read is an ancestor we cannot claim the file sits
+            # under. Fail closed: the item is left out of a folder scope rather than
+            # pulled into one it may not belong to.
+            data = {}
+        parents = [str(item) for item in (data.get("parents") or [])] if isinstance(data, dict) else []
+        cache[file_id] = parents
+        return parents
+
+    async def _within_folder(
+        self,
+        parents: list[str],
+        folder_id: str,
+        cache: dict[str, list[str]],
+        depth: int = 0,
+    ) -> bool:
+        """Whether any ancestor chain from ``parents`` reaches ``folder_id``.
+
+        Drive's changes feed reports only DIRECT parents, so testing membership with
+        ``folder_id in parents`` matched a selected folder's immediate children and
+        nothing else. Everything one level deeper — the usual shape of a real shared
+        folder — was silently dropped, and the admin who selected the folder saw a
+        fraction of it appear in the KB with no error anywhere to explain the rest.
+        """
+
+        # Drive nesting is shallow in practice; the bound is a cycle guard, not a policy.
+        if depth > 20 or not parents:
+            return False
+        if folder_id in parents:
+            return True
+        for parent in parents:
+            if await self._within_folder(
+                await self._parents_of(parent, cache), folder_id, cache, depth + 1
+            ):
+                return True
+        return False
 
     async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
         config = scope["config"]
@@ -431,14 +653,24 @@ class GoogleDriveAdapter(ConnectorAdapter):
             params["pageToken"] = start["startPageToken"]  # type: ignore[index]
         changes: list[NormalizedChange] = []
         next_cursor = None
+        folder_id = config.get("folder_id")
+        ancestry: dict[str, list[str]] = {}
         while params.get("pageToken"):
             query = urlencode(params)
             page = await self._request("GET", f"{self.api}/changes?{query}")
             for entry in page.get("changes", []):  # type: ignore[union-attr]
                 file = entry.get("file") or {}
-                if config.get("folder_id") and config["folder_id"] not in (file.get("parents") or []):
-                    continue
                 removed = bool(entry.get("removed")) or bool(file.get("trashed"))
+                if folder_id and not removed:
+                    if not await self._within_folder(
+                        [str(item) for item in (file.get("parents") or [])], folder_id, ancestry
+                    ):
+                        continue
+                # A removal carries no file resource at all, so it has no parents to
+                # test — the old filter therefore discarded EVERY deletion under a
+                # folder scope and the KB kept serving documents that were gone from
+                # Drive. Emit the tombstone and let the sync layer, which knows what it
+                # actually tracks for this scope, decide whether it is relevant.
                 changes.append(NormalizedChange(
                     external_id=entry["fileId"], corpus_id=config.get("drive_id", "user"), name=file.get("name", entry["fileId"]), state="deleted" if removed else "active", content_changed=bool(file.get("md5Checksum") or file.get("version")), permissions_changed=False, moved=bool(file.get("parents")), revision=str(file.get("version") or file.get("modifiedTime") or "unknown"), mime_type=file.get("mimeType"), parent_external_id=(file.get("parents") or [None])[0], web_url=file.get("webViewLink"), metadata=file,
                 ))
@@ -454,7 +686,11 @@ class GoogleDriveAdapter(ConnectorAdapter):
         result = []
         for item in data.get("permissions", []):  # type: ignore[union-attr]
             principal_type = item.get("type", "user")
-            principal_id = item.get("id") or item.get("emailAddress") or item.get("domain")
+            # Google exposes a stable permission id, but the email is the
+            # useful tenant-local identity for reconciling access to an
+            # internal account. Keep the id as a fallback for principals that
+            # do not expose an address (for example legacy group entries).
+            principal_id = item.get("emailAddress") or item.get("id") or item.get("domain")
             if principal_id:
                 result.append({"principal_type": principal_type, "principal_id": str(principal_id), "role": str(item.get("role", "reader"))})
         return result

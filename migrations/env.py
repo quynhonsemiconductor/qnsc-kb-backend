@@ -28,6 +28,8 @@ _LEGACY_TABLES = {"connector_credentials"}
 # therefore excluded from metadata-diff removal proposals.
 _MIGRATION_MANAGED_INDEXES = {
     "ix_ai_cache_expiry",
+    "ix_ai_cache_article_ids_gin",
+    "ix_ai_usage_logs_user_id",
     "ix_article_access_group_id",
     "ix_article_chunks_article_id",
     "ix_article_chunks_embedding_hnsw",
@@ -35,9 +37,15 @@ _MIGRATION_MANAGED_INDEXES = {
     "ix_article_chunks_permission_lookup",
     "ix_article_departments_department_id",
     "ix_article_versions_article_id",
+    "ix_articles_title_unaccent_trgm",
     "ix_audit_logs_created_at",
+    "ix_comments_article_id",
+    "ix_comments_user_id",
+    "ix_document_sources_article_id",
     "ix_document_sources_hash",
     "ix_ingestion_fingerprints_draft_id",
+    "ix_outbox_events_drain",
+    "ix_search_logs_user_id",
     "ix_user_departments_department_id",
     "uq_department_managers_one_active_owner",
 }

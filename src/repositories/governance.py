@@ -81,7 +81,9 @@ class GovernanceRepository:
             if depts:
                 assignment_scope = assignment_scope | PendingDraft.dept.in_(list(depts))
             stmt = stmt.where(assignment_scope)
-        result = await self.db.execute(stmt.order_by(PendingDraft.created_at.desc()))
+        result = await self.db.execute(
+            stmt.order_by(PendingDraft.created_at.desc()).limit(500)
+        )
         return result.scalars().all()
 
     async def count_pending_for_user(self, user: User) -> int:
@@ -206,7 +208,7 @@ class GovernanceRepository:
             stmt = stmt.where(Gap.status == status)
         if company_domain:
             stmt = stmt.where(Gap.company_domain == company_domain)
-        result = await self.db.execute(stmt.order_by(Gap.count.desc()))
+        result = await self.db.execute(stmt.order_by(Gap.count.desc()).limit(500))
         return result.scalars().all()
 
     async def get_gap(self, gap_id: uuid.UUID, company_domain: str | None = None) -> Gap | None:

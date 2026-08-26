@@ -6,11 +6,11 @@ Production must set `ENVIRONMENT=production`, a random `SECRET_KEY` of at least 
 
 ## Deployment
 
-Use `docker-compose.production.yml`. The API runs Alembic before startup and the worker runs Celery with Redis. The production compose file does not publish database or Redis ports. Put TLS and authentication at the reverse proxy or managed ingress layer.
+Use `docker-compose.production.yml`. Migrations run from the separate `migrator` profile service (`docker compose -f docker-compose.production.yml --profile migrate run --rm migrator`) BEFORE the API starts; the API container itself does not migrate. The worker runs Celery with Redis. The production compose file does not publish database or Redis ports. Put TLS and authentication at the reverse proxy or managed ingress layer.
 
 ## Migrations
 
-Run migrations once per deployment from the API entrypoint using `MIGRATION_DATABASE_URL`. Runtime schema creation is disabled in production. The API and worker use the non-superuser `DATABASE_URL`; this is required for RLS to be effective. Validate migrations against a disposable PostgreSQL/pgvector instance before release.
+Run migrations once per deployment from the `migrator` compose profile (or the ECS migration task) using `MIGRATION_DATABASE_URL`. Runtime schema creation is disabled in production. The API and worker use the non-superuser `DATABASE_URL`; this is required for RLS to be effective. Validate migrations against a disposable PostgreSQL/pgvector instance before release.
 
 ## Retrieval and indexing
 

@@ -1,0 +1,56 @@
+# =============================================================================
+# Semgrep exclusions.
+#
+# Writing this file REPLACES Semgrep's built-in template rather than adding to it,
+# so every default below is reproduced verbatim from
+# semgrep/templates/.semgrepignore (v1.97.0). Removing one silently starts scanning
+# node_modules and friends.
+#
+# The scan is run by the shared reusable workflow as
+#   docker run -v "$PWD:/src" -w /src semgrep/semgrep:<ver> semgrep scan --config=... .
+# so the working directory is this repository root and this file is picked up.
+# =============================================================================
+
+# --- Semgrep defaults (do not edit; keep in step with the template) ----------
+# Common large paths
+node_modules/
+build/
+dist/
+vendor/
+.env/
+.venv/
+.tox/
+*.min.js
+.npm/
+.yarn/
+# Common test paths
+test/
+tests/
+testsuite/
+*_test.go
+# Semgrep rules folder
+.semgrep
+# Semgrep-action log folder
+.semgrep_logs/
+
+# --- This repository ---------------------------------------------------------
+# Alembic revisions. Every finding Semgrep has ever produced here is one of two
+# rules — sqlalchemy-execute-raw-query and formatted-sql-query — and both are
+# structurally inapplicable to a migration:
+#
+#   * PostgreSQL cannot parameterize IDENTIFIERS. There is no bind-parameter form
+#     of `ALTER TABLE <name>`, `CREATE POLICY <name>` or `DROP INDEX <name>`, so
+#     "use parameterized queries instead" describes something the database does not
+#     offer. The advice applies to query VALUES, which these statements do not take.
+#   * Every interpolated value is a literal declared in the same file — module-level
+#     tuples such as `_RLS_TABLES`, `_DOWNGRADE_DROPS` and `_TENANT_EXPRESSION`. No
+#     request data, no function argument, nothing from the network reaches them.
+#
+# Scoped to the revision files, not to `migrations/` as a whole, so `env.py` and any
+# future helper module here stay scanned. Confirmed against the exact image CI uses
+# (semgrep/semgrep:1.97.0, --config=p/default): 148 findings in this directory, 148
+# of them those two rules and nothing else — so this costs no real coverage.
+#
+# If a migration ever needs to interpolate something that is NOT a literal, that is
+# the moment to delete this entry rather than widen it.
+migrations/versions/

@@ -1,9 +1,10 @@
 import uuid
 from datetime import datetime
 from typing import Any
-from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index
+from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index, and_
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
+from src.models.user import Department
 
 # Association table for Article <-> AccessGroup (Many-to-Many)
 article_access = Table(
@@ -43,7 +44,7 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # article's department/ACL; users: only explicit ArticleUserPermission
     # allow rows (subject to explicit deny precedence).
     visibility: Mapped[str] = mapped_column(String(30), default="department", nullable=False)
-    language: Mapped[str] = mapped_column(String(10), default="en", nullable=False)
+    language: Mapped[str] = mapped_column(String(10), default="vi", server_default="vi", nullable=False)
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # draft, pending_review, published, archived
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
@@ -54,6 +55,10 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_reviewed: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_review: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     needs_update: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    self_approved: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    source_changed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    source_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source_previous_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     index_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
     index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -143,6 +148,28 @@ class ArticleTag(Base, UUIDPrimaryKeyMixin):
     tag: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
 
     article: Mapped[Article] = relationship("Article", back_populates="tags")
+
+
+class TagCatalog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Tenant-owned vocabulary used to validate article tags."""
+
+    __tablename__ = "tag_catalog"
+    __table_args__ = (
+        UniqueConstraint("company_domain", "normalized_tag", name="uq_tag_catalog_company_normalized"),
+        Index("ix_tag_catalog_company_active", "company_domain", "active"),
+    )
+    access_audiences: Mapped[list["Department"]] = relationship(
+        "Department", secondary=article_departments, viewonly=True,
+        primaryjoin=lambda: Article.id == article_departments.c.article_id,
+        secondaryjoin=lambda: and_(Department.id == article_departments.c.department_id, Department.kind == "access"),
+    )
+
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    tag: Mapped[str] = mapped_column(String(80), nullable=False)
+    normalized_tag: Mapped[str] = mapped_column(String(80), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 class DocumentSource(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "document_sources"

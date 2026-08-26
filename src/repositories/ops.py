@@ -66,7 +66,7 @@ class OpsRepository:
         return eq
 
     async def list_eval_questions(self) -> Sequence[EvalQuestion]:
-        result = await self.db.execute(select(EvalQuestion))
+        result = await self.db.execute(select(EvalQuestion).limit(500))
         return result.scalars().all()
 
     async def get_eval_question(self, question_id: uuid.UUID) -> EvalQuestion | None:
@@ -84,5 +84,6 @@ class OpsRepository:
             select(EvalRun)
             .order_by(EvalRun.created_at.desc())
             .options(selectinload(EvalRun.question))
+            .limit(200)
         )
         return result.scalars().all()

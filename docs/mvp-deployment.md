@@ -24,8 +24,11 @@ network.
    curl https://kb.example.com/health/live
    ```
 
-The API container runs Alembic migrations before starting. `AUTO_CREATE_SCHEMA`
-is disabled in every environment; schema changes must go through Alembic.
+Migrations run from the one-shot `migrator` compose profile (or the ECS
+migration task), NOT from the API container. Run it before starting the stack:
+`docker compose -f docker-compose.production.yml --profile migrate run --rm migrator`.
+`AUTO_CREATE_SCHEMA` is disabled in every environment; schema changes must go
+through Alembic.
 
 ## Cloud connectors
 

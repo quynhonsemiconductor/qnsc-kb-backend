@@ -53,6 +53,7 @@ class AIRepository:
             select(AiConversation)
             .where(AiConversation.user_id == user_id)
             .order_by(AiConversation.updated_at.desc())
+            .limit(200)
         )
         return list(result.scalars().all())
 
@@ -90,6 +91,7 @@ class AIRepository:
         usage_log_id: uuid.UUID | None = None,
         grounded_content: str | None = None,
         extended_content: str | None = None,
+        action_data: dict | None = None,
     ) -> AiMessage:
         message = AiMessage(
             conversation_id=conversation_id,
@@ -98,6 +100,7 @@ class AIRepository:
             grounded_content=grounded_content,
             extended_content=extended_content,
             citations=json.dumps(citations or []),
+            action_data=action_data,
             usage_log_id=usage_log_id,
         )
         self.db.add(message)

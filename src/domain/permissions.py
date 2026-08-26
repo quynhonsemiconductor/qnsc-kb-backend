@@ -44,7 +44,11 @@ class PermissionService:
             return True
         user_group_ids = {group.id for group in (getattr(user, "groups", []) or [])}
         article_group_ids = {group.id for group in (getattr(article, "access_groups", []) or [])}
-        return bool(user_group_ids & article_group_ids)
+        if user_group_ids & article_group_ids:
+            return True
+        user_access_ids = {department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"}
+        article_access_ids = {department.id for department in getattr(article, "departments", []) if getattr(department, "kind", "org") == "access"}
+        return bool(user_access_ids & article_access_ids)
 
     @staticmethod
     def get_public_bit() -> int:
@@ -101,8 +105,6 @@ class PermissionService:
             return False
         if getattr(article, "visibility", None) == "users":
             return explicit_effect == "allow"
-        if not AuthorizationService.can_access_article_departments(user, article):
-            return False
         if article.status in {"draft", "pending_review", "archived"}:
             # Unpublished content is never ordinary knowledge-base content.
             # Owners and governance users may inspect it for review/history,
@@ -118,11 +120,14 @@ class PermissionService:
             return True
         if explicit_effect == "allow":
             return True
-        if AuthorizationService.has_narrow_article_access(user, article):
+        if article.sensitivity == "restricted":
+            user_group_ids = {group.id for group in getattr(user, "groups", []) or []}
+            article_group_ids = {group.id for group in getattr(article, "access_groups", []) or []}
+            if not user_group_ids & article_group_ids:
+                return False
+        if AuthorizationService.can_access_article_departments(user, article):
             return True
-        user_mask = cls.calculate_user_bitmask(user)
-        art_mask = cls.calculate_article_bitmask(article)
-        return (user_mask & art_mask) != 0
+        return False
 
     @classmethod
     def can_edit_article(cls, user: User, article: Article) -> bool:

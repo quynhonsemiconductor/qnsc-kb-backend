@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # Schema lifecycle is owned exclusively by Alembic migrations.
     AUTO_CREATE_SCHEMA: bool = False
     JOB_MODE: str = "inline"
+    # How often the inline-mode outbox recovery loop retries failed/stale
+    # events (the Celery beat equivalent is replay_outbox_task).
+    OUTBOX_RECOVERY_INTERVAL_SECONDS: int = 300
     ENABLE_API_DOCS: bool = True
     ENABLE_RLS: bool = False
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
@@ -103,51 +106,74 @@ class Settings(BaseSettings):
     # no third-party key gates indexing or search.
     #
     # It is paid for in image size and memory. The API embeds the search QUERY on every
-    # search, so the fp32 ONNX export lives in the api image as well as the worker's —
-    # ~2.2 GB each, and no torch anywhere (PR #54): the `ml` group is a local-checkout
-    # reference, not a shipped dependency. Choosing a hosted model instead
-    # (gemini-embedding-001, text-embedding-3-small) is a one-line change here plus the
-    # migration below, and src/lib/embeddings.py already carries that path.
+    # search, so the ONNX graph and runtime live in the api image as well as the worker's
+    # — the `ml` dependency group is installed in both, and neither is small. Choosing a
+    # hosted model instead (gemini-embedding-001, text-embedding-3-small) is a one-line
+    # change here plus the migration below, and src/lib/embeddings.py already carries
+    # that path.
     #
     # This value fixes EMBEDDING_DIMENSION, which fixes the pgvector column width and the
     # HNSW index AT MIGRATION TIME. Changing it later needs a migration and a full
     # re-embed: a query and a chunk embedded by different models are points in unrelated
     # spaces, and their distance is meaningless rather than merely wrong.
-    EMBEDDING_MODEL: str = "BAAI/bge-m3"
-    EMBEDDING_VERSION: str = "bge-m3-v1"
+    # paraphrase-multilingual-MiniLM-L12-v2, chosen for a CPU-only deployment: 12 layers
+    # and 384 dimensions against bge-m3's 24 layers and 1024, which is the difference
+    # between embedding a query in milliseconds and in seconds without a GPU. It is
+    # multilingual, which the Vietnamese corpus needs, and it publishes its own ONNX
+    # export so the image needs no torch and no optimum-cli step.
+    #
+    # It is also what is already in the database: article_chunks.embedding is vector(384)
+    # and the stored chunks were produced by this model, so adopting it as the default
+    # costs no re-indexing. Switching to bge-m3 would mean deleting every chunk and
+    # re-embedding — see the guard in migration 20260810_51.
+    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # Names the MODEL that produced a vector, and hybrid_search filters on it, so a
+    # mislabelled corpus is an invisible corpus. Rows written while this said
+    # "bge-m3-v1" hold MiniLM vectors — provably, since a vector(384) column cannot
+    # hold bge-m3's 1024 — and need re-stamping or re-indexing once.
+    EMBEDDING_VERSION: str = "minilm-l12-v1"
 
-    # HOW the model runs, kept separate from WHICH model runs. "torch" is
-    # sentence-transformers and is what the stored corpus was embedded with; "onnx" runs
-    # the identical graph on onnxruntime with no torch and no transformers, which is
-    # ~2 GB less in every image that embeds. Same vectors either way — the parity test
-    # in tests/unit/test_embedding_backends.py is what proves that for a given model.
-    EMBEDDING_RUNTIME: str = "torch"
-    # Where the baked ONNX export lives: model.onnx + tokenizer.json.
+    # HOW the model runs, kept separate from WHICH model runs.
+    #
+    # Defaults to onnx because it is the only value this project's dependencies can
+    # satisfy: the `ml` group is onnxruntime + transformers, and neither torch nor
+    # sentence-transformers is declared anywhere. The default used to be "torch", so a
+    # deployment that changed nothing could not embed at all — every search fell back to
+    # keyword-only and logged an error suggesting an install that would not have helped.
+    #
+    # onnx still requires an export (model.onnx + tokenizer.json) in EMBEDDING_ONNX_DIR;
+    # see src/lib/embeddings/local_onnx.py. Until that exists, embeddings are unavailable
+    # either way — but the failure now names the thing that is actually missing.
+    EMBEDDING_RUNTIME: str = "onnx"
     EMBEDDING_ONNX_DIR: str = "/opt/embedding-onnx"
-    # bge-* are CLS-pooled. An ONNX export does not carry the pooling config that
-    # sentence-transformers reads, so it is stated rather than inferred — the wrong
-    # choice yields valid vectors in the wrong space and degrades retrieval silently.
-    EMBEDDING_ONNX_POOLING: str = "cls"
-    # A 0.5 vCPU task oversubscribes itself with onnxruntime's default thread pool and
-    # spends longer scheduling than embedding.
+    # PER MODEL, and not inferable from the export: an ONNX graph does not carry the
+    # pooling config sentence-transformers reads. This model's own 1_Pooling/config.json
+    # sets pooling_mode_mean_tokens=true and pooling_mode_cls_token=false, so "mean" is
+    # correct here. The previous default of "cls" (right for bge-*) would have produced
+    # perfectly valid vectors in the wrong space, degrading retrieval with no error.
+    EMBEDDING_ONNX_POOLING: str = "mean"
     EMBEDDING_ONNX_THREADS: int = 1
-    # Must equal the torch backend's effective max_seq_length (sentence_bert_config.json
-    # — 8192 for bge-m3): the stored corpus was embedded with full-length inputs, and a
-    # runtime that truncates earlier lands long inputs in a different space without any
-    # error. The long-input parity case in test_embedding_backends.py enforces the
-    # agreement; the value is per-model like EMBEDDING_DIMENSION.
-    EMBEDDING_MAX_TOKENS: int = 8192
+    # This model's sentence_bert_config.json says max_seq_length 128, and its
+    # max_position_embeddings is 512. The previous 8192 (bge-m3's window) would let the
+    # tokenizer emit sequences the graph cannot accept.
+    EMBEDDING_MAX_TOKENS: int = 128
     EMBEDDING_BATCH_SIZE: int = 32
+
     CHUNKING_VERSION: str = "v2-structure-aware"
     EMBEDDING_DIMENSION: int | None = None
     LLM_MODEL: str = "gemma-4-26b-a4b-it"
     RESTRUCTURE_ENABLED: bool = True
     RESTRUCTURE_MODEL: str | None = None
-    RESTRUCTURE_MAX_CHARS: int = 60000
+    # GLM-5 has a 200K context window shared by prompt and generation. 120K
+    # characters leaves practical headroom for the system prompt and a 64K
+    # lossless Markdown response, even for token-dense source languages.
+    RESTRUCTURE_MAX_CHARS: int = 120000
     # Formatting is an optional enhancement. Keep review responsive and use
     # the lossless local fallback when the configured provider is slow.
-    RESTRUCTURE_TIMEOUT_SECONDS: float = 120.0
-    RESTRUCTURE_MAX_OUTPUT_TOKENS: int = 16384
+    RESTRUCTURE_TIMEOUT_SECONDS: float = 300.0
+    # A lossless reading view can approach the source length. Keep enough
+    # space for long documents while retaining a finite cost/time safeguard.
+    RESTRUCTURE_MAX_OUTPUT_TOKENS: int = 65536
     RESTRUCTURE_NUMERIC_COVERAGE_THRESHOLD: float = 0.90
     AI_RATE_LIMIT_PER_MINUTE: int = 30
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
@@ -166,6 +192,14 @@ class Settings(BaseSettings):
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
     RAG_ALLOW_EXTENDED_ON_REFUSAL: bool = False
+    # Character budget for conversation history injected into the prompt.
+    # Bounds total prompt size (history + RAG context + system prompt) so long
+    # conversations cannot overflow smaller models' context windows.
+    RAG_HISTORY_MAX_CHARS: int = 9000
+    # Output cap for the main RAG generation path. Without it, provider-side
+    # output length is unbounded (cost/latency exposure); only Gemini enforced
+    # its own cap before this setting existed.
+    RAG_MAX_ANSWER_TOKENS: int = 2048
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
     OIDC_CLIENT_SECRET: str | None = None
@@ -176,18 +210,26 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
-    # Only verified QNSC Entra identities are provisioned automatically. New
-    # identities receive the least-privileged built-in Staff role.
-    ENTRA_AUTO_PROVISION_DOMAIN: str = "qnsc.vn"
-    # Addresses that are provisioned as global administrators instead of Staff, comma
-    # separated. Consulted ONLY when the account is first created — it is a bootstrap
-    # default, not a standing authority, so a role changed later in the admin UI is never
-    # overwritten by a sign-in. Removing someone here does not demote them.
-    #
-    # Safe to express as email addresses because the tenant is pinned: an id_token only
-    # reaches this check if Entra issued it for MICROSOFT_TENANT_ID, so the addresses are
-    # ones the organisation controls.
-    ENTRA_ADMIN_EMAILS: str = ""
+    # Entra is an authentication provider, not an account-provisioning path.
+    # A user must have a matching, unexpired invitation.
+    ENTRA_AUTO_PROVISION_DOMAIN: str = ""
+    MICROSOFT_GRAPH_SENDER: str | None = None
+    MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
+    # ``delegated`` keeps the interactive OAuth flow. ``application`` uses the
+    # tenant-approved client-credentials flow for unattended 24/7 ingestion.
+    MICROSOFT_CONNECTOR_AUTH_MODE: str = "delegated"
+    MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES: int = 1440
+    # Comma-separated Entra object IDs. Application mode deliberately avoids
+    # tenant-wide site/user discovery so it works with Sites.Selected and a
+    # least-privilege OneDrive allowlist.
+    MICROSOFT_SHAREPOINT_SITE_IDS: str = ""
+    MICROSOFT_ONEDRIVE_USER_IDS: str = ""
+    CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: int = 30
+    CONNECTOR_RECONCILE_INTERVAL_MINUTES: int = 360
+    CONNECTOR_AUTO_PUBLISH_MODE: str = "governed"
+    SYSTEM_DATA_OWNER_EMAIL: str | None = None
+    DEFAULT_LANGUAGE: str = "vi"
+    REVIEW_SLA_DAYS: int = 3
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None
@@ -256,9 +298,19 @@ class Settings(BaseSettings):
         # DATABASE_URL has a non-empty default, so testing its truthiness would treat
         # the localhost default as a deliberate choice and ignore the injected parts.
         if self.DATABASE_HOST:
-            if "DATABASE_URL" not in self.model_fields_set and self.DATABASE_USER and self.DATABASE_PASSWORD:
-                self.DATABASE_URL = self._compose_dsn(self.DATABASE_USER, self.DATABASE_PASSWORD)
-            if not self.MIGRATION_DATABASE_URL and self.MIGRATION_DATABASE_USER and self.MIGRATION_DATABASE_PASSWORD:
+            if (
+                "DATABASE_URL" not in self.model_fields_set
+                and self.DATABASE_USER
+                and self.DATABASE_PASSWORD
+            ):
+                self.DATABASE_URL = self._compose_dsn(
+                    self.DATABASE_USER, self.DATABASE_PASSWORD
+                )
+            if (
+                not self.MIGRATION_DATABASE_URL
+                and self.MIGRATION_DATABASE_USER
+                and self.MIGRATION_DATABASE_PASSWORD
+            ):
                 self.MIGRATION_DATABASE_URL = self._compose_dsn(
                     self.MIGRATION_DATABASE_USER, self.MIGRATION_DATABASE_PASSWORD
                 )
@@ -289,19 +341,38 @@ class Settings(BaseSettings):
             origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
         ]
 
+    @property
+    def microsoft_connector_auth_mode(self) -> str:
+        """The Microsoft connector auth mode, normalised in ONE place.
+
+        validate_production compared this stripped while every runtime site compared it
+        with `.lower()` alone, so a value carrying stray whitespace — which is what an
+        environment variable set from a Terraform join or a copied YAML line looks like —
+        passed the boot check and then behaved as "delegated" everywhere afterwards: the
+        app-only worker asked for a delegated refresh token it never had and every sync
+        failed with "not authorized".
+        """
+        return (self.MICROSOFT_CONNECTOR_AUTH_MODE or "").strip().lower()
+
     def validate_production(self) -> None:
-        if self.ENVIRONMENT.lower() not in {"production", "prod"}:
+        environment = self.ENVIRONMENT.lower()
+        if environment in {"development", "dev", "local"}:
             return
+        # Secret-material checks apply to ANY non-development environment. The
+        # committed default SECRET_KEY signs access/refresh JWTs and (without a
+        # DEK) encrypts stored connector tokens; a staging/uat/demo deployment
+        # with it is a production incident waiting to happen, so the gate must
+        # not key off the exact string "production".
         if (
             self.SECRET_KEY in {"", "super-secret-key-change-in-production"}
             or len(self.SECRET_KEY) < 32
         ):
             raise RuntimeError(
-                "SECRET_KEY must be a strong, externally supplied value in production"
+                "SECRET_KEY must be a strong, externally supplied value outside development"
             )
         if not self.DATA_ENCRYPTION_KEY or len(self.DATA_ENCRYPTION_KEY) < 32:
             raise RuntimeError(
-                "DATA_ENCRYPTION_KEY must be a separate, strong externally supplied value in production"
+                "DATA_ENCRYPTION_KEY must be a separate, strong externally supplied value outside development"
             )
         if any(
             len(key.strip()) < 32
@@ -311,6 +382,8 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "PREVIOUS_DATA_ENCRYPTION_KEYS entries must each be at least 32 characters"
             )
+        if environment not in {"production", "prod"}:
+            return
         if self.AUTO_CREATE_SCHEMA:
             raise RuntimeError(
                 "AUTO_CREATE_SCHEMA must be false in production; use Alembic migrations"
@@ -383,6 +456,15 @@ class Settings(BaseSettings):
         ):
             if value:
                 validated_https_url(value, setting_name)
+        connector_auth_mode = self.microsoft_connector_auth_mode
+        if connector_auth_mode not in {"delegated", "application"}:
+            raise RuntimeError(
+                "MICROSOFT_CONNECTOR_AUTH_MODE must be delegated or application"
+            )
+        if connector_auth_mode == "application" and not self.CONNECTOR_WEBHOOK_BASE_URL:
+            raise RuntimeError(
+                "CONNECTOR_WEBHOOK_BASE_URL is required for Microsoft application mode"
+            )
         storage_backend = (self.SOURCE_STORAGE_BACKEND or "").strip().lower()
         storage_bucket = (self.SOURCE_STORAGE_BUCKET or "").strip()
         storage_endpoint = (self.S3_ENDPOINT_URL or "").strip()
@@ -419,18 +501,17 @@ class Settings(BaseSettings):
             raise RuntimeError("MALWARE_SCAN_ENABLED must be true in production")
         if not self.MALWARE_SCANNER_HOST:
             raise RuntimeError("MALWARE_SCANNER_HOST is required in production")
-        if not all(
-            value and value.strip()
-            for value in (
-                self.MICROSOFT_CLIENT_ID,
-                self.MICROSOFT_CLIENT_SECRET,
-                self.MICROSOFT_TENANT_ID,
-                self.MICROSOFT_REDIRECT_URI,
-                self.MICROSOFT_LOGIN_REDIRECT_URI,
-            )
-        ):
+        microsoft_required = (
+            self.MICROSOFT_CLIENT_ID,
+            self.MICROSOFT_CLIENT_SECRET,
+            self.MICROSOFT_TENANT_ID,
+            self.MICROSOFT_LOGIN_REDIRECT_URI,
+        )
+        if self.microsoft_connector_auth_mode == "delegated":
+            microsoft_required = (*microsoft_required, self.MICROSOFT_REDIRECT_URI)
+        if not all(value and value.strip() for value in microsoft_required):
             raise RuntimeError(
-                "Microsoft Entra client, tenant, and redirect settings are required in production"
+                "Microsoft Entra client, tenant, login redirect, and delegated connector redirect settings are required in production"
             )
         if not re.fullmatch(
             r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",

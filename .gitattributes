@@ -1,0 +1,15 @@
+# Shell scripts MUST be LF, always, on every platform.
+#
+# A script checked out with CRLF has `#!/bin/sh\r` as its shebang. Linux then looks for
+# an interpreter literally named `/bin/sh\r`, does not find one, and reports
+# "no such file or directory" — naming the script, not the interpreter, so it reads as
+# though the file is missing when it is sitting right there.
+#
+# That is not hypothetical: docker/migrate-entrypoint.sh was committed with CRLF, which
+# made the `migrator` image unrunnable from any Windows clone. Migrations are the one
+# thing that has to work before anything else does.
+*.sh text eol=lf
+
+# Same reasoning for anything else read by a Linux interpreter or an init hook.
+docker/**/*.sh text eol=lf
+scripts/**/*.sh text eol=lf

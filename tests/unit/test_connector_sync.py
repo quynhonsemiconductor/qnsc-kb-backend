@@ -26,6 +26,7 @@ from src.domain.cloud_sync import (
 from src.domain.connector_adapters import (
     ConnectorAdapter,
     ConnectorProviderError,
+    GoogleDriveAdapter,
     NormalizedChange,
 )
 from src.api.routers.connectors import _can_complete_oauth, _safe_connector_config
@@ -703,3 +704,69 @@ def test_connector_strips_bearer_token_before_provider_download_redirect():
     assert result == b"document"
     assert requests[0].headers["authorization"] == "Bearer provider-token"
     assert "authorization" not in requests[1].headers
+
+
+def test_google_drive_scope_discovery_follows_drive_and_folder_pages():
+    adapter = GoogleDriveAdapter(
+        Connector(id=uuid.uuid4(), company_domain="acme.test", system="google_drive")
+    )
+    calls = []
+
+    async def fake_request(method, url, **_kwargs):
+        calls.append(url)
+        if "/drives?" in url and "pageToken=" not in url:
+            return {
+                "drives": [{"id": "shared-1", "name": "Shared One"}],
+                "nextPageToken": "drive-page-2",
+            }
+        if "/drives?" in url and "pageToken=drive-page-2" in url:
+            return {"drives": [{"id": "shared-2", "name": "Shared Two"}]}
+        if "/files?" in url and "pageToken=" not in url:
+            return {
+                "files": [{"id": "folder-1", "name": "Policies"}],
+                "nextPageToken": "folder-page-2",
+            }
+        if "/files?" in url and "pageToken=folder-page-2" in url:
+            return {"files": [{"id": "folder-2", "name": "Archive"}]}
+        raise AssertionError(f"unexpected Google Drive request: {url}")
+
+    adapter._request = fake_request
+    scopes = asyncio.run(adapter.discover_scopes())
+    scope_ids = {item["external_scope_id"] for item in scopes}
+    assert {"shared-1", "shared-2", "user", "user:folder-1", "user:folder-2"}.issubset(scope_ids)
+    assert any("pageToken=drive-page-2" in url for url in calls)
+    assert any("pageToken=folder-page-2" in url for url in calls)
+
+
+def test_google_drive_permissions_prefer_email_for_internal_identity_matching():
+    adapter = GoogleDriveAdapter(
+        Connector(id=uuid.uuid4(), company_domain="acme.test", system="google_drive")
+    )
+    change = NormalizedChange(
+        external_id="file-1",
+        corpus_id="shared-1",
+        name="policy.md",
+        state="active",
+        content_changed=True,
+        permissions_changed=False,
+        moved=False,
+        revision="1",
+        mime_type="text/markdown",
+        parent_external_id=None,
+        web_url=None,
+        metadata={},
+    )
+
+    async def fake_request(*_args, **_kwargs):
+        return {
+            "permissions": [
+                {"id": "permission-id", "type": "user", "emailAddress": "owner@acme.test", "role": "reader"},
+                {"id": "domain-id", "type": "domain", "domain": "acme.test", "role": "reader"},
+            ]
+        }
+
+    adapter._request = fake_request
+    assert asyncio.run(adapter.permissions(change)) == [
+        {"principal_type": "user", "principal_id": "owner@acme.test", "role": "reader"},
+        {"principal_type": "domain", "principal_id": "domain-id", "role": "reader"},
+    ]

@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import uuid
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from typing import Annotated, Any, Sequence
@@ -19,7 +20,8 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.api.deps import get_db, get_current_user
 from src.models import User
 from src.repositories.article import ArticleRepository
@@ -41,13 +43,16 @@ from src.domain.source_storage import (
     safe_source_media_type,
     source_should_display_inline,
 )
-from src.models.article import Article, DocumentSource
+from src.models.article import Article, DocumentSource, TagCatalog
+from src.models.interaction import ArticleFollower
 from src.models.governance import (
+    ArticleEditRequest,
     DraftTransition,
     DraftCandidate,
     PendingDraft,
     IngestionFingerprint,
 )
+from src.models.ops import NotificationQueue
 from src.repositories.governance import GovernanceRepository
 from src.repositories.feature_flags import FeatureFlagRepository
 from src.core.config import settings
@@ -59,6 +64,7 @@ from src.domain.governance import GovernanceService
 from src.domain.llm_client import complete, resolve_provider
 from src.domain.events import event_bus
 from src.domain.permissions import PermissionService
+from src.domain.article_edit_requests import create_article_edit_request as create_edit_request
 from src.domain.rbac import AuthorizationService
 from src.domain.departments import resolve_active_department, resolve_active_departments
 from src.domain.departments import lock_company_access_groups
@@ -71,9 +77,17 @@ _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 
 def _add_split_candidates(db: AsyncSession, draft: PendingDraft, text: str) -> None:
-    """Persist ordered F23 candidates beside the review envelope."""
-    for item in split_document_candidates(draft.title, text):
-        db.add(DraftCandidate(draft_id=draft.id, **item))
+    """Persist ordered candidates from an already formatted reading view.
+
+    Use the ORM relationship rather than ``draft.id`` directly: a newly
+    created draft receives its UUID when SQLAlchemy flushes it.  The
+    relationship makes the unit of work insert the draft first and propagate
+    its ID to each candidate.
+    """
+    for item in split_document_candidates(
+        draft.title, text, prefer_markdown_sections=True, page_texts=draft.page_texts
+    ):
+        db.add(DraftCandidate(draft=draft, **item))
 
 
 TagInput = Annotated[str, Field(min_length=1, max_length=50)]
@@ -139,10 +153,10 @@ class ArticleCreate(BaseModel):
     body_md: str = Field(min_length=1, max_length=2_000_000)
     dept: str | None = Field(default=None, min_length=1, max_length=100)
     department_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
-    language: str = Field(default="en", min_length=2, max_length=20)
+    language: str = Field(default="vi", min_length=2, max_length=20)
     tags: list[TagInput] = Field(default_factory=list, max_length=20)
     next_review: datetime | None = None
-    visibility: str = Field(default="public", pattern="^(public|department|users)$")
+    visibility: str = Field(default="public", pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
     denied_user_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
@@ -156,9 +170,13 @@ class ArticleUpdate(BaseModel):
     status: str | None = Field(default=None, min_length=1, max_length=30)
     tags: list[TagInput] | None = Field(default=None, max_length=20)
     next_review: datetime | None = None
-    visibility: str | None = Field(default=None, pattern="^(public|department|users)$")
+    visibility: str | None = Field(default=None, pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
     denied_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+
+
+class ArticleEditRequestCreate(BaseModel):
+    request_text: str = Field(min_length=5, max_length=5_000)
 
 
 class AutoTagRequest(BaseModel):
@@ -221,6 +239,9 @@ class ArticleResponse(BaseModel):
     explicit_user_ids: list[uuid.UUID] = []
     explicit_denied_user_ids: list[uuid.UUID] = []
     language: str
+    self_approved: bool = False
+    source_changed: bool = False
+    source_changed_at: datetime | None = None
     owner_id: uuid.UUID | None = None
     owner: OwnerResponse | None = None
     status: str
@@ -362,6 +383,13 @@ async def auto_tag_articles(
         )
 
     suggestions_by_id: dict[str, list[str]] = {}
+    try:
+        catalogue = set((await db.execute(select(TagCatalog.normalized_tag).where(TagCatalog.company_domain == current_user.company_domain, TagCatalog.active.is_(True)))).scalars().all())
+    except AttributeError:
+        # Lightweight unit doubles may not expose a database; production
+        # requests always use the tenant catalogue query above.
+        catalogue = None
+    normalize_tag = lambda value: re.sub(r"\s+", " ", "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)).strip().casefold())
     for item in raw_results:
         if not isinstance(item, dict) or not item.get("id"):
             continue
@@ -378,6 +406,13 @@ async def auto_tag_articles(
                 and value not in cleaned_tags
             ):
                 cleaned_tags.append(value)
+        # AI may propose only customer-approved vocabulary. An empty catalogue
+        # deliberately produces no automatic suggestions until the customer
+        # has loaded its taxonomy.
+        if catalogue == set():
+            cleaned_tags = []
+        elif catalogue is not None:
+            cleaned_tags = [tag for tag in cleaned_tags if normalize_tag(tag) in catalogue]
         suggestions_by_id[str(item["id"])] = cleaned_tags[:8]
 
     results = []
@@ -554,6 +589,28 @@ async def upload_source(
             IngestionFingerprint.source_hash == source_hash,
         )
     )
+    if fingerprint and fingerprint.status == "uploading":
+        # Older browser-to-R2 attempts can be abandoned before completion.
+        # They have no extracted content and are intentionally hidden from the
+        # review queue, so release the reservation before this authenticated
+        # API upload creates the real pending draft.
+        abandoned_draft = (
+            await db.get(PendingDraft, fingerprint.draft_id)
+            if fingerprint.draft_id
+            else None
+        )
+        if abandoned_draft and abandoned_draft.status == "draft":
+            if abandoned_draft.storage_key:
+                try:
+                    await asyncio.to_thread(delete_source, abandoned_draft.storage_key)
+                except Exception:
+                    logger.warning(
+                        "Could not remove abandoned presigned upload object",
+                        draft_id=str(abandoned_draft.id),
+                    )
+            await db.delete(abandoned_draft)
+        await db.delete(fingerprint)
+        await db.flush()
     if fingerprint and fingerprint.status in {"pending", "approved"}:
         raise HTTPException(
             status_code=409,
@@ -648,7 +705,6 @@ async def upload_source(
             created_by=current_user.id,
         )
     )
-    _add_split_candidates(db, draft, extracted)
     try:
         await GovernanceRepository(db).create_draft(draft)
         await GovernanceService(
@@ -664,16 +720,14 @@ async def upload_source(
             )
         raise
     if restructuring_enabled:
-        try:
-            # Queue only after the draft transaction is committed so the
-            # worker can immediately load the stored source text and update
-            # the same pending draft safely.
-            from src.workers.tasks import restructure_pending_draft_task
+        # Dispatch only after the draft transaction is committed so the
+        # formatter can immediately load the stored source text and update
+        # the same pending draft safely.
+        from src.workers.tasks import dispatch_restructure_pending_draft
 
-            restructure_pending_draft_task.delay(
-                str(draft.id), current_user.company_domain, str(current_user.id)
-            )
-        except Exception as exc:
+        if not dispatch_restructure_pending_draft(
+            str(draft.id), current_user.company_domain, str(current_user.id)
+        ):
             # A missing broker must not turn a successful upload into a
             # failure. Reviewers can still retry formatting from the queue.
             draft.restructure_status = "fallback_formatting"
@@ -682,11 +736,6 @@ async def upload_source(
                 "AI formatting could not be queued; retry from Pending Drafts."
             )
             await db.commit()
-            logger.warning(
-                "Could not queue source restructuring",
-                draft_id=str(draft.id),
-                error=str(exc),
-            )
     logger.info(
         "Source upload queued as pending draft",
         draft_id=str(draft.id),
@@ -843,14 +892,65 @@ async def create_source_upload_intent(
             IngestionFingerprint.source_hash == request.source_hash.lower(),
         )
     )
-    if fingerprint and fingerprint.status in {"uploading", "pending", "approved"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "duplicate_document",
-                "message": "This document already exists or is being uploaded.",
-            },
+    if fingerprint:
+        # A browser can fail after the intent has been saved but before its PUT
+        # reaches R2.  The draft is deliberately not shown in Pending Drafts
+        # until completion, so let its uploader retry that same reservation
+        # instead of reporting an invisible upload as a duplicate.
+        existing_draft = (
+            await db.get(PendingDraft, fingerprint.draft_id)
+            if fingerprint.draft_id
+            else None
         )
+        if (
+            fingerprint.status == "uploading"
+            and existing_draft
+            and existing_draft.status == "draft"
+            and existing_draft.created_by == current_user.id
+            and existing_draft.storage_key
+        ):
+            try:
+                upload_url = await asyncio.to_thread(
+                    create_presigned_source_url,
+                    existing_draft.storage_key,
+                    operation="put_object",
+                    expires_in=900,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail="Private R2 upload storage is unavailable"
+                ) from exc
+            await AuditRepository(db).record(
+                current_user.id,
+                "source_upload_intent_reissued",
+                "draft",
+                str(existing_draft.id),
+            )
+            return {
+                "draft_id": str(existing_draft.id),
+                "upload_url": upload_url,
+                "expires_in": 900,
+                "required_headers": {},
+                "status": existing_draft.status,
+                "filename": existing_draft.original_filename or filename,
+            }
+        if fingerprint.status in {"pending", "approved"} or (
+            fingerprint.status == "uploading"
+            and existing_draft
+            and existing_draft.status == "draft"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_document",
+                    "message": "This document already exists or is being uploaded.",
+                },
+            )
+        # Recover reservations orphaned by an older failed intent (or a draft
+        # that was cancelled before completion).  Without this, the unique
+        # fingerprint constraint makes every later retry look duplicate.
+        await db.delete(fingerprint)
+        await db.flush()
 
     storage_key = source_storage_key(
         request.source_hash.lower(), filename, current_user.company_domain
@@ -909,10 +1009,18 @@ async def create_source_upload_intent(
     except Exception as exc:
         await db.rollback()
         try:
+            stale_fingerprint = await db.scalar(
+                select(IngestionFingerprint).where(
+                    IngestionFingerprint.company_domain == current_user.company_domain,
+                    IngestionFingerprint.source_hash == request.source_hash.lower(),
+                )
+            )
+            if stale_fingerprint:
+                await db.delete(stale_fingerprint)
             stale = await db.get(PendingDraft, draft.id)
             if stale:
                 await db.delete(stale)
-                await db.commit()
+            await db.commit()
         except Exception:
             await db.rollback()
         raise HTTPException(
@@ -1066,8 +1174,6 @@ async def complete_source_upload(
         **(draft.content_metadata or {}),
         "upload_mode": "presigned_complete",
     }
-    if not getattr(draft, "candidates", None):
-        _add_split_candidates(db, draft, extracted)
     fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
             IngestionFingerprint.company_domain == draft.company_domain,
@@ -1085,24 +1191,17 @@ async def complete_source_upload(
         current_user.id, "source_upload_complete", "draft", str(updated.id)
     )
     if restructuring_enabled:
-        try:
-            from src.workers.tasks import restructure_pending_draft_task
+        from src.workers.tasks import dispatch_restructure_pending_draft
 
-            restructure_pending_draft_task.delay(
-                str(updated.id), current_user.company_domain, str(current_user.id)
-            )
-        except Exception as exc:
+        if not dispatch_restructure_pending_draft(
+            str(updated.id), current_user.company_domain, str(current_user.id)
+        ):
             updated.restructure_status = "fallback_formatting"
             updated.restructure_model = "lossless-markdown"
             updated.restructure_error = (
                 "AI formatting could not be queued; retry from Pending Drafts."
             )
             await db.commit()
-            logger.warning(
-                "Could not queue presigned source restructuring",
-                draft_id=str(updated.id),
-                error=str(exc),
-            )
     return {
         "id": str(updated.id),
         "title": updated.title,
@@ -1120,6 +1219,31 @@ async def complete_source_upload(
         "requires_update_confirmation": updated.requires_update_confirmation,
         "tags": updated.tags or [],
     }
+
+
+# The file is user-uploaded and untrusted, and it is displayed inside our own review
+# iframe. Both facts have to hold at once:
+#
+#   sandbox allow-scripts  the document runs in an OPAQUE origin, so it can never read
+#                          a cookie, a token or the API as the signed-in user. Scripts
+#                          are permitted because a browser's built-in PDF viewer is
+#                          itself scripted and renders nothing under a bare `sandbox`.
+#                          allow-same-origin is deliberately NOT granted: combined with
+#                          allow-scripts it would let an uploaded HTML file escape.
+#   default-src 'none'     nothing loads and nothing is fetched, so a hostile document
+#                          has no channel to exfiltrate what it can see.
+#   frame-ancestors 'self' only our own UI may frame it.
+#
+# X-Frame-Options is stated here because the global middleware defaults every other
+# response to DENY, which blocks an iframe even same-origin.
+SOURCE_VIEW_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Content-Security-Policy": (
+        "sandbox allow-scripts; default-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'self'"
+    ),
+}
 
 
 @router.get("/{id}/source")
@@ -1151,10 +1275,6 @@ async def view_article_source(
     disposition = (
         "inline" if source_should_display_inline(download_name) else "attachment"
     )
-    security_headers = {
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
-    }
     try:
         data = await asyncio.to_thread(load_source, source.storage_key)
     except FileNotFoundError as exc:
@@ -1178,7 +1298,7 @@ async def view_article_source(
             content=str(selected_page.get("text") or "").encode("utf-8"),
             media_type="text/plain",
             headers={
-                **security_headers,
+                **SOURCE_VIEW_SECURITY_HEADERS,
                 "X-Source-Page": str(page),
                 "Content-Disposition": f'inline; filename="{download_name}.page-{page}.txt"',
             },
@@ -1187,7 +1307,7 @@ async def view_article_source(
         content=data,
         media_type=media_type,
         headers={
-            **security_headers,
+            **SOURCE_VIEW_SECURITY_HEADERS,
             "Content-Disposition": f'{disposition}; filename="{download_name}"',
         },
     )
@@ -1386,7 +1506,7 @@ async def create_article(
             "submission_kind": "manual",
         },
     )
-    _add_split_candidates(db, draft, article_in.body_md)
+    _add_split_candidates(db, draft, draft_body)
     db.add(
         IngestionFingerprint(
             company_domain=current_user.company_domain,
@@ -1415,15 +1535,51 @@ async def create_article(
 @router.get("/", response_model=list[ArticleResponse])
 async def list_articles(
     dept: str | None = Query(None),
+    topic: str | None = Query(None, max_length=80),
     status: str | None = Query(None),
     q: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     article_repo = ArticleRepository(db)
     return await article_repo.list_articles(
-        user=current_user, dept=dept, status=status, search_query=q
+        user=current_user, dept=dept, topic=topic, status=status, search_query=q,
+        limit=limit, offset=offset,
     )
+
+
+@router.post("/{id}/follow", status_code=status.HTTP_201_CREATED)
+async def follow_article(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    article = await ArticleRepository(db).get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    existing = await db.scalar(select(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    if not existing:
+        # Make the idempotent operation race-safe: two tabs may both observe
+        # no row before either commits.
+        await db.execute(pg_insert(ArticleFollower).values(user_id=current_user.id, article_id=id).on_conflict_do_nothing())
+        await db.commit()
+    return {"article_id": str(id), "following": True}
+
+
+@router.delete("/{id}/follow", status_code=status.HTTP_204_NO_CONTENT)
+async def unfollow_article(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> None:
+    article = await ArticleRepository(db).get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    await db.execute(delete(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    await db.commit()
+
+
+@router.get("/{id}/follow")
+async def article_follow_status(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    article = await ArticleRepository(db).get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    followed = await db.scalar(select(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    return {"article_id": str(id), "following": bool(followed)}
 
 
 @router.get("/{id}/related", response_model=list[ArticleResponse])
@@ -1453,6 +1609,17 @@ async def get_article(
     article = await article_service.get_article(current_user, id)
     AuthorizationService.restrict_article_metadata(current_user, article)
     return article
+
+
+@router.post("/{id}/edit-requests", status_code=status.HTTP_201_CREATED)
+async def create_article_edit_request(
+    id: uuid.UUID,
+    request_in: ArticleEditRequestCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Record a reader correction and notify users who can edit this article."""
+    return await create_edit_request(db, current_user, id, request_in.request_text, source="manual")
 
 
 @router.put("/{id}", response_model=DraftSubmissionResponse)
@@ -1671,7 +1838,7 @@ async def update_article(
             "suggested_update_article_id": str(current.id),
         },
     )
-    _add_split_candidates(db, draft, body_md)
+    _add_split_candidates(db, draft, draft_body)
     db.add(
         IngestionFingerprint(
             company_domain=current.company_domain,

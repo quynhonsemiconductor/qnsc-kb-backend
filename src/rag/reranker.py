@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 
 # These words add little retrieval signal. Keeping them out of lexical
@@ -31,6 +31,14 @@ DEFINITION_PATTERNS = (
 )
 
 
+# Compiled once at import. These run against every candidate passage on every search.
+DEFINITION_PATTERNS_RE = tuple(
+    re.compile(pattern, re.IGNORECASE) for pattern in DEFINITION_PATTERNS
+)
+URL_RE = re.compile(r"https?://|www\.")
+TOKEN_RE = re.compile(r"[\w'-]+")
+
+
 def normalize_query(query: str) -> str:
     """Remove low-signal question words before keyword/vector retrieval."""
     tokens = [
@@ -48,45 +56,98 @@ def is_definition_query(query: str) -> bool:
     return any(marker in normalized for marker in DEFINITION_QUERY_MARKERS)
 
 
-def score_retrieval_text(query: str, text: str, title: str = "", section: str = "") -> float:
-    """Score how well a passage answers the query, not just contains its terms."""
-    normalized_query = normalize_query(query)
-    terms = set(re.findall(r"[\w'-]+", normalized_query.lower()))
+class PreparedQuery(NamedTuple):
+    """The query-side half of a score, computed once instead of once per candidate.
+
+    Scoring runs for every candidate in the pool against the SAME query, and all of this
+    was recomputed each time: the query was tokenised three times over (in
+    normalize_query, again for `terms`, and again to rebuild a string that was already
+    exactly `normalized`), plus a separate lowercase pass for the definition check.
+    """
+
+    normalized: str
+    terms: frozenset[str]
+    is_definition: bool
+
+
+def prepare_query(query: str) -> PreparedQuery:
+    normalized = normalize_query(query)
+    return PreparedQuery(
+        normalized=normalized,
+        # normalize_query already lower-cased and already split on this exact pattern,
+        # so its output re-tokenises to itself.
+        terms=frozenset(normalized.split()),
+        is_definition=is_definition_query(query),
+    )
+
+
+def score_prepared_text(
+    prepared: PreparedQuery, text: str, title: str = "", section: str = ""
+) -> float:
+    """Score a passage against an already-prepared query."""
+    terms = prepared.terms
     passage = " ".join(str(value or "") for value in (text, title, section)).lower()
-    normalized_text = " ".join(re.findall(r"[\w'-]+", passage))
-    matched = sum(1 for term in terms if re.search(rf"(?<![\w'-]){re.escape(term)}(?![\w'-])", normalized_text))
+    text_tokens = TOKEN_RE.findall(passage)
+    normalized_text = " ".join(text_tokens)
+    # A whole-token set intersection. The old form ran one anchored regex per term over
+    # the whole passage; because `normalized_text` is tokens joined by single spaces and
+    # every token character is itself in the token class, those lookarounds could only
+    # ever match a complete token — so this is the same predicate without the scan.
+    matched = len(terms & set(text_tokens))
     score = matched / max(len(terms), 1)
-    if len(normalized_query) > 2 and " ".join(re.findall(r"[\w'-]+", normalized_query.lower())) in normalized_text:
+    if len(prepared.normalized) > 2 and prepared.normalized in normalized_text:
         score += 0.35
 
-    if is_definition_query(query):
-        if any(re.search(pattern, passage, re.IGNORECASE) for pattern in DEFINITION_PATTERNS):
+    if prepared.is_definition:
+        if any(pattern.search(passage) for pattern in DEFINITION_PATTERNS_RE):
             score += 0.75
         if any(marker in passage for marker in REFERENCE_MARKERS):
             score -= 1.0
         # A passage dominated by URLs is reference material, even when it
         # repeats the subject name many times.
-        if len(re.findall(r"https?://|www\.", passage)) >= 2:
+        if len(URL_RE.findall(passage)) >= 2:
             score -= 0.5
     elif any(marker in passage for marker in REFERENCE_MARKERS):
         score -= 0.25
     return score
 
 
-def rerank_chunks(query: str, chunks: Sequence[object], limit: int = 5) -> list[object]:
+def score_retrieval_text(query: str, text: str, title: str = "", section: str = "") -> float:
+    """Score how well a passage answers the query, not just contains its terms."""
+    return score_prepared_text(prepare_query(query), text, title, section)
+
+
+def retrieval_score(query: str, chunk: object, prepared: PreparedQuery | None = None) -> float:
+    """Score one retrieved chunk. THE definition of a chunk's relevance.
+
+    Extracted because three call sites — the reranker, the relevance threshold, and the
+    score reported in the response — each rebuilt these arguments by hand and each paid
+    for the scoring again. `score_retrieval_text` costs ~0.9 ms, so a search scored every
+    chunk three times over.
+    """
+    parent = getattr(chunk, "parent_chunk", None)
+    # The child passage is the precise retrieval unit. Parent text is only
+    # a fallback because it often contains repeated slides/references.
+    text = getattr(chunk, "chunk_text", "") or getattr(parent, "text", "")
+    return score_prepared_text(
+        prepared if prepared is not None else prepare_query(query),
+        text,
+        getattr(getattr(chunk, "article", None), "title", ""),
+        getattr(parent, "section_ref", "") if parent else "",
+    )
+
+
+def rerank_chunks_with_scores(
+    query: str, chunks: Sequence[object], limit: int = 5
+) -> list[tuple[object, float]]:
+    """Rerank and hand back the scores, so no caller has to recompute them."""
+    prepared = prepare_query(query)
     scored: list[tuple[float, int, object]] = []
     for position, chunk in enumerate(chunks):
-        article = getattr(chunk, "article", None)
-        parent = getattr(chunk, "parent_chunk", None)
-        # The child passage is the precise retrieval unit. Parent text is only
-        # a fallback because it often contains repeated slides/references.
-        text = getattr(chunk, "chunk_text", "") or getattr(parent, "text", "")
-        score = score_retrieval_text(
-            query,
-            text,
-            getattr(article, "title", ""),
-            getattr(parent, "section_ref", "") if parent else "",
-        )
-        scored.append((score, -position, chunk))
+        scored.append((retrieval_score(query, chunk, prepared), -position, chunk))
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [item[2] for item in scored[:limit]]
+    return [(item[2], item[0]) for item in scored[:limit]]
+
+
+def rerank_chunks(query: str, chunks: Sequence[object], limit: int = 5) -> list[object]:
+    return [chunk for chunk, _score in rerank_chunks_with_scores(query, chunks, limit)]

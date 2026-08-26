@@ -13,6 +13,7 @@ import structlog
 
 from src.api.deps import SessionLocal, get_current_user, get_db, set_database_context
 from src.domain.ai_service import AIService, normalize_answer_markdown
+from src.rag.answer_sections import strip_source_metadata
 from src.domain.search_service import SearchService
 from src.domain.rbac import AuthorizationService
 from src.models import User
@@ -34,7 +35,10 @@ logger = structlog.get_logger()
 class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     conversation_id: uuid.UUID | None = None
-    language: Literal["en", "vi"] = "en"
+    article_id: uuid.UUID | None = None
+    confirm_edit: bool = False
+    edit_instruction: str | None = Field(default=None, max_length=4000)
+    language: Literal["en", "vi"] = "vi"
 
 
 class ConversationCreate(BaseModel):
@@ -109,6 +113,7 @@ async def _hydrate_citations(
                 ParentChunk.child_chunks
             ),
             selectinload(ArticleChunk.article),
+            selectinload(ArticleChunk.article).selectinload(Article.owner),
         )
         .where(*conditions)
     )
@@ -149,6 +154,8 @@ async def _hydrate_citations(
                     "page_number": page_number,
                     "source_url": f"/api/v1/articles/{chunk.article_id}/source"
                     + (f"?page={page_number}" if page_number else ""),
+                    "owner_email": getattr(getattr(article, "owner", None), "email", None),
+                    "last_reviewed": getattr(article, "last_reviewed", None).isoformat() if getattr(article, "last_reviewed", None) else None,
                 }
             )
         # Every persisted citation must identify a concrete retrieved chunk.
@@ -183,6 +190,75 @@ def _parse_historical_citations(value: str | None) -> tuple[list[dict], bool]:
             continue
         citations.append(item)
     return citations, malformed
+
+
+def _answer_provenance(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Action data for a stored answer, recording WHY it carries no citations.
+
+    On reload, "generated without sources" and "sources later revoked" both look like an
+    answer with no citations — but only the second may be withheld. Deciding that from
+    the answer's wording (see _is_safe_historical_status_message) cannot survive a prompt
+    change, a new language, or anything the model phrases its own way, so an answer that
+    genuinely found nothing to cite disappeared behind the revocation notice. The
+    generator knows which case it is; it records it here instead.
+    """
+    action_data = data.get("action_data")
+    stored = dict(action_data) if isinstance(action_data, dict) else {}
+    if not data.get("citations"):
+        stored.setdefault("grounding", "uncited")
+    return stored or None
+
+
+async def _record_failed_turn(
+    repo: AIRepository, db: AsyncSession, conversation_id: uuid.UUID, detail: str
+) -> None:
+    """Persist the failed half of a turn so the turn survives a reload.
+
+    The question is stored before generation starts, so a failure that returned early
+    left a user message with no reply: on reload the turn looked like it was never asked,
+    with nothing to say it had failed. Marked ``failed`` so the frontend can offer a retry
+    and so _authorized_conversation_history never replays it to the model as an answer.
+
+    Best-effort by design: the reader must still receive the error event, so a failure to
+    record one is logged and swallowed rather than replacing the error with a silent hang.
+    """
+    try:
+        # The generation task shared this session; a database-level failure would leave
+        # its transaction unusable, and this write must not fail for that reason.
+        await db.rollback()
+        await repo.add_message(
+            conversation_id,
+            "assistant",
+            detail,
+            action_data={"failed": True, "grounding": "uncited"},
+        )
+    except Exception:
+        logger.exception(
+            "Could not record the failed AI turn", conversation_id=str(conversation_id)
+        )
+
+
+def _is_safe_historical_status_message(message: Any) -> bool:
+    """Keep legacy non-source status messages visible after a refresh."""
+    if getattr(message, "role", None) != "assistant":
+        return False
+    content = str(getattr(message, "content", "") or "").strip().lower()
+    markers = (
+        "i could not produce a grounded answer",
+        "i could not identify a specific article",
+        "i understand this is an update request",
+        "i found the article",
+        "an edit request was created",
+        "was updated because you have permission",
+        "tôi không thể tạo câu trả lời có căn cứ",
+        "tôi không tìm thấy tài liệu được cấp quyền nào",
+        "chưa xác định được tài liệu nào",
+        "tôi hiểu đây là yêu cầu cập nhật",
+        "tôi tìm thấy tài liệu",
+        "đã tạo yêu cầu cập nhật",
+        "đã cập nhật",
+    )
+    return any(marker in content for marker in markers)
 
 
 @router.get("/conversations")
@@ -233,16 +309,27 @@ async def get_conversation_messages(
             for marker in (_historical_source_id(item) for item in raw_citations)
             if marker
         }
+        # Stripped before markers are read: an owner email inside a stored provenance
+        # blob ("owner: c4@example.com") would otherwise count as a citation to C4 and
+        # make a healthy answer look like it cited a source it never did.
+        grounded_text = strip_source_metadata(message.grounded_content or message.content)
         answer_markers = (
-            set(extract_citation_ids(message.grounded_content or message.content))
+            set(extract_citation_ids(grounded_text))
             if message.role == "assistant"
             else set()
         )
-        inaccessible_source = message.role == "assistant" and (
-            not raw_citations
-            or malformed_citations
-            or len(citations) < len(raw_citations)
-            or answer_markers != stored_markers
+        action_data = getattr(message, "action_data", None)
+        action_data = action_data if isinstance(action_data, dict) else None
+        inaccessible_source = (
+            message.role == "assistant"
+            and not action_data
+            and not _is_safe_historical_status_message(message)
+            and (
+                not raw_citations
+                or malformed_citations
+                or len(citations) < len(raw_citations)
+                or answer_markers != stored_markers
+            )
         )
         response.append(
             {
@@ -253,17 +340,17 @@ async def get_conversation_messages(
                 "content": (
                     "This historical answer is no longer available because your access to one or more source documents changed."
                     if message.role == "assistant" and inaccessible_source
-                    else normalize_answer_markdown(message.content)
+                    else strip_source_metadata(normalize_answer_markdown(message.content))
                 ),
                 # Do not leave the original answer in a secondary field after a
                 # cited source has become unauthorized.
                 "answer_grounded": (
-                    (message.grounded_content or message.content)
+                    grounded_text
                     if message.role == "assistant" and not inaccessible_source
                     else ""
                 ),
                 "answer_extended": (
-                    (message.extended_content or "")
+                    strip_source_metadata(message.extended_content or "")
                     if message.role == "assistant" and not inaccessible_source
                     else ""
                 ),
@@ -273,6 +360,9 @@ async def get_conversation_messages(
                     else False
                 ),
                 "citations": [] if inaccessible_source else citations,
+                "action": action_data.get("action") if action_data else None,
+                "action_data": action_data,
+                "failed": bool(action_data and action_data.get("failed")),
                 "usage_log_id": (
                     str(message.usage_log_id) if message.usage_log_id else None
                 ),
@@ -347,7 +437,9 @@ async def ask_question(
 
     await repo.add_message(conversation.id, "user", req.question)
     data = await get_ai_service(db).ask(
-        current_user, req.question, conversation_id=conversation.id, language=req.language
+        current_user, req.question, conversation_id=conversation.id, language=req.language,
+        article_id=req.article_id, confirm_edit=req.confirm_edit,
+        edit_instruction=req.edit_instruction,
     )
     await repo.add_message(
         conversation.id,
@@ -357,6 +449,7 @@ async def ask_question(
         uuid.UUID(data["log_id"]) if data.get("log_id") else None,
         data.get("answer_grounded"),
         data.get("answer_extended"),
+        _answer_provenance(data),
     )
     data["conversation_id"] = str(conversation.id)
     return data
@@ -451,6 +544,9 @@ async def ask_question_stream(
                     req.question,
                     conversation_id=uuid.UUID(conversation_id),
                     language=req.language,
+                    article_id=req.article_id,
+                    confirm_edit=req.confirm_edit,
+                    edit_instruction=req.edit_instruction,
                     on_token=on_token,
                     on_replace=on_replace,
                 )
@@ -473,10 +569,19 @@ async def ask_question_stream(
                     status_code=exc.status_code,
                     detail=str(exc.detail),
                 )
+                await _record_failed_turn(
+                    stream_repo, stream_db, uuid.UUID(conversation_id), str(exc.detail)
+                )
                 yield f"data: {json.dumps({'type': 'error', 'detail': str(exc.detail)})}\n\n"
                 return
             except Exception as exc:
                 logger.exception("AI stream task failed unexpectedly", error=str(exc))
+                await _record_failed_turn(
+                    stream_repo,
+                    stream_db,
+                    uuid.UUID(conversation_id),
+                    "AI generation failed. Please try again.",
+                )
                 yield f"data: {json.dumps({'type': 'error', 'detail': 'AI generation failed. Please try again.'})}\n\n"
                 return
             if not streamed_content:
@@ -492,9 +597,10 @@ async def ask_question_stream(
                 uuid.UUID(data["log_id"]) if data.get("log_id") else None,
                 data.get("answer_grounded"),
                 data.get("answer_extended"),
+                _answer_provenance(data),
             )
             yield f"data: {json.dumps({'type': 'sources', 'sources': data.get('citations', [])})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request')})}\n\n"
 
     return StreamingResponse(
         event_stream(),

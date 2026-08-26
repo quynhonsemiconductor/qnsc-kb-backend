@@ -7,15 +7,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from src.core.config import settings
-from src.domain.source_extraction import extract_source_markdown, extract_source_pages, SourceExtractionError
+from src.domain.source_extraction import (
+    SUPPORTED_EXTENSIONS,
+    extract_source_markdown,
+    extract_source_pages,
+    SourceExtractionError,
+)
 from src.domain.source_storage import save_source
 from src.models.governance import PendingDraft, AuditLog
 from src.models.ops import Connector, ConnectorJob
 from src.repositories.governance import GovernanceRepository
 from src.domain.similarity import find_similar_documents, classify_similarity
 from src.models.user import User
-
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt", ".md", ".csv", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
 
 def _safe_folder(configured: str) -> Path:
     root = Path(settings.CONNECTOR_ROOT_PATH).resolve()

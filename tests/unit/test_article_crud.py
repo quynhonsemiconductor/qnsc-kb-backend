@@ -47,27 +47,39 @@ def make_article() -> Article:
     )
 
 
+class FakeSession:
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+    async def refresh(self, _obj, attribute_names=None):
+        return None
+
+
 class FakeArticleRepository:
     def __init__(self, article: Article, version: ArticleVersion | None = None):
         self.article = article
         self.version = version
         self.created_versions = []
+        self.db = FakeSession()
 
     async def get_by_id(self, *_args, **_kwargs):
         return self.article
 
-    async def soft_delete(self, _article_id, user=None):
+    async def soft_delete(self, _article_id, user=None, **_kwargs):
         self.article.status = "deleted"
         return True
 
-    async def update(self, article):
+    async def update(self, article, **_kwargs):
         self.article = article
         return article
 
     async def get_version_by_number(self, *_args, **_kwargs):
         return self.version
 
-    async def create_version(self, version):
+    async def create_version(self, version, **_kwargs):
         self.created_versions.append(version)
         return version
 
@@ -76,7 +88,7 @@ class FakeAuditRepository:
     def __init__(self):
         self.records = []
 
-    async def record(self, *args):
+    async def record(self, *args, **_kwargs):
         self.records.append(args)
 
 

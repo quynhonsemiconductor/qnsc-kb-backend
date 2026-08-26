@@ -38,9 +38,19 @@ celery_app.conf.update(
             "task": "schedule_cloud_connector_syncs",
             "schedule": 600.0,
         },
-        # Graph drive subscriptions expire an hour after they are created, and a lapsed
-        # one fails silently — the provider just stops calling. Every 10 minutes against
-        # a 20-minute horizon, so several attempts land before any subscription expires.
+        "reconcile-cloud-connectors": {
+            "task": "reconcile_cloud_connectors",
+            "schedule": settings.CONNECTOR_RECONCILE_INTERVAL_MINUTES * 60.0,
+        },
+        # The interval is a setting because it is the floor on webhook-to-index latency
+        # for anything the request-time dispatch missed. Hard-coding 30 here left
+        # CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS declared, documented and dead.
+        "dispatch-pending-sync-requests": {
+            "task": "dispatch_pending_sync_requests",
+            "schedule": float(settings.CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS),
+        },
+        # Graph drive subscriptions can expire quickly and a lapsed one fails silently.
+        # Renew frequently against a horizon so several attempts land before expiry.
         "renew-webhook-subscriptions": {
             "task": "renew_webhook_subscriptions",
             "schedule": 600.0,
@@ -52,6 +62,18 @@ celery_app.conf.update(
         "cleanup-orphaned-source-objects": {
             "task": "cleanup_orphaned_source_objects",
             "schedule": 86400.0,
+        },
+        "deliver-notification-queue": {
+            "task": "deliver_notification_queue",
+            "schedule": 30.0,
+        },
+        "verify-review-deadlines": {
+            "task": "verify_review_deadlines",
+            "schedule": 86400.0,
+        },
+        "escalate-overdue-drafts": {
+            "task": "escalate_overdue_drafts",
+            "schedule": 21600.0,
         },
     },
 )

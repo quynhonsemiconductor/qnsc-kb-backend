@@ -7,10 +7,12 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 from fastapi import HTTPException
+from sqlalchemy import select
 from src.core.config import settings
 from src.core.privacy import REDACTED_OPERATIONAL_CONTENT
 from src.models.user import User
 from src.models.ai import AiUsageLog, AiCache, AiFeedback
+from src.models.governance import ConflictRecord
 from src.repositories.ai import AIRepository
 from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
@@ -21,14 +23,21 @@ from src.rag.citations import extract_citation_ids
 from src.rag.answer_sections import (
     EXTENDED_SENTINEL,
     GROUNDED_SENTINEL,
+    IncrementalAnswerStream,
     normalize_answer_markdown,
     render_answer_sections,
     split_answer_sections,
     strip_citation_markers,
+    strip_source_metadata,
 )
 from src.rag.compressor import compress_context
 from src.rag.reranker import is_definition_query
-from src.domain.llm_client import complete, resolve_provider
+from src.domain.llm_client import ProviderAuthError, ProviderRateLimitError, complete, resolve_provider
+from src.domain.article_edit_requests import create_article_edit_request
+from src.domain.articles import ArticleService
+from src.repositories.article import ArticleRepository
+from src.repositories.audit import AuditRepository
+from src.repositories.user import UserRepository
 
 logger = structlog.get_logger()
 
@@ -73,8 +82,11 @@ or stitch together partial matches.
 verbatim or a close paraphrase of the context.
 
 3. Every factual claim must be immediately followed by source markers, e.g. `[C1]` or
-`[C1][C2]`. Use only source IDs in the provided context. Do not add a References section.
-Never place citations inside fenced code blocks. Always return balanced Markdown fences.
+`[C1][C2]`. Use only source IDs in the provided context. A marker contains the ID and
+nothing else. Never restate a source's last-reviewed date, owner email, page or ID in
+the answer — the interface shows those beside each cited source. Do not add a References
+section. Never place citations inside fenced code blocks. Always return balanced Markdown
+fences.
 
 3a. If two authorized passages make incompatible claims about the same fact, do not
 choose a winner. State that the Knowledge Base contains conflicting information,
@@ -134,6 +146,57 @@ def _query_language(question: str) -> str:
     if _VIETNAMESE_CHARACTER_RE.search(normalized) or _VIETNAMESE_QUERY_WORD_RE.search(normalized):
         return "vi"
     return "en"
+
+
+# The prompt asks the model for "the language-specific equivalent of 'Not found in the
+# Knowledge Base'" and then leaves the wording to it, so matching two fixed strings was
+# never going to hold: the model writes "Không tìm thấy trong Cơ sở Kiến thức", the check
+# looked for "cơ sở tri thức", and the refusal went unrecognised. That matters because an
+# unrecognised refusal skips the recovery path that shows the retrieved passage, and the
+# reader gets the opaque "could not produce a grounded answer" instead of the source they
+# were trying to inspect.
+_REFUSAL_RE = re.compile(
+    r"not found in the knowledge base"
+    r"|no (?:relevant )?information (?:was )?found in the knowledge base"
+    r"|không tìm thấy[^.\n]{0,40}(?:cơ sở (?:tri thức|kiến thức)|knowledge base)"
+    r"|không có (?:thông tin|dữ liệu)[^.\n]{0,40}cơ sở (?:tri thức|kiến thức)",
+    re.IGNORECASE,
+)
+
+
+def _is_grounding_refusal(grounded_answer: str) -> bool:
+    """Whether the model declined to answer from the authorized context.
+
+    An answer that cites a source is answering, whatever phrases it contains — the
+    same is true of a long one. Treating either as a refusal would replace real content
+    with a retrieved snippet, so both are excluded before the wording is examined.
+    """
+
+    text = (grounded_answer or "").strip()
+    if not text or len(text) > 400:
+        return False
+    if extract_citation_ids(text):
+        return False
+    return bool(_REFUSAL_RE.search(text))
+
+
+def _looks_like_edit_request(question: str) -> bool:
+    normalized = " ".join(question.lower().split())
+    return any(
+        marker in normalized
+        for marker in (
+            "cập nhật", "sửa", "chỉnh sửa", "đính chính", "thay đổi", "sửa lại",
+            "update", "edit", "correct", "fix", "modify",
+        )
+    )
+
+
+def _strip_revision_fence(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:markdown|md)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    return cleaned
 
 
 def _resolve_parent_context(results: list[dict]) -> list[dict]:
@@ -478,7 +541,10 @@ class AIService:
         conversation_id: uuid.UUID | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
         on_replace: Callable[[str], Awaitable[None]] | None = None,
-        language: str = "en",
+        language: str = "vi",
+        article_id: uuid.UUID | None = None,
+        confirm_edit: bool = False,
+        edit_instruction: str | None = None,
     ) -> dict:
         if not AuthorizationService.has_permission(
             user, "ai.ask", requested_scope="company"
@@ -503,6 +569,213 @@ class AIService:
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
 
+        is_confirmed_edit = confirm_edit and bool(edit_instruction) and article_id is not None
+        if _looks_like_edit_request(question) or is_confirmed_edit:
+            target_id = article_id
+            matched_target: dict[str, Any] | None = None
+            if target_id is None:
+                # Search the factual part of a correction instead of letting
+                # verbs such as "update" dominate the retrieval query.
+                target_query = re.sub(
+                    r"\b(?:cập nhật|sửa lại|chỉnh sửa|đính chính|thay đổi|update|edit|correct|fix|modify)\b",
+                    " ",
+                    question,
+                    flags=re.IGNORECASE,
+                )
+                target_query = re.sub(r"\s+", " ", target_query).strip(" ,:;-.")
+                # A correction may contain a contradiction rather than the
+                # exact wording stored in the article. Try the cleaned
+                # sentence first, then the original, and finally distinctive
+                # acronyms such as HDL. This keeps the search permission-aware
+                # while preventing the correction sentence from drowning out
+                # the subject.
+                target_results: list[dict[str, Any]] = []
+                target_queries = [target_query or question, question]
+                target_queries.extend(
+                    re.findall(r"\b[A-Z][A-Z0-9_-]{1,}\b", question)
+                )
+                seen_queries: set[str] = set()
+                for candidate_query in target_queries:
+                    candidate_query = candidate_query.strip()
+                    if not candidate_query or candidate_query.lower() in seen_queries:
+                        continue
+                    seen_queries.add(candidate_query.lower())
+                    target_results = await self.search_service.search(
+                        user, candidate_query, limit=settings.RAG_RERANK_LIMIT
+                    )
+                    if target_results:
+                        break
+                unique_targets: list[dict[str, Any]] = []
+                seen_target_ids: set[str] = set()
+                for result in target_results:
+                    result_id = str(result.get("article_id") or "")
+                    if result_id and result_id not in seen_target_ids:
+                        seen_target_ids.add(result_id)
+                        unique_targets.append(result)
+                # SearchService already applies the permission and minimum
+                # relevance filters. The confirmation step is the safety
+                # check before any update, so do not reject a valid low-score
+                # match before the user can confirm the article.
+                if not unique_targets:
+                    return _answer_payload(
+                        "Tôi hiểu đây là yêu cầu cập nhật, nhưng chưa xác định được tài liệu nào. Vui lòng nêu tên tài liệu hoặc mở tài liệu đó rồi yêu cầu cập nhật lại."
+                        if language == "vi" else
+                        "I understand this is an update request, but I could not identify a specific article. Please include the article title or open the article and try again.",
+                        prompt_version=settings.PROMPT_VERSION,
+                        retrieval_version="edit-request",
+                        action="edit_target_required",
+                    )
+                matched_target = unique_targets[0]
+                target_id = uuid.UUID(str(unique_targets[0]["article_id"]))
+
+            try:
+                article_repo = ArticleRepository(self.ai_repo.db)
+                target_article = await article_repo.get_by_id(target_id, user=user)
+                if not target_article:
+                    raise HTTPException(status_code=404, detail="Article not found")
+
+                instruction = (edit_instruction or question).strip()
+                article_preview = re.sub(r"\s+", " ", target_article.body_md or "").strip()[:700]
+                original_information = re.sub(
+                    r"\s+",
+                    " ",
+                    str(
+                        (matched_target or {}).get("chunk_text")
+                        or (matched_target or {}).get("parent_text")
+                        or target_article.body_md
+                        or ""
+                    ),
+                ).strip()[:1200]
+                if not confirm_edit:
+                    confirmation = (
+                        f"Tôi tìm thấy tài liệu **{target_article.title}**. Đây có đúng là tài liệu bạn muốn cập nhật không?\n\n"
+                        f"**Thông tin gốc:** {original_information}\n\n"
+                        f"**Thông tin sẽ cập nhật:** {instruction}\n\n"
+                        "Nếu đúng, hãy chọn **Đúng, cập nhật** hoặc trả lời **Có**. Chưa có thay đổi nào được thực hiện."
+                        if language == "vi" else
+                        f"I found the article **{target_article.title}**. Is this the article you want to update?\n\n"
+                        f"**Original information:** {original_information}\n\n"
+                        f"**Information to update:** {instruction}\n\n"
+                        "If yes, choose **Yes, update** or reply **Yes**. Nothing has been changed yet."
+                    )
+                    return _answer_payload(
+                        confirmation,
+                        prompt_version=settings.PROMPT_VERSION,
+                        retrieval_version="edit-confirmation",
+                        action="edit_confirmation_required",
+                        article_id=str(target_id),
+                        article_title=target_article.title,
+                        article_preview=article_preview,
+                        original_information=original_information,
+                        will_update=instruction,
+                        edit_instruction=question,
+                        action_data={
+                            "action": "edit_confirmation_required",
+                            "article_id": str(target_id),
+                            "article_title": target_article.title,
+                            "original_information": original_information,
+                            "will_update": instruction,
+                            "article_preview": article_preview,
+                            "edit_instruction": question,
+                        },
+                    )
+
+                if PermissionService.can_edit_article(user, target_article):
+                    provider_config = resolve_provider()
+                    if not provider_config:
+                        raise HTTPException(status_code=503, detail="AI editing is unavailable because no LLM provider is configured.")
+                    revision_prompt = (
+                        "Update the following knowledge-base article according to the user's correction. "
+                        "Return the complete revised Markdown article only, with no commentary. "
+                        "Preserve all unrelated facts, structure, headings, links, numbers, and technical details. "
+                        "Make the smallest accurate change necessary.\n\n"
+                        f"Article title: {target_article.title}\n"
+                        f"Current article:\n{target_article.body_md}\n\n"
+                        f"User correction:\n{instruction}"
+                    )
+                    revised_body, _, _, _ = await complete(
+                        [
+                            {
+                                "role": "system",
+                                "content": "You are a precise knowledge-base editor. Do not invent information and do not describe your work.",
+                            },
+                            {"role": "user", "content": revision_prompt},
+                        ],
+                        timeout=settings.LLM_TIMEOUT_SECONDS,
+                        # A document rewrite needs enough output room for the
+                        # complete article, not the short-answer RAG budget.
+                        # Use a bounded character-to-token estimate so long
+                        # articles are not silently returned empty/truncated.
+                        max_tokens=min(
+                            settings.RESTRUCTURE_MAX_OUTPUT_TOKENS,
+                            max(4000, (len(target_article.body_md or "") // 3) + 1200),
+                        ),
+                    )
+                    revised_body = _strip_revision_fence(revised_body)
+                    if len(revised_body) < 20:
+                        raise HTTPException(
+                            status_code=502,
+                            detail="The AI returned an empty article revision, so no changes were made. Please try the confirmation again.",
+                        )
+                    if len(target_article.body_md or "") > 1000 and len(revised_body) < int(len(target_article.body_md) * 0.55):
+                        raise HTTPException(
+                            status_code=502,
+                            detail="The AI returned an incomplete article revision, so no changes were made. Please try the confirmation again.",
+                        )
+                    updated = await ArticleService(
+                        article_repo,
+                        UserRepository(self.ai_repo.db),
+                        AuditRepository(self.ai_repo.db),
+                    ).update_article(user, target_id, body_md=revised_body)
+                    confirmation = (
+                        f"Đã cập nhật **{updated.title}** vì bạn có quyền chỉnh sửa tài liệu này. Phiên bản mới là v{updated.version}."
+                        if language == "vi"
+                        else f"**{updated.title}** was updated because you have permission to edit it. The new version is v{updated.version}."
+                    )
+                    return _answer_payload(
+                        confirmation,
+                        prompt_version=settings.PROMPT_VERSION,
+                        retrieval_version="edit-request",
+                        action="article_updated",
+                        article_id=str(target_id),
+                        article_title=updated.title,
+                        version=updated.version,
+                        action_data={
+                            "action": "article_updated",
+                            "article_id": str(target_id),
+                            "article_title": updated.title,
+                            "version": updated.version,
+                        },
+                    )
+
+                request = await create_article_edit_request(
+                    self.ai_repo.db, user, target_id, instruction, source="ai_assistant"
+                )
+                confirmation = (
+                    f"Đã tạo yêu cầu cập nhật cho **{request['article_title']}**. "
+                    "Yêu cầu đã được gửi đến người có quyền chỉnh sửa tài liệu."
+                    if language == "vi"
+                    else f"An edit request was created for **{request['article_title']}**. "
+                    "It was sent to users authorized to update this document."
+                )
+                return _answer_payload(
+                    confirmation,
+                    prompt_version=settings.PROMPT_VERSION,
+                    retrieval_version="edit-request",
+                    action="edit_request_created",
+                    edit_request=request,
+                    article_id=str(target_id),
+                    article_title=request["article_title"],
+                    action_data={
+                        "action": "edit_request_created",
+                        "article_id": str(target_id),
+                        "article_title": request["article_title"],
+                        "edit_instruction": instruction,
+                    },
+                )
+            except HTTPException as exc:
+                raise
+
         user_bitmask = PermissionService.calculate_user_bitmask(user)
         authorization_fingerprint = AuthorizationService.authorization_fingerprint(user)
 
@@ -524,10 +797,19 @@ class AIService:
             self.search_service, user, conversation_messages
         )
         conversation_messages = conversation_messages[-12:]
-        history_text = "\n".join(
-            f"{message.role.upper()}: {message.content[:3000]}"
-            for message in conversation_messages
-        )
+        # Budget history by characters, not just turn count: 12 turns x 3000
+        # chars (~36k chars) plus RAG context can overflow smaller models'
+        # context windows. Keep the most recent turns that fit the budget.
+        history_budget = settings.RAG_HISTORY_MAX_CHARS
+        history_lines: list[str] = []
+        for message in reversed(conversation_messages):
+            candidate = f"{message.role.upper()}: {message.content[:3000]}"
+            if history_lines and len(candidate) + sum(
+                len(line) for line in history_lines
+            ) > history_budget:
+                break
+            history_lines.insert(0, candidate)
+        history_text = "\n".join(history_lines)
 
         # 2. Check cache first
         # Version the cache key so prompt/retrieval improvements cannot serve
@@ -607,13 +889,16 @@ class AIService:
                 logger.info("AI cache hit", question_hash=question_hash)
         if cached:
             cached_grounded, cached_extended = split_answer_sections(cached.answer)
+            # Answers cached before the prompt stopped asking for inline provenance are
+            # still served for six hours. Clean them on the way out too.
+            cached_grounded = strip_source_metadata(cached_grounded)
             if not settings.RAG_CACHE_EXTENDED_SECTION:
                 cached_extended = ""
-            cached_extended = strip_citation_markers(cached_extended)
+            cached_extended = strip_citation_markers(strip_source_metadata(cached_extended))
             cached_answer = render_answer_sections(
                 cached_grounded, cached_extended, settings.RAG_ENABLE_EXTENDED_SECTION
             )
-            if "not found in the knowledge base" in cached_grounded.lower():
+            if _is_grounding_refusal(cached_grounded):
                 cached_citations = []
             cached_log = AiUsageLog(
                 user_id=user.id,
@@ -731,6 +1016,22 @@ class AIService:
 
         explicit_conflicts = _detect_explicit_conflicts(context_results)
         if explicit_conflicts:
+            for conflict in explicit_conflicts:
+                article_ids = sorted({str(entry.get("article_id")) for entry in conflict.get("entries", []) if entry.get("article_id")})
+                if len(article_ids) > 1:
+                    existing = await self.gov_repo.db.scalar(select(ConflictRecord).where(
+                        ConflictRecord.company_domain == user.company_domain,
+                        ConflictRecord.fact == str(conflict["fact"])[:255],
+                        ConflictRecord.status == "open",
+                    ))
+                    if not existing:
+                        self.gov_repo.db.add(ConflictRecord(
+                            company_domain=user.company_domain,
+                            fact=str(conflict["fact"])[:255],
+                            article_ids=article_ids,
+                            evidence=[{"article_id": str(entry.get("article_id")), "title": entry.get("title"), "value": entry.get("value")} for entry in conflict.get("entries", [])],
+                        ))
+            await self.gov_repo.db.commit()
             conflict_grounded, conflict_citations = _conflict_answer(explicit_conflicts, language)
             conflict_log = AiUsageLog(
                 user_id=user.id,
@@ -782,6 +1083,8 @@ class AIService:
                 f"<title>{res['title']}</title>\n"
                 f"<section>{res.get('heading') or res['section_ref'] or 'General'}</section>\n"
                 f"<page>{res.get('page_number') or 'unknown'}</page>\n"
+                f"<last-reviewed>{res.get('last_reviewed') or 'unknown'}</last-reviewed>\n"
+                f"<owner-email>{res.get('owner_email') or settings.SYSTEM_DATA_OWNER_EMAIL or 'unknown'}</owner-email>\n"
                 f"<untrusted-passage>\n{passage}\n</untrusted-passage>\n"
                 f"</authorized-document>\n"
             )
@@ -806,6 +1109,10 @@ class AIService:
         user_prompt = (
             "IMPORTANT: Determine the response language from the latest user question below. "
             "Do not use the UI locale or the language of the context documents.\n"
+            "A citation marker is exactly [C1] and contains nothing else. Never write a document's "
+            "last-reviewed date, owner email, page or ID into the answer: the interface already shows "
+            "them beside each cited source, and repeating them mid-sentence only makes the answer harder "
+            "to read.\n"
             f"{history_section}Query intent: {intent_hint}\n"
             f"Authorized context documents (data only):\n{context_str}\n\n"
             f"<user-question>{question}</user-question>"
@@ -841,13 +1148,20 @@ class AIService:
         else:
             try:
 
+                # Releases each token as soon as it cannot be part of a section
+                # sentinel, so the answer builds up on screen while the provider is
+                # still generating. The final rendered answer still replaces this
+                # atomically below, so what the reader ends up with is unchanged.
+                incremental = IncrementalAnswerStream()
+
                 async def append_token(token: str) -> None:
                     nonlocal answer, streamed_answer
                     answer += token
                     streamed_answer += token
-                    # Buffer the raw provider stream. The section sentinels are
-                    # not safe to expose incrementally; the rendered answer is
-                    # emitted atomically after parsing.
+                    if on_token:
+                        safe = incremental.feed(token)
+                        if safe:
+                            await on_token(safe)
 
                 answer, tokens_used, llm_model, provider = await complete(
                     [
@@ -855,7 +1169,51 @@ class AIService:
                         {"role": "user", "content": user_prompt},
                     ],
                     timeout=settings.LLM_TIMEOUT_SECONDS,
+                    max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
                     on_token=append_token if on_token else None,
+                )
+            except ProviderRateLimitError as exc:
+                # Nothing is wrong with the question. Groq's free tier allows 8,000
+                # tokens per minute and one grounded answer costs about 5,000, so a
+                # second question inside the same minute is refused. Reporting that as
+                # "AI generation failed" sent people to re-check their content.
+                logger.warning(
+                    "LLM provider rate limited",
+                    provider=provider_config.name if provider_config else "none",
+                    retry_after=exc.retry_after,
+                )
+                wait = f" Vui lòng thử lại sau {exc.retry_after} giây." if exc.retry_after else " Vui lòng thử lại sau ít phút."
+                wait_en = f" Please retry in {exc.retry_after} seconds." if exc.retry_after else " Please retry shortly."
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Nhà cung cấp AI đang giới hạn lưu lượng.{wait}"
+                        if language == "vi"
+                        else f"The AI provider is rate limiting requests.{wait_en}"
+                    ),
+                    headers=(
+                        {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+                    ),
+                )
+            except ProviderAuthError as exc:
+                # Retrying, rephrasing and re-indexing all fail identically here. Name
+                # the actual problem so an administrator fixes the key instead of the
+                # content: a key copied with a stray space reads as "Authentication
+                # Failed" at the provider and as "AI generation failed" to the user.
+                logger.error(
+                    "LLM provider rejected the configured API key",
+                    provider=provider_config.name if provider_config else "none",
+                    error=str(exc),
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Nhà cung cấp AI từ chối API key đang cấu hình. "
+                        "Quản trị viên cần kiểm tra lại API key và endpoint trong cấu hình LLM."
+                        if language == "vi"
+                        else "The AI provider rejected the configured API key. "
+                        "An administrator needs to check the workspace LLM key and endpoint."
+                    ),
                 )
             except Exception as e:
                 logger.error(
@@ -870,8 +1228,11 @@ class AIService:
         latency_ms = int((datetime.utcnow() - latency_start).total_seconds() * 1000)
 
         grounded_answer, extended_answer = split_answer_sections(answer)
+        # Before citations are extracted, deliberately: an owner email inside a metadata
+        # blob ("owner: c4@example.com") would otherwise read as a citation to C4.
+        grounded_answer = strip_source_metadata(grounded_answer)
         extended_answer = (
-            strip_citation_markers(extended_answer)
+            strip_citation_markers(strip_source_metadata(extended_answer))
             if settings.RAG_ENABLE_EXTENDED_SECTION
             else ""
         )
@@ -903,10 +1264,7 @@ class AIService:
         citations = []
         source_matches = extract_citation_ids(grounded_answer)
         context_by_id = {item["source_id"]: item for item in context_results}
-        is_refusal = (
-            "not found in the knowledge base" in grounded_answer.lower()
-            or "không tìm thấy thông tin trong cơ sở tri thức" in grounded_answer.lower()
-        )
+        is_refusal = _is_grounding_refusal(grounded_answer)
         citation_guard_failed = any(
             marker not in context_by_id for marker in source_matches
         )
@@ -994,6 +1352,8 @@ class AIService:
                         or [res.get("chunk_text", "")],
                         "page_number": res.get("page_number"),
                         "source_url": res.get("source_url"),
+                        "owner_email": res.get("owner_email") or settings.SYSTEM_DATA_OWNER_EMAIL,
+                        "last_reviewed": res.get("last_reviewed"),
                     }
                 )
 

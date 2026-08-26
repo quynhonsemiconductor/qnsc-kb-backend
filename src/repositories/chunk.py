@@ -1,5 +1,6 @@
 import uuid
 import re
+import unicodedata
 import hashlib
 import structlog
 from typing import Sequence
@@ -13,6 +14,29 @@ from src.core.config import settings
 from src.repositories.article import ArticleRepository
 
 logger = structlog.get_logger()
+
+#: Everything a retrieved chunk is asked for AFTER the query returns. The async session
+#: cannot lazy-load, so anything missing here is not a slow path — it is a MissingGreenlet
+#: at request time. Each entry names its consumer so it is clear what removing one breaks:
+#:
+#:   parent_chunk.child_chunks  the parent passage and `child_texts` in the response
+#:   article.owner              `owner_email` in the response
+#:   article.access_groups      PermissionService.can_view_article (restricted sensitivity)
+#:   article.departments        AuthorizationService.can_access_article_departments
+#:   article.user_permissions   PermissionService._explicit_user_effect
+#:   article.sources            PermissionService._sharepoint_acl_allows
+#:
+#: `sources` is the trap: permissions reads it as getattr(article, "sources", []), so it
+#: does not appear in a search for `.sources` and looks unused.
+RETRIEVAL_LOAD_OPTIONS = (
+    selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
+    selectinload(ArticleChunk.article).selectinload(Article.owner),
+    selectinload(ArticleChunk.article).selectinload(Article.access_groups),
+    selectinload(ArticleChunk.article).selectinload(Article.departments),
+    selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
+    selectinload(ArticleChunk.article).selectinload(Article.sources),
+)
+
 
 class ChunkRepository:
     def __init__(self, db: AsyncSession):
@@ -52,24 +76,24 @@ class ChunkRepository:
         return result.scalar_one_or_none()
 
     async def authorized_chunk_ids(self, user: object, chunk_ids: list[uuid.UUID]) -> set[str]:
-        """Return only citation chunks still visible to the current user."""
+        """Return only citation chunks still visible to the current user.
+
+        Selects the id COLUMN, not the entity. Authorization is decided entirely by
+        _authorized_article_filters in SQL, so the five eager loads this used to carry
+        (sources, owner, access_groups, departments, user_permissions) issued five extra
+        round trips and materialised whole object graphs per citation check, and every
+        one of them was discarded — the method only ever returned ids.
+        """
         if not chunk_ids:
             return set()
-        from src.domain.rbac import AuthorizationService
 
         conditions = [ArticleChunk.id.in_(chunk_ids), Article.status == "published", *ArticleRepository._authorized_article_filters(user)]
         result = await self.db.execute(
-            select(ArticleChunk)
+            select(ArticleChunk.id)
             .join(Article, Article.id == ArticleChunk.article_id)
-            .options(
-                selectinload(ArticleChunk.article).selectinload(Article.sources),
-                selectinload(ArticleChunk.article).selectinload(Article.access_groups),
-                selectinload(ArticleChunk.article).selectinload(Article.departments),
-                selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
-            )
             .where(*conditions)
         )
-        return {str(chunk.id) for chunk in result.scalars().all()}
+        return {str(chunk_id) for chunk_id in result.scalars().all()}
 
     async def update_permissions(self, article_id: uuid.UUID, bitmap: int, sensitivity: str, visibility: str, dept: str) -> None:
         await self.db.execute(
@@ -115,22 +139,18 @@ class ChunkRepository:
         # explicit-user visibility and explicit denies are relational policy
         # records and are included in the same SQL statement.
         where_clauses.extend(ArticleRepository._authorized_article_filters(user))
-        explicit_allow = exists(select(ArticleUserPermission.id).where(
-            ArticleUserPermission.article_id == Article.id,
-            ArticleUserPermission.user_id == user.id,
-            ArticleUserPermission.effect == "allow",
-        ))
+        # An explicit ALLOW is already part of the shared Article predicate above; only
+        # the DENY needs adding here. This used to build an unused `explicit_allow`
+        # EXISTS on every search.
         explicit_deny = exists(select(ArticleUserPermission.id).where(
             ArticleUserPermission.article_id == Article.id,
             ArticleUserPermission.user_id == user.id,
             ArticleUserPermission.effect == "deny",
         ))
         where_clauses.append(not_(explicit_deny))
-        if not filters.get("bypass_access_groups"):
-            where_clauses.append(or_(
-                ArticleChunk.access_group_bitmap.op("&")(user_bitmask) != 0,
-                explicit_allow,
-            ))
+        # Audience authorization is already present in the shared Article
+        # predicate above.  Keeping a second bitmask gate here made search a
+        # different permission algorithm and imposed a 62-group ceiling.
 
         if filters.get("company_domain"):
             where_clauses.append(Article.company_domain == filters["company_domain"])
@@ -183,25 +203,10 @@ class ChunkRepository:
         if filters.get("date_to"):
             where_clauses.append(Article.created_at <= filters["date_to"])
 
-        diagnostic_stmt = (
-            select(func.count(ArticleChunk.id))
-            .select_from(ArticleChunk)
-            .join(Article, Article.id == ArticleChunk.article_id)
-            .where(and_(*where_clauses))
-        )
-        diagnostic_res = await self.db.execute(diagnostic_stmt)
-        eligible_count = diagnostic_res.scalar_one() or 0
-
-        status_stmt = (
-            select(Article.status, func.count(ArticleChunk.id))
-            .select_from(ArticleChunk)
-            .join(Article, Article.id == ArticleChunk.article_id)
-            .group_by(Article.status)
-        )
-        status_res = await self.db.execute(status_stmt)
-        chunk_counts_by_article_status = {
-            status: count for status, count in status_res.all()
-        }
+        # Diagnostic logging only. The previous implementation ran two extra
+        # aggregate queries per search — one over the full filtered join and an
+        # unfiltered per-status scan across ALL tenants' chunks — which scaled
+        # with corpus size and leaked cross-tenant chunk counts into logs.
         logger.info(
             "Search candidate scope",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
@@ -209,32 +214,30 @@ class ChunkRepository:
             user_access_bitmask=user_bitmask,
             filters=filters,
             embedding_available=query_embedding is not None,
-            eligible_published_chunks=eligible_count,
-            chunk_counts_by_article_status=chunk_counts_by_article_status,
         )
 
         # 1. Vector Search
         vector_results = []
         if query_embedding is not None:
-            # cosine_distance: <=> operator
+            # cosine_distance: <=>
+            # Query and document vectors must come from the same embedding
+            # model/version: cross-model cosine distances are meaningless, so
+            # chunks embedded with any other version are excluded instead of
+            # silently polluting results (the index-wide re-embedding job is
+            # the migration path, not mixed-version search).
             vector_stmt = (
                 select(ArticleChunk)
                 .join(Article, Article.id == ArticleChunk.article_id)
                 .where(
                     and_(
                         *where_clauses,
+                        ArticleChunk.embedding_version == settings.EMBEDDING_VERSION,
                         ArticleChunk.embedding.cosine_distance(query_embedding) <= settings.VECTOR_DISTANCE_THRESHOLD,
                     )
                 )
                 .order_by(ArticleChunk.embedding.cosine_distance(query_embedding))
                 .limit(max(settings.RAG_CANDIDATE_POOL_SIZE, limit))
-                .options(
-                    selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
-                    selectinload(ArticleChunk.article).selectinload(Article.sources),
-                    selectinload(ArticleChunk.article).selectinload(Article.access_groups),
-                    selectinload(ArticleChunk.article).selectinload(Article.departments),
-                    selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
-                )
+                .options(*RETRIEVAL_LOAD_OPTIONS)
             )
             vec_res = await self.db.execute(vector_stmt)
             vector_results = vec_res.scalars().all()
@@ -244,34 +247,39 @@ class ChunkRepository:
                 vector_result_count=len(vector_results),
             )
 
-        # 2. Full-Text Search (keyword)
-        # Fall back to ILIKE if postgres fails or for simplicity, but we can do proper FTS:
-        keyword_terms = [term for term in re.findall(r"[\w'-]+", query.lower()) if len(term) > 1]
-        keyword_conditions = [ArticleChunk.chunk_text.ilike(f"%{term}%") for term in keyword_terms]
-        keyword_conditions.extend(Article.title.ilike(f"%{term}%") for term in keyword_terms)
+        # 2. Full-Text Search (keyword). Keep the query expression aligned
+        # with the immutable_unaccent GIN index created by migration 58.
+        # The old leading-wildcard ILIKE path forced a scan of every chunk and
+        # ranked against a different expression than the one it filtered.
+        search_vector = func.to_tsvector("simple", func.immutable_unaccent(ArticleChunk.chunk_text))
+        search_query = func.plainto_tsquery("simple", func.immutable_unaccent(query))
+        def fold(value: str) -> str:
+            return "".join(
+                char for char in unicodedata.normalize("NFD", value)
+                if unicodedata.category(char) != "Mn"
+            ).lower()
+
+        folded_query = fold(query)
+        keyword_terms = [term for term in re.findall(r"[\w'-]+", folded_query) if len(term) > 1]
+        keyword_conditions = [search_vector.op("@@")(search_query)]
+        keyword_conditions.extend(func.immutable_unaccent(Article.title).ilike(f"%{term}%") for term in keyword_terms)
         keyword_stmt = (
             select(ArticleChunk)
             .join(Article, Article.id == ArticleChunk.article_id)
             .where(
                 and_(
                     *where_clauses,
-                    or_(*keyword_conditions) if keyword_conditions else ArticleChunk.chunk_text.ilike(f"%{query}%")
+                    or_(*keyword_conditions) if keyword_conditions else search_vector.op("@@")(search_query)
                 )
             )
             .order_by(
                 func.ts_rank_cd(
-                    func.to_tsvector("simple", func.concat_ws(" ", ArticleChunk.chunk_text, Article.title)),
-                    func.plainto_tsquery("simple", query),
+                    search_vector,
+                    search_query,
                 ).desc()
             )
             .limit(max(settings.RAG_CANDIDATE_POOL_SIZE, limit))
-            .options(
-                selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
-                selectinload(ArticleChunk.article).selectinload(Article.sources),
-                selectinload(ArticleChunk.article).selectinload(Article.access_groups),
-                selectinload(ArticleChunk.article).selectinload(Article.departments),
-                selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
-            )
+            .options(*RETRIEVAL_LOAD_OPTIONS)
         )
         key_res = await self.db.execute(keyword_stmt)
         keyword_results = key_res.scalars().all()

@@ -64,14 +64,12 @@ module "ecr" {
   # Lower than the module defaults (30 releases / 20 builds), but for a narrower reason
   # than "the images are big".
   #
-  # These images ARE big — the worker carries paddle and every image that embeds carries
-  # the ~2.2 GB fp32 ONNX export (PR #54 dropped torch and the separate weight bake; the
-  # api and worker went from ~3.0/3.3 GB to 1.5/1.8 GB) — but ECR bills unique LAYERS,
-  # and the `deps` stages are shared across all three images and unchanged between builds
-  # unless poetry.lock or the model changes. The per-build delta is the application COPY
-  # layer, which is small. So steady-state storage is roughly one ~2-3 GB layer set plus
-  # deltas, and multiplying image size by keep-count overstates it by an order of
-  # magnitude.
+  # These images ARE big — the api and worker carry ONNX Runtime, paddle and the baked bge-m3
+  # weights — but ECR bills unique LAYERS, and the `deps` and `model-cache` stages are
+  # shared across all three images and unchanged between builds unless poetry.lock or the
+  # model changes. The per-build delta is the application COPY layer, which is small. So
+  # steady-state storage is roughly one ~4-5 GB layer set plus deltas, and multiplying
+  # image size by keep-count overstates it by an order of magnitude.
   #
   # What these counts actually insure against is the case where that assumption breaks: a
   # dependency bump invalidates the shared layers, and every build after it carries its

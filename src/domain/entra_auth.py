@@ -32,11 +32,22 @@ def authorization_url(state: str, nonce: str) -> str:
     return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?{urlencode(params)}"
 
 
-def _validate_id_token_metadata(header: dict[str, Any], claims: dict[str, Any]) -> tuple[str, str]:
-    """Validate untrusted JOSE metadata before fetching or accepting a key."""
+def _validated_algorithm(header: dict[str, Any]) -> str:
+    """Validate the untrusted JOSE header before fetching or accepting a key.
+
+    Only ``alg`` and ``kid`` are read before the signature is checked. Nothing else in
+    an unverified token has to be trusted: the JWKS is fetched from the CONFIGURED
+    tenant, so tenant and issuer are validated afterwards, by
+    :func:`_validate_tenant_claims`, against claims the signature already vouches for.
+    """
     algorithm = str(header.get("alg") or "")
     if algorithm != "RS256":
         raise ValueError("Microsoft ID token algorithm is not allowed")
+    return algorithm
+
+
+def _validate_tenant_claims(claims: dict[str, Any]) -> str:
+    """Pin the tenant and issuer of claims whose signature is already verified."""
     tenant_id = str(claims.get("tid") or "").strip()
     if not tenant_id:
         raise ValueError("Microsoft ID token has no tenant claim")
@@ -47,7 +58,7 @@ def _validate_id_token_metadata(header: dict[str, Any], claims: dict[str, Any]) 
     configured_tenant = str(settings.MICROSOFT_TENANT_ID or "").strip()
     if configured_tenant.lower() != "common" and tenant_id.lower() != configured_tenant.lower():
         raise ValueError("Microsoft ID token tenant is invalid")
-    return algorithm, tenant_id
+    return tenant_id
 
 
 async def exchange_code(code: str) -> dict[str, Any]:
@@ -70,19 +81,11 @@ async def exchange_code(code: str) -> dict[str, Any]:
 
 async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     """Verify signature, audience, nonce, and tenant claims before mapping."""
-    # ONLY the header is read before the signature is checked, and only for the two
-    # values that are needed to find the key at all: which key signed it, and with what
-    # algorithm. The tenant and issuer claims are validated further down, against the
-    # VERIFIED payload — python-jose's get_unverified_claims() invited reading them here,
-    # but nothing actually requires it: the JWKS below is fetched from the CONFIGURED
-    # tenant, never from a tenant the token asks for.
     unverified_header = jwt.get_unverified_header(id_token)
     kid = str(unverified_header.get("kid") or "")
     if not kid:
         raise ValueError("Microsoft ID token has no key identifier")
-    algorithm = str(unverified_header.get("alg") or "")
-    if algorithm != "RS256":
-        raise ValueError("Microsoft ID token algorithm is not allowed")
+    algorithm = _validated_algorithm(unverified_header)
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, trust_env=False) as client:
         response = await client.get(
             f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/discovery/v2.0/keys"
@@ -93,21 +96,21 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     key_data = next((item for item in keys if item.get("kid") == kid), None)
     if not key_data:
         raise ValueError("Microsoft signing key is unknown")
-    # Entra's JWKS can omit the optional `alg` member. The token header was
-    # already validated as RS256 above, so pass that validated algorithm
-    # explicitly instead of asking PyJWT to infer it from the key.
-    key = jwt.PyJWK.from_dict(key_data, algorithm=algorithm).key
+    # Entra's JWKS can omit the optional `alg` member and PyJWK refuses to guess. The
+    # token header was already validated as RS256 above, so pass that validated
+    # algorithm explicitly rather than letting the key material choose it.
+    key = jwt.PyJWK.from_dict(key_data, algorithm=algorithm)
+    # `audience` is not optional here. PyJWT RAISES InvalidAudienceError for a token
+    # that carries `aud` when no audience is passed, where python-jose silently skipped
+    # the check — and every Entra id_token carries `aud`.
     claims = jwt.decode(
         id_token,
-        key,
+        key.key,
         algorithms=["RS256"],
         audience=settings.MICROSOFT_CLIENT_ID,
-        options={"verify_iss": False},
     )
-    # Tenant and issuer are checked HERE, on the verified payload, rather than on a
-    # pre-signature read of the same claims. Same rules, applied to data an attacker
-    # cannot author.
-    _validate_id_token_metadata(unverified_header, claims)
+    # Tenant and issuer only mean something once the signature is verified.
+    _validate_tenant_claims(claims)
     if claims.get("nonce") != expected_nonce:
         raise ValueError("Microsoft ID token nonce is invalid")
     subject = str(claims.get("oid") or claims.get("sub") or "").strip()

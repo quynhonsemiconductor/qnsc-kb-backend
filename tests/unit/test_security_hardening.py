@@ -89,6 +89,7 @@ def test_production_rejects_an_insecure_credentialed_cors_origin():
 
 def test_production_requires_r2_credentials():
     settings = Settings(
+        _env_file=None,
         ENVIRONMENT="production",
         SECRET_KEY="a" * 32,
         DATA_ENCRYPTION_KEY="d" * 32,
@@ -200,6 +201,7 @@ def test_health_r2_signal_requires_an_endpoint_or_account(monkeypatch):
 
 def test_production_rejects_insecure_connector_callback_urls():
     settings = Settings(
+        _env_file=None,
         ENVIRONMENT="production",
         SECRET_KEY="a" * 32,
         DATA_ENCRYPTION_KEY="d" * 32,
@@ -359,13 +361,11 @@ def test_access_token_carries_auth_version():
 
 
 def test_embedding_failure_is_not_converted_to_zero_vector(monkeypatch):
-    # Patch the SEAM, not a backend internal: resolve_provider is the one place the
-    # backend is chosen, so this holds whichever runtime is configured.
-    def unavailable():
-        raise RuntimeError("model unavailable")
-
-    monkeypatch.setattr(embeddings, "resolve_provider", unavailable)
-    monkeypatch.setattr(embeddings.settings, "EMBEDDING_MODEL", "BAAI/bge-m3")
+    monkeypatch.setattr(
+        embeddings,
+        "resolve_provider",
+        lambda: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+    )
     with pytest.raises(RuntimeError, match="Embedding generation failed"):
         embeddings.get_bge_embedding("test")
 

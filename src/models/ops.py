@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import ForeignKey, String, Text, Integer, JSON, Float, DateTime, UniqueConstraint, Index
+from sqlalchemy import Boolean, ForeignKey, String, Text, Integer, JSON, Float, DateTime, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -14,18 +14,9 @@ class Connector(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_sync: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     config_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     company_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False, default="local")
-    # NOTE: there was a `sync_interval_minutes` column here, mapped NOT NULL, that no
-    # Alembic revision ever created. SQLAlchemy put it in the SELECT list for every query
-    # loading a Connector, so Postgres rejected the statement:
-    #   asyncpg.exceptions.UndefinedColumnError:
-    #   column connectors.sync_interval_minutes does not exist
-    # It failed a Celery task every ten minutes in develop while /health/ready still
-    # returned 200 — the connection was fine, so only the worker log showed it.
-    #
-    # REMOVED rather than migrated: `grep -rn sync_interval` returned exactly one line,
-    # this declaration. Nothing read it, nothing wrote it, no API exposed it, and its own
-    # comment said scheduling uses connector config and job mode instead. Adding the
-    # column would have satisfied a mapping nobody uses.
+    # Retained for compatibility with pre-Alembic connector rows. Current
+    # scheduling uses connector config and job mode; no API exposes this field.
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     oauth_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     oauth_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -76,6 +67,8 @@ class NotificationQueue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)  # pending, sent, failed
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 class DeadLetterJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "dead_letter_jobs"
@@ -148,8 +141,26 @@ class EvalQuestion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     expected_answer: Mapped[str] = mapped_column(Text, nullable=False)
     expected_chunk_ids: Mapped[str] = mapped_column(Text, nullable=False)  # JSON list of parent chunk IDs
     category: Mapped[str] = mapped_column(String(50), nullable=False)
+    eval_set_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    eval_set: Mapped["EvalSet | None"] = relationship("EvalSet", back_populates="questions")
+    runs: Mapped[list["EvalRun"]] = relationship("EvalRun", back_populates="question")
 
-    runs: Mapped[list["EvalRun"]] = relationship("EvalRun", back_populates="question", cascade="all, delete-orphan")
+
+class EvalSet(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Versioned, approver-owned acceptance corpus."""
+
+    __tablename__ = "eval_sets"
+    __table_args__ = (UniqueConstraint("company_domain", "name", "version", name="uq_eval_set_company_name_version"),)
+
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    environment: Mapped[str] = mapped_column(String(50), nullable=False, default="uat")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    questions: Mapped[list[EvalQuestion]] = relationship("EvalQuestion", back_populates="eval_set")
 
 class EvalRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "eval_runs"
@@ -160,5 +171,9 @@ class EvalRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     context_recall: Mapped[float] = mapped_column(Float, nullable=False)
     faithfulness: Mapped[float] = mapped_column(Float, nullable=False)
     answer_correctness: Mapped[float] = mapped_column(Float, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # True only when the answer exposed a citation outside the authorized
+    # retrieval set used for this evaluation run.
+    permission_leakage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     question: Mapped[EvalQuestion] = relationship("EvalQuestion", back_populates="runs")

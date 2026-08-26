@@ -1,9 +1,24 @@
 import logging
+
 import structlog
 
+
 def setup_logging():
+    """Emit structured JSON logs to stdout for log aggregation.
+
+    Keeps stdlib logging (uvicorn/sqlalchemy/celery route their records
+    through structlog) in sync so container logs are uniformly parseable.
+    """
     structlog.configure(
         processors=[
-            structlog.processors.JSONRenderer()
-        ]
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
     )

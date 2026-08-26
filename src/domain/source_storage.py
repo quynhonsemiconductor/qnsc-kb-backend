@@ -13,12 +13,23 @@ from pathlib import Path
 
 from src.core.config import is_cloudflare_r2_endpoint, settings
 
+#: Types a browser may be handed for an ORIGINAL upload, chosen for being inert as
+#: documents: images cannot script, a PDF is drawn by the browser's own isolated viewer,
+#: and text/plain is never parsed as markup — the responses also carry
+#: ``X-Content-Type-Options: nosniff``, so a .md full of HTML stays text.
+#:
+#: Markdown and text are here because most of this corpus is exactly that, and without
+#: them every such source came back as an undisplayable octet-stream download.
 _SAFE_SOURCE_MEDIA_TYPES = {
     ".pdf": "application/pdf",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
+    ".csv": "text/plain; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
 }
 
 

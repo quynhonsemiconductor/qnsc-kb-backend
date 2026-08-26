@@ -27,6 +27,7 @@ async def resolve_active_department(
         select(Department).where(
             Department.company_domain == company_domain,
             Department.active.is_(True),
+            Department.kind == "org",
             func.lower(Department.name) == canonical.lower(),
         )
     )

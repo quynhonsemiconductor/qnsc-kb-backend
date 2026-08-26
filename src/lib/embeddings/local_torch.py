@@ -22,10 +22,16 @@ def _load() -> Any:
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as exc:
+        # Do not send the reader to `poetry install --with ml`: the `ml` group is
+        # onnxruntime + transformers. Neither torch nor sentence-transformers is declared
+        # anywhere in this project, so no install command makes this backend work — the
+        # dependency has to be added first, or the ONNX backend used instead. Saying so
+        # plainly beats an instruction that silently changes nothing.
         raise EmbeddingUnavailable(
-            f"EMBEDDING_MODEL={settings.EMBEDDING_MODEL!r} is loaded in-process and needs "
-            "the optional 'ml' dependency group (torch, sentence-transformers). Install "
-            "with `poetry install --with ml`, or set EMBEDDING_RUNTIME=onnx."
+            f"EMBEDDING_RUNTIME=torch needs sentence-transformers (and torch), which this "
+            f"project does not declare in any dependency group, so {settings.EMBEDDING_MODEL!r} "
+            "cannot be loaded. Either add sentence-transformers to the 'ml' group and "
+            "rebuild, or use EMBEDDING_RUNTIME=onnx with an export in EMBEDDING_ONNX_DIR."
         ) from exc
 
     logger.info("Loading SentenceTransformer model", model=settings.EMBEDDING_MODEL)

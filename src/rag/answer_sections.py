@@ -8,8 +8,40 @@ EXTENDED_SENTINEL = "<<<EXTENDED>>>"
 GROUNDED_HEADING = "## Answer from the Knowledge Base"
 EXTENDED_HEADING = "## Additional context (general knowledge — not from the Knowledge Base, not cited)"
 
-_SENTINEL_LINE_RE = re.compile(r"^\s*<<<(GROUNDED|EXTENDED)>>>\s*$", re.IGNORECASE)
-_CITATION_MARKER_RE = re.compile(r"\[(?:Source ID:\s*)?C?\d+\]", re.IGNORECASE)
+# Tolerant on the bracket count by necessity. The sentinels are written by a language
+# model, not by a protocol: glm-4.5-flash emits `<<<GROUNDED>>` — two closing angles —
+# and an exact match then failed to find any section boundary at all. The consequences
+# were not cosmetic. The raw `<<<GROUNDED>>` showed up in the answer, and everything
+# after `<<<EXTENDED>>` — uncited general knowledge, by definition — was folded into the
+# grounded section instead of being separated, stripped of markers, and put under its
+# own "not from the Knowledge Base" heading.
+_SENTINEL_LINE_RE = re.compile(r"^\s*<{2,4}\s*(GROUNDED|EXTENDED)\s*>{2,4}\s*$", re.IGNORECASE)
+_SENTINEL_WORDS = ("GROUNDED", "EXTENDED")
+
+
+def could_begin_a_sentinel(probe: str) -> bool:
+    """Whether `probe` is still a possible start of a sentinel line.
+
+    Used by the incremental stream to decide what to withhold. It must accept the same
+    malformed shapes `_SENTINEL_LINE_RE` does, or a `<<GROUNDED>>` would stream out one
+    character at a time before the completed line was recognised as a boundary.
+    """
+
+    if not probe.startswith("<"):
+        return False
+    body = probe.lstrip("<")
+    if len(probe) - len(body) > 4:
+        return False
+    name = body.rstrip(">").upper()
+    return any(word.startswith(name) for word in _SENTINEL_WORDS)
+# Matches the bare `[C1]` the prompt asks for AND the enriched bracket a model writes
+# when it is also told to surface review dates and owners: `[C4: 2026-08-08, a@b.c]`.
+# The extended section must carry no marker in either shape — nothing there is
+# attributable to the knowledge base.
+_CITATION_MARKER_RE = re.compile(
+    r"\[[^\[\]]{0,240}?\bC\d{1,3}\b[^\[\]]{0,240}?\]|\[(?:Source ID:\s*)?\d{1,2}\]",
+    re.IGNORECASE,
+)
 
 
 def _sentinel_lines(text: str) -> list[tuple[str, int, int]]:
@@ -83,6 +115,127 @@ def split_answer_sections(raw: str) -> tuple[str, str]:
         normalize_answer_markdown(_strip_sentinel_lines(grounded_raw)),
         normalize_answer_markdown(_strip_sentinel_lines(extended_raw)),
     )
+
+
+#: A line is only ever a fence or a sentinel. While the text received so far could still
+#: grow into one of these, it is held back; the moment it cannot, it is safe to release.
+_FENCE = "```"
+
+
+class IncrementalAnswerStream:
+    """Release provider tokens the instant they cannot belong to a sentinel line.
+
+    The provider streams, but the raw stream cannot be forwarded as-is: it carries
+    ``<<<GROUNDED>>>`` / ``<<<EXTENDED>>>`` section markers, and half of one on screen is
+    worse than no streaming at all. The previous answer to that was to forward NOTHING and
+    replace the message atomically at the end — correct, but it turned a streaming
+    provider into a spinner followed by a wall of text.
+
+    Only two constructs matter, and both are whole-line: a fence toggle and a sentinel. So
+    the rule is simply that a line is withheld only while what has arrived of it is still a
+    prefix of one of those. "The" is released immediately; "<" waits one character. In
+    practice that is token-level streaming for everything except the sentinels themselves.
+
+    Text after ``<<<EXTENDED>>>`` is never released: the extended section is rendered under
+    its own heading behind a divider, and arrives with the final replace event.
+    """
+
+    def __init__(self) -> None:
+        self._line = ""
+        # How much of the current line has already gone out. Once any of a line has been
+        # released, that line is committed: it cannot turn out to be a sentinel.
+        self._released = 0
+        self._in_fence = False
+        self._stopped = False
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    def _holding(self) -> bool:
+        if self._released:
+            return False
+        probe = self._line.lstrip()
+        if not probe:
+            # Leading whitespace only: "   <<<GROUNDED>>>" is still reachable.
+            return True
+        return _FENCE.startswith(probe) or could_begin_a_sentinel(probe)
+
+    def _finish_line(self, out: list[str]) -> None:
+        line = self._line
+        if line.strip().startswith("```"):
+            self._in_fence = not self._in_fence
+        elif not self._in_fence:
+            match = _SENTINEL_LINE_RE.match(line)
+            if match:
+                # Guaranteed unreleased: a sentinel is always held by _holding.
+                if match.group(1).upper() == "EXTENDED":
+                    self._stopped = True
+                self._line = ""
+                self._released = 0
+                return
+        out.append(line[self._released:] + "\n")
+        self._line = ""
+        self._released = 0
+
+    def feed(self, chunk: str) -> str:
+        """Consume raw provider text; return only what is safe to show now."""
+        if self._stopped or not chunk:
+            return ""
+        out: list[str] = []
+        for character in chunk:
+            if character == "\n":
+                self._finish_line(out)
+                if self._stopped:
+                    break
+            else:
+                self._line += character
+                if not self._holding():
+                    out.append(self._line[self._released:])
+                    self._released = len(self._line)
+        return "".join(out)
+
+    def finish(self) -> str:
+        """Flush a trailing line that never got its newline."""
+        if self._stopped:
+            return ""
+        line = self._line
+        self._line = ""
+        released, self._released = self._released, 0
+        if not self._in_fence and _SENTINEL_LINE_RE.match(line):
+            return ""
+        return line[released:]
+
+
+
+# Provenance the reader is shown BESIDE each source, not inside the prose. The context
+# block hands the model a last-reviewed date and an owner email per document, and a model
+# told to surface them writes them into the sentence, producing lines like
+#
+#   … [last-reviewed: 2026-08-08T16:34:46.563958; owner: admin@example.com] [4]
+#
+# three times in one paragraph. The prompt now forbids it; this removes what still gets
+# through, and repairs answers already stored that way. Bracketed forms only — rewriting
+# free prose risks deleting a sentence the reader needed.
+_SOURCE_METADATA_BRACKET = re.compile(
+    r"\[\s*(?:last[-\s]?reviewed|reviewed|owner(?:\s*email)?|source[-\s]?id|page"
+    r"|ngày\s*(?:xem\s*xét|rà\s*soát)|email\s*chủ\s*sở\s*hữu|chủ\s*sở\s*hữu|trang)"
+    r"\b[^\[\]]{0,240}\]",
+    re.IGNORECASE,
+)
+#: Interior runs only. A markdown hard line break is two TRAILING spaces, and collapsing
+#: those would silently join the model's list items into one paragraph.
+_INTERIOR_RUN = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)")
+
+
+def strip_source_metadata(text: str) -> str:
+    """Remove inline provenance blobs, leaving the sentence and its markers intact."""
+
+    cleaned = _SOURCE_METADATA_BRACKET.sub("", text or "")
+    cleaned = _INTERIOR_RUN.sub(" ", cleaned)
+    # The blob often sat before its punctuation: "…phần cứng [last-reviewed: …] ."
+    cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
+    return cleaned.strip()
 
 
 def strip_citation_markers(text: str) -> str:
