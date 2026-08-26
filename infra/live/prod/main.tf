@@ -121,11 +121,15 @@ module "stack" {
   // and a broken response mid-answer. The worker takes Spot deliberately — Celery
   // redelivers an interrupted task, so an interruption costs time rather than work.
   api = {
+    // Raised to carry the ClamAV sidecar (256 CPU / 2048 MB carved out), leaving the
+    // api the 512/4096 it had before. NOTE: clamd is per TASK, so at max_count 6 this
+    // is up to 12 GB of duplicated signature database — the point at which one clamd
+    // behind Service Connect becomes the cheaper shape.
     // 4096: the embedding model is local and the API loads it to embed the search query.
     // BAAI/bge-m3 is ~2.27 GB of fp32 weights plus torch; at 1024 MB the load fails and
     // search silently degrades to keyword-only. 512 CPU caps a task at 4096 MB.
-    cpu                = 512
-    memory             = 4096
+    cpu                = 1024
+    memory             = 6144
     min_count          = 0
     max_count          = 6
     enable_autoscaling = false
