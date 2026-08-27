@@ -657,9 +657,20 @@ async def upload_source(
         # that the uploaded binary is a duplicate. The hash check above is
         # the only hard duplicate gate.
         similarity_level = "very_high"
-    storage_key = await asyncio.to_thread(
-        save_source, source_hash, filename, data, current_user.company_domain
-    )
+    try:
+        storage_key = await asyncio.to_thread(
+            save_source, source_hash, filename, data, current_user.company_domain
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        # The only R2 call site that lacked this guard, which is why an InvalidRegionName
+        # on every upload surfaced as an unhandled 500 rather than the 503 its three
+        # siblings already return.
+        logger.exception(
+            "Source upload storage failed", filename=filename, error=str(exc)
+        )
+        raise HTTPException(
+            status_code=503, detail="Private R2 upload storage is unavailable"
+        ) from exc
     draft = PendingDraft(
         title=filename.rsplit(".", 1)[0][:255],
         company_domain=current_user.company_domain,
