@@ -5,8 +5,9 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import func, select, text
 from src.core.config import settings
 from src.api.routers import (
@@ -414,6 +415,54 @@ app = FastAPI(
     redoc_url="/redoc" if settings.ENABLE_API_DOCS else None,
     lifespan=lifespan,
 )
+
+
+async def unhandled_error_boundary(request, call_next):
+    """Turn an unhandled exception into a real response, INSIDE CORSMiddleware.
+
+    Starlette converts an escaped exception to a 500 in ServerErrorMiddleware, which
+    wraps everything — so that response never passes back through CORSMiddleware and
+    carries no `access-control-allow-origin`. The browser then discards it before any
+    JavaScript sees it, and axios reports a bare "Network Error" with no status: a real
+    server-side bug is indistinguishable from the API being unreachable. A source upload
+    failed exactly this way and cost two rounds of misdiagnosis against the tunnel and
+    the ClamAV sidecar, neither of which was involved.
+
+    Registered BEFORE CORSMiddleware so it sits INSIDE it: `add_middleware` inserts at
+    the front of the stack, so the last one registered is the outermost. Returning here
+    rather than re-raising means the 500 travels back out through CORS like any other
+    response and reaches the client with its headers intact.
+
+    HTTPException never arrives here — ExceptionMiddleware is further in and has already
+    turned it into a response. Only genuinely unhandled errors reach this.
+    """
+    try:
+        return await call_next(request)
+    except Exception:
+        try:
+            # exception(), not error(): without the traceback the log names the
+            # exception and nothing about where it came from, which is what made the
+            # upload failure unreadable in CloudWatch as well as in the browser.
+            logger.exception(
+                "Unhandled application error",
+                request_id=getattr(request.state, "request_id", None),
+                method=request.method,
+                path=request.url.path,
+            )
+        except Exception:
+            # A boundary that its own logging can defeat is not a boundary. Rendering a
+            # traceback can itself raise — a non-UTF-8 stream turns one non-ASCII
+            # character into UnicodeEncodeError — and that escaped exception would
+            # restore precisely the CORS-less 500 this exists to prevent. Caught while
+            # testing this function, not hypothesised.
+            pass
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+        )
+
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=unhandled_error_boundary)
 
 # Set CORS middleware
 app.add_middleware(
