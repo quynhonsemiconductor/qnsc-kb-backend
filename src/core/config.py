@@ -271,6 +271,24 @@ class Settings(BaseSettings):
     MAX_SOURCE_PAGES: int = 500
     MAX_SOURCE_TEXT_CHARS: int = 2_000_000
     MAX_SOURCE_IMAGE_PIXELS: int = 40_000_000
+
+    # Near-duplicate detection at upload, and both numbers are cost controls rather
+    # than tuning knobs — the SCORE is insensitive to them.
+    #
+    # Comparing whole documents was never viable. SequenceMatcher is O(n*m): measured
+    # on a developer machine, one 20,000-character pair costs 8.25 s and the cost rises
+    # roughly 8x per doubling, and MAX_SOURCE_TEXT_CHARS admits 2,000,000. That ran once
+    # PER EXISTING ARTICLE, on the event loop.
+    #
+    # 2000 characters is where the cost curve turns: 0.073 s per comparison against
+    # 0.234 s at 3000 and 1.0 s at 6000, while a 95%-identical pair scores 0.974 here
+    # and 0.968 at 6000. Nothing is bought by comparing more.
+    SIMILARITY_COMPARE_CHARS: int = 2_000
+    # Token overlap is O(n) and ranks candidates cheaply, so the O(n*m) comparison is
+    # spent only on the most plausible ones. Without this the total still grows with the
+    # corpus and the timeout returns once the knowledge base is large enough; 50 is a
+    # wide margin over the 5 matches ever returned.
+    SIMILARITY_MAX_SEQUENCE_COMPARISONS: int = 50
     MAX_SOURCE_UNCOMPRESSED_BYTES: int = 100_000_000
     MAX_SOURCE_ARCHIVE_FILES: int = 2_000
     MALWARE_SCAN_ENABLED: bool = False
