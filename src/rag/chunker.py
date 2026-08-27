@@ -118,7 +118,30 @@ def sliding_chunks(text: str, size: int = 1500, overlap: int = 200) -> list[str]
 
 
 def create_parent_child_chunks(text: str, heading: str | None = None) -> list[dict[str, Any]]:
-    """Create structure-aware parent chunks and smaller retrieval children."""
+    """Create structure-aware parent chunks and smaller retrieval children.
+
+    The CHILD size is bounded by the embedding model's context window, not by taste.
+    `_pack` measures characters; the model measures tokens, and local_onnx calls
+    `tokenizer.enable_truncation(max_length=EMBEDDING_MAX_TOKENS)` — so past the window
+    the tail is dropped silently, with no error and no log line. MiniLM-L12-v2 allows
+    128 tokens. At the previous 500 the tail of most chunks was embedded as nothing at
+    all, worst in Vietnamese, where diacritics cost extra tokens.
+
+    THE BUDGET IS `size + overlap`, NOT `size`. _pack flushes BEFORE the piece that would
+    overflow, then seeds the next chunk with the last `overlap` characters of the one it
+    just closed and appends that piece regardless — so a chunk reaches size + overlap + 2
+    (the "
+
+" join). Setting size alone and ignoring overlap still overflows: at
+    size=300/overlap=100 this emitted 401 characters, measured.
+
+    250 + 60 + 2 = 312 characters, about 125 tokens at a deliberately pessimistic 2.5
+    characters per token for Vietnamese, which fits 128 with the two special tokens.
+
+    Small children are the DESIGN, not a concession: the child exists to be matched
+    precisely, and the 1800-character parent above is what supplies context afterwards.
+    Raise these only alongside a model with a longer window — bge-m3 allows 8192.
+    """
     parents = _pack(_blocks(text, heading=heading), size=1800, overlap=250)
     return [
         {
@@ -126,7 +149,7 @@ def create_parent_child_chunks(text: str, heading: str | None = None) -> list[di
             "parent_text": parent["text"],
             "chunk_type": parent["type"],
             "heading": parent["heading"] or heading or None,
-            "children": sliding_chunks(parent["text"], size=500, overlap=100),
+            "children": sliding_chunks(parent["text"], size=250, overlap=60),
         }
         for index, parent in enumerate(parents)
     ]

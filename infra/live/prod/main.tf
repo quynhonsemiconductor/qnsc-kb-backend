@@ -125,9 +125,12 @@ module "stack" {
     // api the 512/4096 it had before. NOTE: clamd is per TASK, so at max_count 6 this
     // is up to 12 GB of duplicated signature database — the point at which one clamd
     // behind Service Connect becomes the cheaper shape.
-    // 4096: the embedding model is local and the API loads it to embed the search query.
-    // BAAI/bge-m3 is ~2.27 GB of fp32 weights plus torch; at 1024 MB the load fails and
-    // search silently degrades to keyword-only. 512 CPU caps a task at 4096 MB.
+    // The embedding model is local and the API loads it to embed the search query, so the
+    // api container needs room for it on top of clamd's 2048. This was sized for
+    // BAAI/bge-m3 (~2.27 GB of fp32 weights), which no image has ever actually carried —
+    // see the note beside embedding_model below. Against MiniLM-L12-v2 it is now
+    // generous rather than tight, and it is left alone deliberately: shrinking it is a
+    // sizing decision to make against measured usage, not a side effect of a bug fix.
     cpu                = 1024
     memory             = 6144
     min_count          = 0
@@ -215,11 +218,15 @@ module "stack" {
 
   malware_scan_enabled = true
 
-  // Must match develop. A different model writes vectors of a different width, and even
-  // at the same width the spaces are unrelated — the comparison would not error, it would
-  // just return nonsense. Fixed at migration time by the pgvector column and HNSW index.
-  embedding_model   = "BAAI/bge-m3"
-  embedding_version = "bge-m3-v1"
+  // Must match develop, and must match the model the IMAGE carries — see the long note in
+  // infra/live/develop/main.tf. "BAAI/bge-m3" was never in any image: the Dockerfile bakes
+  // paraphrase-multilingual-MiniLM-L12-v2 (384) and the deploy pipeline has no build-args
+  // to override it, so EMBEDDING_DIMENSION resolved to 1024 against a 384-wide export and
+  // every embed raised. A different model between the two environments is just as bad —
+  // at the same width the spaces are unrelated, and the comparison returns nonsense
+  // rather than erroring.
+  embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  embedding_version = "minilm-l12-v1"
 
   alarm_emails          = var.alarm_emails
   cloudflare_account_id = var.cloudflare_account_id
