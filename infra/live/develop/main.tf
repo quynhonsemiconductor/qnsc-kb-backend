@@ -210,18 +210,19 @@ module "stack" {
   // cloud-connector polling. In develop that is the intended trade. Beat resumes at the
   // wake, and the outbox is a queue rather than a stream, so pending rows are replayed
   // then rather than lost. Production must not take this setting for that reason.
-  // THREE passes now, and 19:00 is the change: it ends the working day. 22:00 catches an
-  // evening deploy, 02:00 a late one. Was `0,3`.
   //
-  // Develop was up 08:00-00:00, so five of those sixteen hours were after everyone had
-  // stopped. Measured across both develop environments (rally and qnsc-kb), that
-  // 19:00-00:00 tail is ~$8.13/mo of RDS and Fargate.
+  // THREE passes were tried (19:00/22:00/02:00, replacing 0,3) to move the money — develop
+  // was up 08:00-00:00, so the 19:00-00:00 tail cost ~$8.13/mo of RDS and Fargate across
+  // both develop environments. rally moved BACK to `0,3` on 2026-08-19 on request: a 19:00
+  // stop cut the evening short, and develop being down while somebody is still working
+  // costs more in interruption than the hours save. This repo follows the same reversal —
+  // see rally's infra/live/develop/main.tf for the fuller history.
   //
-  // THE LATE PASSES ARE NOT OPTIONAL. A deploy at 20:00 wakes develop; with nothing after
-  // 19:00 it would stay up until the NEXT working day's stop — 23 hours, worse than the
-  // schedule this replaces. Each pass is a no-op when develop is already down
+  // TWO PASSES, and the second is not optional. 00:00 ends the day; 03:00 catches a deploy
+  // that landed late and woke the environment, because nothing else would put it back down
+  // until the next working day. Each pass is a no-op when develop is already down
   // (InvalidDBInstanceState, deliberately not retried).
-  idle_schedule = "cron(0 2,19,22 * * ? *)"
+  idle_schedule = "cron(0 0,3 * * ? *)"
 
   // 08:00 local, every day. Deploys already wake this environment, but that covers the
   // days it is CHANGED rather than the days it is USED — someone opening it on a
