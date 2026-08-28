@@ -207,7 +207,25 @@ class Settings(BaseSettings):
     # Output cap for the main RAG generation path. Without it, provider-side
     # output length is unbounded (cost/latency exposure); only Gemini enforced
     # its own cap before this setting existed.
-    RAG_MAX_ANSWER_TOKENS: int = 2048
+    #
+    # NOW UNCAPPED BY DEFAULT (None). 2048 cut replies off mid-word: ONE generation
+    # produces both the grounded answer and the EXTENDED section, split afterwards on
+    # the sentinel, so the cap was shared between them and the extended half is what ran
+    # out. Vietnamese also costs roughly twice the tokens per character that English
+    # does, so 2048 bought about half the answer it appeared to.
+    #
+    # None means the `max_tokens` field is simply not sent and the model stops when the
+    # answer is finished, which is the behaviour people expect. The runaway-generation
+    # exposure the cap guarded against is small in practice — a grounded answer ends
+    # when it ends — and it is now much smaller still, because the reasoning tokens that
+    # were consuming the budget are disabled on this path.
+    #
+    # Set an integer to put the bound back; the value is passed straight through. Two
+    # things to know if you do. Gemini is never uncapped: its branch falls back to
+    # GEMINI_MAX_OUTPUT_TOKENS when this is None. And a very long answer becomes part of
+    # the next turn's history, which RAG_HISTORY_MAX_CHARS trims at 9,000 characters, so
+    # a rambling reply crowds out the conversation before it costs anything else.
+    RAG_MAX_ANSWER_TOKENS: int | None = None
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
     OIDC_CLIENT_SECRET: str | None = None
