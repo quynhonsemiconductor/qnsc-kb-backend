@@ -152,7 +152,15 @@ class Settings(BaseSettings):
     # correct here. The previous default of "cls" (right for bge-*) would have produced
     # perfectly valid vectors in the wrong space, degrading retrieval with no error.
     EMBEDDING_ONNX_POOLING: str = "mean"
-    EMBEDDING_ONNX_THREADS: int = 1
+    # 2, matched to the worker's 2048 CPU units. This was 1, justified by a comment in
+    # local_onnx.py about "a 0.5 vCPU task" — a sizing the worker has not had for some
+    # time, and the number was never revisited when it grew. One thread on two cores
+    # leaves half the task idle through the whole embedding pass.
+    #
+    # It is a CEILING tied to the task size, not a free dial: more threads than cores
+    # spends the difference on scheduling, which is what the original comment was right
+    # about. Raise this and the `cpu` in infra/live/*/main.tf together or not at all.
+    EMBEDDING_ONNX_THREADS: int = 2
     # This model's sentence_bert_config.json says max_seq_length 128, and its
     # max_position_embeddings is 512. The previous 8192 (bge-m3's window) would let the
     # tokenizer emit sequences the graph cannot accept.

@@ -147,7 +147,7 @@ module "stack" {
   worker = {
     // The worker loads the same model to embed chunks, alongside clamav (1024), beat
     // (256) and PaddleOCR per scanned file.
-    cpu                = 1024
+    cpu                = 2048
     memory             = 6144
     min_count          = 0
     max_count          = 1
