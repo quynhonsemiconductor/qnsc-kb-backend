@@ -121,7 +121,7 @@ module "stack" {
   // max_count is 1 and cannot be raised while beat lives here — two beat containers
   // double every scheduled job. The stack module enforces that with a validation.
   worker = {
-    cpu                = 1024
+    cpu                = 2048
     memory             = 4096
     min_count          = 0
     max_count          = 1
