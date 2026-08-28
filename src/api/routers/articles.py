@@ -120,6 +120,44 @@ async def _read_upload_limited(file: UploadFile) -> bytes:
     return bytes(data)
 
 
+async def _reservation_guards_live_content(
+    db: AsyncSession, fingerprint: Any
+) -> bool:
+    """Whether a source-hash reservation still points at something that exists.
+
+    Article deletion is a SOFT delete, and the DocumentSource duplicate check is written
+    to ignore deleted articles so "a document can be uploaded again after removal". This
+    reservation was not, and nothing has ever deleted these rows — not
+    `soft_delete_article`, not rejection. So an `approved` fingerprint outlived its
+    article and refused the same file forever: 409 duplicate_document for a document
+    that no longer exists anywhere in the product, unfixable by deleting every article.
+
+    A LIVE draft or article must still block, which is the reservation's actual job —
+    closing the concurrent-upload race and stopping a genuine re-upload. Only a
+    reservation whose subject is gone is released.
+    """
+    if fingerprint.status == "approved":
+        article = (
+            await db.get(Article, fingerprint.article_id)
+            if fingerprint.article_id
+            else None
+        )
+        return bool(
+            article
+            and article.status != "deleted"
+            and article.lifecycle_status == "active"
+        )
+    if fingerprint.status == "pending":
+        # A draft awaiting review SHOULD still block: the document is in the queue.
+        draft = (
+            await db.get(PendingDraft, fingerprint.draft_id)
+            if fingerprint.draft_id
+            else None
+        )
+        return bool(draft and draft.status != "rejected")
+    return False
+
+
 def _parse_department_ids(department_ids: str | None) -> list[uuid.UUID] | None:
     """Decode the multipart form's JSON department selection."""
     if not department_ids:
@@ -650,13 +688,23 @@ async def upload_source(
         await db.delete(fingerprint)
         await db.flush()
     if fingerprint and fingerprint.status in {"pending", "approved"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "duplicate_document",
-                "message": "This document already exists.",
-            },
+        if await _reservation_guards_live_content(db, fingerprint):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_document",
+                    "message": "This document already exists.",
+                },
+            )
+        # The draft was rejected or the article deleted, so the reservation guards
+        # nothing. Release it rather than refuse the upload forever.
+        logger.info(
+            "Releasing a stale source reservation",
+            source_hash=source_hash,
+            fingerprint_status=fingerprint.status,
         )
+        await db.delete(fingerprint)
+        await db.flush()
     exact_stmt = (
         select(DocumentSource)
         .join(DocumentSource.article)
@@ -972,7 +1020,10 @@ async def create_source_upload_intent(
                 "status": existing_draft.status,
                 "filename": existing_draft.original_filename or filename,
             }
-        if fingerprint.status in {"pending", "approved"} or (
+        if (
+            fingerprint.status in {"pending", "approved"}
+            and await _reservation_guards_live_content(db, fingerprint)
+        ) or (
             fingerprint.status == "uploading"
             and existing_draft
             and existing_draft.status == "draft"
