@@ -199,7 +199,13 @@ class Settings(BaseSettings):
     # Output cap for the main RAG generation path. Without it, provider-side
     # output length is unbounded (cost/latency exposure); only Gemini enforced
     # its own cap before this setting existed.
-    RAG_MAX_ANSWER_TOKENS: int = 2048
+    #
+    # 4096, not 2048: ONE generation produces both the grounded answer and the EXTENDED
+    # section, split afterwards on the sentinel, so the cap is shared between them and
+    # the extended half is what runs out. Vietnamese also costs roughly twice the tokens
+    # per character that English does, so 2048 bought about half the answer it appears
+    # to. A truncated reply ends mid-word, with nothing marking it as incomplete.
+    RAG_MAX_ANSWER_TOKENS: int = 4096
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
     OIDC_CLIENT_SECRET: str | None = None

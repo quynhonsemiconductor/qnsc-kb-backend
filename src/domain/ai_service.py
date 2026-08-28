@@ -1170,6 +1170,16 @@ class AIService:
                     ],
                     timeout=settings.LLM_TIMEOUT_SECONDS,
                     max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
+                    # EXPLICIT, and the reason answers were being cut off mid-word.
+                    # `_payload` only sends glm's `thinking` field when this is not None,
+                    # so leaving it unset handed glm-4.5 its own default — reasoning
+                    # ENABLED — and those hidden tokens are spent from the same
+                    # max_tokens budget as the answer. The visible reply then ran out
+                    # part-way through the EXTENDED section, which is generated last in
+                    # the same call. content_restructure has always passed thinking=False;
+                    # only this path did not, and only glm was affected, because the
+                    # Gemini branch always sets thinkingConfig.
+                    thinking=False,
                     on_token=append_token if on_token else None,
                 )
             except ProviderRateLimitError as exc:
