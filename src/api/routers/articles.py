@@ -120,30 +120,68 @@ async def _read_upload_limited(file: UploadFile) -> bytes:
     return bytes(data)
 
 
+def _parse_department_ids(department_ids: str | None) -> list[uuid.UUID] | None:
+    """Decode the multipart form's JSON department selection."""
+    if not department_ids:
+        return None
+    try:
+        raw_ids = json.loads(department_ids)
+        if not isinstance(raw_ids, list):
+            raise ValueError
+        return [uuid.UUID(str(item)) for item in raw_ids]
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=422, detail="The department selection is invalid"
+        ) from exc
+
+
 async def _resolve_upload_departments(
     db: AsyncSession,
     current_user: User,
     dept: str | None,
-    department_ids: str | None,
-) -> list[Any]:
-    if department_ids:
-        try:
-            raw_ids = json.loads(department_ids)
-            if not isinstance(raw_ids, list):
-                raise ValueError
-            selected_ids = [uuid.UUID(str(item)) for item in raw_ids]
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise HTTPException(
-                status_code=422, detail="The department selection is invalid"
-            ) from exc
-        return await resolve_active_departments(
-            db, current_user.company_domain, selected_ids
+    department_ids: list[uuid.UUID] | None,
+) -> tuple[Any, list[Any]]:
+    """Return (primary organisational department, access audiences).
+
+    THESE ARE TWO DIFFERENT THINGS and were previously the same list. `department_ids` is
+    an audience selection — `Article.departments` joins it with `kind == "access"`, and
+    the permission checks in permissions.py and rbac.py read only access-kind rows. The
+    article's `dept` is an ORGANISATIONAL department, and `approve_draft` re-resolves it
+    through `resolve_active_department`, which requires `kind == "org"`.
+
+    Taking the primary from `selected_departments[0]` wrote an access group's name into
+    `dept`, so a draft uploaded into "public" was created happily and could then never be
+    approved — every attempt returned 422 "Department does not exist or is inactive"
+    about a department that plainly existed and was active. Both upload paths did it.
+    """
+    audiences: list[Any] = (
+        await resolve_active_departments(
+            db, current_user.company_domain, department_ids
         )
-    return [
-        await resolve_active_department(
-            db, current_user.company_domain, dept or current_user.dept, required=True
+        if department_ids
+        else []
+    )
+    # An explicit `dept` wins; otherwise prefer an org department the caller actually
+    # selected, and fall back to the uploader's own. Resolving through
+    # resolve_active_department is what enforces kind == "org" in ONE place.
+    primary_name = (
+        dept
+        or next(
+            (
+                department.name
+                for department in audiences
+                if getattr(department, "kind", "org") == "org"
+            ),
+            None,
         )
-    ]
+        or current_user.dept
+    )
+    primary = await resolve_active_department(
+        db, current_user.company_domain, primary_name, required=True
+    )
+    # An audience-less upload keeps its previous shape: the primary is also the only row
+    # written to Article.departments, where an org-kind row is simply never loaded back.
+    return primary, (audiences or [primary])
 
 
 # Schema definitions
@@ -527,10 +565,10 @@ async def upload_source(
                 headers={"Retry-After": str(retry_after)},
             )
         db.info[rate_marker] = True
-    selected_departments = await _resolve_upload_departments(
-        db, current_user, dept, department_ids
+    primary_department, selected_departments = await _resolve_upload_departments(
+        db, current_user, dept, _parse_department_ids(department_ids)
     )
-    upload_dept = selected_departments[0].name
+    upload_dept = primary_department.name
     upload_resource = Article(
         company_domain=current_user.company_domain,
         dept=upload_dept,
@@ -865,23 +903,12 @@ async def create_source_upload_intent(
     filename = Path(request.filename).name.strip()[:255] or "uploaded-source"
     if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=422, detail="Unsupported file type")
-    selected_departments = (
-        await resolve_active_departments(
-            db, current_user.company_domain, request.department_ids
-        )
-        if request.department_ids
-        else [
-            await resolve_active_department(
-                db,
-                current_user.company_domain,
-                request.dept or current_user.dept,
-                required=True,
-            )
-        ]
+    primary_department, selected_departments = await _resolve_upload_departments(
+        db, current_user, request.dept, request.department_ids
     )
     upload_resource = Article(
         company_domain=current_user.company_domain,
-        dept=selected_departments[0].name,
+        dept=primary_department.name,
         owner_id=current_user.id,
         departments=selected_departments,
     )
@@ -969,7 +996,7 @@ async def create_source_upload_intent(
     draft = PendingDraft(
         title=filename.rsplit(".", 1)[0][:255],
         company_domain=current_user.company_domain,
-        dept=selected_departments[0].name,
+        dept=primary_department.name,
         source_ref=f"upload://{filename}",
         source_hash=request.source_hash.lower(),
         storage_key=storage_key,
@@ -1390,7 +1417,25 @@ async def create_article(
                     detail="The primary department must be one of the selected departments",
                 )
         else:
-            primary_department = selected_departments[0]
+            # Resolved by NAME rather than taken as-is, so kind == "org" is enforced here
+            # too: `dept` is an organisational department, while department_ids is an
+            # access-audience selection. Taking selected_departments[0] blindly wrote an
+            # access group's name into Article.dept — the same defect that made uploaded
+            # drafts unapprovable.
+            primary_department = await resolve_active_department(
+                db,
+                current_user.company_domain,
+                next(
+                    (
+                        department.name
+                        for department in selected_departments
+                        if getattr(department, "kind", "org") == "org"
+                    ),
+                    None,
+                )
+                or current_user.dept,
+                required=True,
+            )
     else:
         primary_department = await resolve_active_department(
             db, current_user.company_domain, article_in.dept, required=True
