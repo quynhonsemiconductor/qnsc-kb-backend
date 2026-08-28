@@ -75,8 +75,20 @@ def test_the_answer_path_disables_thinking():
 
 
 def test_the_answer_budget_covers_two_sections():
-    """One generation emits the grounded answer and the extended section, and Vietnamese
-    costs roughly twice the tokens per character that English does."""
+    """One generation emits the grounded answer AND the extended section, and Vietnamese
+    costs roughly twice the tokens per character English does. 2048 cut replies in half.
+
+    None means the cap is not sent at all and the model stops when it is finished, which
+    is the intended default; any explicit value must still clear the two-section floor.
+    """
     from src.core.config import settings
 
-    assert settings.RAG_MAX_ANSWER_TOKENS >= 4096
+    cap = settings.RAG_MAX_ANSWER_TOKENS
+    assert cap is None or cap >= 4096
+
+
+def test_no_cap_sends_no_max_tokens_field():
+    """Uncapped must mean the field is absent, not zero — a zero would truncate to
+    nothing rather than let the model finish."""
+    payload = _payload(_glm(), _messages(), 0.0, thinking=False, max_tokens=None)
+    assert "max_tokens" not in payload
