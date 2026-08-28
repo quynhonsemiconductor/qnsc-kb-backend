@@ -48,6 +48,53 @@ async def _preload_embedding_model() -> None:
         )
 
 
+async def verify_embedding_column_width() -> None:
+    """Report a pgvector column that no longer matches EMBEDDING_DIMENSION.
+
+    The column width is DERIVED from EMBEDDING_MODEL but enforced by a one-shot Alembic
+    revision, and Alembic never re-runs an applied revision. So changing the model in
+    infra silently leaves the old width behind, and the only symptom is every article
+    turning "Search index: failed" one at a time, with the real cause — a DataError deep
+    in the worker — visible nowhere near the setting that caused it. That has now
+    happened twice: bge-m3 against a 768 column, and MiniLM against a 1024 one.
+
+    Logged, not raised. A width mismatch breaks indexing, not serving, and taking the
+    whole API down over it would turn degraded search into an outage. The fix is a new
+    realign revision; this exists so the next person reads one line instead of a
+    traceback.
+    """
+    from sqlalchemy import text
+
+    from src.api.deps import engine
+
+    try:
+        async with engine.connect() as connection:
+            current = (
+                await connection.execute(
+                    text(
+                        "SELECT a.atttypmod FROM pg_attribute a "
+                        "JOIN pg_class c ON c.oid = a.attrelid "
+                        "JOIN pg_type t ON t.oid = a.atttypid "
+                        "WHERE c.relname = 'article_chunks' "
+                        "AND a.attname = 'embedding' AND t.typname = 'vector'"
+                    )
+                )
+            ).scalar()
+    except Exception as exc:  # pragma: no cover - diagnostics must never block boot
+        logger.warning("Could not verify embedding column width", error=str(exc))
+        return
+
+    if current is None or current == settings.EMBEDDING_DIMENSION:
+        return
+    logger.error(
+        "Embedding column width does not match EMBEDDING_DIMENSION; indexing will fail "
+        "on every article until a realign migration runs",
+        column_dimension=current,
+        expected_dimension=settings.EMBEDDING_DIMENSION,
+        embedding_model=settings.EMBEDDING_MODEL,
+    )
+
+
 async def verify_rls_policies() -> None:
     """Fail fast when production RLS policies are missing.
 
@@ -178,6 +225,7 @@ async def initialize_resources() -> None:
             await asyncio.wait_for(init_db(), timeout=60)
             logger.info("Database initialized successfully", attempt=attempt)
             await verify_rls_policies()
+            await verify_embedding_column_width()
             await reconcile_published_indexes()
             break
         except Exception as exc:
