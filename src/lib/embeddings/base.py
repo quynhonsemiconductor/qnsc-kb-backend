@@ -31,7 +31,9 @@ class EmbeddingProvider(Protocol):
 
     name: str
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(
+        self, texts: list[str], task: str = "RETRIEVAL_DOCUMENT"
+    ) -> list[list[float]]:
         """Return one vector per input, in order. Raise on any failure."""
         ...
 

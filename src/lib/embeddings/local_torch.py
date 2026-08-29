@@ -49,7 +49,11 @@ class TorchEmbeddingProvider:
     def warm_up(self) -> None:
         _model.get()
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(
+        self, texts: list[str], task: str = "RETRIEVAL_DOCUMENT"
+    ) -> list[list[float]]:
+        # `task` is a hosted-provider concern; a local model embeds a question
+        # and a passage with the same weights.
         # normalize_embeddings stays on: it is how this backend has always behaved, and
         # the seam's own normalisation is then a no-op rather than a second opinion.
         vectors = _model.get().encode(

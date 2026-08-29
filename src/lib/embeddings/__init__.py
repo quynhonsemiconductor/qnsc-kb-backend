@@ -85,8 +85,16 @@ def warm_up() -> None:
     resolve_provider().warm_up()
 
 
-def _embed(texts: list[str]) -> list[list[float]]:
-    return finalise(resolve_provider().embed(texts), len(texts))
+def _embed(texts: list[str], task: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
+    """Embed through the configured provider.
+
+    `task` matters only to hosted providers, which embed a QUESTION and a PASSAGE
+    differently. Mixing them degrades retrieval quietly rather than visibly, so the
+    distinction is carried from the two public entry points — singular is a search
+    query, plural is a batch of chunks being indexed — rather than guessed further
+    down. Local providers ignore it.
+    """
+    return finalise(resolve_provider().embed(texts, task=task), len(texts))
 
 
 def get_bge_embedding(text: str) -> list[float]:
@@ -98,7 +106,7 @@ def get_bge_embedding(text: str) -> list[float]:
     if is_mock():
         return [0.0] * settings.EMBEDDING_DIMENSION
     try:
-        return _embed([text])[0]
+        return _embed([text], task="RETRIEVAL_QUERY")[0]
     except Exception as exc:
         logger.error(
             "Error generating embedding",
@@ -118,7 +126,7 @@ def get_bge_embeddings(texts: list[str]) -> list[list[float]]:
     if is_mock():
         return [[0.0] * settings.EMBEDDING_DIMENSION for _ in texts]
     try:
-        return _embed(texts)
+        return _embed(texts, task="RETRIEVAL_DOCUMENT")
     except Exception as exc:
         logger.error(
             "Error generating embedding batch",

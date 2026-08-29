@@ -166,6 +166,12 @@ class Settings(BaseSettings):
     # tokenizer emit sequences the graph cannot accept.
     EMBEDDING_MAX_TOKENS: int = 128
     EMBEDDING_BATCH_SIZE: int = 32
+    # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
+    # embedding API during bulk ingestion, not an exceptional one: without a retry a
+    # single 429 fails the index for a whole article. Only 429 and 5xx are retried — a
+    # 400 means the request is wrong and repeating it just spends the quota again.
+    EMBEDDING_HTTP_MAX_ATTEMPTS: int = 4
+    EMBEDDING_HTTP_BACKOFF_SECONDS: float = 1.0
 
     CHUNKING_VERSION: str = "v2-structure-aware"
     EMBEDDING_DIMENSION: int | None = None

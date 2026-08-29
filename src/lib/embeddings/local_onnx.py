@@ -94,7 +94,11 @@ class OnnxEmbeddingProvider:
     def warm_up(self) -> None:
         _model.get()
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(
+        self, texts: list[str], task: str = "RETRIEVAL_DOCUMENT"
+    ) -> list[list[float]]:
+        # `task` is a hosted-provider concern; a local model embeds a question
+        # and a passage with the same weights.
         """Embed in length-sorted batches, preserving the caller's order.
 
         `enable_padding()` pads every encoding to the LONGEST member of the call, and
@@ -152,6 +156,13 @@ class OnnxEmbeddingProvider:
             for position, index in enumerate(window):
                 vectors[index] = pooled[position]
 
+        if any(vector is None for vector in vectors):
+            # Unreachable: every index in `order` is written exactly once. Raising
+            # rather than filtering because the filter would return a SHORTER list,
+            # and a shorter list is how every embedding after the gap ends up attached
+            # to the wrong chunk — the exact silent corruption this method's ordering
+            # is careful to avoid.
+            raise RuntimeError("embedding batches did not fill every input slot")
         return [vector for vector in vectors if vector is not None]
 
 
