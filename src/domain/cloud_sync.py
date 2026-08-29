@@ -665,6 +665,7 @@ async def _save_permissions(
                         permission_snapshot_id=snapshot.id,
                         principal_type=item.get("principal_type", "user"),
                         principal_id=item.get("principal_id", ""),
+                        principal_name=(item.get("principal_name") or None),
                         role=item.get("role", "reader"),
                     )
                 )
