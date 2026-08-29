@@ -285,6 +285,15 @@ class Settings(BaseSettings):
     # Short on purpose. This runs inside document ingest, once per document, and a slow
     # provider must cost a suggestion rather than the import.
     DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # The approval agent applies an administrator's written rule to pending drafts. It
+    # is off unless a rule exists AND that rule was explicitly granted authority, so this
+    # switch exists to stop it entirely without deleting anyone's rules.
+    APPROVAL_AGENT_ENABLED: bool = True
+    APPROVAL_AGENT_TIMEOUT: float = 30.0
+    # Drafts examined per run. A connector can drop hundreds into the queue at once, and
+    # a run that decides a few hundred documents unattended should be a deliberate act
+    # repeated, not one call with no upper bound.
+    APPROVAL_AGENT_BATCH_LIMIT: int = 50
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3

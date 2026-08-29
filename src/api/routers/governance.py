@@ -13,6 +13,8 @@ from src.models import User
 from src.models.article import Article
 from src.models.user import Department
 from src.models.governance import (
+    AuditLog,
+    ApprovalRule,
     ApproverRule,
     DraftTransition,
     DraftCandidate,
@@ -1285,3 +1287,193 @@ async def update_feature_flag(
         "label": MANAGED_FEATURE_FLAGS.get(flag.key, {}).get("label", flag.key),
         "description": MANAGED_FEATURE_FLAGS.get(flag.key, {}).get("description", ""),
     }
+
+
+# ---------------------------------------------------------------------------
+# Approval agent
+#
+# Gated on article.publish at global scope, not governance.read. A rule is a standing
+# instruction to publish or discard company-wide content, so writing one has to require
+# the authority it grants -- reading the governance queue plainly does not.
+# ---------------------------------------------------------------------------
+
+
+class ApprovalRuleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+    instruction: str = Field(min_length=1, max_length=5000)
+    active: bool = True
+    priority: int = Field(default=100, ge=0, le=10_000)
+    connector_id: uuid.UUID | None = None
+    dept: str | None = Field(default=None, max_length=100)
+    file_extensions: list[str] | None = Field(default=None, max_length=25)
+    max_similarity_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Both default to False here as well as in the model and the database: a rule created
+    # by a client that omits them must not acquire authority by omission.
+    can_approve: bool = False
+    can_reject: bool = False
+
+
+class ApprovalAgentRunRequest(BaseModel):
+    # Defaults to a dry run. Deciding hundreds of documents unattended should be
+    # something a caller asks for explicitly, not what happens if a field is forgotten.
+    dry_run: bool = True
+    limit: int | None = Field(default=None, ge=1, le=500)
+
+
+def _approval_rule_payload(rule: ApprovalRule) -> dict[str, Any]:
+    return {
+        "id": str(rule.id),
+        "name": rule.name,
+        "instruction": rule.instruction,
+        "active": rule.active,
+        "priority": rule.priority,
+        "connector_id": str(rule.connector_id) if rule.connector_id else None,
+        "dept": rule.dept,
+        "file_extensions": rule.file_extensions,
+        "max_similarity_score": rule.max_similarity_score,
+        "can_approve": rule.can_approve,
+        "can_reject": rule.can_reject,
+        "created_by": str(rule.created_by) if rule.created_by else None,
+        "created_at": rule.created_at,
+        "updated_at": rule.updated_at,
+    }
+
+
+def _normalise_extensions(values: list[str] | None) -> list[str] | None:
+    """Store extensions the one way the matcher looks them up."""
+    if not values:
+        return None
+    cleaned = set()
+    for value in values:
+        text = value.strip().lstrip(".").lower()
+        if text:
+            cleaned.add("." + text)
+    return sorted(cleaned) or None
+
+
+@router.get("/approval-rules")
+async def list_approval_rules(
+    current_user: User = Depends(require_permission("article.publish", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    rules = (
+        await db.execute(
+            select(ApprovalRule)
+            .where(ApprovalRule.company_domain == current_user.company_domain)
+            .order_by(ApprovalRule.priority, ApprovalRule.created_at)
+        )
+    ).scalars().all()
+    return [_approval_rule_payload(rule) for rule in rules]
+
+
+@router.post("/approval-rules", status_code=status.HTTP_201_CREATED)
+async def create_approval_rule(
+    payload: ApprovalRuleRequest,
+    current_user: User = Depends(require_permission("article.publish", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    rule = ApprovalRule(
+        company_domain=current_user.company_domain,
+        name=payload.name.strip(),
+        instruction=payload.instruction.strip(),
+        active=payload.active,
+        priority=payload.priority,
+        connector_id=payload.connector_id,
+        dept=payload.dept.strip() if payload.dept else None,
+        file_extensions=_normalise_extensions(payload.file_extensions),
+        max_similarity_score=payload.max_similarity_score,
+        can_approve=payload.can_approve,
+        can_reject=payload.can_reject,
+        # The agent runs as this person. A rule outlives the session that created it, so
+        # this is who it will still be acting as next month.
+        created_by=current_user.id,
+    )
+    db.add(rule)
+    await db.flush()
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="approval_rule_create",
+            target_type="approval_rule",
+            target_id=str(rule.id),
+            outcome="success",
+            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject},
+        )
+    )
+    await db.commit()
+    return _approval_rule_payload(rule)
+
+
+@router.patch("/approval-rules/{rule_id}")
+async def update_approval_rule(
+    rule_id: uuid.UUID,
+    payload: ApprovalRuleRequest,
+    current_user: User = Depends(require_permission("article.publish", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    rule = await db.get(ApprovalRule, rule_id)
+    if not rule or rule.company_domain != current_user.company_domain:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    rule.name = payload.name.strip()
+    rule.instruction = payload.instruction.strip()
+    rule.active = payload.active
+    rule.priority = payload.priority
+    rule.connector_id = payload.connector_id
+    rule.dept = payload.dept.strip() if payload.dept else None
+    rule.file_extensions = _normalise_extensions(payload.file_extensions)
+    rule.max_similarity_score = payload.max_similarity_score
+    rule.can_approve = payload.can_approve
+    rule.can_reject = payload.can_reject
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="approval_rule_update",
+            target_type="approval_rule",
+            target_id=str(rule.id),
+            outcome="success",
+            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject},
+        )
+    )
+    await db.commit()
+    return _approval_rule_payload(rule)
+
+
+@router.delete("/approval-rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_approval_rule(
+    rule_id: uuid.UUID,
+    current_user: User = Depends(require_permission("article.publish", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    rule = await db.get(ApprovalRule, rule_id)
+    if not rule or rule.company_domain != current_user.company_domain:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await db.delete(rule)
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="approval_rule_delete",
+            target_type="approval_rule",
+            target_id=str(rule_id),
+            outcome="success",
+        )
+    )
+    await db.commit()
+
+
+@router.post("/approval-agent/run")
+async def run_approval_agent(
+    payload: ApprovalAgentRunRequest,
+    current_user: User = Depends(require_permission("article.publish", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Apply the active rules to the pending queue.
+
+    Defaults to a dry run, which is how a rule is meant to be introduced: write it, run
+    it against the real queue, read the reasons it gives, and only then grant it
+    can_approve or can_reject.
+    """
+    from src.domain.approval_agent import run as run_agent
+
+    return await run_agent(
+        db, current_user.company_domain, limit=payload.limit, dry_run=payload.dry_run
+    )
