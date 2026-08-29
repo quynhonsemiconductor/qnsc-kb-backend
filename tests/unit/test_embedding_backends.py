@@ -31,11 +31,15 @@ class FakeProvider:
 
     def __init__(self, vectors):
         self._vectors = vectors
+        self.tasks: list[str] = []
 
     def warm_up(self) -> None:
         pass
 
-    def embed(self, texts):
+    def embed(self, texts, task="RETRIEVAL_DOCUMENT"):
+        # `task` is part of the provider protocol: hosted backends embed a question and
+        # a passage differently. Recorded so the seam's routing can be asserted.
+        self.tasks.append(task)
         return self._vectors
 
 
@@ -169,3 +173,17 @@ def test_onnx_matches_torch_closely_enough_to_skip_re_embedding(monkeypatch, tex
         f"cosine similarity {similarity:.5f} — below this the two runtimes are different "
         "vector spaces, so switching EMBEDDING_RUNTIME requires re-embedding every chunk"
     )
+
+
+def test_a_search_query_and_an_indexed_chunk_are_labelled_differently(monkeypatch, width):
+    """Hosted backends embed a question and a passage differently, and mixing them
+    degrades retrieval quietly. The seam carries the distinction the two public entry
+    points already encode: singular is a query, plural is a batch being indexed."""
+    provider = FakeProvider([[1.0] + [0.0] * (width - 1)])
+    monkeypatch.setattr(embeddings.settings, "EMBEDDING_MODEL", "BAAI/bge-m3")
+    monkeypatch.setattr(embeddings, "resolve_provider", lambda: provider)
+
+    embeddings.get_bge_embedding("a question")
+    embeddings.get_bge_embeddings(["a passage"])
+
+    assert provider.tasks == ["RETRIEVAL_QUERY", "RETRIEVAL_DOCUMENT"]
