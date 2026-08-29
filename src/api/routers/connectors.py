@@ -865,6 +865,57 @@ async def connector_health(
     }
 
 
+@router.post("/{connector_id}/retry-failed")
+async def retry_failed_documents(
+    connector_id: uuid.UUID,
+    current_user: User = Depends(require_permission("connector.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Let a sync try quarantined documents again.
+
+    A document that fails to ingest three times on one revision stops being retried, and
+    only a new revision at the provider clears that. The reasoning holds when the file is
+    the problem: replacing it at the source is how a person fixes it, and needing to find
+    an admin screen as well would be worse.
+
+    It does not hold when the failure was ours. A server-side defect quarantines every
+    document it touches, and once it is fixed there is nothing at the provider for anyone
+    to repair -- the files were always fine. Without this the corpus stays empty and the
+    sync reports "skipped" forever, which reads as a problem with the documents.
+
+    Releasing does not re-ingest. It clears the mark so the next sync treats these as
+    unseen; run a sync afterwards.
+    """
+    connector = await _connector_for_user(db, connector_id, current_user)
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    from src.domain.cloud_sync import _clear_ingest_failure
+
+    documents = (
+        await db.execute(
+            select(ExternalDocument).where(
+                ExternalDocument.connector_id == connector.id,
+                ExternalDocument.state != "deleted",
+                ExternalDocument.metadata_json["ingest_failure"].is_not(None),
+            )
+        )
+    ).scalars().all()
+    for document in documents:
+        _clear_ingest_failure(document)
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="connector_retry_failed_documents",
+            target_type="connector",
+            target_id=str(connector.id),
+            outcome="success",
+            detail_json={"released": len(documents)},
+        )
+    )
+    await db.commit()
+    return {"released": len(documents)}
+
+
 @router.get("/{connector_id}/source-tree")
 async def connector_source_tree(
     connector_id: uuid.UUID,
