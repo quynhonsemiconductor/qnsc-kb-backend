@@ -176,6 +176,25 @@ class Settings(BaseSettings):
     # characters leaves practical headroom for the system prompt and a 64K
     # lossless Markdown response, even for token-dense source languages.
     RESTRUCTURE_MAX_CHARS: int = 120000
+    # Restructuring regenerates the WHOLE document, so wall clock is bound by output
+    # tokens and grows with length. A 26,633-character upload measured 304 s as one
+    # call — against RESTRUCTURE_TIMEOUT_SECONDS of 300, which it cleared by a margin
+    # too thin to rely on. Past that edge the result is not an error but a silent
+    # fallback to unformatted text.
+    #
+    # Sectioning existed already but only above RESTRUCTURE_MAX_CHARS, which no real
+    # document reached, and it ran the sections SEQUENTIALLY — so the one path that did
+    # split was the slowest of all.
+    #
+    # 8000 splits that upload into 4 sections; run together they finish in about the
+    # time of one, and each sits far from the timeout. Smaller is faster and choppier:
+    # the seams between sections are where headings lose their thread, because each
+    # section is formatted without sight of its neighbours.
+    RESTRUCTURE_SECTION_CHARS: int = 8000
+    # Concurrent sections. The ceiling is the provider's rate limit, not ours — GLM
+    # refuses a burst rather than queueing it, and a refused section falls back to
+    # unformatted text for that part of the document.
+    RESTRUCTURE_MAX_CONCURRENCY: int = 4
     # Formatting is an optional enhancement. Keep review responsive and use
     # the lossless local fallback when the configured provider is slow.
     RESTRUCTURE_TIMEOUT_SECONDS: float = 300.0

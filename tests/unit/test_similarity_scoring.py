@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import random
-import time
 
 import pytest
 
 from src.core.config import settings
+from src.domain import similarity as similarity_module
 from src.domain.similarity import (
     MATCH_THRESHOLD,
     _rank,
@@ -134,20 +134,35 @@ def test_no_candidates_yields_no_matches():
 # ── cost ──────────────────────────────────────────────────────────────────────
 
 
-def test_a_large_corpus_of_large_documents_stays_bounded():
+def test_a_large_corpus_runs_a_bounded_number_of_comparisons(monkeypatch):
     """Previously this shape was minutes of event-loop-blocking work: 200 articles, each
-    compared over its full length. The sequence comparison is now capped in both the
-    prefix it reads and the number of candidates it reads it for."""
-    original = _document(20_000)
+    compared over its full length. The O(n*m) comparison is now spent only on the
+    candidates cheap token overlap ranks highest.
+
+    Counted rather than TIMED. This assertion used to be `elapsed < 30`, which passed on
+    CI and failed on a developer machine measuring 48 s for the same code — a wall-clock
+    bound tests the hardware, not the algorithm, and its own comment already worried
+    about exactly that. The invariant worth pinning is how many times the expensive call
+    runs, which is deterministic.
+    """
+    calls = 0
+    real = similarity_module.sequence_similarity
+
+    def counting(left: str, right: str) -> float:
+        nonlocal calls
+        calls += 1
+        return real(left, right)
+
+    monkeypatch.setattr(similarity_module, "sequence_similarity", counting)
+
+    original = _document(2_000)
     bodies = [_edited(original, 0.30, seed=n) for n in range(200)]
-
-    started = time.perf_counter()
     _rank(original, _candidates(bodies))
-    elapsed = time.perf_counter() - started
 
-    # Generous: the point is the difference between seconds and many minutes, not a
-    # precise number that would flake on shared CI hardware.
-    assert elapsed < 30, f"took {elapsed:.1f}s"
+    assert calls <= settings.SIMILARITY_MAX_SEQUENCE_COMPARISONS, (
+        f"{calls} sequence comparisons for 200 candidates; the cap is "
+        f"{settings.SIMILARITY_MAX_SEQUENCE_COMPARISONS}"
+    )
 
 
 def test_the_comparison_reads_only_a_bounded_prefix():

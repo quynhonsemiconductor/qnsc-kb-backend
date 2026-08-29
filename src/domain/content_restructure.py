@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -385,6 +386,45 @@ async def _restructure_single_document(
         )
 
 
+async def _restructure_sections(
+    title: str,
+    sections: list[str],
+    model: str,
+    department_descriptions: list[tuple[str, str]] | None,
+) -> list[RestructureResult]:
+    """Format sections concurrently, returning them in document order.
+
+    Restructuring regenerates the whole document, so wall clock is bound by output
+    tokens. Run in sequence — which is what the previous list comprehension did, an
+    `await` inside the loop — a long document costs the SUM of its parts. Run
+    together it costs roughly the slowest one.
+
+    Bounded by a semaphore because the ceiling is the provider's rate limit, not
+    ours: GLM refuses a burst rather than queueing it, and a refused section falls
+    back to unformatted text for that part of the document.
+
+    `gather` preserves ARGUMENT order, not completion order, so the sections
+    reassemble correctly however they interleave. That is the property the caller
+    depends on when it joins them.
+    """
+    limit = asyncio.Semaphore(max(1, settings.RESTRUCTURE_MAX_CONCURRENCY))
+
+    async def _one(index: int, section: str) -> RestructureResult:
+        async with limit:
+            return await _restructure_single_document(
+                f"{title} — part {index}", section, model, department_descriptions
+            )
+
+    return list(
+        await asyncio.gather(
+            *(
+                _one(index, section)
+                for index, section in enumerate(sections, start=1)
+            )
+        )
+    )
+
+
 async def restructure_document(
     title: str,
     source_text: str,
@@ -403,25 +443,28 @@ async def restructure_document(
 
     requested_model = settings.RESTRUCTURE_MODEL if settings.RESTRUCTURE_MODEL else None
     provider_config = resolve_provider(requested_model)
-    if len(source_text) > settings.RESTRUCTURE_MAX_CHARS:
-        sections = _split_oversized_source(source_text, settings.RESTRUCTURE_MAX_CHARS)
+    sections: list[str] = []
+    if len(source_text) > settings.RESTRUCTURE_SECTION_CHARS:
+        sections = _split_oversized_source(
+            source_text, settings.RESTRUCTURE_SECTION_CHARS
+        )
         if provider_config is None or len(sections) <= 1:
-            return _result(
-                source_text,
-                fallback,
-                "fallback_too_large",
-                "none",
-                f"Source exceeds the {settings.RESTRUCTURE_MAX_CHARS:,}-character restructuring limit and could not be safely sectioned.",
-            )
-        section_results = [
-            await _restructure_single_document(
-                f"{title} — part {index}",
-                section,
-                provider_config.model,
-                department_descriptions,
-            )
-            for index, section in enumerate(sections, start=1)
-        ]
+            if len(source_text) > settings.RESTRUCTURE_MAX_CHARS:
+                return _result(
+                    source_text,
+                    fallback,
+                    "fallback_too_large",
+                    "none",
+                    f"Source exceeds the {settings.RESTRUCTURE_MAX_CHARS:,}-character restructuring limit and could not be safely sectioned.",
+                )
+            # Indivisible, or no provider to section for: the single-call path below
+            # handles both, and for a short document it is also the faster one.
+            sections = []
+
+    if sections and provider_config is not None:
+        section_results = await _restructure_sections(
+            title, sections, provider_config.model, department_descriptions
+        )
         combined = "\n\n".join(result.body_md for result in section_results).strip()
         all_succeeded = all(result.status == "llm" for result in section_results)
         logger.info(
