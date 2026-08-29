@@ -57,10 +57,21 @@ _MIGRATION_MANAGED_INDEXES = {
 }
 
 
+# Check constraints created by SQL migrations rather than declared on the ORM model.
+# Same category as the indexes above: real, required, and invisible to metadata, so a
+# diff would propose dropping them forever. ck_departments_kind is what keeps a
+# department's kind to the org/access pair the permission model is built on.
+_MIGRATION_MANAGED_CONSTRAINTS = {
+    "ck_departments_kind",
+}
+
+
 def include_object(object_, name, type_, reflected, compare_to):
     if reflected and type_ == "table" and name in _LEGACY_TABLES:
         return False
     if reflected and type_ == "index" and name in _MIGRATION_MANAGED_INDEXES:
+        return False
+    if type_ == "check_constraint" and name in _MIGRATION_MANAGED_CONSTRAINTS:
         return False
     return True
 
