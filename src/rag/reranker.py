@@ -9,10 +9,20 @@ from typing import NamedTuple, Sequence
 # coverage prevents a query such as "What is CTS?" from ranking generic text
 # containing "what/is" above the passage containing the important term CTS.
 STOPWORDS = {
-    "a", "an", "and", "are", "be", "by", "can", "do", "for", "from", "how",
-    "i", "in", "is", "it", "of", "on", "or", "the", "to", "what", "when",
-    "where", "which", "who", "why", "with", "you", "your",
-    "là", "và", "có", "cho", "của", "để", "gì", "nào", "như", "về", "tôi",
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do",
+    "does", "for", "from", "give", "how", "i", "in", "is", "it", "list", "me",
+    "my", "need", "of", "on", "or", "please", "provide", "show", "so", "some",
+    "tell", "that", "the", "them", "there", "these", "this", "those", "to",
+    "us", "use", "used", "using", "want", "we", "what", "when", "where",
+    "which", "who", "why", "will", "with", "would", "you", "your",
+    # Vietnamese. The list here used to hold eleven words and none of the ones a
+    # person actually opens a request with, which is why a politely phrased question
+    # scored five times lower than the same question typed as two keywords.
+    "à", "ạ", "ai", "bạn", "bằng", "các", "cách", "cần", "cho", "chúng", "có",
+    "của", "cung", "cấp", "danh", "dùng", "dụng", "gì", "giúp", "hãy", "khi",
+    "không", "là", "làm", "liệt", "kê", "một", "muốn", "nào", "này", "nêu",
+    "như", "những", "ở", "ra", "rằng", "sách", "sao", "sẽ", "sử", "thì",
+    "tôi", "trong", "và", "vậy", "về", "với", "được", "đó", "để", "đưa",
 }
 
 REFERENCE_MARKERS = (
@@ -56,6 +66,14 @@ def is_definition_query(query: str) -> bool:
     return any(marker in normalized for marker in DEFINITION_QUERY_MARKERS)
 
 
+def corpus_terms(passages: Sequence[str]) -> frozenset[str]:
+    """Every token that appears anywhere in a candidate pool."""
+    found: set[str] = set()
+    for passage in passages:
+        found.update(TOKEN_RE.findall((passage or "").lower()))
+    return frozenset(found)
+
+
 class PreparedQuery(NamedTuple):
     """The query-side half of a score, computed once instead of once per candidate.
 
@@ -70,13 +88,39 @@ class PreparedQuery(NamedTuple):
     is_definition: bool
 
 
-def prepare_query(query: str) -> PreparedQuery:
+def prepare_query(query: str, findable: frozenset[str] | None = None) -> PreparedQuery:
+    """Prepare the query side of a score.
+
+    `findable` is every token present somewhere in the candidate pool. Query terms that
+    appear in NO candidate are dropped from the scored set, because the score is
+    `matched / len(terms)` and those terms can only ever sit in the denominator.
+
+    That denominator was the whole query, so relevance shrank with the length of the
+    question rather than with anything about the passage. Against the same text:
+
+        "RTL Generator"                                    2 terms -> 1.350  answered
+        "Vậy cung cấp cho tôi các Tool dùng RTL Generator"  8 terms -> 0.250  refused
+
+    Both matched the same two terms. The second was refused for being politely phrased,
+    and the effect is far worse in Vietnamese, where a request opens with several words
+    that no English technical document will ever contain.
+
+    Ranking is unaffected -- the denominator is constant across candidates for one query
+    -- so this only changes the absolute value, which is what the confidence thresholds
+    read. If nothing at all is findable the full set is kept, so a query about content
+    that genuinely is not there still scores zero and is still refused.
+    """
     normalized = normalize_query(query)
+    # normalize_query already lower-cased and already split on this exact pattern,
+    # so its output re-tokenises to itself.
+    terms = frozenset(normalized.split())
+    if findable is not None:
+        scored_terms = terms & findable
+        if scored_terms:
+            terms = scored_terms
     return PreparedQuery(
         normalized=normalized,
-        # normalize_query already lower-cased and already split on this exact pattern,
-        # so its output re-tokenises to itself.
-        terms=frozenset(normalized.split()),
+        terms=terms,
         is_definition=is_definition_query(query),
     )
 
@@ -137,11 +181,29 @@ def retrieval_score(query: str, chunk: object, prepared: PreparedQuery | None = 
     )
 
 
+def chunk_passage(chunk: object) -> str:
+    """The text a chunk is scored on. One definition, used by scoring and by the pool."""
+    parent = getattr(chunk, "parent_chunk", None)
+    return " ".join(
+        str(value or "")
+        for value in (
+            getattr(chunk, "chunk_text", "") or getattr(parent, "text", ""),
+            getattr(getattr(chunk, "article", None), "title", ""),
+            getattr(parent, "section_ref", "") if parent else "",
+        )
+    )
+
+
+def prepare_query_for_chunks(query: str, chunks: Sequence[object]) -> PreparedQuery:
+    """Prepare a query against the pool it will be scored over."""
+    return prepare_query(query, corpus_terms([chunk_passage(chunk) for chunk in chunks]))
+
+
 def rerank_chunks_with_scores(
     query: str, chunks: Sequence[object], limit: int = 5
 ) -> list[tuple[object, float]]:
     """Rerank and hand back the scores, so no caller has to recompute them."""
-    prepared = prepare_query(query)
+    prepared = prepare_query_for_chunks(query, chunks)
     scored: list[tuple[float, int, object]] = []
     for position, chunk in enumerate(chunks):
         scored.append((retrieval_score(query, chunk, prepared), -position, chunk))
