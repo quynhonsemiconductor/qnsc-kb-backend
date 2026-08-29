@@ -92,6 +92,35 @@ class SearchService:
         self.gov_repo = gov_repo
         self.feature_flags = feature_flags
 
+    async def _record_gap(self, user: User, query: str) -> None:
+        """Note that a search found nothing, without letting that end the search.
+
+        Both call sites used to await log_gap directly. A gap row that could not be
+        written therefore propagated out of search and out of AiService.ask, so the
+        reader got a 500 on the answer stream instead of an empty result -- caused by a
+        query 26 characters over the column width.
+
+        Recording that we found nothing is bookkeeping. It must never be the reason
+        nothing is returned.
+        """
+        try:
+            await self.gov_repo.log_gap(
+                query=query, company_domain=user.company_domain, dept=user.dept
+            )
+        except Exception:
+            logger.warning(
+                "Could not record the search gap",
+                query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                exc_info=True,
+            )
+            # log_gap commits, so a failure leaves the session in a failed transaction
+            # and every later statement in the same request raises too. Swallowing the
+            # error without this would move the 500 rather than remove it.
+            try:
+                await self.gov_repo.db.rollback()
+            except Exception:
+                logger.warning("Could not reset the session after a gap write", exc_info=True)
+
     async def search(
         self,
         user: User,
@@ -148,7 +177,7 @@ class SearchService:
         )
 
         if not retrieval_query:
-            await self.gov_repo.log_gap(query=query, company_domain=user.company_domain, dept=user.dept)
+            await self._record_gap(user, query)
             return []
 
         # 1. Get embedding asynchronously
@@ -202,7 +231,7 @@ class SearchService:
                 user_access_bitmask=user_bitmask,
                 filters=effective_filters,
             )
-            await self.gov_repo.log_gap(query=query, company_domain=user.company_domain, dept=user.dept)
+            await self._record_gap(user, query)
 
         # 4. Format search results
         formatted_results = []
