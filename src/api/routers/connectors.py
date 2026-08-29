@@ -269,6 +269,39 @@ def _oauth_frontend_redirect(*, connector_id: str | None = None, success: bool =
     )
 
 
+def _subject_from_id_token(id_token: str | None, fallback: str) -> str:
+    """Read `sub` out of the provider's id_token, or fall back.
+
+    This is a LABEL, shown so an administrator can tell which account authorized a
+    connector. It has no bearing on whether the connection works, and it used to be able
+    to destroy one: the line here called `jwt.get_unverified_claims`, which belongs to
+    python-jose. This project uses PyJWT, which has no such function, so the call raised
+    AttributeError — not caught by the `except jwt.PyJWTError` beside it, so it escaped
+    the callback, hit the blanket handler in oauth_callback_entry, and sent the browser
+    back to /admin/connectors?oauth=error.
+
+    Microsoft's scope includes `openid`, so an id_token is ALWAYS returned and the branch
+    always ran. SharePoint authorization therefore failed every single time, in a way
+    that looked like the provider had simply declined: a new tab that came straight back,
+    still unauthorized, with nothing said.
+
+    Signature verification is skipped deliberately. The token came from the provider's
+    own token endpoint over TLS, in exchange for our client secret — it is not
+    attacker-supplied, and verifying it would mean fetching and caching provider JWKS to
+    read a display string. Do not "fix" that without a reason.
+
+    The except is broad on purpose. Decoration must not be able to fail an authorization
+    again, whatever a future provider puts in this field.
+    """
+    if not id_token:
+        return fallback
+    try:
+        claims = jwt.decode(id_token, options={"verify_signature": False})
+        return str(claims.get("sub") or fallback)
+    except Exception:  # noqa: BLE001 - a label is never worth failing the flow for
+        return fallback
+
+
 @router.get("/oauth/callback")
 async def oauth_callback_entry(
     code: str | None = None,
@@ -361,13 +394,9 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail="Provider authorization failed") from exc
     connector.oauth_access_token = encrypt_secret(tokens.get("access_token"))
     connector.oauth_refresh_token = encrypt_secret(tokens.get("refresh_token")) or connector.oauth_refresh_token
-    subject = str(tokens.get("token_type") or "authorized")
-    if tokens.get("id_token"):
-        try:
-            subject = str(jwt.get_unverified_claims(tokens["id_token"]).get("sub") or subject)
-        except jwt.PyJWTError:
-            pass
-    connector.oauth_subject = subject[:255]
+    connector.oauth_subject = _subject_from_id_token(
+        tokens.get("id_token"), str(tokens.get("token_type") or "authorized")
+    )[:255]
     if tokens.get("expires_in"):
         connector.oauth_expires_at = datetime.utcnow() + timedelta(seconds=int(tokens["expires_in"]))
     connector.oauth_state_hash = None
