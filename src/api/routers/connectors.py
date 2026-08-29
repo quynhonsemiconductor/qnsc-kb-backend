@@ -361,13 +361,18 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail="Provider authorization failed") from exc
     connector.oauth_access_token = encrypt_secret(tokens.get("access_token"))
     connector.oauth_refresh_token = encrypt_secret(tokens.get("refresh_token")) or connector.oauth_refresh_token
-    subject = str(tokens.get("token_type") or "authorized")
-    if tokens.get("id_token"):
-        try:
-            subject = str(jwt.get_unverified_claims(tokens["id_token"]).get("sub") or subject)
-        except jwt.PyJWTError:
-            pass
-    connector.oauth_subject = subject[:255]
+    # Deliberately NOT read out of tokens["id_token"]. This column records HOW a
+    # connector was authorized -- connector_auth.py writes "application" for app-only
+    # mode -- and nothing anywhere reads it for an account name: it is serialized into
+    # no response, queried by no code, and absent from the frontend.
+    #
+    # It used to hold the id_token's `sub`, decoded without signature verification. That
+    # decode is what broke this endpoint (see the test), and keeping it would mean
+    # either shipping an unverified decode past Semgrep or fetching provider JWKS on the
+    # callback path -- another step that could fail an authorization -- to fill a field
+    # with no consumer. If an account label is ever actually wanted, add it deliberately,
+    # with a verification decision and somewhere to display it.
+    connector.oauth_subject = "delegated"
     if tokens.get("expires_in"):
         connector.oauth_expires_at = datetime.utcnow() + timedelta(seconds=int(tokens["expires_in"]))
     connector.oauth_state_hash = None
