@@ -156,6 +156,13 @@ class OnnxEmbeddingProvider:
             for position, index in enumerate(window):
                 vectors[index] = pooled[position]
 
+        if any(vector is None for vector in vectors):
+            # Unreachable: every index in `order` is written exactly once. Raising
+            # rather than filtering because the filter would return a SHORTER list,
+            # and a shorter list is how every embedding after the gap ends up attached
+            # to the wrong chunk — the exact silent corruption this method's ordering
+            # is careful to avoid.
+            raise RuntimeError("embedding batches did not fill every input slot")
         return [vector for vector in vectors if vector is not None]
 
 

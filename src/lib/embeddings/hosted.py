@@ -107,8 +107,8 @@ class HostedEmbeddingProvider:
                     json=payload,
                     timeout=settings.LLM_TIMEOUT_SECONDS,
                 )
-                if response.status_code == 429 or response.status_code >= 500:
-                    response.raise_for_status()
+                # raise_for_status covers every 4xx and 5xx; which of them are worth
+                # retrying is decided in the handler, from the status on the exception.
                 response.raise_for_status()
                 return response.json()
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
