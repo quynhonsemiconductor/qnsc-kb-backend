@@ -51,6 +51,7 @@ from src.models.user import Department, User
 from src.models.ops import Connector, ConnectorJob, NotificationQueue
 from src.repositories.governance import GovernanceRepository
 from src.repositories.article import ArticleRepository
+from src.repositories.user import UserRepository
 from src.domain.governance import GovernanceService
 from src.domain.department_routing import route_document_candidates
 
@@ -104,7 +105,21 @@ async def _persist_connector_draft(
     )
     for item in await _routed_candidate_items(db, connector, draft.title, text):
         db.add(DraftCandidate(draft_id=draft.id, **item))
-    actor = await db.get(User, draft.created_by) if draft.created_by else None
+    # Loaded through the repository, NOT db.get(User, ...). submit_draft below reaches
+    # get_draft_for_user, which calls the synchronous AuthorizationService.has_permission
+    # and reads `user.roles` directly. db.get() loads no relationships, so that read was
+    # a lazy load -- ordinary attribute access, with no await for the async session to
+    # suspend on -- and SQLAlchemy raised "greenlet_spawn has not been called".
+    #
+    # It failed for every document that produced a draft, so the walk hit its 25
+    # consecutive item failures and aborted the whole scope. Nothing caught it because
+    # every HTTP path already loads users through this repository, which eager-loads the
+    # four trees authorization reads; only the connector built its own actor.
+    actor = (
+        await UserRepository(db).get_by_id(draft.created_by)
+        if draft.created_by
+        else None
+    )
     if actor:
         await GovernanceService(
             GovernanceRepository(db), ArticleRepository(db)
