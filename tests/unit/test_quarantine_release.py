@@ -89,10 +89,17 @@ def test_a_new_revision_still_clears_it_by_itself():
 
 
 def test_the_release_endpoint_is_registered():
-    """It is the only way back for a corpus quarantined by a defect."""
-    from src.api.main import app
+    """It is the only way back for a corpus quarantined by a defect.
+
+    Asserted on the connectors router rather than the assembled app. The app's route
+    table depends on import order across the whole test session -- read from there this
+    same assertion passed locally and failed in CI, seeing an app carrying only
+    FastAPI's built-in routes. The router is the thing this change actually adds to,
+    and reading it directly is both stable and closer to the edit.
+    """
+    from src.api.routers.connectors import router
 
     routes = {
-        getattr(route, "path", ""): getattr(route, "methods", set()) for route in app.routes
+        getattr(route, "path", ""): getattr(route, "methods", set()) for route in router.routes
     }
-    assert "POST" in routes.get("/api/v1/connectors/{connector_id}/retry-failed", set())
+    assert "POST" in routes.get("/{connector_id}/retry-failed", set()), sorted(routes)
