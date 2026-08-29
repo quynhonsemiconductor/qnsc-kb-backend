@@ -9,10 +9,11 @@ def test_migrations_have_one_current_head():
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     # Pinned on purpose: a new revision must be a deliberate act, and a second head
-    # means one was chained off the wrong parent. Bumped for 20260828_64, which realigns
-    # article_chunks.embedding to 384 after the move to MiniLM — see that file for why a
-    # NEW revision was needed rather than re-running 20260810_51.
-    assert script.get_heads() == ["20260828_64"]
+    # means one was chained off the wrong parent. Bumped for 20260829_65, which adds
+    # approval_rules for the draft approval agent — a table whose two authority columns
+    # default to FALSE in the database as well as the model, because a rule must not be
+    # able to acquire the right to publish by having a field left unset.
+    assert script.get_heads() == ["20260829_65"]
 
 
 def test_production_compose_is_explicitly_hardened():
