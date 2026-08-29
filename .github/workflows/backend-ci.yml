@@ -296,6 +296,26 @@ jobs:
       - name: Apply new migrations on top of baseline
         run: poetry run alembic -c migrations/alembic.ini upgrade head
 
+      # BLOCKING. `alembic check` compares the ORM metadata against the schema the
+      # migrations just built, and this is the gate that would have caught
+      # connectors.sync_interval_minutes: a column mapped by the model that no migration
+      # creates is not a schema lagging behind, it is a query that FAILS AT RUNTIME. It
+      # took cloud connector polling down entirely and surfaced only as a beat task
+      # dying every five minutes.
+      #
+      # It ran advisory first rather than being asserted blind. That run reported exactly
+      # one item — a check constraint created by SQL and never declared on the model —
+      # which is now excluded in env.py beside the twenty indexes in the same category.
+      # The diff is empty, so the gate is real rather than aspirational.
+      #
+      # When this fails: either add the missing migration, or, if the object is genuinely
+      # created outside the ORM, add it to the exclusion lists in migrations/env.py with
+      # a note saying which migration owns it. Do not reach for --no-verify; the whole
+      # value here is that the failure arrives before deploy rather than five minutes
+      # into it.
+      - name: Model/migration drift
+        run: poetry run alembic -c migrations/alembic.ini check
+
   # ─────────────────────────────────────────────────────────────────────────
   # 4. Docker build — all three targets the deploy pipeline ships.
   # ─────────────────────────────────────────────────────────────────────────
