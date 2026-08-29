@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.api.deps import SessionLocal, get_db, get_current_user, require_permission, set_database_context
 from src.models import User
+from src.models.article import Article
 from src.models.governance import AuditLog, PendingDraft
 from src.models.user import AccessGroup, ExternalIdentity
 from src.models.ops import Connector, ConnectorJob
@@ -814,13 +815,9 @@ async def connector_health(
         .order_by(SyncError.created_at.desc())
         .limit(25)
     )).all()
-    quarantined = int(await db.scalar(
-        select(func.count(ExternalDocument.id)).where(
-            ExternalDocument.connector_id == connector.id,
-            ExternalDocument.state != "deleted",
-            ExternalDocument.metadata_json["ingest_failure"].is_not(None),
-        )
-    ) or 0)
+    from src.domain.connectors import document_breakdown
+
+    documents = await document_breakdown(db, connector.id)
     now = datetime.utcnow()
     return {
         "connector_id": str(connector.id),
@@ -829,7 +826,10 @@ async def connector_health(
         "last_error": connector.last_error,
         "queue_depth": queued,
         "notifications_last_24h": notifications_24h,
-        "documents_needing_attention": quarantined,
+        # Kept: existing clients read this name. It is the same number as
+        # documents["held"], from the same query rather than a second one.
+        "documents_needing_attention": documents["held"],
+        "documents": documents,
         "recent_document_errors": [
             {
                 "document_id": str(error.external_document_id) if error.external_document_id else None,
