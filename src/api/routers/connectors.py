@@ -550,7 +550,10 @@ async def list_acl_principals(
     by_principal: dict[tuple[str, str], dict[str, Any]] = {}
     for principal in principals:
         key = (principal.principal_type, principal.principal_id)
-        entry = by_principal.setdefault(key, {"principal_type": principal.principal_type, "principal_id": principal.principal_id, "roles": set()})
+        entry = by_principal.setdefault(key, {"principal_type": principal.principal_type, "principal_id": principal.principal_id, "roles": set(), "principal_name": None})
+        # The newest non-empty name wins: a principal seen across many documents may
+        # only have been named on some of them.
+        entry["principal_name"] = entry["principal_name"] or principal.principal_name
         if principal.role:
             entry["roles"].update(item.strip() for item in principal.role.split(",") if item.strip())
 
@@ -572,6 +575,7 @@ async def list_acl_principals(
         response.append({
             "principal_type": principal_type,
             "principal_id": principal_id,
+            "principal_name": entry["principal_name"],
             "roles": sorted(entry["roles"]),
             "mapping_status": "mapped" if active_mapping or mapped_user_id else "unmapped",
             "external_group_name": mapping["external_group_name"] if mapping else None,
