@@ -53,7 +53,7 @@ from src.repositories.governance import GovernanceRepository
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
 from src.domain.governance import GovernanceService
-from src.domain.department_routing import route_document_candidates
+from src.domain.department_routing import route_document_candidates_llm
 
 logger = structlog.get_logger()
 
@@ -71,7 +71,7 @@ async def _routed_candidate_items(
             )
         )
     ).scalars().all()
-    return route_document_candidates(title, text, departments)
+    return await route_document_candidates_llm(title, text, departments)
 
 
 async def _persist_connector_draft(
@@ -187,7 +187,7 @@ async def _replace_split_candidates(
             )
         )
     ).scalars().all()
-    for item in route_document_candidates(draft.title, text, departments):
+    for item in await route_document_candidates_llm(draft.title, text, departments):
         db.add(DraftCandidate(draft_id=draft.id, **item))
 
 

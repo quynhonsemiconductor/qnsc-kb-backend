@@ -278,6 +278,13 @@ class Settings(BaseSettings):
     CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: int = 30
     CONNECTOR_RECONCILE_INTERVAL_MINUTES: int = 360
     CONNECTOR_AUTO_PUBLISH_MODE: str = "governed"
+    # Department routing asks the LLM first and falls back to keyword ranking. The
+    # fallback is not a degraded mode: it is what runs whenever no provider is
+    # configured, and it is what every existing deployment already had.
+    DEPARTMENT_ROUTING_LLM_ENABLED: bool = True
+    # Short on purpose. This runs inside document ingest, once per document, and a slow
+    # provider must cost a suggestion rather than the import.
+    DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
