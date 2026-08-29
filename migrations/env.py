@@ -19,8 +19,14 @@ target_metadata = Base.metadata
 # A pre-Alembic deployment left this empty table behind. It is intentionally
 # retained for backward-compatible database handoff, but it is no longer part
 # of the application model and must not make every ``alembic check`` propose a
-# destructive drop. The connector scheduling column is retained in the ORM
-# model until an explicit data-retention decision is made.
+# destructive drop.
+#
+# This note used to add that "the connector scheduling column is retained in the ORM
+# model until an explicit data-retention decision is made". That retention was removed:
+# keeping connectors.sync_interval_minutes mapped to avoid proposing a drop cost a
+# runtime outage instead, because SQLAlchemy SELECTs every mapped column and no
+# migration ever created it. A drop is only ever proposed against a database that HAS
+# the column, and CI checks a freshly migrated one, which does not.
 _LEGACY_TABLES = {"connector_credentials"}
 
 # These indexes are created by historical SQL migrations rather than ORM

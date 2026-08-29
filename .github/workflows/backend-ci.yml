@@ -296,6 +296,28 @@ jobs:
       - name: Apply new migrations on top of baseline
         run: poetry run alembic -c migrations/alembic.ini upgrade head
 
+      # Advisory for now, deliberately, and following the expand-contract step above.
+      #
+      # `alembic check` compares the ORM metadata against the schema the migrations just
+      # built. It is the gate that would have caught connectors.sync_interval_minutes:
+      # a column mapped by the model that no migration creates is not a schema lagging
+      # behind, it is a query that fails at runtime — and it took down cloud connector
+      # polling entirely, surfacing only as a beat task dying every five minutes.
+      #
+      # Not blocking yet because nobody has run it against this schema. Autogenerate is
+      # noisy about server defaults, index shapes and column types, and env.py already
+      # carries hand-maintained exclusions for legacy tables and SQL-managed indexes.
+      # Promote to a gate once a clean run proves the list is complete; failing the build
+      # on unreviewed drift would only teach people to skip it.
+      - name: Model/migration drift (advisory)
+        continue-on-error: true
+        run: |
+          if poetry run alembic -c migrations/alembic.ini check; then
+            echo "ORM metadata matches the migrated schema."
+          else
+            echo "::warning title=Model drift::alembic check reports the ORM and the migrations disagree. A mapped column with no migration fails at runtime — see the note in this workflow."
+          fi
+
   # ─────────────────────────────────────────────────────────────────────────
   # 4. Docker build — all three targets the deploy pipeline ships.
   # ─────────────────────────────────────────────────────────────────────────
