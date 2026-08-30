@@ -132,6 +132,16 @@ class GovernanceService:
             for role in getattr(user, "roles", [])
         )
 
+    def may_publish_own_change(self, user: User) -> bool:
+        """Whether this identity can approve its own submission, so queueing is pointless.
+
+        Public because the article-edit path needs the same answer: an editor who may
+        approve their own draft gains nothing from being sent to a review screen to click
+        publish on their own change. Delegates to `_may_self_approve` rather than restating
+        the rule, so the two paths cannot drift into disagreeing about who may self-approve.
+        """
+        return self._may_self_approve(user)
+
     def _can_assign_approver(self, user: User, draft: PendingDraft) -> bool:
         # Assignment is optional. Any user who may review this draft may
         # choose to narrow it to one specific reviewer.

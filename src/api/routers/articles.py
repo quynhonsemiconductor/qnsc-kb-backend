@@ -1956,16 +1956,89 @@ async def update_article(
         )
     )
     created = await GovernanceRepository(db).create_draft(draft)
-    created = await GovernanceService(
-        GovernanceRepository(db), ArticleRepository(db)
-    ).submit_draft(current_user, created.id)
+    governance = GovernanceService(GovernanceRepository(db), ArticleRepository(db))
+    created = await governance.submit_draft(current_user, created.id)
+
+    # Captured as plain values BEFORE the approval attempt, never read off the ORM
+    # instances afterwards. `approve_draft` calls `db.rollback()` when it refuses
+    # (governance.py:1434), which expires the whole identity map - so `created.title` and
+    # even `current.id` raise MissingGreenlet inside the `except` below. Reading the
+    # expired object to build the fallback response is exactly the trap that cost three
+    # wrong fixes on the bulk endpoint; the primitives sidestep it entirely.
+    draft_id = created.id
+    draft_title = created.title
+    draft_status = created.status
+    edited_article_id = current.id
+    # `current_user` is expired by the rollback too, so even the actor's own id must be
+    # captured up front - the audit write in the fallback is what actually crashed.
+    actor_id = current_user.id
+
+    # An editor who may already approve their own submission gains nothing from queueing
+    # behind themselves: they would open the review screen and click publish on their own
+    # change. So the draft is submitted (keeping the transition history and the fingerprint
+    # reservation intact) and then approved in the same request.
+    #
+    # `may_publish_own_change` is reused deliberately rather than `can_edit_article`. It is the
+    # rule this codebase ALREADY trusts for approving your own draft — Admin/CEO only — and
+    # approve_draft already records the act as `self_approve` with a `self_approved` flag
+    # (governance.py:1397-1400), so the audit trail distinguishes it from an independent
+    # review with no change needed here. A department publisher still queues, because
+    # submit_draft calls that path "Submitted for independent approval".
+    #
+    # NOT a second approval path: this calls the same approve_draft a reviewer calls, so
+    # every gate still applies. That includes the one that can legitimately refuse — a
+    # multi-section edit produces >1 split candidate and raises 409 batch_review_required
+    # (governance.py:842). Falling back to the queue there is correct: the reviewer must
+    # choose how the sections are routed, and that choice cannot be inferred.
+    if governance.may_publish_own_change(current_user):
+        try:
+            article = await governance.approve_draft(
+                user=current_user,
+                draft_id=draft_id,
+                dept=dept,
+                department_ids=[department.id for department in selected_departments],
+                update_article_id=edited_article_id,
+                visibility=visibility,
+                explicit_user_ids=explicit_user_ids,
+                denied_user_ids=denied_user_ids,
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            code = detail.get("code") if isinstance(detail, dict) else None
+            logger.info(
+                "Self-approving edit fell back to the review queue",
+                article_id=str(edited_article_id),
+                draft_id=str(draft_id),
+                reason=code or str(detail)[:120],
+            )
+            await AuditRepository(db).record(
+                actor_id, "article_change_submit", "draft", str(draft_id)
+            )
+            return DraftSubmissionResponse(
+                id=draft_id,
+                title=draft_title,
+                status=draft_status,
+                workflow="pending_approval",
+                message=(
+                    "Changes were submitted for review because they need a decision that "
+                    "cannot be made automatically."
+                ),
+            )
+        return DraftSubmissionResponse(
+            id=article.id,
+            title=article.title,
+            status=article.status,
+            workflow="published",
+            message="Changes published.",
+        )
+
     await AuditRepository(db).record(
-        current_user.id, "article_change_submit", "draft", str(created.id)
+        actor_id, "article_change_submit", "draft", str(draft_id)
     )
     return DraftSubmissionResponse(
-        id=created.id,
-        title=created.title,
-        status=created.status,
+        id=draft_id,
+        title=draft_title,
+        status=draft_status,
         workflow="pending_approval",
         message="Changes submitted. An independent approver must review them before the article is updated.",
     )
