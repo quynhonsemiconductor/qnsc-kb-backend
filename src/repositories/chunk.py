@@ -238,8 +238,14 @@ class ChunkRepository:
         # filters instead of giving up at the first ef_search candidates. It needs
         # pgvector 0.8.0+; relaxed_order is safe here because the reranker re-sorts
         # everything it is given, so exact distance ordering out of the index buys us
-        # nothing. Applied best-effort: an older pgvector raises on the unknown GUC, and
-        # a wider ef_search alone is still strictly better than the default.
+        # nothing.
+        #
+        # Best-effort, but NOT because an old server errors: Postgres accepts any unknown
+        # GUC in a custom `hnsw.*` prefix silently, so on pgvector < 0.8.0 this call
+        # succeeds and simply does nothing (measured on 0.8.6 against a deliberately
+        # misspelled name). The try/except is there for a genuinely rejected value, and
+        # either way the wider ef_search above is the larger win and applies on every
+        # version.
         if query_embedding is not None:
             try:
                 await self.db.execute(
