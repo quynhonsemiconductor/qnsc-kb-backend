@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Boolean, ForeignKey, String, Text, Integer, JSON, Float, DateTime, UniqueConstraint, Index
+from sqlalchemy import Boolean, ForeignKey, String, Text, Integer, JSON, Float, DateTime, UniqueConstraint, Index, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -111,6 +111,21 @@ class SearchLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class ApiRequestMetric(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "api_request_metrics"
+    #: Declared here, not only in the migration: `alembic check` compares the live schema
+    #: against this metadata, so an index created by raw SQL alone reads as drift and the
+    #: CI gate asks to DROP it. Measured -- that is exactly how this failed first.
+    #:
+    #: Partial and DESC to match the only query /governance/request-failures issues:
+    #: newest failures first. Indexing the 200s would cover most of the table for none of
+    #: the queries actually run.
+    __table_args__ = (
+        Index(
+            "ix_api_request_metrics_failures",
+            text("created_at DESC"),
+            "path",
+            postgresql_where=text("status_code >= 500"),
+        ),
+    )
 
     request_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     method: Mapped[str] = mapped_column(String(12), nullable=False)
