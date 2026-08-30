@@ -384,24 +384,46 @@ def _conflict_answer(
     return "\n".join(lines), citations
 
 
+#: A follow-up refers back to what was said instead of restating it. These are the ways
+#: people do that. There were no Vietnamese ones, so in a Vietnamese deployment this
+#: never fired and a follow-up never received the conversation context it exists to add.
+_FOLLOWUP_PHRASES = (
+    "what about",
+    "how about",
+    "and next",
+    "what then",
+    "next year",
+    "next month",
+    "thì sao",
+    "thế còn",
+    "vậy còn",
+    "còn lại",
+    "tiếp theo",
+    "vậy thì",
+    "thế thì",
+    "ngoài ra",
+)
+
+#: Words that point at something already named rather than naming it.
+_FOLLOWUP_ANAPHORA = re.compile(
+    r"\b(?:that|those|it|they|them|also|more"
+    r"|đó|này|nó|chúng|kia|ấy|thêm|nữa|cũng|vậy)\b"
+)
+
+#: Vietnamese is written in syllables, so the same sentence counts far more "words" than
+#: its English equivalent -- "cung cấp cho tôi" is four where English has two. A cap
+#: chosen for English was therefore much tighter in Vietnamese than anyone intended.
+_FOLLOWUP_MAX_WORDS = 16
+
+
 def _needs_query_rewrite(question: str, conversation_messages: list[Any]) -> bool:
     """Use conversation context only for likely follow-up questions."""
     if not conversation_messages:
         return False
     normalized = " ".join((question or "").lower().split())
-    phrase_markers = (
-        "what about",
-        "how about",
-        "and next",
-        "what then",
-        "next year",
-        "next month",
-    )
-    pronoun_markers = re.search(
-        r"\b(?:that|those|it|they|them|also|more)\b", normalized
-    )
-    return len(normalized.split()) <= 12 and (
-        any(marker in normalized for marker in phrase_markers) or bool(pronoun_markers)
+    return len(normalized.split()) <= _FOLLOWUP_MAX_WORDS and (
+        any(marker in normalized for marker in _FOLLOWUP_PHRASES)
+        or bool(_FOLLOWUP_ANAPHORA.search(normalized))
     )
 
 

@@ -1477,3 +1477,84 @@ async def run_approval_agent(
     return await run_agent(
         db, current_user.company_domain, limit=payload.limit, dry_run=payload.dry_run
     )
+
+
+class KnowledgePurgeRequest(BaseModel):
+    # Defaults to a dry run, like the approval agent above. Deleting an entire corpus
+    # should be something a caller asks for explicitly, not what happens if a field is
+    # forgotten by a script.
+    dry_run: bool = True
+    #: Must equal the company_domain being purged. A boolean alone is too easy to send by
+    #: accident from a saved request; typing the tenant name proves the operator knows
+    #: WHICH corpus they are erasing, which is the mistake worth preventing when several
+    #: environments share a client.
+    confirm: str | None = Field(default=None, max_length=255)
+
+
+@router.post("/knowledge/purge")
+async def purge_knowledge(
+    payload: KnowledgePurgeRequest,
+    current_user: User = Depends(require_permission("role.manage", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Delete every article, document, chunk and sync record for the caller's tenant.
+
+    IRREVERSIBLE. Intended for resetting a test corpus, which is otherwise a long manual
+    job that does not even work: deleting articles by hand leaves the connector's
+    revision/content-hash cache intact, so the next sync decides every provider file is
+    unchanged and re-imports nothing.
+
+    Keeps users, roles, departments, access groups, tag vocabulary, feature flags and the
+    audit log. Keeps connector rows too, so the SharePoint grant survives and the operator
+    does not have to reconnect after each reset — only their synchronisation state is
+    reset, which is what makes the next sync re-import everything.
+
+    Scoped to `current_user.company_domain`. A global-scope permission is required because
+    the operation is unrecoverable, NOT because it crosses tenants — it does not.
+    """
+    from src.domain.kb_purge import purge_knowledge_base
+
+    company_domain = current_user.company_domain
+    if not company_domain:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "tenant_unresolved",
+                "message": "This account has no company domain, so no corpus can be scoped.",
+            },
+        )
+
+    if not payload.dry_run and payload.confirm != company_domain:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "confirmation_mismatch",
+                "message": (
+                    "Set confirm to the company domain being purged to run this for real."
+                ),
+                "expected": company_domain,
+            },
+        )
+
+    counts = await purge_knowledge_base(db, company_domain, dry_run=payload.dry_run)
+
+    if payload.dry_run:
+        # Nothing was written, so there is nothing to audit and nothing to commit.
+        return {"dry_run": True, "company_domain": company_domain, **counts.as_dict()}
+
+    # The audit row lands in the SAME transaction as the deletions, so the record of the
+    # purge cannot survive without the purge or vice versa. audit_logs is deliberately not
+    # one of the purged tables.
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="knowledge_purge",
+            target_type="knowledge_base",
+            target_id=company_domain,
+            outcome="success",
+            detail_json=counts.as_dict(),
+        )
+    )
+    await db.commit()
+
+    return {"dry_run": False, "company_domain": company_domain, **counts.as_dict()}

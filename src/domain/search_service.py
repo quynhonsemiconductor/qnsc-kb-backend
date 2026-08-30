@@ -15,6 +15,7 @@ from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
 from src.rag.reranker import (
     normalize_query,
+    prepare_query_for_chunks,
     rerank_chunks_with_scores,
     retrieval_score,
 )
@@ -198,8 +199,11 @@ class SearchService:
         if reranking_enabled:
             ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=limit)
         else:
+            # Prepared against the same pool the reranker would have used, so turning
+            # the reranker off changes the ordering and not the calibration.
+            prepared = prepare_query_for_chunks(retrieval_query, candidates)
             ranked = [
-                (chunk, retrieval_score(retrieval_query, chunk))
+                (chunk, retrieval_score(retrieval_query, chunk, prepared))
                 for chunk in candidates[:limit]
             ]
         # Vector similarity alone is not enough: short or vague inputs can be
