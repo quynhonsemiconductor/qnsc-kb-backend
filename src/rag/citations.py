@@ -34,3 +34,45 @@ def extract_citation_ids(answer: str) -> list[str]:
         if legacy:
             ids.add(f"C{int(legacy.group(1))}")
     return sorted(ids, key=lambda value: int(value[1:]))
+
+
+def strip_unknown_markers(answer: str, known: set[str]) -> str:
+    """Remove citation markers that name a passage which was never retrieved.
+
+    A model that invents `[C3]` when only two passages were retrieved used to cost the
+    user the WHOLE answer: the guard failed closed and replaced a correct, cited response
+    with "no grounded answer could be produced". The valid `[C1]`/`[C2]` citations went
+    with it.
+
+    Dropping the dangling marker is both safer and less destructive. Every marker left in
+    the text still resolves to a retrieved passage, so nothing is attributed to a source
+    that was not consulted -- which is the property the guard exists to protect -- while
+    the sourced answer survives.
+
+    Markers are removed with any immediately adjacent whitespace collapsed, so stripping
+    `[C3]` from "routing [C1] [C3]." does not leave a double space before the full stop.
+    """
+    if not answer:
+        return answer
+
+    def replace(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        found = _MARKER_IN_BRACKET.findall(inner)
+        if not found:
+            legacy = _LEGACY_BARE.match(inner)
+            found = [legacy.group(1)] if legacy else []
+        if not found:
+            # Not a citation at all -- a footnote, a year, a Markdown link. Leave it.
+            return match.group(0)
+        kept = [value for value in found if f"C{int(value)}" in known]
+        if not kept:
+            return ""
+        if len(kept) == len(found):
+            return match.group(0)
+        # A grouped marker such as `[C1, C3]` keeps only the retrieved half.
+        return "[" + ", ".join(f"C{int(value)}" for value in kept) + "]"
+
+    stripped = _BRACKET.sub(replace, answer)
+    # Collapse the gap a removed marker leaves behind, without touching newlines.
+    stripped = re.sub(r"[ \t]{2,}", " ", stripped)
+    return re.sub(r"[ \t]+([.,;:!?])", r"\1", stripped).strip()
