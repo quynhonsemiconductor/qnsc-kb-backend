@@ -29,7 +29,7 @@ from src.domain.ai_service import AIService
 from src.domain.search_service import SearchService
 from src.repositories.chunk import ChunkRepository
 from src.repositories.ai import AIRepository
-from src.models.ops import EvalQuestion, EvalSet, EvalRun, IndexReprocessJob, Connector
+from src.models.ops import EvalQuestion, EvalSet, EvalRun, IndexReprocessJob, Connector, ApiRequestMetric
 from src.rag.evaluator import answer_correctness, context_recall, lexical_faithfulness
 from src.core.config import is_cloudflare_r2_endpoint, settings
 from src.models.ops import FeatureFlag
@@ -903,6 +903,64 @@ async def get_audit_log(
         end_time=end_time,
     )
     return [_audit_response(audit) for audit in logs]
+
+
+@router.get("/request-failures")
+async def get_request_failures(
+    limit: int = Query(50, ge=1, le=500),
+    path: str | None = Query(None, min_length=1, max_length=255),
+    request_id: str | None = Query(None, min_length=1, max_length=100),
+    min_status: int = Query(500, ge=400, le=599),
+    since: datetime | None = Query(None),
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Recent failed requests, WITH the exception that caused each one.
+
+    Exists so a 500 can be diagnosed without CloudWatch. The middleware always caught
+    the exception and logged it, but only the status code was persisted, which meant
+    reading production errors required an AWS role switch. Now the same information is
+    queryable here.
+
+    `path` matches the resolved route template (`/upload-source`, not `/upload-source?x=1`),
+    because that is what the metric records — bounded cardinality is why it is stored that
+    way. `request_id` looks up the exact failure a user reports, since the id is already
+    returned to them in the `X-Request-ID` response header.
+    """
+    conditions = [ApiRequestMetric.status_code >= min_status]
+    if path:
+        conditions.append(ApiRequestMetric.path.ilike(f"%{path}%"))
+    if request_id:
+        conditions.append(ApiRequestMetric.request_id == request_id)
+    if since:
+        conditions.append(ApiRequestMetric.created_at >= since)
+
+    rows = await db.execute(
+        select(ApiRequestMetric)
+        .where(*conditions)
+        .order_by(ApiRequestMetric.created_at.desc())
+        .limit(limit)
+    )
+    failures = rows.scalars().all()
+
+    return {
+        "count": len(failures),
+        "failures": [
+            {
+                "request_id": failure.request_id,
+                "at": failure.created_at.isoformat() if failure.created_at else None,
+                "method": failure.method,
+                "path": failure.path,
+                "status_code": failure.status_code,
+                "duration_ms": failure.duration_ms,
+                "error_type": failure.error_type,
+                # NULL for anything recorded before the detail columns existed, and for
+                # failures raised as deliberate HTTPExceptions rather than crashes.
+                "error_detail": failure.error_detail,
+            }
+            for failure in failures
+        ],
+    }
 
 
 @router.get("/health-metrics")

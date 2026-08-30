@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import re
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta
 from fastapi import FastAPI
@@ -140,10 +141,29 @@ def _metric_path_for(request) -> str:
     return template if isinstance(template, str) else "/unmatched"
 
 
+#: A traceback is unbounded and this row is written on the request path, so the stored
+#: detail is capped. The innermost frames are the ones that name the actual fault.
+ERROR_DETAIL_MAX_CHARS = 4000
+
+
 async def record_request_metric(
-    request_id: str, method: str, path: str, status_code: int, duration_ms: float
+    request_id: str,
+    method: str,
+    path: str,
+    status_code: int,
+    duration_ms: float,
+    exc: BaseException | None = None,
 ) -> None:
     record_request(method, path, status_code, duration_ms)
+    error_type: str | None = None
+    error_detail: str | None = None
+    if exc is not None:
+        error_type = type(exc).__name__
+        # The message first, so it survives truncation even when the traceback is deep.
+        formatted = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        error_detail = f"{exc}\n\n{formatted}"[:ERROR_DETAIL_MAX_CHARS]
     try:
         async with SessionLocal() as db:
             db.add(
@@ -153,14 +173,18 @@ async def record_request_metric(
                     path=path,
                     status_code=status_code,
                     duration_ms=duration_ms,
+                    error_type=error_type,
+                    error_detail=error_detail,
                 )
             )
             await db.commit()
-    except Exception as exc:
+    except Exception as persist_error:
+        # Named distinctly from the `exc` parameter above: shadowing it here would mean a
+        # storage failure silently overwrote the exception we were trying to record.
         logger.warning(
             "Could not persist API request metric",
             request_id=request_id,
-            error=str(exc),
+            error=str(persist_error),
         )
 
 
@@ -595,6 +619,7 @@ async def request_logging_middleware(request, call_next):
             _metric_path_for(request),
             500,
             round((time.perf_counter() - started) * 1000, 2),
+            exc,
         )
         raise
     finally:
