@@ -213,6 +213,13 @@ class Settings(BaseSettings):
     RAG_MIN_RELEVANCE_SCORE: float = 0.12
     RAG_MIN_CONTEXT_SCORE: float = 0.35
     RAG_CANDIDATE_POOL_SIZE: int = 48
+    # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
+    # the index scan: the permission bitmask and published-status predicates consume
+    # candidates the index already committed to. pgvector's default is 40, i.e. below
+    # the pool we ask for. Measured recall on a 128-dim/1M set: 40 -> 95.4%, 200 ->
+    # 99.8%, at 1.19ms -> 4.60ms p99 (jkatz05.com/post/postgres/pgvector-scalar-binary-quantization).
+    # Valid range is 1..1000; raising it costs latency, so it is a setting, not a literal.
+    HNSW_EF_SEARCH: int = 200
     RAG_RERANK_LIMIT: int = 16
     RAG_MAX_CONTEXT_PARENTS: int = 8
     RAG_CONTEXT_MAX_CHARS: int = 14000

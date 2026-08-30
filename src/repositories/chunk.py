@@ -216,6 +216,49 @@ class ChunkRepository:
             embedding_available=query_embedding is not None,
         )
 
+        # Widen the HNSW candidate list BEFORE the vector query, or the pool we ask for
+        # cannot arrive. hnsw.ef_search defaults to 40 and caps how many candidates one
+        # index pass yields, but the query below asks for RAG_CANDIDATE_POOL_SIZE (48) —
+        # so 8 were unobtainable even before filtering. And pgvector applies filtering
+        # AFTER the index scan, so the permission bitmask, published-status and
+        # embedding_version predicates all cut into that 40: "If a condition matches 10%
+        # of rows, with HNSW and the default hnsw.ef_search of 40, only 4 rows will match
+        # on average" (pgvector README, Filtering). Every filtered search was silently
+        # short of candidates, with no error and no log line — just weaker answers.
+        #
+        # Measured on pgvector 0.8.6 with 10% of rows passing the filter: a LIMIT 48
+        # returned 23 rows at the default, and 48 with these two settings applied.
+        #
+        # set_config(..., true) rather than SET LOCAL, for two reasons. The `true` makes
+        # it TRANSACTION-local exactly like the tenant context in api/deps.py, so it
+        # cannot ride a pooled connection into the next request; and it takes bind
+        # parameters, so the value never reaches the server as interpolated SQL.
+        #
+        # iterative_scan lets the index keep scanning until enough rows survive the
+        # filters instead of giving up at the first ef_search candidates. It needs
+        # pgvector 0.8.0+; relaxed_order is safe here because the reranker re-sorts
+        # everything it is given, so exact distance ordering out of the index buys us
+        # nothing. Applied best-effort: an older pgvector raises on the unknown GUC, and
+        # a wider ef_search alone is still strictly better than the default.
+        if query_embedding is not None:
+            try:
+                await self.db.execute(
+                    text("SELECT set_config('hnsw.ef_search', :ef_search, true)"),
+                    {"ef_search": str(int(settings.HNSW_EF_SEARCH))},
+                )
+            except Exception as exc:  # pragma: no cover - depends on server build
+                logger.warning("Could not widen hnsw.ef_search", error=str(exc))
+            try:
+                await self.db.execute(
+                    text("SELECT set_config('hnsw.iterative_scan', :mode, true)"),
+                    {"mode": "relaxed_order"},
+                )
+            except Exception as exc:
+                logger.info(
+                    "hnsw.iterative_scan unavailable; needs pgvector 0.8.0+",
+                    error=str(exc),
+                )
+
         # 1. Vector Search
         vector_results = []
         if query_embedding is not None:
