@@ -54,6 +54,22 @@ variable "microsoft_client_id" {
   description = "Entra application (client) ID for the Microsoft connector. A public identifier."
 }
 
+variable "microsoft_graph_sender" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
+
+    Empty means outbound mail is DEAD, silently: ENVIRONMENT is pinned to "production", so
+    the development FakeEmailSender is never selected and the Graph sender raises before any
+    HTTP call. Invitations and password resets queue and retry every 30 seconds forever
+    without arriving, and validate_production() does not catch it.
+
+    Requires the mailbox to exist in the tenant and the Entra app to hold Mail.Send
+    application permission with admin consent.
+  EOT
+}
+
 variable "google_client_id" {
   type        = string
   default     = ""

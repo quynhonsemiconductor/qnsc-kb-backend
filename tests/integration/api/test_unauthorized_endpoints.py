@@ -19,6 +19,23 @@ PUBLIC_ROUTE_FRAGMENTS = (
     "/auth/entra/callback",
     "/oauth/callback",
     "/connectors/webhooks/",
+    # Credential routes reachable WITHOUT a session, by necessity: an invitee has no
+    # account yet, and someone who has forgotten their password cannot authenticate to ask
+    # for a reset. Each is listed individually rather than by an "/auth/password" prefix,
+    # so adding a sixth password route cannot inherit public access silently.
+    #
+    # The secret in each case is the token, not a session. /invitations/preview,
+    # /invitations/accept and /password/reset all require a 32-byte token whose sha256
+    # matches a live, unexpired, unused row; /password/forgot deliberately answers
+    # identically for every address so it cannot be used to enumerate accounts. All four
+    # reject cross-site requests and are rate limited on the identifier AND the source IP.
+    #
+    # NOT listed: /auth/password/change, which requires a session AND the current password
+    # — a stolen access token must not be able to lock the owner out of their own account.
+    "/auth/invitations/preview",
+    "/auth/invitations/accept",
+    "/auth/password/forgot",
+    "/auth/password/reset",
 )
 
 

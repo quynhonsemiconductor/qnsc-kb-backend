@@ -286,11 +286,12 @@ module "stack" {
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"
 
-  alarm_emails          = var.alarm_emails
-  cloudflare_account_id = var.cloudflare_account_id
-  microsoft_client_id   = var.microsoft_client_id
-  microsoft_tenant_id   = var.microsoft_tenant_id
-  google_client_id      = var.google_client_id
-  allowed_email_domains = var.allowed_email_domains
-  entra_admin_emails    = var.entra_admin_emails
+  alarm_emails           = var.alarm_emails
+  cloudflare_account_id  = var.cloudflare_account_id
+  microsoft_client_id    = var.microsoft_client_id
+  microsoft_tenant_id    = var.microsoft_tenant_id
+  microsoft_graph_sender = var.microsoft_graph_sender
+  google_client_id       = var.google_client_id
+  allowed_email_domains  = var.allowed_email_domains
+  entra_admin_emails     = var.entra_admin_emails
 }

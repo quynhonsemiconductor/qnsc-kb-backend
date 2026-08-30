@@ -338,6 +338,25 @@ variable "microsoft_client_id" {
   description = "Public identifier, not a secret. Empty leaves the Microsoft connector dormant."
 }
 
+variable "microsoft_graph_sender" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    The mailbox Graph sends application email FROM — invitations and password resets.
+    A UPN or objectId, e.g. "no-reply@qnsc.vn".
+
+    Empty leaves outbound mail DEAD, silently. ENVIRONMENT is pinned to "production" in
+    every environment, so get_email_sender() never returns the development FakeEmailSender;
+    it returns the Graph sender, which raises "MICROSOFT_GRAPH_SENDER is not configured"
+    before any HTTP call. deliver_notification_queue then retries every 30 seconds forever
+    and the invitee never receives a link. Nothing in validate_production() catches this,
+    which is why it is stated here rather than left to the code default.
+
+    The Entra app needs Mail.Send application permission with admin consent, and the
+    mailbox must exist in the tenant.
+  EOT
+}
+
 variable "google_client_id" {
   type        = string
   default     = ""

@@ -198,6 +198,14 @@ locals {
     { name = "MICROSOFT_TENANT_ID", value = var.microsoft_tenant_id },
     { name = "MICROSOFT_REDIRECT_URI", value = var.microsoft_client_id != "" ? "${local.api_base_url}/api/v1/connectors/oauth/callback" : "" },
 
+    // Who application email is sent FROM. Without it every invitation and password reset
+    // queues a notification row that raises "MICROSOFT_GRAPH_SENDER is not configured"
+    // every 30 seconds forever, and the recipient never gets a link. ENVIRONMENT is pinned
+    // to "production" here, so the development FakeEmailSender is never selected and there
+    // is no fallback. validate_production() does not check this, so stating it is the only
+    // thing that makes outbound mail work.
+    { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
+
     // SSO sign-in, a DIFFERENT callback from the connector one above: that consents to
     // SharePoint content, this authenticates a person. Both must be registered on the
     // Entra app.

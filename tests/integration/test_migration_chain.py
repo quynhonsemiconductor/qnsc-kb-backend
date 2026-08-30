@@ -9,10 +9,10 @@ def test_migrations_have_one_current_head():
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     # Pinned on purpose: a new revision must be a deliberate act, and a second head
-    # means one was chained off the wrong parent. Bumped for 20260830_67, which keeps the
-    # exception behind a 500 on the request metric row, so a production failure can be
-    # diagnosed without an AWS role switch to read CloudWatch.
-    assert script.get_heads() == ["20260830_67"]
+    # means one was chained off the wrong parent. Bumped for 20260830_68, which adds
+    # single-use password reset grants so an account can be recovered without an
+    # administrator setting a password by hand.
+    assert script.get_heads() == ["20260830_68"]
 
 
 def test_production_compose_is_explicitly_hardened():
