@@ -189,14 +189,43 @@ def test_both_outcomes_are_reported_separately():
         assert key in source, key
 
 
+def _walk_routes(routes, prefix: str = ""):
+    """Yield ``(full_path, methods)`` for every endpoint, however it was mounted.
+
+    Inlined rather than imported from tests/integration: there are no `__init__.py` files
+    under tests/, so `tests.integration...` is not an importable package and the import
+    fails with ModuleNotFoundError. Measured.
+
+    The walk itself is necessary because FastAPI 0.141 / Starlette 1.6 stopped flattening
+    `include_router()` into `app.routes`. Each include is a wrapper carrying no `path`,
+    holding sub-routes on `original_router.routes` with paths relative to the mount and the
+    prefix on `include_context.prefix`. Reading `route.path` off the top level therefore
+    returns only the few routes declared directly on the app — this test passed locally and
+    failed in CI against the newer FastAPI, asserting against an inventory that did not
+    contain the application at all.
+    """
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            context = getattr(route, "include_context", None)
+            yield from _walk_routes(
+                included.routes, prefix + (getattr(context, "prefix", "") or "")
+            )
+            continue
+        path = getattr(route, "path", None)
+        if path:
+            yield prefix + path, set(getattr(route, "methods", set()) or set())
+
+
 def test_the_endpoint_is_registered_before_the_id_scoped_routes_can_shadow_it():
     """`bulk-decide` is a literal segment where `{id}` also matches."""
     from src.api.main import app
 
-    paths = [getattr(r, "path", "") for r in app.routes]
+    paths = {path for path, _methods in _walk_routes(app.routes)}
 
+    assert paths, "the route inventory must not be empty, or this checks nothing"
     assert "/api/v1/governance/pending-drafts/bulk-decide" in paths
-    # No bare /pending-drafts/{id} route exists, so the literal cannot be captured.
+    # No bare /pending-drafts/{id} route exists, so the literal cannot be captured by one.
     assert "/api/v1/governance/pending-drafts/{id}" not in paths
 
 
