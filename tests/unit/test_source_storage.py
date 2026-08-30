@@ -46,6 +46,52 @@ def test_r2_client_requires_explicit_r2_credentials(monkeypatch):
         source_storage._s3_client()
 
 
+#: Cloudflare R2 accepts only these as a region hint. An AWS region is not one of them,
+#: and R2 rejects the signed request with InvalidRegionName rather than ignoring it.
+R2_VALID_REGIONS = {"wnam", "enam", "weur", "eeur", "apac", "oc", "auto"}
+
+
+def test_the_r2_client_never_signs_with_an_aws_region(monkeypatch):
+    """Every R2 call failed in the deployment because of this one value.
+
+    `_s3_client` passed `settings.AWS_REGION or "auto"`. The fallback looks like it
+    covers R2, but AWS_REGION is set — legitimately and unavoidably — to the real AWS
+    region for Secrets Manager and ECS, so the fallback never fired and R2 answered:
+
+        ClientError: An error occurred (InvalidRegionName) when calling the PutObject
+        operation: The region name 'ap-southeast-1' is not valid.
+
+    The regression is only visible with AWS_REGION SET, which is why it survived: with
+    it unset the fallback produces the right answer and everything passes.
+    """
+    captured = {}
+
+    def fake_client(service, **kwargs):
+        captured.update(kwargs)
+        captured["service"] = service
+        return object()
+
+    monkeypatch.setattr(settings, "SOURCE_STORAGE_BACKEND", "r2")
+    monkeypatch.setattr(settings, "SOURCE_STORAGE_BUCKET", "private-kb")
+    monkeypatch.setattr(
+        settings, "S3_ENDPOINT_URL", "https://account-id.r2.cloudflarestorage.com"
+    )
+    monkeypatch.setattr(settings, "R2_ACCOUNT_ID", None)
+    monkeypatch.setattr(settings, "R2_ACCESS_KEY_ID", "access-key")
+    monkeypatch.setattr(settings, "R2_SECRET_ACCESS_KEY", "secret-key")
+    # The deployed value, set from var.region by infra/modules/stack/main.tf.
+    monkeypatch.setattr(settings, "AWS_REGION", "ap-southeast-1")
+
+    import boto3
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    source_storage._s3_client()
+
+    assert captured["region_name"] in R2_VALID_REGIONS, captured["region_name"]
+    assert captured["region_name"] != "ap-southeast-1"
+    assert captured["endpoint_url"] == "https://account-id.r2.cloudflarestorage.com"
+
+
 def test_r2_upload_uses_private_tenant_scoped_object_key(monkeypatch):
     captured = {}
 
@@ -87,6 +133,33 @@ def test_r2_upload_uses_private_tenant_scoped_object_key(monkeypatch):
     assert create_presigned_source_url(key) == "https://private-r2.example/signed"
     assert captured["presign"]["ClientMethod"] == "get_object"
     assert captured["presign"]["ExpiresIn"] == 300
+
+
+def test_a_backend_failure_is_raised_as_a_catchable_storage_error(monkeypatch):
+    """botocore's ClientError is neither FileNotFoundError nor RuntimeError, so it slipped
+    through every R2 guard in articles.py and reached the client as a bare 500."""
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {"Error": {"Code": "InvalidRegionName", "Message": "not valid"}}, "PutObject"
+    )
+
+    class Client:
+        def put_object(self, **kwargs):
+            raise error
+
+    monkeypatch.setattr(settings, "SOURCE_STORAGE_BACKEND", "r2")
+    monkeypatch.setattr(settings, "SOURCE_STORAGE_BUCKET", "private-kb")
+    monkeypatch.setattr(settings, "SOURCE_STORAGE_PREFIX", "sources")
+    monkeypatch.setattr(source_storage, "_s3_client", lambda: Client())
+
+    with pytest.raises(source_storage.SourceStorageError) as raised:
+        save_source("a" * 64, "report.pdf", b"document", "acme.test")
+
+    # RuntimeError is what the call sites in articles.py already catch, so subclassing it
+    # is what makes them return 503 instead of leaking a 500.
+    assert isinstance(raised.value, RuntimeError)
+    assert raised.value.__cause__ is error
 
 
 def test_source_media_type_is_derived_from_a_safe_allow_list():

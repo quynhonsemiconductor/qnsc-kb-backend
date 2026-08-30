@@ -33,6 +33,18 @@ _SAFE_SOURCE_MEDIA_TYPES = {
 }
 
 
+class SourceStorageError(RuntimeError):
+    """The storage backend refused or could not complete the request.
+
+    Subclasses RuntimeError deliberately. The R2 call sites in articles.py already catch
+    ``(FileNotFoundError, RuntimeError)`` for CONFIGURATION failures raised by
+    ``_s3_client``, but botocore's ClientError is neither, so a backend failure escaped
+    every one of those guards as a bare 500 — which is exactly how an InvalidRegionName
+    on every upload reached the browser as an opaque error. Raising this instead means
+    those existing guards cover backend failures too, without editing them.
+    """
+
+
 def _safe_name(filename: str) -> str:
     name = Path(filename).name
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "source.bin"
@@ -198,7 +210,20 @@ def _s3_client() -> Any:
     except ImportError as exc:
         raise RuntimeError("boto3 is required for S3-backed source storage") from exc
     kwargs: dict[str, Any] = {
-        "region_name": settings.AWS_REGION or "auto",
+        # "auto", NEVER settings.AWS_REGION. This client only ever talks to Cloudflare
+        # R2 — the endpoint check above rejects anything else — and R2 accepts only its
+        # own region hints: wnam, enam, weur, eeur, apac, oc, auto. An AWS region is not
+        # one of them, so R2 rejects the signed request outright:
+        #
+        #   ClientError: An error occurred (InvalidRegionName) when calling the
+        #   PutObject operation: The region name 'ap-southeast-1' is not valid.
+        #
+        # This read `settings.AWS_REGION or "auto"`, and the fallback looks like it
+        # covers this — but AWS_REGION is set, legitimately and unavoidably, to the real
+        # AWS region for Secrets Manager and ECS (infra sets it from var.region). So the
+        # fallback never fired in a deployment and every R2 call failed. Not just
+        # uploads: this client backs put, get, delete, head, list and presign.
+        "region_name": "auto",
         "endpoint_url": endpoint_url,
     }
     kwargs.update(
@@ -221,14 +246,19 @@ def _s3_key(source_hash: str, filename: str, company_domain: str | None = None) 
 def _s3_put(
     source_hash: str, filename: str, data: bytes, company_domain: str | None = None
 ) -> str:
+    from botocore.exceptions import BotoCoreError, ClientError
+
     key = _s3_key(source_hash, filename, company_domain)
-    _s3_client().put_object(
-        Bucket=settings.SOURCE_STORAGE_BUCKET,
-        Key=key,
-        Body=data,
-        ContentType="application/octet-stream",
-        Metadata={"sha256": source_hash},
-    )
+    try:
+        _s3_client().put_object(
+            Bucket=settings.SOURCE_STORAGE_BUCKET,
+            Key=key,
+            Body=data,
+            ContentType="application/octet-stream",
+            Metadata={"sha256": source_hash},
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise SourceStorageError(f"R2 rejected the source upload: {exc}") from exc
     return f"s3://{settings.SOURCE_STORAGE_BUCKET}/{key}"
 
 

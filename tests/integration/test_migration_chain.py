@@ -8,7 +8,11 @@ def test_migrations_have_one_current_head():
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20260820_63"]
+    # Pinned on purpose: a new revision must be a deliberate act, and a second head
+    # means one was chained off the wrong parent. Bumped for 20260829_66, which records
+    # what the provider calls each ACL principal, so the mapping screen can show a name
+    # instead of a bare GUID.
+    assert script.get_heads() == ["20260829_66"]
 
 
 def test_production_compose_is_explicitly_hardened():

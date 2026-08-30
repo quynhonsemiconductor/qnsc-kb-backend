@@ -175,8 +175,12 @@ locals {
     { name = "EMBEDDING_RUNTIME", value = var.embedding_runtime },
     { name = "GEMINI_MODEL", value = var.gemini_model },
 
-    // localhost is correct under awsvpc: every container in a task shares one network
-    // namespace, so the API and worker reach the ClamAV sidecar without exposing it.
+    // localhost is correct under awsvpc ONLY because BOTH tasks carry their own ClamAV
+    // sidecar. The namespace is shared per TASK, not per cluster: the api and worker are
+    // separate services, so the api reaching the worker's sidecar on localhost was never
+    // possible. It resolved to nothing, every upload failed closed with "Malware scanning
+    // is unavailable", and because connector ingestion runs in the worker — which did
+    // have one — only the UI upload path was affected. See local.clamav_container.
     { name = "MALWARE_SCAN_ENABLED", value = tostring(var.malware_scan_enabled) },
     { name = "MALWARE_SCANNER_HOST", value = var.malware_scan_enabled ? "localhost" : "" },
     { name = "MALWARE_SCANNER_PORT", value = "3310" },
@@ -377,6 +381,55 @@ resource "aws_secretsmanager_secret_version" "tunnel_token" {
   secret_string = module.tunnel[0].token
 }
 
+// ── ClamAV sidecar ───────────────────────────────────────────────────────────
+// One definition, used by BOTH the api and the worker task. It is not a shared service:
+// each task runs its own copy, because clamd is reached over localhost and awsvpc scopes
+// that to a task. Duplicated memory is the price of a synchronous scan on the upload path
+// — the API blocks on it in `_validate_source_bytes`, so it cannot wait on another
+// service. If the API ever scales past a couple of tasks, replace this with one clamd
+// behind Service Connect rather than paying ~2 GB per task.
+locals {
+  clamav_container = var.malware_scan_enabled ? [
+    {
+      name      = "clamav"
+      image     = "clamav/clamav:1.4"
+      essential = true
+      // 2048, matching what the comment beside it always said: the signature database is
+      // ~2 GB resident. At 1024 it did not fit, and the way that presented is worth
+      // recording — clamd came up only on the runs where the signature UPDATE had
+      // FAILED:
+      //
+      //   ERROR: Database test FAILED.  ...  Update failed.
+      //   socket found, clamd started.
+      //
+      // A failed update leaves the older, smaller database, which fits; a successful one
+      // does not. So the task cycled — two tasks killed for "failed container health
+      // checks" before a third happened to get a failed update and went healthy. Roughly
+      // 30 minutes per worker deploy, and it looked intermittent rather than like a
+      // sizing error.
+      cpu    = 256
+      memory = 2048
+      // clamd loads the whole database before it answers anything, so the start period
+      // has to cover a cold load or the task is killed and restarted forever.
+      //
+      // 300 is the CEILING, not a choice: ECS rejects anything higher —
+      //   ClientException: Health check startPeriod must be less than or equal to the
+      //   maximum allowed value 300
+      // I raised it to 600 on the theory that the ~3.4 GB image pull had eaten the
+      // window; that was wrong twice over. The pull happens BEFORE the container starts,
+      // so it never consumes the start period at all, and the limit forbids it regardless.
+      // The memory above is the actual fix.
+      healthCheck = {
+        command     = ["CMD-SHELL", "clamdcheck.sh || exit 1"]
+        interval    = 60
+        timeout     = 10
+        retries     = 3
+        startPeriod = 300
+      }
+    },
+  ] : []
+}
+
 // ── Cloudflare Tunnel sidecar (api only) ─────────────────────────────────────
 // Ingress without an ALB: cloudflared dials out, so the task needs no inbound listener
 // and no public IPv4. The worker has no HTTP surface and gets none.
@@ -387,6 +440,20 @@ module "tunnel_api" {
   app_port                = 8000
   log_group               = local.api_log_group
   region                  = var.region
+
+  // 512, not the module's 128 default. That default is a HARD limit — the module sets
+  // `memory` and `memoryReservation` to the same value — and its own documentation says
+  // to raise it for "a task holding many long-lived SSE connections", which is precisely
+  // what this product is: the AI answer path streams tokens over SSE for the length of a
+  // generation, and source uploads push up to 25 MB through the same connector.
+  //
+  // The sidecar is `essential = true`, so this is not a degraded-tunnel failure mode: if
+  // cloudflared is OOM-killed the TASK dies and is replaced, and every request in flight
+  // is reset with no HTTP response at all. In the browser that surfaces as a bare
+  // "Network Error" with no status and no CORS headers, which is indistinguishable from
+  // the API being down — and it reproduced from outside the browser as an intermittent
+  // connection reset on large multipart POSTs while small requests stayed reliable.
+  memory = 512
 }
 
 // ── API service ───────────────────────────────────────────────────────────────
@@ -447,7 +514,22 @@ module "api" {
   secret_arns = concat(local.secret_iam_arns, [module.rds.master_secret_arn], aws_secretsmanager_secret.tunnel_token[*].arn)
   kms_key_arn = local.kms_key_arn
 
-  additional_containers = module.tunnel_api.container_definitions
+  // The tunnel AND clamav. The api scans uploads synchronously in-process
+  // (articles.py -> extract_source_pages -> _validate_source_bytes), so it needs a
+  // clamd of its own on localhost; the worker's is in a different task.
+  additional_containers = concat(
+    module.tunnel_api.container_definitions,
+    [for container in local.clamav_container : merge(container, {
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = local.api_log_group
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "clamav"
+        }
+      }
+    })],
+  )
 
   tags = local.tags
 }
@@ -516,43 +598,7 @@ module "worker" {
         }
       }
     },
-    ], var.malware_scan_enabled ? [
-    {
-      name      = "clamav"
-      image     = "clamav/clamav:1.4"
-      essential = true
-      // 2048, matching what the comment beside it always said: the signature database is
-      // ~2 GB resident. At 1024 it did not fit, and the way that presented is worth
-      // recording — clamd came up only on the runs where the signature UPDATE had
-      // FAILED:
-      //
-      //   ERROR: Database test FAILED.  ...  Update failed.
-      //   socket found, clamd started.
-      //
-      // A failed update leaves the older, smaller database, which fits; a successful one
-      // does not. So the task cycled — two tasks killed for "failed container health
-      // checks" before a third happened to get a failed update and went healthy. Roughly
-      // 30 minutes per worker deploy, and it looked intermittent rather than like a
-      // sizing error.
-      cpu    = 256
-      memory = 2048
-      // clamd loads the whole database before it answers anything, so the start period
-      // has to cover a cold load or the task is killed and restarted forever.
-      //
-      // 300 is the CEILING, not a choice: ECS rejects anything higher —
-      //   ClientException: Health check startPeriod must be less than or equal to the
-      //   maximum allowed value 300
-      // I raised it to 600 on the theory that the ~3.4 GB image pull had eaten the
-      // window; that was wrong twice over. The pull happens BEFORE the container starts,
-      // so it never consumes the start period at all, and the limit forbids it regardless.
-      // The memory above is the actual fix.
-      healthCheck = {
-        command     = ["CMD-SHELL", "clamdcheck.sh || exit 1"]
-        interval    = 60
-        timeout     = 10
-        retries     = 3
-        startPeriod = 300
-      }
+    ], [for container in local.clamav_container : merge(container, {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -561,8 +607,7 @@ module "worker" {
           "awslogs-stream-prefix" = "clamav"
         }
       }
-    },
-  ] : [])
+  })])
 
   tags = local.tags
 }

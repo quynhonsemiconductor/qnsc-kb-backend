@@ -140,7 +140,11 @@ def test_long_documents_are_split_into_bounded_ai_requests(monkeypatch):
         content_restructure, "resolve_provider", lambda model: _Provider()
     )
     monkeypatch.setattr(content_restructure, "complete", fake_complete)
-    monkeypatch.setattr(settings, "RESTRUCTURE_MAX_CHARS", len(source) // 2)
+    # RESTRUCTURE_SECTION_CHARS is what drives splitting now. RESTRUCTURE_MAX_CHARS kept
+    # its old name but narrowed to one job: refusing a document too large to section at
+    # all. Splitting only at MAX_CHARS meant nothing real was ever split, and the one
+    # path that did split ran sequentially.
+    monkeypatch.setattr(settings, "RESTRUCTURE_SECTION_CHARS", len(source) // 2)
 
     result = _run(
         content_restructure.restructure_document("Manual", source, enabled=True)
@@ -149,3 +153,6 @@ def test_long_documents_are_split_into_bounded_ai_requests(monkeypatch):
     assert result.status == "llm"
     assert len(calls) == 3
     assert all(len(call) <= len(source) // 2 for call in calls)
+    # Order is reassembly-critical: the joined body must follow the source, not whichever
+    # section the provider happened to finish first.
+    assert calls == sorted(calls, key=source.index)

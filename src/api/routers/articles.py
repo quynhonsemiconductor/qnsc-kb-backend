@@ -120,30 +120,106 @@ async def _read_upload_limited(file: UploadFile) -> bytes:
     return bytes(data)
 
 
+async def _reservation_guards_live_content(
+    db: AsyncSession, fingerprint: Any
+) -> bool:
+    """Whether a source-hash reservation still points at something that exists.
+
+    Article deletion is a SOFT delete, and the DocumentSource duplicate check is written
+    to ignore deleted articles so "a document can be uploaded again after removal". This
+    reservation was not, and nothing has ever deleted these rows — not
+    `soft_delete_article`, not rejection. So an `approved` fingerprint outlived its
+    article and refused the same file forever: 409 duplicate_document for a document
+    that no longer exists anywhere in the product, unfixable by deleting every article.
+
+    A LIVE draft or article must still block, which is the reservation's actual job —
+    closing the concurrent-upload race and stopping a genuine re-upload. Only a
+    reservation whose subject is gone is released.
+    """
+    if fingerprint.status == "approved":
+        article = (
+            await db.get(Article, fingerprint.article_id)
+            if fingerprint.article_id
+            else None
+        )
+        return bool(
+            article
+            and article.status != "deleted"
+            and article.lifecycle_status == "active"
+        )
+    if fingerprint.status == "pending":
+        # A draft awaiting review SHOULD still block: the document is in the queue.
+        draft = (
+            await db.get(PendingDraft, fingerprint.draft_id)
+            if fingerprint.draft_id
+            else None
+        )
+        return bool(draft and draft.status != "rejected")
+    return False
+
+
+def _parse_department_ids(department_ids: str | None) -> list[uuid.UUID] | None:
+    """Decode the multipart form's JSON department selection."""
+    if not department_ids:
+        return None
+    try:
+        raw_ids = json.loads(department_ids)
+        if not isinstance(raw_ids, list):
+            raise ValueError
+        return [uuid.UUID(str(item)) for item in raw_ids]
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=422, detail="The department selection is invalid"
+        ) from exc
+
+
 async def _resolve_upload_departments(
     db: AsyncSession,
     current_user: User,
     dept: str | None,
-    department_ids: str | None,
-) -> list[Any]:
-    if department_ids:
-        try:
-            raw_ids = json.loads(department_ids)
-            if not isinstance(raw_ids, list):
-                raise ValueError
-            selected_ids = [uuid.UUID(str(item)) for item in raw_ids]
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise HTTPException(
-                status_code=422, detail="The department selection is invalid"
-            ) from exc
-        return await resolve_active_departments(
-            db, current_user.company_domain, selected_ids
+    department_ids: list[uuid.UUID] | None,
+) -> tuple[Any, list[Any]]:
+    """Return (primary organisational department, access audiences).
+
+    THESE ARE TWO DIFFERENT THINGS and were previously the same list. `department_ids` is
+    an audience selection — `Article.departments` joins it with `kind == "access"`, and
+    the permission checks in permissions.py and rbac.py read only access-kind rows. The
+    article's `dept` is an ORGANISATIONAL department, and `approve_draft` re-resolves it
+    through `resolve_active_department`, which requires `kind == "org"`.
+
+    Taking the primary from `selected_departments[0]` wrote an access group's name into
+    `dept`, so a draft uploaded into "public" was created happily and could then never be
+    approved — every attempt returned 422 "Department does not exist or is inactive"
+    about a department that plainly existed and was active. Both upload paths did it.
+    """
+    audiences: list[Any] = (
+        await resolve_active_departments(
+            db, current_user.company_domain, department_ids
         )
-    return [
-        await resolve_active_department(
-            db, current_user.company_domain, dept or current_user.dept, required=True
+        if department_ids
+        else []
+    )
+    # An explicit `dept` wins; otherwise prefer an org department the caller actually
+    # selected, and fall back to the uploader's own. Resolving through
+    # resolve_active_department is what enforces kind == "org" in ONE place.
+    primary_name = (
+        dept
+        or next(
+            (
+                department.name
+                for department in audiences
+                if getattr(department, "kind", "org") == "org"
+            ),
+            None,
         )
-    ]
+        or current_user.dept
+    )
+    primary = await resolve_active_department(
+        db, current_user.company_domain, primary_name, required=True
+    )
+    # An audience-less upload keeps its previous shape: the primary is also the only row
+    # written to Article.departments, where an org-kind row is simply never loaded back.
+    return primary, (audiences or [primary])
 
 
 # Schema definitions
@@ -527,10 +603,10 @@ async def upload_source(
                 headers={"Retry-After": str(retry_after)},
             )
         db.info[rate_marker] = True
-    selected_departments = await _resolve_upload_departments(
-        db, current_user, dept, department_ids
+    primary_department, selected_departments = await _resolve_upload_departments(
+        db, current_user, dept, _parse_department_ids(department_ids)
     )
-    upload_dept = selected_departments[0].name
+    upload_dept = primary_department.name
     upload_resource = Article(
         company_domain=current_user.company_domain,
         dept=upload_dept,
@@ -612,13 +688,23 @@ async def upload_source(
         await db.delete(fingerprint)
         await db.flush()
     if fingerprint and fingerprint.status in {"pending", "approved"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "duplicate_document",
-                "message": "This document already exists.",
-            },
+        if await _reservation_guards_live_content(db, fingerprint):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_document",
+                    "message": "This document already exists.",
+                },
+            )
+        # The draft was rejected or the article deleted, so the reservation guards
+        # nothing. Release it rather than refuse the upload forever.
+        logger.info(
+            "Releasing a stale source reservation",
+            source_hash=source_hash,
+            fingerprint_status=fingerprint.status,
         )
+        await db.delete(fingerprint)
+        await db.flush()
     exact_stmt = (
         select(DocumentSource)
         .join(DocumentSource.article)
@@ -657,9 +743,20 @@ async def upload_source(
         # that the uploaded binary is a duplicate. The hash check above is
         # the only hard duplicate gate.
         similarity_level = "very_high"
-    storage_key = await asyncio.to_thread(
-        save_source, source_hash, filename, data, current_user.company_domain
-    )
+    try:
+        storage_key = await asyncio.to_thread(
+            save_source, source_hash, filename, data, current_user.company_domain
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        # The only R2 call site that lacked this guard, which is why an InvalidRegionName
+        # on every upload surfaced as an unhandled 500 rather than the 503 its three
+        # siblings already return.
+        logger.exception(
+            "Source upload storage failed", filename=filename, error=str(exc)
+        )
+        raise HTTPException(
+            status_code=503, detail="Private R2 upload storage is unavailable"
+        ) from exc
     draft = PendingDraft(
         title=filename.rsplit(".", 1)[0][:255],
         company_domain=current_user.company_domain,
@@ -854,23 +951,12 @@ async def create_source_upload_intent(
     filename = Path(request.filename).name.strip()[:255] or "uploaded-source"
     if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=422, detail="Unsupported file type")
-    selected_departments = (
-        await resolve_active_departments(
-            db, current_user.company_domain, request.department_ids
-        )
-        if request.department_ids
-        else [
-            await resolve_active_department(
-                db,
-                current_user.company_domain,
-                request.dept or current_user.dept,
-                required=True,
-            )
-        ]
+    primary_department, selected_departments = await _resolve_upload_departments(
+        db, current_user, request.dept, request.department_ids
     )
     upload_resource = Article(
         company_domain=current_user.company_domain,
-        dept=selected_departments[0].name,
+        dept=primary_department.name,
         owner_id=current_user.id,
         departments=selected_departments,
     )
@@ -934,7 +1020,10 @@ async def create_source_upload_intent(
                 "status": existing_draft.status,
                 "filename": existing_draft.original_filename or filename,
             }
-        if fingerprint.status in {"pending", "approved"} or (
+        if (
+            fingerprint.status in {"pending", "approved"}
+            and await _reservation_guards_live_content(db, fingerprint)
+        ) or (
             fingerprint.status == "uploading"
             and existing_draft
             and existing_draft.status == "draft"
@@ -958,7 +1047,7 @@ async def create_source_upload_intent(
     draft = PendingDraft(
         title=filename.rsplit(".", 1)[0][:255],
         company_domain=current_user.company_domain,
-        dept=selected_departments[0].name,
+        dept=primary_department.name,
         source_ref=f"upload://{filename}",
         source_hash=request.source_hash.lower(),
         storage_key=storage_key,
@@ -1379,7 +1468,25 @@ async def create_article(
                     detail="The primary department must be one of the selected departments",
                 )
         else:
-            primary_department = selected_departments[0]
+            # Resolved by NAME rather than taken as-is, so kind == "org" is enforced here
+            # too: `dept` is an organisational department, while department_ids is an
+            # access-audience selection. Taking selected_departments[0] blindly wrote an
+            # access group's name into Article.dept — the same defect that made uploaded
+            # drafts unapprovable.
+            primary_department = await resolve_active_department(
+                db,
+                current_user.company_domain,
+                next(
+                    (
+                        department.name
+                        for department in selected_departments
+                        if getattr(department, "kind", "org") == "org"
+                    ),
+                    None,
+                )
+                or current_user.dept,
+                required=True,
+            )
     else:
         primary_department = await resolve_active_department(
             db, current_user.company_domain, article_in.dept, required=True

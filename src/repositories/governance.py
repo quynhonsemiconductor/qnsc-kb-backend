@@ -186,7 +186,24 @@ class GovernanceRepository:
         return result.scalars().all()
 
     # Gap Queue
+    #: Taken from the column rather than written out, so the two cannot drift apart.
+    _GAP_QUERY_CHARS = Gap.__table__.c.query.type.length
+
     async def log_gap(self, query: str, company_domain: str, dept: str | None = None) -> Gap:
+        """Record a query that found nothing.
+
+        The query is truncated to the column width. It used to be written whole into a
+        VARCHAR(255), so a longer query raised StringDataRightTruncationError -- and
+        because the gap is recorded from inside search, that killed the search itself.
+        A 281-character question returned a 500 instead of "no results".
+
+        Truncating rather than widening the column is deliberate: `query` carries a
+        unique index, and a btree entry has a hard size limit, so an unbounded value
+        moves the failure rather than removing it. The cost is that two very long
+        queries sharing a 255-character prefix count as one gap, which for a
+        what-are-people-not-finding tally is an acceptable trade.
+        """
+        query = (query or "")[: self._GAP_QUERY_CHARS]
         # A query can legitimately be a gap in more than one tenant.
         result = await self.db.execute(
             select(Gap).where(Gap.query == query, Gap.company_domain == company_domain)

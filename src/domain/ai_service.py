@@ -229,18 +229,43 @@ def _resolve_parent_context(results: list[dict]) -> list[dict]:
     )
 
 
+def _per_article_cap(parents: list[dict]) -> int:
+    """How many parents one article may contribute.
+
+    RAG_MAX_PARENTS_PER_ARTICLE is a DIVERSITY guard: it stops one long document
+    crowding out every other source. Applied flatly it also starves an answer when
+    there is nothing to diversify across — a knowledge base holding one article fed the
+    model 3 parents out of a budget of 8, so two thirds of the prompt went unused and
+    the answer read as a handful of disconnected fragments. Questions whose answer sat
+    outside those 3 came back as "the knowledge base does not contain this", about a
+    document that did.
+
+    So the cap scales to what is actually available: with enough distinct articles to
+    fill the budget it is unchanged, and it only relaxes when spreading the budget
+    evenly would leave it unspent. The global parent, character and token budgets still
+    bound everything — this only stops the per-article guard biting below them.
+    """
+    distinct = len({str(parent.get("article_id") or "") for parent in parents})
+    if distinct <= 0:
+        return settings.RAG_MAX_PARENTS_PER_ARTICLE
+    even_share = -(-settings.RAG_MAX_CONTEXT_PARENTS // distinct)  # ceiling division
+    return max(settings.RAG_MAX_PARENTS_PER_ARTICLE, even_share)
+
+
 def _select_context(results: list[dict]) -> list[dict]:
     """Select high-value, diverse parents within a bounded prompt budget."""
     selected: list[dict] = []
     total_chars = 0
     total_tokens = 0
     article_counts: dict[str, int] = {}
-    for result in _resolve_parent_context(results):
+    parents = _resolve_parent_context(results)
+    per_article_cap = _per_article_cap(parents)
+    for result in parents:
         score = float(result.get("score") or 0.0)
         if score < settings.RAG_MIN_CONTEXT_SCORE:
             continue
         article_id = str(result.get("article_id") or "")
-        if article_counts.get(article_id, 0) >= settings.RAG_MAX_PARENTS_PER_ARTICLE:
+        if article_counts.get(article_id, 0) >= per_article_cap:
             continue
         context_text = compress_context(
             result.get("parent_text") or result.get("chunk_text") or "",
@@ -1170,6 +1195,16 @@ class AIService:
                     ],
                     timeout=settings.LLM_TIMEOUT_SECONDS,
                     max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
+                    # EXPLICIT, and the reason answers were being cut off mid-word.
+                    # `_payload` only sends glm's `thinking` field when this is not None,
+                    # so leaving it unset handed glm-4.5 its own default — reasoning
+                    # ENABLED — and those hidden tokens are spent from the same
+                    # max_tokens budget as the answer. The visible reply then ran out
+                    # part-way through the EXTENDED section, which is generated last in
+                    # the same call. content_restructure has always passed thinking=False;
+                    # only this path did not, and only glm was affected, because the
+                    # Gemini branch always sets thinkingConfig.
+                    thinking=False,
                     on_token=append_token if on_token else None,
                 )
             except ProviderRateLimitError as exc:

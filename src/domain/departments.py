@@ -32,6 +32,25 @@ async def resolve_active_department(
         )
     )
     if department is None:
+        # "does not exist or is inactive" is a LIE for the commonest cause of getting
+        # here: an access group's name. `public` exists, is active, and is rejected only
+        # because kind != "org" — and reporting that as non-existence sent a real
+        # investigation into CloudWatch instead of reading the message on screen.
+        # The extra query runs on the failure path only.
+        conflicting = await db.scalar(
+            select(Department).where(
+                Department.company_domain == company_domain,
+                func.lower(Department.name) == canonical.lower(),
+            )
+        )
+        if conflicting is not None and conflicting.active:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"'{conflicting.name}' is an access group, not an organisational "
+                    "department, so it cannot be an article's department"
+                ),
+            )
         raise HTTPException(status_code=422, detail="Department does not exist or is inactive")
     return department
 

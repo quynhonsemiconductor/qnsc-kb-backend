@@ -121,17 +121,56 @@ def _validate_source_bytes(filename: str, data: bytes) -> None:
 
 @lru_cache(maxsize=1)
 def _markitdown() -> Any:
+    """Load MarkItDown once, and say why when it cannot be loaded.
+
+    Every failure here used to return None in silence, and the caller logged the same
+    "markitdown_unavailable_or_failed" whether the package was missing or a particular
+    PDF had defeated it. A dependency that never loaded in any image was therefore
+    indistinguishable from a difficult file, and both looked survivable — so the
+    structure layer being dead on every single upload went unnoticed.
+
+    Cached, so an import failure is reported once per process rather than per document.
+    """
     try:
         from markitdown import MarkItDown
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "MarkItDown is not importable; Markdown conversion falls back to the "
+            "page extractor for every document",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
         return None
+
     try:
         return MarkItDown(enable_plugins=False)
     except TypeError:
         # MarkItDown 0.0.x has no plugin constructor argument. Its built-in
         # converters are still sufficient here because PaddleOCR remains the
         # scanned-page fallback.
+        pass
+    except Exception as exc:
+        # Only TypeError was caught before, so any OTHER constructor failure escaped
+        # this function entirely — past _convert_with_markitdown, which does not guard
+        # this call, and out through extract_source_markdown, which the upload endpoint
+        # does not guard either. An optional enhancement layer could take the whole
+        # upload down with a 500.
+        logger.warning(
+            "MarkItDown could not be constructed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return None
+
+    try:
         return MarkItDown()
+    except Exception as exc:
+        logger.warning(
+            "MarkItDown could not be constructed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return None
 
 
 def _convert_with_markitdown(filename: str, data: bytes) -> str:
@@ -153,9 +192,17 @@ def _convert_with_markitdown(filename: str, data: bytes) -> str:
         )
         value = getattr(result, "markdown", None) or getattr(result, "text_content", None) or ""
         return _clean(str(value))
-    except Exception:
+    except Exception as exc:
         # MarkItDown is an enhancement layer. A single unsupported or malformed
-        # file must still be handled by the existing format-specific extractor.
+        # file must still be handled by the existing format-specific extractor —
+        # but say which file and which error, so a systematic failure is
+        # distinguishable from one awkward document.
+        logger.warning(
+            "MarkItDown conversion failed; using the page extractor",
+            filename=filename,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
         return ""
 
 

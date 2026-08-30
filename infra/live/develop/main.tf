@@ -92,8 +92,12 @@ module "stack" {
   // one idle task it computes one. It would be inert while billing CloudWatch alarms —
   // and a floor of 1 instead would undo the scale-to-zero within minutes.
   api = {
-    cpu                = 512
-    memory             = 2048
+    // Raised to carry the ClamAV sidecar. clamd carves out 256 CPU / 2048 MB of the
+    // task, and the api scans uploads synchronously, so it needs one in ITS task —
+    // the worker's is in a different network namespace. The remaining 768/2048 is
+    // what the api and the tunnel had before this changed.
+    cpu                = 1024
+    memory             = 4096
     min_count          = 0
     max_count          = 2
     enable_autoscaling = false
@@ -117,7 +121,7 @@ module "stack" {
   // max_count is 1 and cannot be raised while beat lives here — two beat containers
   // double every scheduled job. The stack module enforces that with a validation.
   worker = {
-    cpu                = 1024
+    cpu                = 2048
     memory             = 4096
     min_count          = 0
     max_count          = 1
@@ -206,18 +210,19 @@ module "stack" {
   // cloud-connector polling. In develop that is the intended trade. Beat resumes at the
   // wake, and the outbox is a queue rather than a stream, so pending rows are replayed
   // then rather than lost. Production must not take this setting for that reason.
-  // THREE passes now, and 19:00 is the change: it ends the working day. 22:00 catches an
-  // evening deploy, 02:00 a late one. Was `0,3`.
   //
-  // Develop was up 08:00-00:00, so five of those sixteen hours were after everyone had
-  // stopped. Measured across both develop environments (rally and qnsc-kb), that
-  // 19:00-00:00 tail is ~$8.13/mo of RDS and Fargate.
+  // THREE passes were tried (19:00/22:00/02:00, replacing 0,3) to move the money — develop
+  // was up 08:00-00:00, so the 19:00-00:00 tail cost ~$8.13/mo of RDS and Fargate across
+  // both develop environments. rally moved BACK to `0,3` on 2026-08-19 on request: a 19:00
+  // stop cut the evening short, and develop being down while somebody is still working
+  // costs more in interruption than the hours save. This repo follows the same reversal —
+  // see rally's infra/live/develop/main.tf for the fuller history.
   //
-  // THE LATE PASSES ARE NOT OPTIONAL. A deploy at 20:00 wakes develop; with nothing after
-  // 19:00 it would stay up until the NEXT working day's stop — 23 hours, worse than the
-  // schedule this replaces. Each pass is a no-op when develop is already down
+  // TWO PASSES, and the second is not optional. 00:00 ends the day; 03:00 catches a deploy
+  // that landed late and woke the environment, because nothing else would put it back down
+  // until the next working day. Each pass is a no-op when develop is already down
   // (InvalidDBInstanceState, deliberately not retried).
-  idle_schedule = "cron(0 2,19,22 * * ? *)"
+  idle_schedule = "cron(0 0,3 * * ? *)"
 
   // 08:00 local, every day. Deploys already wake this environment, but that covers the
   // days it is CHANGED rather than the days it is USED — someone opening it on a
@@ -254,12 +259,29 @@ module "stack" {
   // dispatchable workflow), THEN remove this line. In that order.
   wake_schedule = "cron(0 8 ? * MON-FRI *)"
 
-  // Hosted. Fixes EMBEDDING_DIMENSION at 768, which is the pgvector column width and the
-  // HNSW index built by migration 20260802_03 — changing it later means a migration and
-  // re-embedding every chunk, because a query and a chunk embedded by different models
-  // are points in unrelated spaces.
-  embedding_model   = "BAAI/bge-m3"
-  embedding_version = "bge-m3-v1"
+  // MUST NAME THE MODEL THE IMAGE ACTUALLY CARRIES. This is not a preference: with
+  // embedding_runtime = "onnx" the loader reads whatever export sits in
+  // EMBEDDING_ONNX_DIR and ignores this value, while EMBEDDING_DIMENSION is derived FROM
+  // it (src/core/config.py). Name a different model and the two disagree, so every embed
+  // dies in src/lib/embeddings/base.py:
+  //
+  //   embedding backend returned 384 dimensions, but EMBEDDING_DIMENSION is 1024
+  //
+  // That is exactly what "BAAI/bge-m3" did here. The Dockerfile bakes
+  // paraphrase-multilingual-MiniLM-L12-v2 (384) via ARG EMBEDDING_MODEL, and the deploy
+  // pipeline cannot override it — qnsc-ci's build-push-ecr action takes no build-args —
+  // so bge-m3 was never in any image and RAG had never once worked here. Search fell back
+  // to keyword-only and indexing failed, silently.
+  //
+  // Moving to bge-m3 for real is a project, not an edit: a build-args passthrough in
+  // qnsc-ci, api memory to 6144 (2.27 GB of fp32 weights do not fit the ~1.5 GiB left
+  // after clamav), pooling to "cls", and EMBEDDING_MAX_TOKENS to 8192.
+  //
+  // Fixes EMBEDDING_DIMENSION at 384, which is the pgvector column width and the HNSW
+  // index; migration 20260810_51 re-aligns the column and REFUSES to run while any
+  // embeddings exist, because vectors of different widths are not comparable.
+  embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  embedding_version = "minilm-l12-v1"
   // Parity-gated ONNX flip (cosine 1.000000 vs torch, tests/unit/test_embedding_backends.py).
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"

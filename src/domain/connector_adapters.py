@@ -484,19 +484,10 @@ class SharePointAdapter(ConnectorAdapter):
         # authoritative drive for this item, not connector-level config.
         drive_id = change.corpus_id
         data = await self._request("GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/permissions")
-        result = []
+        result: list[dict[str, str]] = []
         for item in data.get("value", []):  # type: ignore[union-attr]
-            identities = item.get("grantedToV2") or item.get("grantedTo") or {}
-            principal = identities.get("user") or identities.get("group") or identities.get("siteUser") or identities.get("siteGroup")
-            if principal and principal.get("id"):
-                result.append({"principal_type": "group" if "group" in identities or "siteGroup" in identities else "user", "principal_id": str(principal["id"]), "role": ",".join(item.get("roles") or [])})
-            elif item.get("id"):
-                # Preserve link/domain/other permission entries as explicit
-                # unresolved principals. Dropping them would make a provider
-                # ACL look narrower than it is and could allow an unsafe
-                # approval or mapping decision.
-                result.append({"principal_type": "unknown", "principal_id": str(item["id"]), "role": ",".join(item.get("roles") or [])})
-        return result
+            result.extend(sharepoint_permission_principals(item))
+        return _dedupe_principals(result)
 
     async def download(self, change: NormalizedChange) -> bytes:
         drive_id = change.corpus_id
@@ -708,3 +699,127 @@ def adapter_for(connector: Connector) -> ConnectorAdapter:
     if connector.system == "google_drive":
         return GoogleDriveAdapter(connector)
     raise ConnectorProviderError(f"Unsupported connector provider: {connector.system}", retryable=False, code="unsupported_provider")
+
+
+#: The identity kinds a SharePoint identity set can carry, and what each is to us.
+_SHAREPOINT_IDENTITY_KINDS = {
+    "group": "group",
+    "siteGroup": "group",
+    "user": "user",
+    "siteUser": "user",
+    "application": "application",
+    "device": "device",
+}
+
+
+def _identity_sets(item: dict) -> list[dict]:
+    """Every identity set on one Graph permission entry.
+
+    Graph reports a grant in FOUR shapes, and only the two singular ones were read:
+
+        grantedToV2            one identity set
+        grantedTo              one identity set  (legacy)
+        grantedToIdentitiesV2  a LIST of identity sets
+        grantedToIdentities    a LIST of identity sets  (legacy)
+
+    The plural forms are what SharePoint uses for most library permissions, and they
+    were being missed entirely. A permission that only had them fell through to the
+    fallback below and was recorded as principal_type "unknown" with the PERMISSION
+    entry's own id standing in for a principal id -- an identifier that names nobody, is
+    different on every file, and can never be mapped to anything meaningful. That is why
+    a single library produced dozens of unmappable GUIDs that blocked every approval.
+    """
+    sets: list[dict] = []
+    for key in ("grantedToV2", "grantedTo"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            sets.append(value)
+    for key in ("grantedToIdentitiesV2", "grantedToIdentities"):
+        for value in item.get(key) or []:
+            if isinstance(value, dict):
+                sets.append(value)
+    return sets
+
+
+def sharepoint_permission_principals(item: dict) -> list[dict[str, str]]:
+    """Turn one Graph permission entry into the principals it actually grants to.
+
+    A link or an invitation is a real grant and is kept, but named for what it is
+    ("link:anonymous") rather than by the permission's own id. That identifier is stable
+    across files, so one mapping decision covers a whole library instead of one per
+    document -- and it says what is being decided, which a bare GUID never did.
+    """
+    role = ",".join(item.get("roles") or [])
+    principals: list[dict[str, str]] = []
+
+    for identity_set in _identity_sets(item):
+        for key, kind in _SHAREPOINT_IDENTITY_KINDS.items():
+            identity = identity_set.get(key)
+            if not isinstance(identity, dict) or not identity.get("id"):
+                continue
+            principals.append(
+                {
+                    "principal_type": kind,
+                    "principal_id": str(identity["id"]),
+                    "principal_name": str(
+                        identity.get("displayName") or identity.get("email") or ""
+                    ),
+                    "role": role,
+                }
+            )
+    if principals:
+        return principals
+
+    # No identity at all: a sharing link, an outstanding invitation, or something Graph
+    # has not told us about. These are NOT dropped -- an ACL that looks narrower than it
+    # is would let an unsafe approval through -- but they are named usefully.
+    link = item.get("link") or {}
+    scope = link.get("scope")
+    if scope:
+        return [
+            {
+                "principal_type": "link",
+                "principal_id": f"link:{scope}",
+                "principal_name": f"Sharing link ({scope})",
+                "role": role,
+            }
+        ]
+    email = (item.get("invitation") or {}).get("email")
+    if email:
+        return [
+            {
+                "principal_type": "user",
+                "principal_id": str(email).lower(),
+                "principal_name": str(email),
+                "role": role,
+            }
+        ]
+    if item.get("id"):
+        return [
+            {
+                "principal_type": "unknown",
+                "principal_id": str(item["id"]),
+                "principal_name": "",
+                "role": role,
+            }
+        ]
+    return []
+
+
+def _dedupe_principals(principals: list[dict[str, str]]) -> list[dict[str, str]]:
+    """One row per principal. The same identity appears in several sets on one item, and
+    the storage layer has a uniqueness constraint on (snapshot, type, id)."""
+    seen: dict[tuple[str, str], dict[str, str]] = {}
+    for principal in principals:
+        key = (principal["principal_type"], principal["principal_id"])
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = dict(principal)
+            continue
+        # Keep the widest role and any name we managed to learn.
+        roles = {part for part in (existing["role"], principal["role"]) if part}
+        existing["role"] = ",".join(sorted(roles))
+        existing["principal_name"] = existing.get("principal_name") or principal.get(
+            "principal_name", ""
+        )
+    return list(seen.values())

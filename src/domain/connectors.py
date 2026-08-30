@@ -3,7 +3,7 @@ import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from src.core.config import settings
@@ -14,11 +14,80 @@ from src.domain.source_extraction import (
     SourceExtractionError,
 )
 from src.domain.source_storage import save_source
+from src.models.article import Article
+from src.models.connectors import ExternalDocument
 from src.models.governance import PendingDraft, AuditLog
 from src.models.ops import Connector, ConnectorJob
 from src.repositories.governance import GovernanceRepository
 from src.domain.similarity import find_similar_documents, classify_similarity
 from src.models.user import User
+
+async def document_breakdown(db: AsyncSession, connector_id: uuid.UUID) -> dict[str, int]:
+    """Where one source's documents have actually got to.
+
+    A sync summary reports what one RUN did -- checked, imported, skipped -- and then
+    that run is over. It could not answer "how much of this drive is live, and how much
+    is still waiting for a reviewer", which is the question an administrator actually
+    has. It is why a sync reporting 70 imported next to an empty Articles list read as a
+    failure rather than as a review queue: connector documents become PendingDrafts under
+    governed publication and only become Articles once somebody approves them.
+
+    Deleted documents are excluded throughout. A tombstone is not part of the corpus, and
+    counting one would make a drive look fuller than it is.
+    """
+    live = (
+        ExternalDocument.connector_id == connector_id,
+        ExternalDocument.state != "deleted",
+    )
+    # Grouped rather than one query per status: the set of draft statuses belongs to the
+    # governance workflow, and a count-per-status here would quietly stop covering a new
+    # one instead of failing.
+    draft_counts = {
+        status: int(count)
+        for status, count in (
+            await db.execute(
+                select(PendingDraft.status, func.count(PendingDraft.id))
+                .join(
+                    ExternalDocument,
+                    ExternalDocument.id == PendingDraft.external_document_id,
+                )
+                .where(*live)
+                .group_by(PendingDraft.status)
+            )
+        ).all()
+    }
+    total = int(await db.scalar(select(func.count(ExternalDocument.id)).where(*live)) or 0)
+    published = int(
+        await db.scalar(
+            select(func.count(ExternalDocument.id))
+            .join(Article, Article.id == ExternalDocument.article_id)
+            .where(
+                *live,
+                Article.status == "published",
+                Article.lifecycle_status == "active",
+            )
+        )
+        or 0
+    )
+    held = int(
+        await db.scalar(
+            select(func.count(ExternalDocument.id)).where(
+                *live, ExternalDocument.metadata_json["ingest_failure"].is_not(None)
+            )
+        )
+        or 0
+    )
+    return {
+        "total": total,
+        "published": published,
+        # The number that explains an empty Articles list after a successful sync.
+        "pending_review": draft_counts.get("pending", 0),
+        "draft": draft_counts.get("draft", 0),
+        "rejected": draft_counts.get("rejected", 0),
+        "approved": draft_counts.get("approved", 0),
+        "held": held,
+    }
+
 
 def _safe_folder(configured: str) -> Path:
     root = Path(settings.CONNECTOR_ROOT_PATH).resolve()

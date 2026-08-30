@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from typing import Any, Iterable
+
+import structlog
+
+_logger = structlog.get_logger()
 
 
 _TOKEN_RE = re.compile(r"[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9_-]{2,}")
@@ -142,20 +147,40 @@ def route_document_candidates(
     """
     department_list = list(departments)
     sections = _major_sections(title, markdown)
-    routed = []
-    for section in sections:
-        ids, suggestions, proposed = suggest_departments(
-            section["title"], section["body_md"], department_list
-        )
-        routed.append(
-            {
-                **section,
-                "department_ids": ids,
-                "department_suggestions": suggestions,
-                "proposed_department": proposed,
-            }
-        )
+    routed = [
+        {
+            **section,
+            **_assignment(
+                *suggest_departments(section["title"], section["body_md"], department_list)
+            ),
+        }
+        for section in sections
+    ]
+    return _finalize(title, markdown, department_list, routed)
 
+
+def _assignment(
+    ids: list[str], suggestions: list[dict[str, Any]], proposed: dict[str, str] | None
+) -> dict[str, Any]:
+    return {
+        "department_ids": ids,
+        "department_suggestions": suggestions,
+        "proposed_department": proposed,
+    }
+
+
+def _finalize(
+    title: str,
+    markdown: str,
+    department_list: list[Any],
+    routed: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse, merge and number routed sections.
+
+    Shared by the keyword path and the LLM path deliberately. A second copy of the
+    merge rule would be a second thing to keep in step, and the two would disagree the
+    first time either changed.
+    """
     # If no section can be linked to an existing department, keep the document
     # intact and offer one reviewable new-department suggestion instead.
     if not any(item["department_ids"] for item in routed):
@@ -191,3 +216,180 @@ def route_document_candidates(
     for position, item in enumerate(grouped, start=1):
         item["position"] = position
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# LLM-assisted routing
+#
+# The ranking above matches a document against a department's name and description
+# literally: no stemming, no synonyms, no meaning. `description` defaults to "", so on a
+# tenant where nobody has written them every score is zero -- nothing routes, and every
+# document instead proposes creating a new department named after its own filename.
+# Even with descriptions written, a lecture on static timing analysis only reaches the
+# right team if somebody thought to put "timing" in that team's description.
+#
+# So an LLM decides when one is configured, and the keyword ranking stays as the
+# fallback: unchanged, still computed for every section, and still the answer whenever
+# the model declines, errors, or is switched off.
+#
+# Departments are offered to the model as NUMBERS rather than UUIDs. A short integer is
+# cheap to emit, survives a truncated reply, and cannot be half-hallucinated into
+# something shaped like a real id. Every answer is checked against the list that was
+# sent, and anything else falls back rather than being guessed at.
+# ---------------------------------------------------------------------------
+
+#: Enough of a section to recognise its subject; the rest is prompt cost.
+_LLM_BODY_CHARS = 1_200
+#: Past this a document is being re-outlined, not routed, and the reply grows unbounded.
+_LLM_MAX_SECTIONS = 12
+
+_ROUTING_SYSTEM_PROMPT = (
+    "You assign sections of a document to the department that owns them in a company "
+    "knowledge base. Reply with JSON only, no prose: "
+    '{"assignments": [{"section": <int>, "department": <int>}]}. '
+    "Use only the department numbers given. Use 0 when no listed department is a "
+    "sensible owner. Include every section exactly once."
+)
+
+
+def _routing_prompt(
+    title: str, sections: list[dict[str, Any]], departments: list[Any]
+) -> str:
+    lines = ["DEPARTMENTS:"]
+    for index, department in enumerate(departments, start=1):
+        description = (getattr(department, "description", "") or "").strip()
+        suffix = f" - {description[:300]}" if description else ""
+        lines.append(f"{index}. {getattr(department, 'name', '')}{suffix}")
+    lines += ["", f"DOCUMENT: {title}", "", "SECTIONS:"]
+    for index, section in enumerate(sections, start=1):
+        lines.append(f"--- section {index}: {section.get('title') or ''}")
+        lines.append((section.get("body_md") or "")[:_LLM_BODY_CHARS])
+    return "\n".join(lines)
+
+
+def _parse_assignments(
+    reply: str, section_count: int, department_count: int
+) -> dict[int, int]:
+    """Read the reply, keeping only assignments that name things that exist.
+
+    Tolerant about how the JSON is wrapped -- models fence it, or add a sentence -- and
+    strict about what it says. An out-of-range number is dropped rather than clamped:
+    a wrong department is worse than no suggestion, because a reviewer reads a filled-in
+    field as something the system worked out.
+    """
+    text = reply.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    payload = json.loads(text[start : end + 1])
+
+    chosen: dict[int, int] = {}
+    for entry in payload.get("assignments") or []:
+        if not isinstance(entry, dict):
+            continue
+        section, department = entry.get("section"), entry.get("department")
+        # bool is an int subclass, and True would silently mean department 1.
+        if type(section) is not int or type(department) is not int:
+            continue
+        # 0 is a real answer meaning "no owner"; it leaves the section to the fallback.
+        if 1 <= section <= section_count and 1 <= department <= department_count:
+            chosen[section] = department
+    return chosen
+
+
+async def _llm_section_departments(
+    title: str, sections: list[dict[str, Any]], departments: list[Any]
+) -> dict[int, Any]:
+    """Map 1-based section number to a Department, or {} when the LLM cannot be used.
+
+    Never raises. A routing suggestion is something a reviewer sees and can change; it
+    must not be able to fail a document import, which this codebase has already paid
+    for once.
+    """
+    from src.core.config import settings
+
+    if not settings.DEPARTMENT_ROUTING_LLM_ENABLED:
+        return {}
+    if not departments or not sections or len(sections) > _LLM_MAX_SECTIONS:
+        return {}
+    try:
+        from src.domain.llm_client import complete, resolve_provider
+
+        if resolve_provider() is None:
+            return {}
+        reply, _tokens, _model, _provider = await complete(
+            [
+                {"role": "system", "content": _ROUTING_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": _routing_prompt(title, sections, departments),
+                },
+            ],
+            timeout=settings.DEPARTMENT_ROUTING_LLM_TIMEOUT,
+            # Hidden reasoning would spend the whole budget before the JSON appears.
+            thinking=False,
+            max_tokens=64 + 24 * len(sections),
+        )
+    except Exception:
+        _logger.warning(
+            "LLM department routing unavailable; using keyword ranking", exc_info=True
+        )
+        return {}
+
+    try:
+        chosen = _parse_assignments(reply, len(sections), len(departments))
+    except Exception:
+        _logger.warning("LLM department routing returned unreadable JSON", exc_info=True)
+        return {}
+    return {section: departments[index - 1] for section, index in chosen.items()}
+
+
+async def route_document_candidates_llm(
+    title: str, markdown: str, departments: Iterable[Any]
+) -> list[dict[str, Any]]:
+    """Route with the LLM when one is configured, and exactly as before when not.
+
+    The keyword ranking is computed for every section either way: it supplies the
+    reviewer's alternatives and the new-department proposal, and it is the whole answer
+    whenever the model has nothing to say.
+    """
+    department_list = list(departments)
+    sections = _major_sections(title, markdown)
+    baseline = [
+        suggest_departments(section["title"], section["body_md"], department_list)
+        for section in sections
+    ]
+    chosen = await _llm_section_departments(title, sections, department_list)
+
+    routed: list[dict[str, Any]] = []
+    for index, section in enumerate(sections):
+        ids, suggestions, proposed = baseline[index]
+        department = chosen.get(index + 1)
+        if department is not None:
+            department_id = str(department.id)
+            ids = [department_id]
+            # The model named a real owner, so there is nothing left to propose creating.
+            proposed = None
+            existing = next(
+                (item for item in suggestions if item["department_id"] == department_id),
+                None,
+            )
+            suggestions = [
+                existing
+                or {
+                    "department_id": department_id,
+                    "name": getattr(department, "name", ""),
+                    "description": getattr(department, "description", ""),
+                    # No keyword overlap is exactly why the LLM was worth asking.
+                    "score": 0,
+                }
+            ] + [
+                item for item in suggestions if item["department_id"] != department_id
+            ]
+        routed.append(
+            {**section, **_assignment(ids, suggestions[:3], proposed)}
+        )
+    return _finalize(title, markdown, department_list, routed)

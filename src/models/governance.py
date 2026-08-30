@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     DateTime,
+    Float,
     ForeignKey,
     String,
     Text,
@@ -282,3 +283,53 @@ class AuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     detail_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     user: Mapped["User | None"] = relationship("User")
+
+
+class ApprovalRule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """A rule the approval agent applies to pending drafts.
+
+    Structured filters decide WHICH drafts a rule looks at; the instruction decides what
+    to do with them. Splitting it that way keeps scoping cheap and deterministic -- no
+    model is asked whether a rule is relevant -- and means a mis-scoped rule is visible
+    in its own columns rather than buried in a sentence.
+
+    Both authorities default to False. A rule that nobody has explicitly given permission
+    to act can still be written, reviewed and dry-run, and it will do nothing. Publishing
+    to a whole company is not something to acquire by leaving a field unset.
+
+    There is deliberately no "agent user". The agent acts as `created_by`, through the
+    same GovernanceService calls a person uses, so it can never do something the author
+    could not do themselves and the audit trail names somebody accountable rather than a
+    machine.
+    """
+
+    __tablename__ = "approval_rules"
+    __table_args__ = (
+        Index("ix_approval_rules_company_active", "company_domain", "active"),
+    )
+
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: Lower runs first. The first rule that reaches a verdict decides.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+
+    # --- which drafts this rule applies to (all optional; null means "any") ---
+    connector_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("connectors.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    dept: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: Lowercased extensions including the dot, e.g. [".pdf", ".docx"].
+    file_extensions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    #: Skip anything this similar to existing content; a near-duplicate is a decision
+    #: about which article wins, which is not the agent's to make.
+    max_similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # --- what to do with them ---
+    instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    can_approve: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    can_reject: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )

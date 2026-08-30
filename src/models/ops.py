@@ -14,9 +14,17 @@ class Connector(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_sync: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     config_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     company_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False, default="local")
-    # Retained for compatibility with pre-Alembic connector rows. Current
-    # scheduling uses connector config and job mode; no API exposes this field.
-    sync_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
+    # NO sync_interval_minutes. It was kept here "for compatibility with pre-Alembic
+    # connector rows" while being read by nothing — and because SQLAlchemy SELECTs every
+    # mapped column, that compatibility gesture broke every database Alembic actually
+    # built. No migration ever creates the column (20260802_08 patches on the oauth
+    # columns beside it and skips this one), so schedule_cloud_connector_syncs died on
+    # every beat tick with
+    #
+    #   UndefinedColumnError: column connectors.sync_interval_minutes does not exist
+    #
+    # taking cloud connector polling down entirely. A legacy database keeps its column;
+    # unmapped, it is simply never referenced again.
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     oauth_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     oauth_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)

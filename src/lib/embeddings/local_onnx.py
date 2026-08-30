@@ -69,8 +69,9 @@ def _load() -> tuple[Any, Any]:
 
     logger.info("Loading ONNX embedding model", path=str(model_path))
     options = onnxruntime.SessionOptions()
-    # One model, many small requests: the default thread pool oversubscribes a 0.5 vCPU
-    # task and spends more time scheduling than embedding.
+    # Bounded to EMBEDDING_ONNX_THREADS rather than left to the default pool, which
+    # oversubscribes a small task and spends more time scheduling than embedding. The
+    # setting tracks the task's `cpu` in infra/live/*/main.tf — see the note beside it.
     options.intra_op_num_threads = settings.EMBEDDING_ONNX_THREADS
     options.inter_op_num_threads = 1
     session = onnxruntime.InferenceSession(
@@ -93,27 +94,76 @@ class OnnxEmbeddingProvider:
     def warm_up(self) -> None:
         _model.get()
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(
+        self, texts: list[str], task: str = "RETRIEVAL_DOCUMENT"
+    ) -> list[list[float]]:
+        # `task` is a hosted-provider concern; a local model embeds a question
+        # and a passage with the same weights.
+        """Embed in length-sorted batches, preserving the caller's order.
+
+        `enable_padding()` pads every encoding to the LONGEST member of the call, and
+        this used to hand the tokenizer an entire document at once — so one chunk that
+        reached the 128-token cap padded all of them to 128, and the model did a full
+        forward pass over the padding. Indexing a 38-page PDF is ~87 chunks whose real
+        lengths vary widely, so most of that width was zeros.
+
+        Sorting by length first means each batch pads to its own longest member instead
+        of the document's. Character length is the sort key rather than token length
+        because it is a good proxy here and costs no extra tokenisation pass.
+
+        Batching also bounds peak memory. The single-call version built one
+        `n_chunks x max_tokens` tensor, which for a 500-page document is thousands of
+        rows in a task that also holds clamd and PaddleOCR.
+
+        EMBEDDING_BATCH_SIZE now actually applies to this backend; before, only
+        local_torch honoured it.
+
+        ORDER IS PART OF THE CONTRACT: callers zip the result against their chunk list,
+        so the vectors are written back to their original positions.
+        """
         import numpy
 
-        session, tokenizer = _model.get()
-        encodings = tokenizer.encode_batch(texts)
+        if not texts:
+            return []
 
+        session, tokenizer = _model.get()
         # Feed only what this export actually declares. bge-m3 exports carry
         # token_type_ids; some models do not, and passing an undeclared input is a hard
         # ORT error rather than an ignored extra.
         declared = {i.name for i in session.get_inputs()}
-        feed = {
-            "input_ids": numpy.array([e.ids for e in encodings], dtype=numpy.int64),
-            "attention_mask": numpy.array(
-                [e.attention_mask for e in encodings], dtype=numpy.int64
-            ),
-            "token_type_ids": numpy.array(
-                [e.type_ids for e in encodings], dtype=numpy.int64
-            ),
-        }
-        outputs = session.run(None, {k: v for k, v in feed.items() if k in declared})
-        return _pool(outputs[0], feed["attention_mask"]).tolist()
+        batch_size = max(1, settings.EMBEDDING_BATCH_SIZE)
+        order = sorted(range(len(texts)), key=lambda index: len(texts[index]))
+        vectors: list[list[float] | None] = [None] * len(texts)
+
+        for start in range(0, len(order), batch_size):
+            window = order[start : start + batch_size]
+            encodings = tokenizer.encode_batch([texts[index] for index in window])
+            feed = {
+                "input_ids": numpy.array(
+                    [e.ids for e in encodings], dtype=numpy.int64
+                ),
+                "attention_mask": numpy.array(
+                    [e.attention_mask for e in encodings], dtype=numpy.int64
+                ),
+                "token_type_ids": numpy.array(
+                    [e.type_ids for e in encodings], dtype=numpy.int64
+                ),
+            }
+            outputs = session.run(
+                None, {k: v for k, v in feed.items() if k in declared}
+            )
+            pooled = _pool(outputs[0], feed["attention_mask"]).tolist()
+            for position, index in enumerate(window):
+                vectors[index] = pooled[position]
+
+        if any(vector is None for vector in vectors):
+            # Unreachable: every index in `order` is written exactly once. Raising
+            # rather than filtering because the filter would return a SHORTER list,
+            # and a shorter list is how every embedding after the gap ends up attached
+            # to the wrong chunk — the exact silent corruption this method's ordering
+            # is careful to avoid.
+            raise RuntimeError("embedding batches did not fill every input slot")
+        return [vector for vector in vectors if vector is not None]
 
 
 def _pool(last_hidden_state: Any, attention_mask: Any) -> Any:

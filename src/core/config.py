@@ -152,12 +152,26 @@ class Settings(BaseSettings):
     # correct here. The previous default of "cls" (right for bge-*) would have produced
     # perfectly valid vectors in the wrong space, degrading retrieval with no error.
     EMBEDDING_ONNX_POOLING: str = "mean"
-    EMBEDDING_ONNX_THREADS: int = 1
+    # 2, matched to the worker's 2048 CPU units. This was 1, justified by a comment in
+    # local_onnx.py about "a 0.5 vCPU task" — a sizing the worker has not had for some
+    # time, and the number was never revisited when it grew. One thread on two cores
+    # leaves half the task idle through the whole embedding pass.
+    #
+    # It is a CEILING tied to the task size, not a free dial: more threads than cores
+    # spends the difference on scheduling, which is what the original comment was right
+    # about. Raise this and the `cpu` in infra/live/*/main.tf together or not at all.
+    EMBEDDING_ONNX_THREADS: int = 2
     # This model's sentence_bert_config.json says max_seq_length 128, and its
     # max_position_embeddings is 512. The previous 8192 (bge-m3's window) would let the
     # tokenizer emit sequences the graph cannot accept.
     EMBEDDING_MAX_TOKENS: int = 128
     EMBEDDING_BATCH_SIZE: int = 32
+    # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
+    # embedding API during bulk ingestion, not an exceptional one: without a retry a
+    # single 429 fails the index for a whole article. Only 429 and 5xx are retried — a
+    # 400 means the request is wrong and repeating it just spends the quota again.
+    EMBEDDING_HTTP_MAX_ATTEMPTS: int = 4
+    EMBEDDING_HTTP_BACKOFF_SECONDS: float = 1.0
 
     CHUNKING_VERSION: str = "v2-structure-aware"
     EMBEDDING_DIMENSION: int | None = None
@@ -168,6 +182,25 @@ class Settings(BaseSettings):
     # characters leaves practical headroom for the system prompt and a 64K
     # lossless Markdown response, even for token-dense source languages.
     RESTRUCTURE_MAX_CHARS: int = 120000
+    # Restructuring regenerates the WHOLE document, so wall clock is bound by output
+    # tokens and grows with length. A 26,633-character upload measured 304 s as one
+    # call — against RESTRUCTURE_TIMEOUT_SECONDS of 300, which it cleared by a margin
+    # too thin to rely on. Past that edge the result is not an error but a silent
+    # fallback to unformatted text.
+    #
+    # Sectioning existed already but only above RESTRUCTURE_MAX_CHARS, which no real
+    # document reached, and it ran the sections SEQUENTIALLY — so the one path that did
+    # split was the slowest of all.
+    #
+    # 8000 splits that upload into 4 sections; run together they finish in about the
+    # time of one, and each sits far from the timeout. Smaller is faster and choppier:
+    # the seams between sections are where headings lose their thread, because each
+    # section is formatted without sight of its neighbours.
+    RESTRUCTURE_SECTION_CHARS: int = 8000
+    # Concurrent sections. The ceiling is the provider's rate limit, not ours — GLM
+    # refuses a burst rather than queueing it, and a refused section falls back to
+    # unformatted text for that part of the document.
+    RESTRUCTURE_MAX_CONCURRENCY: int = 4
     # Formatting is an optional enhancement. Keep review responsive and use
     # the lossless local fallback when the configured provider is slow.
     RESTRUCTURE_TIMEOUT_SECONDS: float = 300.0
@@ -199,7 +232,25 @@ class Settings(BaseSettings):
     # Output cap for the main RAG generation path. Without it, provider-side
     # output length is unbounded (cost/latency exposure); only Gemini enforced
     # its own cap before this setting existed.
-    RAG_MAX_ANSWER_TOKENS: int = 2048
+    #
+    # NOW UNCAPPED BY DEFAULT (None). 2048 cut replies off mid-word: ONE generation
+    # produces both the grounded answer and the EXTENDED section, split afterwards on
+    # the sentinel, so the cap was shared between them and the extended half is what ran
+    # out. Vietnamese also costs roughly twice the tokens per character that English
+    # does, so 2048 bought about half the answer it appeared to.
+    #
+    # None means the `max_tokens` field is simply not sent and the model stops when the
+    # answer is finished, which is the behaviour people expect. The runaway-generation
+    # exposure the cap guarded against is small in practice — a grounded answer ends
+    # when it ends — and it is now much smaller still, because the reasoning tokens that
+    # were consuming the budget are disabled on this path.
+    #
+    # Set an integer to put the bound back; the value is passed straight through. Two
+    # things to know if you do. Gemini is never uncapped: its branch falls back to
+    # GEMINI_MAX_OUTPUT_TOKENS when this is None. And a very long answer becomes part of
+    # the next turn's history, which RAG_HISTORY_MAX_CHARS trims at 9,000 characters, so
+    # a rambling reply crowds out the conversation before it costs anything else.
+    RAG_MAX_ANSWER_TOKENS: int | None = None
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
     OIDC_CLIENT_SECRET: str | None = None
@@ -227,6 +278,22 @@ class Settings(BaseSettings):
     CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: int = 30
     CONNECTOR_RECONCILE_INTERVAL_MINUTES: int = 360
     CONNECTOR_AUTO_PUBLISH_MODE: str = "governed"
+    # Department routing asks the LLM first and falls back to keyword ranking. The
+    # fallback is not a degraded mode: it is what runs whenever no provider is
+    # configured, and it is what every existing deployment already had.
+    DEPARTMENT_ROUTING_LLM_ENABLED: bool = True
+    # Short on purpose. This runs inside document ingest, once per document, and a slow
+    # provider must cost a suggestion rather than the import.
+    DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # The approval agent applies an administrator's written rule to pending drafts. It
+    # is off unless a rule exists AND that rule was explicitly granted authority, so this
+    # switch exists to stop it entirely without deleting anyone's rules.
+    APPROVAL_AGENT_ENABLED: bool = True
+    APPROVAL_AGENT_TIMEOUT: float = 30.0
+    # Drafts examined per run. A connector can drop hundreds into the queue at once, and
+    # a run that decides a few hundred documents unattended should be a deliberate act
+    # repeated, not one call with no upper bound.
+    APPROVAL_AGENT_BATCH_LIMIT: int = 50
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
@@ -271,6 +338,24 @@ class Settings(BaseSettings):
     MAX_SOURCE_PAGES: int = 500
     MAX_SOURCE_TEXT_CHARS: int = 2_000_000
     MAX_SOURCE_IMAGE_PIXELS: int = 40_000_000
+
+    # Near-duplicate detection at upload, and both numbers are cost controls rather
+    # than tuning knobs — the SCORE is insensitive to them.
+    #
+    # Comparing whole documents was never viable. SequenceMatcher is O(n*m): measured
+    # on a developer machine, one 20,000-character pair costs 8.25 s and the cost rises
+    # roughly 8x per doubling, and MAX_SOURCE_TEXT_CHARS admits 2,000,000. That ran once
+    # PER EXISTING ARTICLE, on the event loop.
+    #
+    # 2000 characters is where the cost curve turns: 0.073 s per comparison against
+    # 0.234 s at 3000 and 1.0 s at 6000, while a 95%-identical pair scores 0.974 here
+    # and 0.968 at 6000. Nothing is bought by comparing more.
+    SIMILARITY_COMPARE_CHARS: int = 2_000
+    # Token overlap is O(n) and ranks candidates cheaply, so the O(n*m) comparison is
+    # spent only on the most plausible ones. Without this the total still grows with the
+    # corpus and the timeout returns once the knowledge base is large enough; 50 is a
+    # wide margin over the 5 matches ever returned.
+    SIMILARITY_MAX_SEQUENCE_COMPARISONS: int = 50
     MAX_SOURCE_UNCOMPRESSED_BYTES: int = 100_000_000
     MAX_SOURCE_ARCHIVE_FILES: int = 2_000
     MALWARE_SCAN_ENABLED: bool = False
