@@ -19,7 +19,7 @@ from src.repositories.governance import GovernanceRepository
 from src.domain.search_service import SearchService
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
-from src.rag.citations import extract_citation_ids
+from src.rag.citations import extract_citation_ids, strip_unknown_markers
 from src.rag.answer_sections import (
     EXTENDED_SENTINEL,
     GROUNDED_SENTINEL,
@@ -1322,25 +1322,35 @@ class AIService:
         source_matches = extract_citation_ids(grounded_answer)
         context_by_id = {item["source_id"]: item for item in context_results}
         is_refusal = _is_grounding_refusal(grounded_answer)
-        citation_guard_failed = any(
-            marker not in context_by_id for marker in source_matches
-        )
-        if citation_guard_failed:
-            # A provider-issued marker that is not present in the retrieved
-            # context is not a citation. Fail closed instead of returning a
-            # dangling marker or silently attaching a different source.
+        unknown_markers = sorted(set(source_matches) - set(context_by_id))
+        if unknown_markers:
+            # A marker naming a passage that was never retrieved is not a citation, and it
+            # must not survive into the answer. But discarding the WHOLE answer over it —
+            # which is what this did — threw away the valid citations alongside the
+            # invented one, and the user saw "no grounded answer could be produced" for a
+            # correct, sourced reply. Measured in production: an answer citing [C1][C2]
+            # correctly plus one hallucinated [C3] was replaced wholesale.
+            #
+            # Dropping just the dangling marker keeps the property the guard exists to
+            # protect — every marker left resolves to a passage that was actually
+            # consulted — without punishing the user for the model's arithmetic.
             logger.warning(
                 "AI output contained an unretrieved citation marker",
                 question_hash=question_hash,
-                unknown_markers=sorted(set(source_matches) - set(context_by_id)),
+                unknown_markers=unknown_markers,
+                retrieved_markers=sorted(context_by_id),
             )
-            grounded_answer = (
-                "Không thể tạo câu trả lời có căn cứ từ các nguồn được cấp quyền trong Cơ sở tri thức."
-                if language == "vi" else UNVERIFIABLE_GROUNDED_ANSWER
+            grounded_answer = strip_unknown_markers(grounded_answer, set(context_by_id))
+            extended_answer = strip_unknown_markers(
+                extended_answer, set(context_by_id)
             )
-            extended_answer = ""
-            source_matches = []
-            is_refusal = True
+            source_matches = extract_citation_ids(grounded_answer)
+            is_refusal = _is_grounding_refusal(grounded_answer)
+
+        # Only a stripped answer with NO citation left is unusable: nothing in it can be
+        # attributed to a permitted source, so it falls through to the uncited-answer
+        # refusal below rather than being special-cased here.
+        citation_guard_failed = bool(unknown_markers) and not source_matches
 
         if is_refusal and context_results and not citation_guard_failed:
             result = context_results[0]
