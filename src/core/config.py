@@ -229,6 +229,35 @@ class Settings(BaseSettings):
     PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
     RETRIEVAL_VERSION: str = "v2-parent-budget-confidence"
     RERANKER_VERSION: str = "v1.2-definition-aware"
+    # --- Extractive reader (CPU-only answer path) -----------------------------
+    # The product answers through a hosted LLM (src/domain/llm_client.py). These
+    # settings configure the in-process EXTRACTIVE alternative used for
+    # span-extraction benchmarking (MLQA, UIT-ViQuAD) under a CPU-only
+    # constraint, and for any deployment that must answer without an API call.
+    # Nothing here changes the hosted path.
+    READER_ONNX_DIR: str = "/opt/reader-onnx"
+    # Stride windows per forward pass. A question against 8 retrieved parents is
+    # 15-40 windows; one pass each measured 6.1 s/question on 4 threads, because
+    # every session.run pays its own dispatch. Batching them is what makes a
+    # 5,495-question split finish in hours rather than a day.
+    READER_BATCH_SIZE: int = 16
+    # `model_int8.onnx` trades ~1 F1 for ~4x less memory; keep fp32 as the
+    # default so a measured number is never quietly a quantised one.
+    READER_ONNX_FILE: str = "model.onnx"
+    READER_ONNX_THREADS: int = 4
+    # mDeBERTa-v3 accepts 512; 384 with a 128 stride is the SQuAD convention and
+    # keeps the per-window cost down on CPU.
+    READER_MAX_TOKENS: int = 384
+    READER_DOC_STRIDE: int = 128
+    # Candidate start/end positions considered per window. 20 is the SQuAD
+    # default; raising it costs almost nothing (the model already ran) but buys
+    # little beyond ~20.
+    READER_NBEST: int = 20
+    READER_MAX_ANSWER_TOKENS: int = 64
+    # Minimum null-relative score for a span to beat abstention. 0.0 trusts the
+    # model's own calibration; raising it abstains more often, which helps
+    # UIT-ViQuAD 2.0's unanswerable half and hurts its answerable half.
+    READER_NULL_THRESHOLD: float = 0.0
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
     RAG_ALLOW_EXTENDED_ON_REFUSAL: bool = False

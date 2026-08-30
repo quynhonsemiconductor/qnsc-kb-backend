@@ -8,3 +8,6 @@ venv/
 storage/
 backups/
 celerybeat-schedule
+# Benchmark working directory: model exports (~2 GB), dataset downloads, and
+# per-question run detail. Reproduced by scripts/eval_prep_datasets.py.
+.eval-cache/
