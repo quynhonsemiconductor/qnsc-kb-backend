@@ -34,7 +34,16 @@ class CommentResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-@router.post("/articles/{id}/comments")
+# response_model is NOT decoration here, it is the only thing keeping secrets out of the
+# body. Both handlers return ORM Comment objects whose `user` relationship is eager-loaded
+# (selectinload(Comment.user), repositories/interaction.py), and without a response_model
+# FastAPI falls back to jsonable_encoder, which walks the loaded graph and serialises every
+# column of User — including `password_hash`. Reproduced: the encoded body contained
+# "password_hash": "$2b$12$..." for every commenter.
+#
+# CommentResponse/UserBrief above were already written for exactly this and simply never
+# attached to a route, so the leak looked guarded and was not.
+@router.post("/articles/{id}/comments", response_model=CommentResponse)
 async def add_comment(
     id: uuid.UUID,
     comment_in: CommentCreate,
@@ -46,7 +55,7 @@ async def add_comment(
     service = InteractionsService(int_repo, art_repo)
     return await service.add_comment(current_user, id, comment_in.text)
 
-@router.get("/articles/{id}/comments")
+@router.get("/articles/{id}/comments", response_model=list[CommentResponse])
 async def get_comments(
     id: uuid.UUID,
     current_user: User = Depends(get_current_user),
@@ -132,7 +141,20 @@ async def list_bookmarks(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ) -> Any:
+    """Bookmarked articles, projected to the shared safe card shape.
+
+    Returned raw, this leaked secrets: the service hands back ORM `Article` rows with
+    `Article.owner` eager-loaded, and with no projection FastAPI serialises every column of
+    that User — `password_hash` included. Reproduced with jsonable_encoder.
+
+    `_article_card` is reused rather than reimplemented so there is ONE definition of what
+    an article may expose; a second local shape would drift from it on the first edit. It
+    reduces the owner to a display name.
+    """
+    from src.api.routers.knowledge import _article_card
+
     int_repo = InteractionRepository(db)
     art_repo = ArticleRepository(db)
     service = InteractionsService(int_repo, art_repo)
-    return await service.list_bookmarks(current_user)
+    bookmarks = await service.list_bookmarks(current_user)
+    return [_article_card(article) for article in bookmarks]

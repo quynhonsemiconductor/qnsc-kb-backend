@@ -543,6 +543,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # `allow_headers` governs the REQUEST direction only. Without expose_headers the
+    # browser hides every non-safelisted RESPONSE header from JavaScript, so
+    # `response.headers.get("X-Request-ID")` returned null even though the server set it
+    # on every response. Measured against the live stack.
+    #
+    # That silently broke the whole point of the id: it is the key the operator pastes
+    # into /governance/request-failures?request_id=... to find the traceback for the
+    # failure a user just reported. A header the client cannot read cannot be reported.
+    expose_headers=["X-Request-ID", "Retry-After"],
 )
 
 
