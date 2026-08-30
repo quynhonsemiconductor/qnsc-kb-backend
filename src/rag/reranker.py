@@ -2,7 +2,39 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import NamedTuple, Sequence
+
+
+# Vietnamese is routinely typed without diacritics — "CTS la gi" for "CTS là gì" — and
+# every lexical comparison below has to survive that. Folding is done with a translation
+# table built once at import: one pass per string, no per-call NFD allocation, on a path
+# that runs for every candidate in the pool on every search.
+#
+# `đ`/`Đ` are handled explicitly because they are NOT decomposable — NFD leaves them
+# whole, so stripping combining marks alone would fold "được" to "đuoc" and never match
+# a user's "duoc". PostgreSQL's unaccent() maps them to `d`, which migration 58 wired
+# into both the FTS index and its query, so matching that behaviour here keeps the
+# lexical and reranking legs in agreement.
+def _build_fold_table() -> dict[int, str]:
+    table = {ord("đ"): "d", ord("Đ"): "d"}
+    for codepoint in range(0x00C0, 0x1EFA):
+        char = chr(codepoint)
+        decomposed = unicodedata.normalize("NFD", char)
+        stripped = "".join(
+            part for part in decomposed if unicodedata.category(part) != "Mn"
+        )
+        if stripped and stripped != char:
+            table[codepoint] = stripped.lower()
+    return table
+
+
+_FOLD_TABLE = _build_fold_table()
+
+
+def fold_diacritics(value: str) -> str:
+    """Lowercase and strip Vietnamese/Latin diacritics, as PostgreSQL unaccent() does."""
+    return (value or "").lower().translate(_FOLD_TABLE)
 
 
 # These words add little retrieval signal. Keeping them out of lexical
@@ -25,6 +57,12 @@ STOPWORDS = {
     "tôi", "trong", "và", "vậy", "về", "với", "được", "đó", "để", "đưa",
 }
 
+# What the code actually tests against. Derived, not hand-maintained: a second
+# hand-written list of unaccented forms would drift from the one above on the first edit.
+STOPWORDS_FOLDED = frozenset(fold_diacritics(word) for word in STOPWORDS) | frozenset(
+    STOPWORDS
+)
+
 REFERENCE_MARKERS = (
     "references", "reference", "helpful documents", "sources", "bibliography",
     "tài liệu tham khảo", "nguồn tham khảo", "http://", "https://", "www.",
@@ -35,13 +73,23 @@ DEFINITION_QUERY_MARKERS = (
     "là gì", "định nghĩa", "có nghĩa là", "giải thích", "khái niệm",
 )
 
+# Matched against folded text, so the markers must be folded too.
+REFERENCE_MARKERS_FOLDED = tuple(
+    fold_diacritics(marker) for marker in REFERENCE_MARKERS
+)
+DEFINITION_QUERY_MARKERS_FOLDED = tuple(
+    fold_diacritics(marker) for marker in DEFINITION_QUERY_MARKERS
+)
+
 DEFINITION_PATTERNS = (
     r"\b(?:is|are|means|refers to|defined as|describes)\b",
-    r"\b(?:là|được gọi là|có nghĩa là|dùng để chỉ|được định nghĩa là)\b",
+    r"\b(?:la|duoc goi la|co nghia la|dung de chi|duoc dinh nghia la)\b",
 )
 
 
 # Compiled once at import. These run against every candidate passage on every search.
+# The Vietnamese alternatives are written pre-folded because the passage they are
+# matched against has been folded.
 DEFINITION_PATTERNS_RE = tuple(
     re.compile(pattern, re.IGNORECASE) for pattern in DEFINITION_PATTERNS
 )
@@ -50,10 +98,15 @@ TOKEN_RE = re.compile(r"[\w'-]+")
 
 
 def normalize_query(query: str) -> str:
-    """Remove low-signal question words before keyword/vector retrieval."""
+    """Remove low-signal question words before keyword/vector retrieval.
+
+    Folded first, so "cung cap cho toi" is recognised as the same set of stopwords as
+    "cung cấp cho tôi". Untyped diacritics used to leave every one of those words in the
+    scored term set, where they could only ever sit in the denominator.
+    """
     tokens = [
-        token for token in re.findall(r"[\w'-]+", (query or "").lower())
-        if len(token) > 1 and token not in STOPWORDS
+        token for token in TOKEN_RE.findall(fold_diacritics(query))
+        if len(token) > 1 and token not in STOPWORDS_FOLDED
     ]
     # An all-stopword input has no retrieval signal. Returning the original
     # query here caused generic words such as "what is" to retrieve arbitrary
@@ -62,15 +115,25 @@ def normalize_query(query: str) -> str:
 
 
 def is_definition_query(query: str) -> bool:
-    normalized = " ".join((query or "").lower().split())
-    return any(marker in normalized for marker in DEFINITION_QUERY_MARKERS)
+    """Whether the user asked what something IS.
+
+    Folded, because "CTS la gi" is the same question as "CTS là gì" and used to miss the
+    marker list entirely — losing the definition bonus on exactly the queries it exists
+    to serve.
+    """
+    normalized = " ".join(fold_diacritics(query).split())
+    return any(marker in normalized for marker in DEFINITION_QUERY_MARKERS_FOLDED)
 
 
 def corpus_terms(passages: Sequence[str]) -> frozenset[str]:
-    """Every token that appears anywhere in a candidate pool."""
+    """Every token that appears anywhere in a candidate pool.
+
+    Folded to the same form as the query terms it is intersected with; otherwise an
+    accented passage token could never cancel an unaccented query term.
+    """
     found: set[str] = set()
     for passage in passages:
-        found.update(TOKEN_RE.findall((passage or "").lower()))
+        found.update(TOKEN_RE.findall(fold_diacritics(passage)))
     return frozenset(found)
 
 
@@ -130,7 +193,9 @@ def score_prepared_text(
 ) -> float:
     """Score a passage against an already-prepared query."""
     terms = prepared.terms
-    passage = " ".join(str(value or "") for value in (text, title, section)).lower()
+    # Folded, not merely lower-cased: the query terms are folded, so an accented passage
+    # token would otherwise never match the unaccented term a user actually typed.
+    passage = fold_diacritics(" ".join(str(value or "") for value in (text, title, section)))
     text_tokens = TOKEN_RE.findall(passage)
     normalized_text = " ".join(text_tokens)
     # A whole-token set intersection. The old form ran one anchored regex per term over
@@ -145,13 +210,13 @@ def score_prepared_text(
     if prepared.is_definition:
         if any(pattern.search(passage) for pattern in DEFINITION_PATTERNS_RE):
             score += 0.75
-        if any(marker in passage for marker in REFERENCE_MARKERS):
+        if any(marker in passage for marker in REFERENCE_MARKERS_FOLDED):
             score -= 1.0
         # A passage dominated by URLs is reference material, even when it
         # repeats the subject name many times.
         if len(URL_RE.findall(passage)) >= 2:
             score -= 0.5
-    elif any(marker in passage for marker in REFERENCE_MARKERS):
+    elif any(marker in passage for marker in REFERENCE_MARKERS_FOLDED):
         score -= 0.25
     return score
 
