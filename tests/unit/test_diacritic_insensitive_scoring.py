@@ -28,7 +28,8 @@ from src.rag.reranker import (
     DEFINITION_QUERY_MARKERS,
     REFERENCE_MARKERS,
     STOPWORDS,
-    STOPWORDS_FOLDED,
+    VIETNAMESE_STOPWORDS,
+    VIETNAMESE_STOPWORDS_FOLDED,
     fold_diacritics,
     is_definition_query,
     normalize_query,
@@ -88,8 +89,27 @@ def test_unaccented_vietnamese_stopwords_are_dropped_from_the_scored_terms():
 
 def test_the_folded_stopword_set_is_derived_from_the_accented_one():
     """Two hand-maintained lists would drift apart on the first edit."""
-    for word in STOPWORDS:
-        assert fold_diacritics(word) in STOPWORDS_FOLDED
+    for word in VIETNAMESE_STOPWORDS:
+        assert fold_diacritics(word) in VIETNAMESE_STOPWORDS_FOLDED
+
+
+def test_a_vietnamese_content_word_is_not_eaten_by_an_english_stopword():
+    """The regression this split exists to prevent.
+
+    Folding collapses Vietnamese content syllables onto English stopwords -- `tổ` -> "to",
+    `số` -> "so", `căn` -> "can". A single merged set therefore deleted the SUBJECT of the
+    question: "Logic tổ hợp là gì" searched for "logic hop" and answered "not found in the
+    Knowledge Base", while "Combinatrial Logic" answered correctly from the same document.
+    Measured against production.
+    """
+    assert normalize_query("Logic tổ hợp là gì") == "logic to hop"
+    assert normalize_query("số bit là gì") == "so bit"
+
+
+def test_english_stopwords_are_still_removed():
+    """The split must not stop the English list working."""
+    assert normalize_query("What is CTS") == "cts"
+    assert normalize_query("how to use the tool") == "tool"
 
 
 def test_folding_matches_postgres_unaccent_on_the_vietnamese_d_stroke():
