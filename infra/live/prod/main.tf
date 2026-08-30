@@ -228,10 +228,11 @@ module "stack" {
   embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
   embedding_version = "minilm-l12-v1"
 
-  alarm_emails          = var.alarm_emails
-  cloudflare_account_id = var.cloudflare_account_id
-  microsoft_client_id   = var.microsoft_client_id
-  google_client_id      = var.google_client_id
-  allowed_email_domains = var.allowed_email_domains
-  entra_admin_emails    = var.entra_admin_emails
+  alarm_emails           = var.alarm_emails
+  cloudflare_account_id  = var.cloudflare_account_id
+  microsoft_client_id    = var.microsoft_client_id
+  microsoft_graph_sender = var.microsoft_graph_sender
+  google_client_id       = var.google_client_id
+  allowed_email_domains  = var.allowed_email_domains
+  entra_admin_emails     = var.entra_admin_emails
 }
