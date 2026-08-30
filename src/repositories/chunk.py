@@ -295,7 +295,7 @@ class ChunkRepository:
         # The old leading-wildcard ILIKE path forced a scan of every chunk and
         # ranked against a different expression than the one it filtered.
         search_vector = func.to_tsvector("simple", func.immutable_unaccent(ArticleChunk.chunk_text))
-        search_query = func.plainto_tsquery("simple", func.immutable_unaccent(query))
+
         def fold(value: str) -> str:
             return "".join(
                 char for char in unicodedata.normalize("NFD", value)
@@ -304,6 +304,41 @@ class ChunkRepository:
 
         folded_query = fold(query)
         keyword_terms = [term for term in re.findall(r"[\w'-]+", folded_query) if len(term) > 1]
+
+        # OR the terms, do NOT and them. plainto_tsquery joins every lexeme with `&`, so a
+        # question longer than its own subject could not match the passage containing that
+        # subject: the passage had to contain EVERY word of the question. Measured against
+        # the live corpus, where the chunk holding "Innovus CCOpt" is found by the subject
+        # and lost the moment the question is phrased:
+        #
+        #     "CCOpt"                                    2 hits
+        #     "Innovus CCOpt"                            2 hits
+        #     "Innovus CCOpt hoat dong"                  0 hits   <- conjunction dies here
+        #     "Innovus CCOpt hoat dong nhu the nao ..."  0 hits
+        #
+        # An English technical passage can never contain the Vietnamese syllables of the
+        # question asking about it, so the keyword leg was dead for every natural-language
+        # Vietnamese question — leaving only the vector leg, and a refusal when that also
+        # missed.
+        #
+        # Each term goes through its own plainto_tsquery as a BIND PARAMETER and the
+        # results are combined with the tsquery `||` (OR) operator, so no term text is ever
+        # parsed as tsquery syntax. ts_rank_cd still ranks a passage matching many terms
+        # above one matching a single term, and the reranker plus the relevance floor
+        # discard the weak matches this admits.
+        term_queries = [
+            func.plainto_tsquery("simple", func.immutable_unaccent(term))
+            for term in keyword_terms
+        ]
+        if term_queries:
+            search_query = term_queries[0]
+            for extra in term_queries[1:]:
+                search_query = search_query.op("||")(extra)
+        else:
+            # No usable terms (all one-character, or an empty query): fall back to the
+            # whole string rather than building an empty tsquery, which matches nothing.
+            search_query = func.plainto_tsquery("simple", func.immutable_unaccent(query))
+
         keyword_conditions = [search_vector.op("@@")(search_query)]
         keyword_conditions.extend(func.immutable_unaccent(Article.title).ilike(f"%{term}%") for term in keyword_terms)
         keyword_stmt = (
