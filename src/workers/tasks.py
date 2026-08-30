@@ -303,7 +303,7 @@ async def run_restructure_pending_draft(
     from src.models import User
     from src.models.governance import AuditLog, DraftCandidate, PendingDraft
     from src.models.user import Department
-    from src.domain.department_routing import route_document_candidates
+    from src.domain.department_routing import route_document_candidates_llm
     from src.domain.llm_config import load_runtime_config
     from src.repositories.feature_flags import FeatureFlagRepository
 
@@ -379,7 +379,7 @@ async def run_restructure_pending_draft(
             await db.execute(
                 delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
             )
-            for item in route_document_candidates(
+            for item in await route_document_candidates_llm(
                 draft.title, result.body_md, departments
             ):
                 db.add(

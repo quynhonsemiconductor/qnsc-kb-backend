@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 import structlog
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -51,8 +51,9 @@ from src.models.user import Department, User
 from src.models.ops import Connector, ConnectorJob, NotificationQueue
 from src.repositories.governance import GovernanceRepository
 from src.repositories.article import ArticleRepository
+from src.repositories.user import UserRepository
 from src.domain.governance import GovernanceService
-from src.domain.department_routing import route_document_candidates
+from src.domain.department_routing import route_document_candidates_llm
 
 logger = structlog.get_logger()
 
@@ -70,11 +71,15 @@ async def _routed_candidate_items(
             )
         )
     ).scalars().all()
-    return route_document_candidates(title, text, departments)
+    return await route_document_candidates_llm(title, text, departments)
 
 
 async def _persist_connector_draft(
-    db: AsyncSession, connector: Connector, draft: PendingDraft, text: str
+    db: AsyncSession,
+    connector: Connector,
+    draft: PendingDraft,
+    text: str,
+    format_queue: list[tuple[str, str, str]] | None = None,
 ) -> None:
     """Persist connector input as Draft, then submit through the same workflow."""
     publication_mode = settings.CONNECTOR_AUTO_PUBLISH_MODE.strip().lower()
@@ -104,7 +109,21 @@ async def _persist_connector_draft(
     )
     for item in await _routed_candidate_items(db, connector, draft.title, text):
         db.add(DraftCandidate(draft_id=draft.id, **item))
-    actor = await db.get(User, draft.created_by) if draft.created_by else None
+    # Loaded through the repository, NOT db.get(User, ...). submit_draft below reaches
+    # get_draft_for_user, which calls the synchronous AuthorizationService.has_permission
+    # and reads `user.roles` directly. db.get() loads no relationships, so that read was
+    # a lazy load -- ordinary attribute access, with no await for the async session to
+    # suspend on -- and SQLAlchemy raised "greenlet_spawn has not been called".
+    #
+    # It failed for every document that produced a draft, so the walk hit its 25
+    # consecutive item failures and aborted the whole scope. Nothing caught it because
+    # every HTTP path already loads users through this repository, which eager-loads the
+    # four trees authorization reads; only the connector built its own actor.
+    actor = (
+        await UserRepository(db).get_by_id(draft.created_by)
+        if draft.created_by
+        else None
+    )
     if actor:
         await GovernanceService(
             GovernanceRepository(db), ArticleRepository(db)
@@ -124,6 +143,73 @@ async def _persist_connector_draft(
             )
         )
         await db.flush()
+    _queue_draft_formatting(draft, connector, format_queue)
+
+
+def _queue_draft_formatting(
+    draft: PendingDraft,
+    connector: Connector,
+    format_queue: list[tuple[str, str, str]] | None,
+) -> None:
+    """Mark a connector draft for AI formatting and remember to dispatch it.
+
+    Connector drafts were created `lossless_ready`: the raw extracted text, presented as
+    a reading view. Nothing ever asked for the AI pass. dispatch_restructure_pending_draft
+    was called only from the upload endpoints, so a document that arrived through a
+    connector kept its unformatted extraction unless a reviewer noticed and pressed
+    "Retry AI format" on each one -- which for a 241-file drive is not a workflow.
+
+    The dispatch itself is deferred to the caller. The worker loads the draft by id, so a
+    task queued before the transaction commits can arrive first and find nothing.
+    """
+    if format_queue is None or not draft.created_by:
+        # No creator means no user for the worker's feature-flag check, so the AI pass
+        # would be skipped anyway. The lossless view stays, which is the old behaviour.
+        return
+    draft.restructure_status = "queued"
+    draft.restructure_error = None
+    format_queue.append(
+        (str(draft.id), connector.company_domain, str(draft.created_by))
+    )
+
+
+async def _dispatch_queued_formats(
+    db: AsyncSession, format_queue: list[tuple[str, str, str]]
+) -> None:
+    """Queue the AI formatter for drafts the caller has just committed."""
+    if not format_queue:
+        return
+    from src.workers.tasks import dispatch_restructure_pending_draft
+
+    failed: list[uuid.UUID] = []
+    for draft_id, company_domain, user_id in format_queue:
+        try:
+            dispatched = dispatch_restructure_pending_draft(
+                draft_id, company_domain, user_id
+            )
+        except Exception:
+            logger.exception(
+                "Could not queue connector draft formatting", draft_id=draft_id
+            )
+            dispatched = False
+        if not dispatched:
+            failed.append(uuid.UUID(draft_id))
+    format_queue.clear()
+    if failed:
+        # A broker that is down must not cost the document. The draft keeps its lossless
+        # reading view and says so, and a reviewer can retry from the queue.
+        await db.execute(
+            update(PendingDraft)
+            .where(PendingDraft.id.in_(failed))
+            .values(
+                restructure_status="fallback_formatting",
+                restructure_model="lossless-markdown",
+                restructure_error=(
+                    "AI formatting could not be queued; retry from Pending Drafts."
+                ),
+            )
+        )
+        await db.commit()
 
 
 def _acl_hash(permissions: list[dict[str, str]]) -> str:
@@ -172,7 +258,7 @@ async def _replace_split_candidates(
             )
         )
     ).scalars().all()
-    for item in route_document_candidates(draft.title, text, departments):
+    for item in await route_document_candidates_llm(draft.title, text, departments):
         db.add(DraftCandidate(draft_id=draft.id, **item))
 
 
@@ -579,6 +665,7 @@ async def _save_permissions(
                         permission_snapshot_id=snapshot.id,
                         principal_type=item.get("principal_type", "user"),
                         principal_id=item.get("principal_id", ""),
+                        principal_name=(item.get("principal_name") or None),
                         role=item.get("role", "reader"),
                     )
                 )
@@ -944,6 +1031,7 @@ async def _ingest_content(
     change: NormalizedChange,
     job: ConnectorJob,
     cleanup_keys: list[str] | None = None,
+    format_queue: list[tuple[str, str, str]] | None = None,
 ) -> None:
     adapter = adapter_for(connector)
     data = await adapter.download(change)
@@ -1114,6 +1202,7 @@ async def _ingest_content(
                 content_metadata=draft_metadata,
             ),
             text,
+            format_queue,
         )
     else:
         previous_storage_key = existing.storage_key
@@ -1122,6 +1211,9 @@ async def _ingest_content(
         existing.storage_key = storage_key
         existing.page_texts = pages
         existing.original_filename = change.name
+        # The stored reading view describes the revision that was just replaced, so it
+        # has to be rebuilt rather than left to describe content nobody will see again.
+        _queue_draft_formatting(existing, connector, format_queue)
         await _replace_split_candidates(db, existing, text)
         if (
             not existing.dept
@@ -1180,6 +1272,7 @@ async def sync_cloud_connector(
     connector_id = connector.id
     job_id = job.id
     cleanup_keys: list[str] = []
+    format_queue: list[tuple[str, str, str]] = []
     audit_actor_id = job.requested_by or connector.created_by
     try:
         # Iterated by id, not by instance. A single item's failure rolls the session
@@ -1359,7 +1452,13 @@ async def sync_cloud_connector(
                         pending_draft_needs_candidates=pending_draft_needs_candidates,
                     ):
                         await _ingest_content(
-                            db, connector, document, change, job, cleanup_keys
+                            db,
+                            connector,
+                            document,
+                            change,
+                            job,
+                            cleanup_keys,
+                            format_queue,
                         )
                         _clear_ingest_failure(document)
                         action = "imported" if previous is None else "updated"
@@ -1380,6 +1479,9 @@ async def sync_cloud_connector(
                     if action == "unchanged" and is_file:
                         summary["unchanged"] = int(summary["unchanged"]) + 1
                     await db.commit()
+                    # After the commit, never before: the formatter loads the draft by
+                    # id, and a task that arrives first finds nothing there.
+                    await _dispatch_queued_formats(db, format_queue)
                     consecutive_failures = 0
                 except Exception as exc:
                     if not _is_item_level_failure(exc):
@@ -1390,6 +1492,9 @@ async def sync_cloud_connector(
                     # file froze the whole connector, permanently and silently, and the
                     # healthy documents behind it never arrived at all.
                     await db.rollback()
+                    # Anything queued for this item died with the transaction; a task
+                    # for a draft that was never committed would find nothing.
+                    format_queue.clear()
                     reason = str(exc) or exc.__class__.__name__
                     attempts = await _record_item_failure(
                         db,

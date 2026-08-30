@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.api.deps import SessionLocal, get_db, get_current_user, require_permission, set_database_context
 from src.models import User
+from src.models.article import Article
 from src.models.governance import AuditLog, PendingDraft
 from src.models.user import AccessGroup, ExternalIdentity
 from src.models.ops import Connector, ConnectorJob
@@ -361,13 +362,18 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail="Provider authorization failed") from exc
     connector.oauth_access_token = encrypt_secret(tokens.get("access_token"))
     connector.oauth_refresh_token = encrypt_secret(tokens.get("refresh_token")) or connector.oauth_refresh_token
-    subject = str(tokens.get("token_type") or "authorized")
-    if tokens.get("id_token"):
-        try:
-            subject = str(jwt.get_unverified_claims(tokens["id_token"]).get("sub") or subject)
-        except jwt.PyJWTError:
-            pass
-    connector.oauth_subject = subject[:255]
+    # Deliberately NOT read out of tokens["id_token"]. This column records HOW a
+    # connector was authorized -- connector_auth.py writes "application" for app-only
+    # mode -- and nothing anywhere reads it for an account name: it is serialized into
+    # no response, queried by no code, and absent from the frontend.
+    #
+    # It used to hold the id_token's `sub`, decoded without signature verification. That
+    # decode is what broke this endpoint (see the test), and keeping it would mean
+    # either shipping an unverified decode past Semgrep or fetching provider JWKS on the
+    # callback path -- another step that could fail an authorization -- to fill a field
+    # with no consumer. If an account label is ever actually wanted, add it deliberately,
+    # with a verification decision and somewhere to display it.
+    connector.oauth_subject = "delegated"
     if tokens.get("expires_in"):
         connector.oauth_expires_at = datetime.utcnow() + timedelta(seconds=int(tokens["expires_in"]))
     connector.oauth_state_hash = None
@@ -544,7 +550,10 @@ async def list_acl_principals(
     by_principal: dict[tuple[str, str], dict[str, Any]] = {}
     for principal in principals:
         key = (principal.principal_type, principal.principal_id)
-        entry = by_principal.setdefault(key, {"principal_type": principal.principal_type, "principal_id": principal.principal_id, "roles": set()})
+        entry = by_principal.setdefault(key, {"principal_type": principal.principal_type, "principal_id": principal.principal_id, "roles": set(), "principal_name": None})
+        # The newest non-empty name wins: a principal seen across many documents may
+        # only have been named on some of them.
+        entry["principal_name"] = entry["principal_name"] or principal.principal_name
         if principal.role:
             entry["roles"].update(item.strip() for item in principal.role.split(",") if item.strip())
 
@@ -566,6 +575,7 @@ async def list_acl_principals(
         response.append({
             "principal_type": principal_type,
             "principal_id": principal_id,
+            "principal_name": entry["principal_name"],
             "roles": sorted(entry["roles"]),
             "mapping_status": "mapped" if active_mapping or mapped_user_id else "unmapped",
             "external_group_name": mapping["external_group_name"] if mapping else None,
@@ -809,13 +819,9 @@ async def connector_health(
         .order_by(SyncError.created_at.desc())
         .limit(25)
     )).all()
-    quarantined = int(await db.scalar(
-        select(func.count(ExternalDocument.id)).where(
-            ExternalDocument.connector_id == connector.id,
-            ExternalDocument.state != "deleted",
-            ExternalDocument.metadata_json["ingest_failure"].is_not(None),
-        )
-    ) or 0)
+    from src.domain.connectors import document_breakdown
+
+    documents = await document_breakdown(db, connector.id)
     now = datetime.utcnow()
     return {
         "connector_id": str(connector.id),
@@ -824,7 +830,10 @@ async def connector_health(
         "last_error": connector.last_error,
         "queue_depth": queued,
         "notifications_last_24h": notifications_24h,
-        "documents_needing_attention": quarantined,
+        # Kept: existing clients read this name. It is the same number as
+        # documents["held"], from the same query rather than a second one.
+        "documents_needing_attention": documents["held"],
+        "documents": documents,
         "recent_document_errors": [
             {
                 "document_id": str(error.external_document_id) if error.external_document_id else None,
@@ -863,6 +872,57 @@ async def connector_health(
             for subscription in subscriptions
         ],
     }
+
+
+@router.post("/{connector_id}/retry-failed")
+async def retry_failed_documents(
+    connector_id: uuid.UUID,
+    current_user: User = Depends(require_permission("connector.manage")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Let a sync try quarantined documents again.
+
+    A document that fails to ingest three times on one revision stops being retried, and
+    only a new revision at the provider clears that. The reasoning holds when the file is
+    the problem: replacing it at the source is how a person fixes it, and needing to find
+    an admin screen as well would be worse.
+
+    It does not hold when the failure was ours. A server-side defect quarantines every
+    document it touches, and once it is fixed there is nothing at the provider for anyone
+    to repair -- the files were always fine. Without this the corpus stays empty and the
+    sync reports "skipped" forever, which reads as a problem with the documents.
+
+    Releasing does not re-ingest. It clears the mark so the next sync treats these as
+    unseen; run a sync afterwards.
+    """
+    connector = await _connector_for_user(db, connector_id, current_user)
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    from src.domain.cloud_sync import _clear_ingest_failure
+
+    documents = (
+        await db.execute(
+            select(ExternalDocument).where(
+                ExternalDocument.connector_id == connector.id,
+                ExternalDocument.state != "deleted",
+                ExternalDocument.metadata_json["ingest_failure"].is_not(None),
+            )
+        )
+    ).scalars().all()
+    for document in documents:
+        _clear_ingest_failure(document)
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="connector_retry_failed_documents",
+            target_type="connector",
+            target_id=str(connector.id),
+            outcome="success",
+            detail_json={"released": len(documents)},
+        )
+    )
+    await db.commit()
+    return {"released": len(documents)}
 
 
 @router.get("/{connector_id}/source-tree")

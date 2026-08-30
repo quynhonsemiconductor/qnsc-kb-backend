@@ -91,6 +91,10 @@ class ExternalAclPrincipal(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     permission_snapshot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("permission_snapshots.id", ondelete="CASCADE"), nullable=False)
     principal_type: Mapped[str] = mapped_column(String(30), nullable=False)  # user, group, domain, anyone
     principal_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: What the provider calls this principal. Without it the only thing an
+    #: administrator could be shown was a GUID, which is not something anyone can make
+    #: an access decision about.
+    principal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(40), nullable=False)
 
 

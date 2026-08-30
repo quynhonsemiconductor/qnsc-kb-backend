@@ -278,6 +278,22 @@ class Settings(BaseSettings):
     CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: int = 30
     CONNECTOR_RECONCILE_INTERVAL_MINUTES: int = 360
     CONNECTOR_AUTO_PUBLISH_MODE: str = "governed"
+    # Department routing asks the LLM first and falls back to keyword ranking. The
+    # fallback is not a degraded mode: it is what runs whenever no provider is
+    # configured, and it is what every existing deployment already had.
+    DEPARTMENT_ROUTING_LLM_ENABLED: bool = True
+    # Short on purpose. This runs inside document ingest, once per document, and a slow
+    # provider must cost a suggestion rather than the import.
+    DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # The approval agent applies an administrator's written rule to pending drafts. It
+    # is off unless a rule exists AND that rule was explicitly granted authority, so this
+    # switch exists to stop it entirely without deleting anyone's rules.
+    APPROVAL_AGENT_ENABLED: bool = True
+    APPROVAL_AGENT_TIMEOUT: float = 30.0
+    # Drafts examined per run. A connector can drop hundreds into the queue at once, and
+    # a run that decides a few hundred documents unattended should be a deliberate act
+    # repeated, not one call with no upper bound.
+    APPROVAL_AGENT_BATCH_LIMIT: int = 50
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3

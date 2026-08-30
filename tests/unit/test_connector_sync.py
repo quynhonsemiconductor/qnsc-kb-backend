@@ -248,6 +248,18 @@ def test_empty_or_unmapped_sharepoint_acl_fails_closed():
 
 
 def test_unsupported_provider_principal_is_retained_as_unmapped():
+    """A grant with no identity behind it is kept, so it still blocks approval.
+
+    The identifier changed and the invariant did not. This used to be recorded as
+    principal_type "unknown" carrying the PERMISSION ENTRY's own id, which names nobody
+    and differs on every file -- a library of 200 documents produced 200 separate
+    unmappable blockers. It is now keyed by the link's scope, which is the same principal
+    on every file, so one mapping decision covers the library.
+
+    What this test exists to protect is unchanged: the entry is RETAINED and is NOT
+    treated as a resolved principal. Dropping it would make the ACL look narrower than it
+    is and could let an unsafe approval through.
+    """
     from src.domain.connector_adapters import SharePointAdapter
 
     adapter = SharePointAdapter(Connector(id=uuid.uuid4(), company_domain="acme.test"))
@@ -280,11 +292,15 @@ def test_unsupported_provider_principal_is_retained_as_unmapped():
     adapter._request = fake_request
     assert asyncio.run(adapter.permissions(change)) == [
         {
-            "principal_type": "unknown",
-            "principal_id": "permission-link",
+            "principal_type": "link",
+            "principal_id": "link:anonymous",
+            "principal_name": "Sharing link (anonymous)",
             "role": "read",
         }
     ]
+    # Still not a resolvable identity, so cloud_sync keeps counting it as unmapped and
+    # approval stays blocked until somebody decides what it means.
+    assert "link" not in {"group", "siteGroup", "user", "siteUser"}
 
 
 def test_unsupported_provider_principal_is_persisted_as_unmapped():
