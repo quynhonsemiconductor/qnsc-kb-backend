@@ -40,16 +40,33 @@ def fold_diacritics(value: str) -> str:
 # These words add little retrieval signal. Keeping them out of lexical
 # coverage prevents a query such as "What is CTS?" from ranking generic text
 # containing "what/is" above the passage containing the important term CTS.
-STOPWORDS = {
+#
+# SPLIT INTO TWO SETS ON PURPOSE, and the split is load-bearing. Folding diacritics
+# collapses Vietnamese CONTENT syllables onto English stopwords:
+#
+#     tổ  (combination) -> "to"    số (number) -> "so"    căn (balance) -> "can"
+#
+# A single folded set therefore deleted the subject of the question. "Logic tổ hợp là gì"
+# retrieved on "logic hop" with `tổ` silently dropped, and answered "not found in the
+# Knowledge Base" — while "Combinatrial Logic", which contains no Vietnamese, answered
+# correctly from the same document. Measured against production.
+#
+# So English stopwords are matched against the RAW token only, and Vietnamese stopwords
+# against either form. A Vietnamese word typed without diacritics is still recognised;
+# an English stopword can no longer swallow a Vietnamese content word.
+ENGLISH_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do",
     "does", "for", "from", "give", "how", "i", "in", "is", "it", "list", "me",
     "my", "need", "of", "on", "or", "please", "provide", "show", "so", "some",
     "tell", "that", "the", "them", "there", "these", "this", "those", "to",
     "us", "use", "used", "using", "want", "we", "what", "when", "where",
     "which", "who", "why", "will", "with", "would", "you", "your",
-    # Vietnamese. The list here used to hold eleven words and none of the ones a
-    # person actually opens a request with, which is why a politely phrased question
-    # scored five times lower than the same question typed as two keywords.
+}
+
+# Vietnamese. The list here used to hold eleven words and none of the ones a
+# person actually opens a request with, which is why a politely phrased question
+# scored five times lower than the same question typed as two keywords.
+VIETNAMESE_STOPWORDS = {
     "à", "ạ", "ai", "bạn", "bằng", "các", "cách", "cần", "cho", "chúng", "có",
     "của", "cung", "cấp", "danh", "dùng", "dụng", "gì", "giúp", "hãy", "khi",
     "không", "là", "làm", "liệt", "kê", "một", "muốn", "nào", "này", "nêu",
@@ -57,11 +74,24 @@ STOPWORDS = {
     "tôi", "trong", "và", "vậy", "về", "với", "được", "đó", "để", "đưa",
 }
 
-# What the code actually tests against. Derived, not hand-maintained: a second
-# hand-written list of unaccented forms would drift from the one above on the first edit.
-STOPWORDS_FOLDED = frozenset(fold_diacritics(word) for word in STOPWORDS) | frozenset(
-    STOPWORDS
-)
+#: Kept for callers that want the whole vocabulary; not what matching uses.
+STOPWORDS = ENGLISH_STOPWORDS | VIETNAMESE_STOPWORDS
+
+#: Vietnamese only, in both forms. Derived rather than hand-listed: a second written-out
+#: list of unaccented spellings would drift from the accented one on the first edit.
+VIETNAMESE_STOPWORDS_FOLDED = frozenset(
+    fold_diacritics(word) for word in VIETNAMESE_STOPWORDS
+) | frozenset(VIETNAMESE_STOPWORDS)
+
+
+def is_stopword(raw: str, folded: str) -> bool:
+    """Whether a token carries no retrieval signal.
+
+    `raw` is the token as typed, `folded` its accent-stripped form. English stopwords are
+    tested against `raw` alone so that a folded Vietnamese content word — `tổ` -> "to" —
+    cannot be mistaken for one.
+    """
+    return raw in ENGLISH_STOPWORDS or folded in VIETNAMESE_STOPWORDS_FOLDED
 
 REFERENCE_MARKERS = (
     "references", "reference", "helpful documents", "sources", "bibliography",
@@ -100,14 +130,20 @@ TOKEN_RE = re.compile(r"[\w'-]+")
 def normalize_query(query: str) -> str:
     """Remove low-signal question words before keyword/vector retrieval.
 
-    Folded first, so "cung cap cho toi" is recognised as the same set of stopwords as
-    "cung cấp cho tôi". Untyped diacritics used to leave every one of those words in the
-    scored term set, where they could only ever sit in the denominator.
+    Each token is judged on BOTH forms: the raw spelling decides English stopwords, the
+    folded spelling decides Vietnamese ones. Folding first and testing once against a
+    merged set deleted Vietnamese content words whose accent-stripped form happens to be
+    an English stopword — `tổ` -> "to", `số` -> "so" — so "Logic tổ hợp là gì" searched
+    for "logic hop" and found nothing.
+
+    The emitted tokens stay folded, because the passage side is folded too: that is what
+    lets a query typed without diacritics match accented source text.
     """
-    tokens = [
-        token for token in TOKEN_RE.findall(fold_diacritics(query))
-        if len(token) > 1 and token not in STOPWORDS_FOLDED
-    ]
+    tokens = []
+    for raw in TOKEN_RE.findall((query or "").lower()):
+        folded = fold_diacritics(raw)
+        if len(folded) > 1 and not is_stopword(raw, folded):
+            tokens.append(folded)
     # An all-stopword input has no retrieval signal. Returning the original
     # query here caused generic words such as "what is" to retrieve arbitrary
     # documents through vector similarity.
