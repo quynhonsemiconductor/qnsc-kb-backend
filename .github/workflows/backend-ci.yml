@@ -442,7 +442,7 @@ jobs:
 
       - name: Detect breaking API changes
         if: github.event_name == 'pull_request'
-        uses: QNSC-VN/qnsc-ci/actions/validate-openapi-contract@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
+        uses: QNSC-VN/qnsc-ci/actions/validate-openapi-contract@cb3f63c4285d3a467b46c6c3d75fa8825f94bbf4 # v1.12.0
         with:
           current-spec-path: openapi.json
           base-spec-path: /tmp/openapi-base.json
