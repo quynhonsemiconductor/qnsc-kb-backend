@@ -43,6 +43,7 @@ from sqlalchemy.orm import selectinload
 from src.core.config import settings
 from src.domain.search_service import SearchService
 from src.models.article import Article
+from src.models.rbac import Role, RolePermission
 from src.models.user import User
 from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
@@ -59,17 +60,26 @@ async def _eval_user(session) -> User:
     makes the first insert fail and poisons the session for every question after
     it, which reads as a retrieval failure and is not one.
 
-    Eagerly loaded because PermissionService reads `groups`/`roles` synchronously
-    while building the access bitmask. Left lazy, the first attribute access
-    raises MissingGreenlet under asyncio and every question records an error
+    Eagerly loaded because the permission helpers walk these relationships
+    SYNCHRONOUSLY: PermissionService reads `groups` for the access bitmask, and
+    AuthorizationService.has_permission (src/domain/rbac.py:231) iterates
+    `user.roles -> role.permissions -> assignment.permission`. Both of those hops
+    are lazy on the model, so loading only `User.roles` is not enough -- the first
+    access raises MissingGreenlet under asyncio and every question records an error
     instead of a result.
+
+    This bit only after migrations backfilled RBAC role assignments onto the eval
+    user: before that it had no roles, so has_permission took the
+    DEFAULT_ROLE_PERMISSIONS fallback and never touched the chain.
     """
     query = (
         select(User)
         .where(User.email == "eval@eval.local")
         .options(
             selectinload(User.groups),
-            selectinload(User.roles),
+            selectinload(User.roles)
+            .selectinload(Role.permissions)
+            .selectinload(RolePermission.permission),
             selectinload(User.departments),
             selectinload(User.department_ownerships),
         )

@@ -71,6 +71,47 @@ class _Lazy:
         return self._value
 
 
+def _register_cuda_libraries() -> None:
+    """Make pip-installed cuDNN/cuBLAS visible to onnxruntime, if they are present.
+
+    Only relevant to a LOCAL GPU evaluation run; a no-op on the CPU default and in
+    production, where these packages are not installed.
+
+    onnxruntime-gpu resolves `onnxruntime_providers_cuda.dll` against the process
+    library path, while pip puts cuDNN inside `site-packages/nvidia/*/bin`. Nothing
+    bridges the two, so CUDA initialisation fails with `LoadLibrary ... error 126`
+    and the provider is dropped -- silently, because the fallback to CPU is
+    deliberate. That produced a "GPU" run measuring 1.0x speedup.
+
+    Python 3.8+ on Windows ignores PATH for extension modules, so the directories
+    are registered with os.add_dll_directory as well.
+    """
+    import os
+
+    directories: list[str] = []
+    for module_name in ("nvidia.cudnn", "nvidia.cublas"):
+        try:
+            module = __import__(module_name, fromlist=["__path__"])
+        except Exception:  # noqa: BLE001 - absent is the normal case
+            continue
+        # Namespace packages: __file__ is None, so __path__ is the only handle.
+        for entry in getattr(module, "__path__", []):
+            for name in ("bin", "lib"):
+                candidate = Path(entry) / name
+                if candidate.is_dir():
+                    directories.append(str(candidate))
+    if not directories:
+        return
+    os.environ["PATH"] = os.pathsep.join(directories + [os.environ.get("PATH", "")])
+    for directory in directories:
+        try:
+            os.add_dll_directory(directory)
+        except (AttributeError, OSError):
+            # Not Windows, or already registered. PATH above still applies.
+            pass
+    logger.info("Registered CUDA library directories", directories=directories)
+
+
 def _load() -> tuple[Any, Any]:
     directory = Path(settings.READER_ONNX_DIR or "")
     if not directory.is_dir():
@@ -84,6 +125,13 @@ def _load() -> tuple[Any, Any]:
         if not path.is_file():
             raise ReaderUnavailable(f"{path} is missing from the reader export")
 
+    # Before importing onnxruntime: the CUDA provider DLL is resolved at import
+    # time, so registering the library directories afterwards is too late. Skipped
+    # entirely unless CUDA was actually asked for, which keeps the CPU default and
+    # production untouched.
+    if "CUDA" in (settings.READER_ONNX_PROVIDERS or ""):
+        _register_cuda_libraries()
+
     try:
         import onnxruntime
         from tokenizers import Tokenizer
@@ -96,9 +144,30 @@ def _load() -> tuple[Any, Any]:
     options = onnxruntime.SessionOptions()
     options.intra_op_num_threads = settings.READER_ONNX_THREADS
     options.inter_op_num_threads = 1
-    session = onnxruntime.InferenceSession(
-        str(model_path), options, providers=["CPUExecutionProvider"]
-    )
+
+    # Requested providers, filtered to what this wheel actually carries, with CPU
+    # always last. Passing an unavailable provider name to InferenceSession is a
+    # hard error, so an env var naming CUDA on a CPU-only wheel would take the
+    # reader down rather than fall back -- and the fallback is the point: a machine
+    # without a GPU must still run, just slower.
+    available = set(onnxruntime.get_available_providers())
+    requested = [
+        name.strip()
+        for name in (settings.READER_ONNX_PROVIDERS or "").split(",")
+        if name.strip()
+    ]
+    providers = [name for name in requested if name in available]
+    if "CPUExecutionProvider" not in providers:
+        providers.append("CPUExecutionProvider")
+    missing = [name for name in requested if name not in available]
+    if missing:
+        logger.warning(
+            "Requested ONNX providers are unavailable in this build; ignoring them",
+            missing=missing,
+            available=sorted(available),
+        )
+
+    session = onnxruntime.InferenceSession(str(model_path), options, providers=providers)
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     # Truncation and padding are applied per call: the stride logic below needs
     # exact control over both, and a tokenizer-level setting would silently
@@ -106,6 +175,7 @@ def _load() -> tuple[Any, Any]:
     logger.info(
         "ONNX reader ready",
         path=str(model_path),
+        providers=session.get_providers(),
         inputs=[item.name for item in session.get_inputs()],
     )
     return session, tokenizer

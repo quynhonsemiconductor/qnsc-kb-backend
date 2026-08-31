@@ -43,6 +43,7 @@ from sqlalchemy.orm import selectinload
 from src.core.config import settings
 from src.domain.search_service import SearchService
 from src.models.article import Article
+from src.models.rbac import Role, RolePermission
 from src.models.user import User
 from src.rag.compressor import compress_context
 from src.rag.squad_metrics import aggregate, score_answer
@@ -56,15 +57,24 @@ async def _eval_user(session) -> User:
     """A persisted global-read user with relationships eagerly loaded.
 
     Persisted because SearchService writes a search_logs row per query (FK to
-    users); eager because the permission helpers read `groups`/`roles`
-    synchronously and lazy loading raises MissingGreenlet under asyncio.
+    users).
+
+    Eager because the permission helpers walk these relationships SYNCHRONOUSLY:
+    PermissionService reads `groups` for the access bitmask, and
+    AuthorizationService.has_permission (src/domain/rbac.py:231) iterates
+    `user.roles -> role.permissions -> assignment.permission`. Both of those hops
+    are lazy on the model, so loading only `User.roles` is not enough -- the first
+    access raises MissingGreenlet under asyncio and every question records an error
+    instead of a result.
     """
     query = (
         select(User)
         .where(User.email == "eval@eval.local")
         .options(
             selectinload(User.groups),
-            selectinload(User.roles),
+            selectinload(User.roles)
+            .selectinload(Role.permissions)
+            .selectinload(RolePermission.permission),
             selectinload(User.departments),
             selectinload(User.department_ownerships),
         )

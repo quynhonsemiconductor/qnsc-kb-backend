@@ -254,6 +254,19 @@ class Settings(BaseSettings):
     # Raise this WITH RAG_CANDIDATE_POOL_SIZE or the pool increase buys nothing: 256
     # needs roughly 400 here.
     HNSW_EF_SEARCH: int = 200
+    # Hybrid fusion, previously three literals inside ChunkRepository.hybrid_search.
+    # Defaults reproduce that behaviour exactly (k=60, both legs 1.0), so exposing
+    # them changes nothing until one is set.
+    #
+    # k=60 is the Cormack et al. (SIGIR 2009) default. The weights exist because
+    # the legs are not equally trustworthy: the sparse leg is `ts_rank_cd`, which
+    # per the Postgres docs uses no global information — no IDF, no term
+    # saturation, no length normalisation — so at equal weight a common-word match
+    # can outrank a semantically correct passage. Bruch et al. (arXiv 2210.11934)
+    # measure weighted/convex fusion as never worse than equal-weight RRF.
+    RAG_FUSION_K: float = 60.0
+    RAG_FUSION_DENSE_WEIGHT: float = 1.0
+    RAG_FUSION_SPARSE_WEIGHT: float = 1.0
     RAG_RERANK_LIMIT: int = 16
     RAG_MAX_CONTEXT_PARENTS: int = 8
     RAG_CONTEXT_MAX_CHARS: int = 14000
@@ -273,6 +286,21 @@ class Settings(BaseSettings):
     # constraint, and for any deployment that must answer without an API call.
     # Nothing here changes the hosted path.
     READER_ONNX_DIR: str = "/opt/reader-onnx"
+    # Execution providers, in priority order. CPU-ONLY BY DEFAULT, and that is a
+    # deployment guarantee rather than a preference: production runs without a GPU,
+    # and `onnxruntime` (as declared in pyproject) has no CUDA provider compiled in
+    # at all, so this cannot silently acquire one.
+    #
+    # Overriding it to "CUDAExecutionProvider,CPUExecutionProvider" is for LOCAL
+    # EVALUATION only, where a GPU cuts a 40-minute benchmark config to minutes.
+    # It requires the separate `onnxruntime-gpu` wheel, which is deliberately NOT a
+    # project dependency. CPU is always appended as the fallback, so a missing or
+    # unusable GPU degrades to a slower run rather than a failed one.
+    #
+    # WHAT TRANSFERS AND WHAT DOES NOT: the weights and the arithmetic are the same,
+    # so accuracy measured on a GPU is valid. Latency and memory are not — every
+    # such figure reported for production must be measured with this at its default.
+    READER_ONNX_PROVIDERS: str = "CPUExecutionProvider"
     # Stride windows per forward pass. A question against 8 retrieved parents is
     # 15-40 windows; one pass each measured 6.1 s/question on 4 threads, because
     # every session.run pays its own dispatch. Batching them is what makes a

@@ -193,3 +193,69 @@ MLQA-vi and F1 moved only 1.8, because the gold-context ceiling is 61.4 F1
 numbers; a stronger Vietnamese reader is the only lever left, and published
 extractive SOTA (75.2 / 77.24) still sits below the 90 target.
 
+
+## Evaluation speed: what was tried, and the protocol that came out of it
+
+The reader dominates cost at ~7 s/question, so a 200-question config takes ~40
+minutes and a three-language iteration takes two hours. Three levers were
+measured; two are dead ends, and recording them here is what stops them being
+retried.
+
+### GPU: rejected on measurement, 3.5x SLOWER
+
+Evaluated at the user's request for local runs only, with production staying
+CPU-only. GTX 1050 4 GB, CUDA 12.4, `onnxruntime-gpu` 1.20.2 plus pip
+`nvidia-cudnn-cu12`/`cublas`. The CUDA provider was confirmed genuinely active
+(session reported `['CUDAExecutionProvider', 'CPUExecutionProvider']`), so this is
+not a fallback artefact:
+
+| config | F1 | p50 | vs CPU |
+|---|---|---|---|
+| CPU 384/128 t4 b16 | 61.89 | 7.3 s | 1.00x |
+| CUDA 384/128 b16 | 61.89 | 7.3 s | 1.04x |
+| CUDA 512/128 b64 | 61.89 | 26.1 s | **0.28x** |
+
+Cause: 4 GB cannot hold mDeBERTa's graph, so ONNX Runtime partitions it and
+inserts Memcpy nodes that copy tensors host<->device on every stride window. F1 was
+identical across all arms, which is the useful part -- it confirms accuracy
+transfers between providers, so a bigger GPU would be a valid accelerator later.
+`onnxruntime-gpu` was uninstalled and the declared CPU wheel restored.
+
+Two guards were added while doing this, and they stay: `READER_ONNX_PROVIDERS`
+defaults to `CPUExecutionProvider`, and `tests/unit/rag/test_reader_execution_providers.py`
+asserts both that default and that `onnxruntime-gpu` is absent from
+`pyproject.toml` -- so images are CPU-only by construction, not by convention.
+
+### CPU configuration: already optimal
+
+| config | F1 | p50 | speedup |
+|---|---|---|---|
+| 384/128 t4 b16 (shipped) | 66.65 | 7.1 s | 1.00x |
+| 384/128 t8 b16 | 66.65 | 7.3 s | 1.00x |
+| 512/128 t8 b32 | 66.65 | 8.5 s | 0.83x |
+| 384/64 t8 b32 | 66.65 | 8.5 s | 0.85x |
+
+Eight threads buy nothing -- the work is memory-bandwidth bound, not compute
+bound -- and larger windows cost more than the reduced overlap saves. F1 was
+identical (66.65) in all six configs, so nothing was traded away.
+
+### Passage count: an evaluation protocol, not a product change
+
+With the gold passage pinned at rank 2, 3 passages scored the same F1 as 8 at
+1.63x. That looked like a free win and is not one: reading
+`answer_passage_index` back from the real iteration-1 runs (590 answered
+questions) shows how much a cap actually discards.
+
+| cap | correct answers kept | speedup |
+|---|---|---|
+| 3 | 88.9% | 1.63x |
+| 4 | 93.9% | 1.46x |
+| 6 | 97.0% | ~1.28x |
+| 8 (shipped) | 100% | 1.00x |
+
+So the protocol, rather than a default change: exploratory passes may set
+`RAG_MAX_CONTEXT_PARENTS=4` for 1.46x with a known ~6% loss of correct answers,
+and every validating or reported run uses the shipped 8. Sweeps stay
+retrieval-only, which needs no reader at all and is already ~30x faster per
+config.
+
