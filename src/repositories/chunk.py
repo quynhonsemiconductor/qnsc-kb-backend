@@ -367,19 +367,33 @@ class ChunkRepository:
             keyword_result_count=len(keyword_results),
         )
 
-        # 3. Merge results using Reciprocal Rank Fusion (RRF)
+        # 3. Merge results using weighted Reciprocal Rank Fusion (RRF).
+        #
+        # The k constant and the per-leg weights are settings rather than literals
+        # because the two legs are NOT equally trustworthy and the balance is
+        # corpus-dependent. The sparse leg is Postgres `ts_rank_cd`, which the
+        # Postgres docs describe as using no global information -- no IDF, no term
+        # saturation, no length normalisation -- so at equal weight a common-word
+        # match can outrank a semantically correct passage. Bruch et al.
+        # (arXiv 2210.11934) measure weighted/convex fusion as never worse than
+        # equal-weight RRF.
+        #
+        # Defaults reproduce the previous hardcoded behaviour exactly:
+        # k=60.0, both weights 1.0.
         rrf_scores = {}
-        
-        def add_rrf_scores(results_list):
+        fusion_k = float(settings.RAG_FUSION_K)
+
+        def add_rrf_scores(results_list, weight: float):
+            if weight <= 0:
+                return
             for rank, chunk in enumerate(results_list):
-                # RRF formula: score = 1 / (60 + rank)
-                score = 1.0 / (60.0 + rank)
+                score = weight / (fusion_k + rank)
                 if chunk.id not in rrf_scores:
                     rrf_scores[chunk.id] = {"chunk": chunk, "score": 0.0}
                 rrf_scores[chunk.id]["score"] += score
 
-        add_rrf_scores(vector_results)
-        add_rrf_scores(keyword_results)
+        add_rrf_scores(vector_results, settings.RAG_FUSION_DENSE_WEIGHT)
+        add_rrf_scores(keyword_results, settings.RAG_FUSION_SPARSE_WEIGHT)
 
         # Sort by score descending
         sorted_results = sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)
