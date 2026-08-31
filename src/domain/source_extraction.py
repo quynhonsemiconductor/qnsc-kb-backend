@@ -280,11 +280,44 @@ def _ocr_image(image: Any) -> str:
     return _clean("\n".join(lines))
 
 
-def _extract_pdf_pages(data: bytes) -> list[dict[str, Any]]:
+def _reject_oversized_pdf(page_count: int) -> None:
+    """Reject before extraction, not after.
+
+    The limit used to be checked on the RESULT, so a 5,000-page scan was fully
+    rasterized and OCR'd — minutes of worker time and every page of it held in memory —
+    only to be refused for a page count that was knowable from the header.
+    """
+    if page_count > settings.MAX_SOURCE_PAGES:
+        raise SourceExtractionError(
+            f"Documents are limited to {settings.MAX_SOURCE_PAGES} pages"
+        )
+
+
+def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
+    """Extract page text, and report which pages could not be read.
+
+    The second element is the page numbers that FAILED, which is not the same as the
+    pages that came back empty: a legitimately blank page is readable and yields nothing,
+    while an unreadable one means the caller is about to index a document that is missing
+    content. Only the caller can decide what to do about that, and it cannot decide at all
+    unless the failure is reported instead of swallowed.
+    """
+    failed_pages: list[int] = []
     try:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
-        pages = [_page(index, page.extract_text() or "") for index, page in enumerate(reader.pages, start=1)]
+        _reject_oversized_pdf(len(reader.pages))
+        pages: list[dict[str, Any]] = []
+        for index, page in enumerate(reader.pages, start=1):
+            try:
+                pages.append(_page(index, page.extract_text() or ""))
+            except Exception as exc:
+                # A single corrupt content stream must not decide the fate of the other
+                # 400 pages, but it must not vanish either: this page is recorded as
+                # failed and reported upwards.
+                logger.warning("PDF page text extraction failed", page_number=index, error=str(exc))
+                pages.append(_page(index, ""))
+                failed_pages.append(index)
         if any(item["text"] for item in pages):
             # Mixed PDFs are common: retain embedded text and OCR only image
             # pages instead of silently dropping scanned appendices.
@@ -298,27 +331,54 @@ def _extract_pdf_pages(data: bytes) -> list[dict[str, Any]]:
                             continue
                         page = document[index]
                         if not page.get_images(full=True):
+                            # No image and no text: genuinely blank, not a failure.
                             continue
-                        pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                        item["text"] = _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))
-                except Exception:
-                    # Embedded-text PDFs remain usable when OCR is not
-                    # installed; blank pages are preserved rather than
-                    # converting the entire document to a failing request.
-                    pass
-            return pages
-    except Exception:
-        pass
+                        try:
+                            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                            item["text"] = _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))
+                        except Exception as exc:
+                            logger.warning("PDF page OCR failed", page_number=index + 1, error=str(exc))
+                        if not item["text"] and index + 1 not in failed_pages:
+                            # An image page that produced nothing is unread content,
+                            # whether OCR raised or simply returned empty.
+                            failed_pages.append(index + 1)
+                except Exception as exc:
+                    # OCR being absent entirely is a deployment condition rather than a
+                    # per-page fault, so the embedded text still stands. The image-only
+                    # pages are reported as failures so the document is not treated as
+                    # completely extracted.
+                    logger.warning("PDF OCR pass unavailable", error=str(exc))
+                    failed_pages.extend(
+                        index for index, item in enumerate(pages, start=1)
+                        if not item["text"] and index not in failed_pages
+                    )
+            return pages, sorted(set(failed_pages))
+    except SourceExtractionError:
+        raise
+    except Exception as exc:
+        # No embedded text could be read at all; fall through to a full OCR pass.
+        logger.info("PDF embedded-text extraction unusable, falling back to OCR", error=str(exc))
 
     try:
         import fitz
         from PIL import Image
         document = fitz.open(stream=data, filetype="pdf")
-        pages: list[dict[str, Any]] = []
+        _reject_oversized_pdf(document.page_count)
+        ocr_pages: list[dict[str, Any]] = []
+        ocr_failures: list[int] = []
         for index, page in enumerate(document, start=1):
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-            pages.append(_page(index, _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))))
-        return pages
+            try:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                ocr_pages.append(_page(index, _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))))
+            except SourceExtractionError:
+                # OCR is not installed. That is not a per-page fault and the whole
+                # document is unreadable without it, so it stays a hard failure.
+                raise
+            except Exception as exc:
+                logger.warning("PDF page rasterization failed", page_number=index, error=str(exc))
+                ocr_pages.append(_page(index, ""))
+                ocr_failures.append(index)
+        return ocr_pages, ocr_failures
     except SourceExtractionError:
         raise
     except Exception as exc:
@@ -360,6 +420,15 @@ def _extract_pptx(data: bytes) -> str:
     return _clean("\n".join(parts))
 
 
+def extraction_failed_pages(pages: list[dict[str, Any]]) -> list[int]:
+    """Page numbers this extraction could not read, for callers that must flag it."""
+    return [
+        int(item["page_number"])
+        for item in pages
+        if item.get("extraction_failed")
+    ]
+
+
 def extract_source_pages(filename: str, data: bytes) -> list[dict[str, Any]]:
     extension = Path(filename).suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:
@@ -369,8 +438,9 @@ def extract_source_pages(filename: str, data: bytes) -> list[dict[str, Any]]:
     if not data:
         raise SourceExtractionError("The uploaded file is empty.")
     _validate_source_bytes(filename, data)
+    failed_pages: list[int] = []
     if extension == ".pdf":
-        pages = _extract_pdf_pages(data)
+        pages, failed_pages = _extract_pdf_pages(data)
     elif extension == ".docx":
         pages = [_page(1, _extract_docx(data))]
     elif extension in {".xlsx", ".xlsm"}:
@@ -388,13 +458,33 @@ def extract_source_pages(filename: str, data: bytes) -> list[dict[str, Any]]:
         Image.MAX_IMAGE_PIXELS = settings.MAX_SOURCE_IMAGE_PIXELS
         image = Image.open(io.BytesIO(data)).convert("RGB")
         pages = [_page(1, _ocr_image(np.asarray(image)))]
-    pages = [item for item in pages if item["text"]]
+    # An unreadable page is KEPT, marked, and carried into ``page_texts``. Dropping every
+    # textless page made a partially-unreadable document indistinguishable from a complete
+    # one: the corpus was quietly missing content, citations pointed at pages that were
+    # never read, and nothing in the record said so. Everything downstream selects pages by
+    # `item["text"]` being non-empty, so a marker page is never indexed or cited — it only
+    # makes the gap visible.
+    failures = set(failed_pages)
+    pages = [
+        {**item, "extraction_failed": True} if item["page_number"] in failures else item
+        for item in pages
+        if item["text"] or item["page_number"] in failures
+    ]
+    # The page-count ceiling is enforced before extraction for PDFs (_reject_oversized_pdf);
+    # this catches the other formats, whose page count is only known once parsed.
     if len(pages) > settings.MAX_SOURCE_PAGES:
         raise SourceExtractionError(f"Documents are limited to {settings.MAX_SOURCE_PAGES} pages")
     if sum(len(str(item["text"])) for item in pages) > settings.MAX_SOURCE_TEXT_CHARS:
         raise SourceExtractionError("The extracted document text is too large")
-    if not pages:
+    if not any(item["text"] for item in pages):
         raise SourceExtractionError("No readable text was found in the uploaded file.")
+    if failures:
+        logger.warning(
+            "Source extracted with unreadable pages",
+            filename=filename,
+            failed_pages=sorted(failures),
+            total_pages=len(pages),
+        )
     return pages
 
 

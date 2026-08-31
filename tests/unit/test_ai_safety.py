@@ -67,6 +67,9 @@ class FakeSearchService:
     def __init__(self, results):
         self.results = results
         self.authorized_ids = {str(item["chunk_id"]) for item in results}
+        # `ask` reads this to tell "the knowledge base has nothing" apart from "vector
+        # retrieval is broken", which the real service reports rather than swallowing.
+        self.vector_search_degraded = False
         self.chunk_repo = SimpleNamespace(
             authorized_chunk_ids=self.authorized_chunk_ids
         )

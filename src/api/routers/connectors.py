@@ -1022,8 +1022,14 @@ async def _enqueue_webhook(request: Request, provider: str, lifecycle_only: bool
             if not subscription or not subscription.active:
                 continue
             expected_token = subscription.verification_token_hash
+            # No stored token means nothing can authenticate this notification, so the
+            # only safe answer is to drop it. Comparing only when a hash happens to
+            # exist made an unverifiable subscription MORE permissive than a verified
+            # one: anyone who learned a subscription id could enqueue provider syncs.
+            if not expected_token:
+                continue
             received_token = hashlib.sha256(item_client_state.encode("utf-8")).hexdigest() if item_client_state else None
-            if expected_token and (not received_token or not hmac.compare_digest(expected_token, received_token)):
+            if not received_token or not hmac.compare_digest(expected_token, received_token):
                 continue
 
             lifecycle_event = str(item.get("lifecycleEvent") or body.get("lifecycleEvent") or "") or None

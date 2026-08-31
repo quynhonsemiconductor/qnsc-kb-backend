@@ -382,9 +382,14 @@ async def _system_role(db: AsyncSession, name: str, company_domain: str | None) 
 
 
 async def _set_primary_role(db: AsyncSession, user: Any, name: str) -> None:
-    """Keep the legacy display role and authoritative RBAC relationship aligned."""
-    role_company = None if name == "Admin" else user.company_domain
-    role = await _system_role(db, name, role_company)
+    """Keep the legacy display role and authoritative RBAC relationship aligned.
+
+    An "Admin" primary role resolves to the target's own company Admin role. The
+    company_domain = NULL Admin role bypasses tenant RLS entirely, so granting it here
+    would turn a company-scoped promotion into a cross-tenant one; it stays reserved for
+    the identities that attach it deliberately (src/domain/admin_bootstrap.py).
+    """
+    role = await _system_role(db, name, user.company_domain)
     user.roles = [role]
     user.role = name
 
@@ -593,6 +598,16 @@ async def create_invitation(
         raise HTTPException(status_code=403, detail="Employee email must remain in the company domain")
     if payload.role not in MANAGED_PRIMARY_ROLES:
         raise HTTPException(status_code=422, detail="Unsupported employee role")
+    if payload.role in {"Admin", "CEO"} and not _is_global_user_manager(current_user):
+        # An invitation is a deferred role grant, so it needs the same authority check
+        # every immediate grant goes through. Without this a company-scoped user.manage
+        # holder can invite an address in their own domain as "Admin"; accept_invitation
+        # copies the role onto the new account and bootstrap_rbac then resolves it to an
+        # Admin role, which is the one identity that escapes tenant isolation.
+        raise HTTPException(
+            status_code=403,
+            detail="Only global user managers can assign global or executive roles",
+        )
     existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if existing and existing.active:
         raise HTTPException(status_code=409, detail="An active account already exists for this email")

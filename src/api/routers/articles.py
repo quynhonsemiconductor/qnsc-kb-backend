@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from src.api.deps import get_db, get_current_user
+from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
@@ -32,6 +32,7 @@ from src.domain.source_extraction import (
     SourceExtractionError,
     extract_source_markdown,
     extract_source_pages,
+    extraction_failed_pages,
 )
 from src.domain.source_storage import (
     save_source,
@@ -249,6 +250,11 @@ class ArticleUpdate(BaseModel):
     visibility: str | None = Field(default=None, pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
     denied_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+    # The article version the client loaded, for optimistic concurrency. Optional, so a
+    # caller that does not send it keeps the previous last-write-wins behaviour; when it
+    # is sent and no longer matches, the update is refused with 409 rather than silently
+    # overwriting an edit the client never saw.
+    version: int | None = Field(default=None, ge=1)
 
 
 class ArticleEditRequestCreate(BaseModel):
@@ -585,7 +591,14 @@ async def upload_source(
     tags: str | None = Form(None),
     dept: str | None = Form(None),
     department_ids: str | None = Form(None),
-    current_user: User = Depends(get_current_user),
+    # Rejected before a byte is read. Authenticating alone was enough to reach this
+    # endpoint, so an identity holding only `article.read` could spend the ingestion,
+    # storage and malware-scan budget on drafts it was never allowed to create — the
+    # resource-scoped check further down refused the draft, but only after the whole
+    # extract-and-OCR pass had already run. `scope="own"` is the weakest grant of
+    # `article.create`, so every role that may create anything still passes here and the
+    # department/company/global decision remains with the resource check below.
+    current_user: User = Depends(require_permission("article.create", scope="own")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     # A batch shares one DB session and should consume one request quota, not
@@ -650,6 +663,7 @@ async def upload_source(
         raise HTTPException(
             status_code=422, detail="Could not process uploaded source"
         ) from exc
+    unreadable_pages = extraction_failed_pages(extracted_pages)
 
     source_hash = hashlib.sha256(data).hexdigest()
     # Article deletion is soft-delete. Ignore source rows belonging to deleted
@@ -790,7 +804,17 @@ async def upload_source(
         content_metadata={
             "department_ids": [
                 str(department.id) for department in selected_departments
-            ]
+            ],
+            # Recorded on the draft, not merely logged, because it changes what a
+            # reviewer is looking at: pages listed here were NOT read, so the reading
+            # view is incomplete and approving it publishes a document with holes in it.
+            # Absent when extraction was clean, so existing drafts and responses are
+            # unchanged.
+            **(
+                {"unreadable_pages": unreadable_pages}
+                if unreadable_pages
+                else {}
+            ),
         },
     )
     db.add(
@@ -870,10 +894,18 @@ async def upload_source(
             else []
         ),
         "tags": requested_tags,
+        # Reported to the uploader as well as recorded on the draft: silence here is what
+        # let a partially-unreadable scan look like a successful upload.
+        "unreadable_pages": unreadable_pages,
         "message": (
             "Source stored and queued for reviewer approval. AI reading view is formatting in the background."
             if restructuring_enabled
             else "Source extracted and queued for reviewer approval."
+        ) + (
+            f" {len(unreadable_pages)} page(s) could not be read and are excluded: "
+            f"{', '.join(str(page) for page in unreadable_pages)}."
+            if unreadable_pages
+            else ""
         ),
     }
 
@@ -886,7 +918,8 @@ async def upload_sources(
     tags: str | list[str] | None = Form(None),
     dept: str | None = Form(None),
     department_ids: str | None = Form(None),
-    current_user: User = Depends(get_current_user),
+    # Same gate as the single-file endpoint: this one fans out to twenty of them.
+    current_user: User = Depends(require_permission("article.create", scope="own")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Process a batch without letting one bad or duplicate file stop the batch."""
@@ -1259,9 +1292,13 @@ async def complete_source_upload(
         if similarity_level == "partial"
         else None
     )
+    unreadable_pages = extraction_failed_pages(extracted_pages)
     draft.content_metadata = {
         **(draft.content_metadata or {}),
         "upload_mode": "presigned_complete",
+        # Same reason as the direct upload path: pages that could not be read make the
+        # reviewer's reading view incomplete, and that has to travel with the draft.
+        **({"unreadable_pages": unreadable_pages} if unreadable_pages else {}),
     }
     fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
@@ -1743,6 +1780,19 @@ async def update_article(
     if not PermissionService.can_edit_article(current_user, current):
         raise HTTPException(
             status_code=403, detail="Not authorized to edit this article"
+        )
+    # Optimistic concurrency, checked before any of the expensive work below (LLM
+    # restructuring, similarity search) rather than at the write: refusing early costs the
+    # loser of the race nothing. The publish path bumps `version` (governance.py: the new
+    # article row is written with update_target.version + 1), so a client that reloads
+    # after each save always holds the version its editor was opened on.
+    if article_in.version is not None and article_in.version != current.version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This article was modified by someone else while you were editing. "
+                "Reload it and reapply your changes."
+            ),
         )
     if article_in.status is not None and article_in.status != current.status:
         raise HTTPException(

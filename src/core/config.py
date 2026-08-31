@@ -41,7 +41,18 @@ class Settings(BaseSettings):
     # during a deliberate rotation window.
     DATA_ENCRYPTION_KEY: str | None = None
     PREVIOUS_DATA_ENCRYPTION_KEYS: str = ""
-    ENVIRONMENT: str = "development"
+    # Defaults to the HARDENED value, so every hardening check below is opted OUT of
+    # explicitly rather than opted IN to. It was "development", which made the whole of
+    # validate_production fail open: an unset ENVIRONMENT — a missed task-definition
+    # variable, a container platform that drops empty values, a fresh EC2 box started by
+    # hand — booted a public deployment with the committed SECRET_KEY signing its JWTs,
+    # /docs published, self-registration reachable, and the bootstrap administrator
+    # holding the password written down in this file. Nothing logged a warning, because
+    # from the process's point of view it was a normal development run.
+    #
+    # Local development, the dev Compose stack and the test suite therefore set this
+    # explicitly (docker-compose.yml, .env.example, tests/conftest.py).
+    ENVIRONMENT: str = "production"
     CORS_ORIGINS: str = "http://localhost:5173"
     FRONTEND_URL: str = "http://localhost:5173"
     # Schema lifecycle is owned exclusively by Alembic migrations.

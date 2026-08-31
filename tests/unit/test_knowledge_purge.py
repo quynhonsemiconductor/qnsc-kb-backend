@@ -75,6 +75,18 @@ class _PurgeDB:
             return _Result([])
         return _Result(rowcount=self._rowcount)
 
+    async def scalar(self, statement, params=None, *args, **kwargs):
+        """The dry-run counter aggregates in SQL, so it reads a scalar COUNT.
+
+        It used to pull every id into Python and take len(), which on a real corpus meant
+        millions of UUIDs crossing the wire to produce one integer.
+        """
+        rendered = str(statement.compile(dialect=postgresql.dialect()))
+        self.statements.append(rendered)
+        if "count(" in rendered.lower() and "from articles" in rendered.lower():
+            return len(self._article_ids)
+        return 0
+
     async def commit(self):
         self.committed = True
 

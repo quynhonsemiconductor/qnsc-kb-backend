@@ -122,7 +122,12 @@ class ConnectorAdapter:
                         raise ConnectorProviderError("Provider returned too many redirects", retryable=False, code="unsafe_redirect")
                 if status_code in {429, 500, 502, 503, 504}:
                     retry_after = response_headers.get("retry-after")
-                    delay = float(retry_after) if retry_after and retry_after.isdigit() else min(16, 2 ** attempt) + secrets.randbelow(500) / 1000
+                    # The provider chooses this number, so it is untrusted input: a
+                    # misconfigured or hostile tenant answering `Retry-After: 86400`
+                    # parks a sync worker for a day. Capped at the top of our own
+                    # backoff curve; past the attempt ceiling the durable queue
+                    # reschedules the whole request anyway.
+                    delay = min(60.0, float(retry_after)) if retry_after and retry_after.isdigit() else min(16, 2 ** attempt) + secrets.randbelow(500) / 1000
                     if attempt == 3:
                         raise ConnectorProviderError(f"Provider retry limit reached ({status_code})", code=str(status_code))
                     await asyncio.sleep(delay)

@@ -265,6 +265,12 @@ async def _index_article(article_id: uuid.UUID) -> bool:
 
             logger.info("Article indexing completed", article_id=str(article_id), chunk_count=chunk_count)
             if embedding_failures:
+                # Discard the rebuild BEFORE recording the failure. The wipe and every chunk
+                # written above are still uncommitted, so this restores the previous chunk
+                # set wholesale: the article keeps serving its old passages instead of
+                # becoming a published document with a partial index. Committing the DLQ row
+                # first would have committed those partial chunks with it.
+                await db.rollback()
                 db.add(DeadLetterJob(
                     source_queue="embedding",
                     payload={"article_id": str(article_id), "failures": embedding_failures},
@@ -302,5 +308,9 @@ async def recompute_article_permissions(article_id: uuid.UUID) -> None:
 async def delete_article_chunks(article_id: uuid.UUID) -> None:
     async with SessionLocal() as db:
         await set_database_context(db, None, True)
+        # The repository stages the delete and leaves the commit to whoever owns the
+        # transaction, because a reindex has to wipe and rebuild atomically. Here the wipe
+        # IS the whole operation, so this is the owner.
         await ChunkRepository(db).delete_by_article_id(article_id)
+        await db.commit()
         logger.info("Article chunks deleted", article_id=str(article_id))

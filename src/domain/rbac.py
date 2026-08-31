@@ -80,16 +80,24 @@ async def bootstrap_rbac(db: AsyncSession) -> None:
         role_by_name[cache_key] = role
         return role
 
-    admin_role = await ensure_role("Admin", None)
+    # The global Admin role — company_domain = NULL — is the one identity that bypasses
+    # tenant RLS (AuthorizationService.is_global_administrator). It is created here
+    # because admin_bootstrap and scripts/create_admin.py attach it explicitly, but it is
+    # never handed out by the backfill below: a user that belongs to a company gets that
+    # company's Admin role, so acquiring the scalar role string "Admin" by any route
+    # cannot silently promote an account to cross-tenant administrator.
+    await ensure_role("Admin", None)
     for domain in domains:
         for name in DEFAULT_ROLE_PERMISSIONS:
-            if name != "Admin":
-                await ensure_role(name, domain)
+            await ensure_role(name, domain)
 
     for user in users:
         if user.roles:
             continue
-        role = admin_role if user.role == "Admin" else await ensure_role(user.role if user.role in DEFAULT_ROLE_PERMISSIONS else "Staff", user.company_domain)
+        name = user.role if user.role in DEFAULT_ROLE_PERMISSIONS else "Staff"
+        # A user with no company_domain has no tenant to scope to; the seeded bootstrap
+        # administrator is the only such identity, and the global role is correct for it.
+        role = await ensure_role(name, user.company_domain)
         user.roles.append(role)
     await db.commit()
 
