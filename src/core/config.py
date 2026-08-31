@@ -243,7 +243,7 @@ class Settings(BaseSettings):
     # moved ViQuAD R@10 67.4 -> 74.5 and MLQA-vi 61.0 -> 63.0, but with this MiniLM
     # default it gave MLQA-en +2.0 R@10 while MLQA-vi went 56.5 -> 56.0, for about
     # +400ms retrieval p50. Left at 48 until the encoder that justifies it is adopted.
-    RAG_CANDIDATE_POOL_SIZE: int = 48
+    RAG_CANDIDATE_POOL_SIZE: int = 240
     # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
     # the index scan: the permission bitmask and published-status predicates consume
     # candidates the index already committed to. pgvector's default is 40, i.e. below
@@ -253,18 +253,18 @@ class Settings(BaseSettings):
     #
     # Raise this WITH RAG_CANDIDATE_POOL_SIZE or the pool increase buys nothing: 256
     # needs roughly 400 here.
-    HNSW_EF_SEARCH: int = 200
-    RAG_RERANK_LIMIT: int = 16
-    RAG_MAX_CONTEXT_PARENTS: int = 8
-    RAG_CONTEXT_MAX_CHARS: int = 14000
-    RAG_CONTEXT_MAX_TOKENS: int = 3500
+    HNSW_EF_SEARCH: int = 1000
+    RAG_RERANK_LIMIT: int = 80
+    RAG_MAX_CONTEXT_PARENTS: int = 40
+    RAG_CONTEXT_MAX_CHARS: int = 70000
+    RAG_CONTEXT_MAX_TOKENS: int = 17500
     RAG_PARENT_CONTEXT_CHARS: int = 2400
-    RAG_MAX_PARENTS_PER_ARTICLE: int = 3
+    RAG_MAX_PARENTS_PER_ARTICLE: int = 15
     PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
     # Part of the ai_cache key (src/domain/ai_service.py:917-924), so this MUST move
     # whenever retrieval behaviour changes, or a cached answer from the old pipeline is
     # served for six hours as if it came from the new one.
-    RETRIEVAL_VERSION: str = "v3-e5-encoder"
+    RETRIEVAL_VERSION: str = "v4-e5-encoder-5x-topk"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
