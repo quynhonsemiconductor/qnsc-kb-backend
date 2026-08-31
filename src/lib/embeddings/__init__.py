@@ -85,16 +85,51 @@ def warm_up() -> None:
     resolve_provider().warm_up()
 
 
+# Models trained with an asymmetric instruction prefix. e5 is explicit about it:
+# "Each input text should start with 'query: ' or 'passage: ', even for
+# non-English texts", and omitting the prefix costs recall SILENTLY -- the
+# vectors are still unit-norm and still retrieve something, just worse. bge-m3
+# and MiniLM take no prefix, so the table is opt-in per model family.
+_INSTRUCTION_PREFIXES = {
+    "query": "query: ",
+    "passage": "passage: ",
+}
+
+
+def _needs_instruction_prefix() -> bool:
+    model = settings.EMBEDDING_MODEL.lower()
+    # bge-m3 dropped instructions entirely; only the e5 family needs them here.
+    return "e5-" in model
+
+
+def _decorate(texts: list[str], task: str) -> list[str]:
+    """Prepend the model's instruction prefix, if it was trained with one.
+
+    Applied HERE rather than in each backend so the torch and onnx runtimes
+    cannot disagree about it -- a query embedded with a prefix and a passage
+    embedded without one land in different regions of the space, which degrades
+    retrieval with no error to notice.
+    """
+    if not _needs_instruction_prefix():
+        return texts
+    key = "query" if task == "RETRIEVAL_QUERY" else "passage"
+    prefix = _INSTRUCTION_PREFIXES[key]
+    return [f"{prefix}{text}" for text in texts]
+
+
 def _embed(texts: list[str], task: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
     """Embed through the configured provider.
 
-    `task` matters only to hosted providers, which embed a QUESTION and a PASSAGE
-    differently. Mixing them degrades retrieval quietly rather than visibly, so the
-    distinction is carried from the two public entry points — singular is a search
-    query, plural is a batch of chunks being indexed — rather than guessed further
-    down. Local providers ignore it.
+    `task` tells a hosted provider to embed a QUESTION differently from a
+    PASSAGE, and now also selects the instruction prefix for local models that
+    were trained with one (e5). Mixing the two degrades retrieval quietly rather
+    than visibly, so the distinction is carried from the two public entry points
+    -- singular is a search query, plural is a batch of chunks being indexed --
+    rather than guessed further down.
     """
-    return finalise(resolve_provider().embed(texts, task=task), len(texts))
+    return finalise(
+        resolve_provider().embed(_decorate(texts, task), task=task), len(texts)
+    )
 
 
 def get_bge_embedding(text: str) -> list[float]:

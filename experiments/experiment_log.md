@@ -100,3 +100,96 @@ Published extractive SOTA:
 **>=90 token-F1 is 6-25 points above every published extractive result on these
 benchmarks.** The objective's fallback branch therefore governs: optimize as far
 as CPU-only allows, document the best achieved score, and name the bottleneck.
+
+## Iteration 1 — Vietnamese retrieval ranking (38.7 F1 points)
+
+### Bottleneck, diagnosed rather than guessed
+
+Failure analysis put the largest single loss in retrieval ranking: 25.1 F1 points
+combined, 38.7 on MLQA-vi, where 39% of questions never retrieved their gold
+paragraph. Two diagnostics then separated the legs, over the 60 MLQA-vi questions
+where retrieval had failed:
+
+| Leg | Finding |
+|---|---|
+| Dense | gold chunk at cosine distance **median 0.819** (min 0.464), so **0/60 passed `VECTOR_DISTANCE_THRESHOLD=0.45`**; dense rank median 764 |
+| Sparse | with the product's real OR-of-per-term tsquery, **found the gold document for 96.7%** — but at **median rank 172**, cut by `RAG_CANDIDATE_POOL_SIZE=48` |
+
+So the evidence was in the corpus and reachable; two gates discarded it. The
+first measurement of the sparse leg used a single AND-semantics `plainto_tsquery`
+and reported 3.3%; that understated it, and the corrected OR-semantics number is
+the one above.
+
+Root cause of the dense failure is the encoder's training objective, not tuning:
+`paraphrase-multilingual-MiniLM-L12-v2` is a symmetric paraphrase/STS model, and
+a question is not a paraphrase of the passage that answers it.
+
+### Research
+
+VN-MTEB (arXiv 2507.21500, Table 3), 15 Vietnamese retrieval datasets:
+
+| Model | VN-MTEB retrieval |
+|---|---|
+| bge-m3 (1024-d, 2.3 GB) | 39.84 |
+| **multilingual-e5-small (384-d)** | **34.12** |
+| paraphrase-multilingual-MiniLM-L12-v2 (current) | 14.14 |
+
+e5-small is also 384-wide, so it needs no pgvector column or HNSW rebuild. It
+does require the `query: ` / `passage: ` instruction prefixes.
+
+### Measured (dev/validation, 200 questions per config)
+
+Retrieval only, so the reader could not confound it:
+
+| Config | MLQA-en R@10 | MLQA-vi R@10 | ViQuAD-vi R@10 |
+|---|---|---|---|
+| MiniLM, pool 48 (shipped) | 80.5 | 56.5 | 68.8 |
+| e5-small, pool 48 | 91.0 | 61.0 | 67.4 |
+| e5-small, pool 256 | 91.5 | 63.0 | 74.5 |
+| MiniLM, pool 256 | 82.5 | **56.0** | 70.2 |
+
+End to end, e5-small + pool 256:
+
+| Config | EM | F1 | vs baseline | gold retrieved | answer in context |
+|---|---|---|---|---|---|
+| MLQA-en | 52.0 | 62.20 | **+7.92** | 93.5% | 91.0% |
+| MLQA-vi | 24.0 | 33.88 | **+1.80** | 63.0% | 66.0% |
+| ViQuAD-vi | 37.5 | 51.41 | **+3.30** | 74.5% | 72.3% |
+
+### Outcome: validated, not adopted
+
+All three languages improved with no regression, but the change was NOT made the
+default, for two reasons that are not about the measurement:
+
+1. `tests/unit/test_embedding_config_matches_image.py` pins
+   `infra/live/{develop,prod}/main.tf` to the Dockerfile ARG and the code default.
+   Flipping the encoder requires editing `infra/`, which is outside the agreed
+   scope boundary.
+2. Adopting it DELETES and re-embeds every stored chunk — same 384 width, a
+   different vector space. That is a production data operation, not a config flip.
+
+The deeper candidate pool was also reverted, on its own evidence: under the
+shipped MiniLM encoder it moves MLQA-vi 56.5 -> 56.0 for about +400 ms retrieval
+p50. The pool gain belongs to the encoder swap, not to the pool.
+
+What shipped instead is the capability, with defaults untouched: e5 dimension
+derivation, and central `query: `/`passage: ` prefix handling so the two local
+runtimes cannot disagree about it. Adoption is then three env vars plus a
+re-index.
+
+### Ablations recorded
+
+- Removing `VECTOR_DISTANCE_THRESHOLD` under e5: byte-identical results. The
+  cutoff is inert there (all 48 candidates pass) and was destructive under MiniLM
+  (0/60 gold chunks passed) — fixed by the encoder, not by the threshold. No
+  change made.
+- Reader int8: -10.3 / -9.7 / -20.2 F1 for ~8% latency. Rejected in iteration 0.
+
+### Next bottleneck
+
+The reader, on Vietnamese. Retrieval gained 7.5 points of answer-in-context on
+MLQA-vi and F1 moved only 1.8, because the gold-context ceiling is 61.4 F1
+(MLQA-vi) and 56.3 (ViQuAD-vi). No retrieval work can lift the score past those
+numbers; a stronger Vietnamese reader is the only lever left, and published
+extractive SOTA (75.2 / 77.24) still sits below the 90 target.
+
