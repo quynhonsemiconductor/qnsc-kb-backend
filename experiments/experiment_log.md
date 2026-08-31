@@ -393,3 +393,59 @@ conclusion that the reader is the binding constraint. Samples were small to fit
 the time budget; the direction (retrieval up, F1 flat, latency up) is consistent
 across the retrieval and end-to-end measurements and matches the iteration-4
 mechanism, so a larger sample is not expected to change the verdict.
+
+## Iteration 6 — XLM-R-large-viquad reader: research promised, testing rejected
+
+### Hypothesis and research
+
+Iteration 5 confirmed the reader is the binding constraint. Web research (arXiv
+2105.09043 ViMRC, 2203.11400 ViMRC Challenge) reports XLM-R-Large fine-tuned on
+UIT-ViQuAD 2.0 at F1 ~88 / EM ~86 on Vietnamese MRC -- far above the incumbent
+mDeBERTa's 56.3 gold-context ceiling. Candidate: `NamSyntax/xlmr-large-viquad`
+(Apache-2.0, XLM-R-Large, fine-tuned on ViQuAD 2.0, 0.6B). Exported to ONNX with
+optimum (torch-free at runtime; export is a one-time offline step) and run through
+the existing OnnxReader unchanged (inputs input_ids/attention_mask, no
+token_type_ids).
+
+### Test 1 -- gold-context ceiling (40 q/split), the fast decisive comparison
+
+| split | mDeBERTa F1 | xlmr-viquad F1 | delta | note |
+|---|---|---|---|---|
+| MLQA-vi (CLEAN) | 69.0 | 71.8 | +2.8 | real generalization -- xlmr never trained on MLQA |
+| ViQuAD-vi (in-domain) | 64.4 | 79.0 | +14.6 | large but partly in-domain optimism |
+| MLQA-en | 82.5 | 65.9 | -16.5 | English regresses hard |
+
+xlmr-viquad is a Vietnamese specialist: it lifts both Vietnamese ceilings but
+destroys English, because it was fine-tuned VI-only and lost mDeBERTa's English
+SQuAD ability. A single-reader swap therefore violates rule 10 (regresses a
+language). The apparent path forward was a language-routed reader (mDeBERTa for
+en, xlmr for vi).
+
+### Test 2 -- end-to-end on the CLEAN split (MLQA-vi, 20 q), which overturned it
+
+| reader | EM | F1 |
+|---|---|---|
+| mDeBERTa (control) | 25.0 | 35.30 |
+| xlmr-viquad (gate on) | 5.0 | 30.23 |
+| xlmr-viquad (gate off) | 5.0 | 32.05 |
+
+Despite the higher ceiling, xlmr-viquad is WORSE end-to-end on the clean split,
+and turning the confidence gate off recovers only to 32.05 -- so this is not a
+gate-calibration artifact. The signal is the EM collapse (25 -> 5): xlmr trained
+on ViQuAD's answer-span conventions extracts spans that earn partial F1 but rarely
+match MLQA's exact boundaries. The ceiling gain does not survive the pipeline.
+
+### Verdict -- REJECTED, not adopted
+
+Research strongly suggested this model; measurement rejected it. The clean
+end-to-end number is the one that counts, and it went down. No language-routed
+reader was built, because the Vietnamese half it would route to does not actually
+improve the clean end-to-end metric -- only the in-domain ViQuAD ceiling (which is
+the overfit-prone number the objective explicitly discounts). Incumbent mDeBERTa
+stays. The ONNX export is kept in .eval-cache (gitignored) as research knowledge;
+nothing shipped.
+
+This is the third reader candidate tested and rejected (int8 iter0, XLM-R-base
+iter2, XLM-R-large-viquad iter6), which strengthens the standing conclusion: no
+available CPU extractive reader clears the target, and swaps that look good on a
+ceiling or in-domain number fail the clean end-to-end test.
