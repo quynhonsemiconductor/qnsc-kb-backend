@@ -207,9 +207,20 @@ class OnnxReader:
         passage: str,
         passage_index: int,
     ) -> Span | None:
-        """Pick the best passage-internal span and compare it to the null score."""
-        import numpy
+        """The best passage-internal span in this window, scored against the null.
 
+        Candidates are the top READER_NBEST start and end positions rather than a
+        single argmax over each: the highest-scoring start does not have to pair
+        with the highest-scoring end, since the pair must also satisfy end >= start
+        and the answer-length bound.
+
+        Pooling the n-best by answer TEXT across windows and passages, so repeated
+        evidence could promote a corroborated answer, was implemented and measured
+        against this decoder on one corpus: byte-identical F1 on ViQuAD validation
+        (50.564 both arms). It cannot differ, because the winner is chosen on the
+        span's own score first and that is what this already returns. Recorded in
+        experiments/results.jsonl and reverted rather than kept as dead weight.
+        """
         null_score = float(start_logits[0] + end_logits[0])
         # Sequence id 1 is the passage (0 is the question, None is special/padding).
         sequence_ids = window.sequence_ids
@@ -223,13 +234,12 @@ class OnnxReader:
             return None
 
         top = settings.READER_NBEST
-        candidates = [position for position in valid]
-        starts = sorted(candidates, key=lambda position: -start_logits[position])[:top]
-        ends = sorted(candidates, key=lambda position: -end_logits[position])[:top]
-
-        best_score = -numpy.inf
-        best_bounds: tuple[int, int] | None = None
+        starts = sorted(valid, key=lambda position: -start_logits[position])[:top]
+        ends = sorted(valid, key=lambda position: -end_logits[position])[:top]
         max_answer_tokens = settings.READER_MAX_ANSWER_TOKENS
+
+        best_score = float("-inf")
+        best_bounds: tuple[int, int] | None = None
         for start in starts:
             for end in ends:
                 if end < start or (end - start + 1) > max_answer_tokens:
