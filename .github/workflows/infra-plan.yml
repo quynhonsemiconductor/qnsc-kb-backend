@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   plan:
-    uses: QNSC-VN/qnsc-ci/.github/workflows/infra-plan.yml@v1.10.0
+    uses: QNSC-VN/qnsc-ci/.github/workflows/infra-plan.yml@v1.12.0
     with:
       product: qnsc-kb
       # Mirror the apply-time non-secret TF_VARs, or the plan lies. The Cloudflare
