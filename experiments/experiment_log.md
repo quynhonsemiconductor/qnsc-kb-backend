@@ -259,3 +259,62 @@ and every validating or reported run uses the shipped 8. Sweeps stay
 retrieval-only, which needs no reader at all and is already ~30x faster per
 config.
 
+
+
+## Iteration 4 — fusion weights are a structural no-op at this architecture
+
+### Hypothesis
+
+The sparse leg is Postgres `ts_rank_cd`, which uses no IDF, no term saturation,
+and no length normalisation. At equal RRF weight it gets 50% of the fused score
+unearned, so a common-word match can outrank a semantically correct passage.
+Bruch et al. (arXiv 2210.11934) measure weighted/convex fusion as never worse
+than equal-weight RRF. Down-weighting the sparse leg should therefore help
+Vietnamese, and it is a query-time-only change (no re-index, no infra edit).
+
+### Result — REJECTED, byte-identical to control
+
+Retrieval-only A/B, both arms in one process on the identical MiniLM corpus,
+120 questions per split:
+
+| split | arm (dense/sparse) | R@1 | R@5 | R@10 | MRR |
+|---|---|---|---|---|---|
+| MLQA-vi | 1.0/1.0 (control) | 41.67 | 55.00 | 58.33 | 47.05 |
+| MLQA-vi | 1.0/0.25 | 41.67 | 55.00 | 58.33 | 47.05 |
+| ViQuAD-vi | 1.0/1.0 (control) | 54.55 | 67.05 | 72.73 | 59.96 |
+| ViQuAD-vi | 1.0/0.25 | 54.55 | 67.05 | 72.73 | 59.96 |
+
+Every metric is identical to the last decimal.
+
+### Root cause — verified in code, not inferred
+
+`ChunkRepository.hybrid_search` (`src/repositories/chunk.py:395-406`) applies the
+weights, sorts by fused RRF score, and returns `sorted_results[:limit]`. But the
+caller `SearchService.search` (`src/domain/search_service.py:199`) then does:
+
+```python
+ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=limit)
+```
+
+which re-scores every fused candidate with the deterministic lexical reranker and
+sorts by *that* score — the RRF order is discarded. Both legs return
+`max(pool, limit)` ≥ 16 candidates, they overlap heavily, and all of them enter
+the reranker's top-`limit`. So the dense/sparse weight ratio changes which chunks
+are *inside* the merged set (which is far larger than `limit`) but not which 16
+the reranker ultimately surfaces, nor their order. The fusion weight is therefore
+inert by construction.
+
+### Conclusion
+
+RRF fusion weighting **cannot** improve retrieval ranking until the lexical
+reranker that overrides it is replaced (a CPU cross-encoder or a
+retrieval-trained scorer). The `RAG_FUSION_DENSE_WEIGHT` / `RAG_FUSION_SPARSE_WEIGHT`
+settings were added this iteration with behaviour-preserving 1.0/1.0 defaults and
+are kept as inert, documented knobs for the day the reranker changes. No default
+was altered; nothing shipped.
+
+This joins the standing conclusion that the two true binding constraints are
+(1) the reader's Vietnamese gold-context ceiling (61.4 MLQA-vi / 56.3 ViQuAD-vi,
+both far below the 90 target and below published extractive SOTA of 75.2 / 77.24),
+and (2) the symmetric MiniLM encoder, whose fix (e5-small) is validated but blocked
+on the `infra/` scope boundary and a production re-embedding operation.

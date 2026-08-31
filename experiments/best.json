@@ -44,7 +44,8 @@
   "rejected_this_iteration": {
     "pool_256_alone": "Measured under the shipped MiniLM encoder: MLQA-en R@10 80.5 -> 82.5, MLQA-vi 56.5 -> 56.0, ViQuAD 68.8 -> 70.2, for ~+400ms retrieval p50. Vietnamese got worse. The pool gain only materialises with a retrieval-trained encoder, so it was reverted rather than shipped on English-only evidence.",
     "reader_int8": "-10.3 / -9.7 / -20.2 F1 for ~8% latency (iteration 0).",
-    "removing_vector_distance_threshold": "Byte-identical results under e5 (the cutoff is inert: all 48 candidates already pass). Destructive under MiniLM (0/60 gold chunks passed), but that is fixed by the encoder, not by the threshold. No change made."
+    "removing_vector_distance_threshold": "Byte-identical results under e5 (the cutoff is inert: all 48 candidates already pass). Destructive under MiniLM (0/60 gold chunks passed), but that is fixed by the encoder, not by the threshold. No change made.",
+    "fusion_weights_iter4": "Down-weighting the no-IDF sparse leg to dense/sparse 1.0/0.25 gave BYTE-IDENTICAL retrieval metrics to the 1.0/1.0 control on both Vietnamese splits (120 q each): MLQA-vi R@10 58.33 both, ViQuAD-vi R@10 72.73 both. Root cause in code: SearchService re-scores fused candidates with the lexical reranker and sorts by that (search_service.py:199), discarding the RRF order, so fusion weights are inert until the reranker is replaced. RAG_FUSION_*_WEIGHT kept as inert 1.0/1.0 knobs; nothing shipped."
   },
   "target": {
     "f1": 90.0,
