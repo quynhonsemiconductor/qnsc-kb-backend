@@ -41,7 +41,7 @@
 # fails outright. The bump to 3.14-slim went in anyway and backend-ci has been failing
 # on main since. Raise this only once paddlepaddle ships a cp314 wheel.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim AS deps
+FROM python:3.14-slim AS deps
 
 WORKDIR /app
 
@@ -87,7 +87,7 @@ RUN poetry install --no-root --only main,ml,ocr
 # runtime — common base. NO application code: see rule 1 above.
 # ---------------------------------------------------------------------------
 # Kept in step with the deps stage above, including its 3.13 ceiling.
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
