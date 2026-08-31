@@ -14,6 +14,7 @@ from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
 from src.rag.reranker import (
+    chunk_passage,
     normalize_query,
     prepare_query_for_chunks,
     rerank_chunks_with_scores,
@@ -23,6 +24,26 @@ from src.models.ops import SearchLog
 from src.repositories.feature_flags import FeatureFlagRepository
 
 logger = structlog.get_logger()
+
+
+class _RerankerSingleton:
+    """Load the cross-encoder once per process, on first use.
+
+    The model is ~2.3 GB; instantiating it per request would be untenable. Holding
+    one instance keeps the ONNX session and tokenizer resident. Loading is the
+    backend's own lazy concern -- this just avoids re-resolving it each search.
+    """
+
+    def __init__(self) -> None:
+        self._value = None
+
+    def get(self, factory):
+        if self._value is None:
+            self._value = factory()
+        return self._value
+
+
+_reranker_singleton = _RerankerSingleton()
 
 import asyncio
 from collections import OrderedDict
@@ -92,6 +113,43 @@ class SearchService:
         self.chunk_repo = chunk_repo
         self.gov_repo = gov_repo
         self.feature_flags = feature_flags
+
+    def _cross_encoder_rank(
+        self, query: str, candidates: list, limit: int
+    ) -> list[tuple[object, float]] | None:
+        """Rerank candidates with the cross-encoder, or None to signal fallback.
+
+        Returns the same (chunk, score) contract as rerank_chunks_with_scores so the
+        caller is agnostic to which scorer ran. The score is the cross-encoder logit
+        passed through a sigmoid, mapping its roughly -11..+11 range into (0, 1) so the
+        downstream RAG_MIN_RELEVANCE_SCORE gate -- calibrated for the lexical scorer's
+        0..1 range -- keeps its meaning instead of filtering everything or nothing.
+
+        Returns None (not an exception) when the model cannot load or run, so search()
+        falls back to the lexical scorer. Reranking degrades; it never breaks search.
+        """
+        if not candidates:
+            return []
+        try:
+            import math
+
+            from src.lib.reranker import RerankerUnavailable, resolve_reranker
+
+            reranker = _reranker_singleton.get(resolve_reranker)
+            passages = [chunk_passage(chunk) for chunk in candidates]
+            scored = reranker.score(query, passages)
+        except Exception as exc:  # noqa: BLE001 - any failure means fall back
+            logger.warning(
+                "Cross-encoder rerank unavailable; falling back to lexical scorer",
+                error=str(exc),
+            )
+            return None
+        ranked = [
+            (candidates[item.index], 1.0 / (1.0 + math.exp(-item.score)))
+            for item in scored
+        ]
+        ranked.sort(key=lambda pair: pair[1], reverse=True)
+        return ranked[:limit]
 
     async def _record_gap(self, user: User, query: str) -> None:
         """Note that a search found nothing, without letting that end the search.
@@ -196,7 +254,17 @@ class SearchService:
         reranking_enabled = not self.feature_flags or await self.feature_flags.is_enabled("rag.reranker", user)
         # Scored ONCE, here. The threshold below and the score reported per result both
         # reuse these values rather than scoring the same passage again.
-        if reranking_enabled:
+        _reranker_fell_back = False
+        if reranking_enabled and settings.RERANKER_BACKEND == "onnx":
+            # Cross-encoder path (opt-in). Scores every (query, passage) pair jointly,
+            # which is what the lexical scorer cannot do. If the model is unavailable
+            # (missing export, missing onnx deps), fall back to the lexical scorer
+            # rather than failing the search -- reranking degrades, it never breaks.
+            ranked = self._cross_encoder_rank(retrieval_query, candidates, limit)
+            if ranked is None:
+                _reranker_fell_back = True
+                ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=limit)
+        elif reranking_enabled:
             ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=limit)
         else:
             # Prepared against the same pool the reranker would have used, so turning
@@ -209,7 +277,23 @@ class SearchService:
         # Vector similarity alone is not enough: short or vague inputs can be
         # close to an unrelated document in embedding space. Keep a result only
         # when the reranked passage has at least one meaningful lexical signal.
-        relevance_threshold = settings.RAG_MIN_RELEVANCE_SCORE
+        #
+        # The floor is backend-specific: the lexical scorer's 0.12 is a term-overlap
+        # threshold, meaningless for the cross-encoder's sigmoid-mapped logits, so
+        # the cross-encoder path uses its own (default 0.0 -- keep the ranking, let
+        # the reader abstain). Fallback to lexical inside _cross_encoder_rank leaves
+        # this at the lexical value only when the cross-encoder never ran.
+        using_cross_encoder = (
+            reranking_enabled
+            and settings.RERANKER_BACKEND == "onnx"
+            and ranked is not None
+            and not _reranker_fell_back
+        )
+        relevance_threshold = (
+            settings.RERANKER_MIN_SCORE
+            if using_cross_encoder
+            else settings.RAG_MIN_RELEVANCE_SCORE
+        )
         scored_chunks = [
             (chunk, score) for chunk, score in ranked
             if getattr(chunk, "article", None) is not None

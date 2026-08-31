@@ -318,3 +318,78 @@ This joins the standing conclusion that the two true binding constraints are
 both far below the 90 target and below published extractive SOTA of 75.2 / 77.24),
 and (2) the symmetric MiniLM encoder, whose fix (e5-small) is validated but blocked
 on the `infra/` scope boundary and a production re-embedding operation.
+
+## Iteration 5 — CPU cross-encoder reranker (bge-reranker-v2-m3)
+
+### Hypothesis and research
+
+Iteration 4 proved the lexical reranker overrides retrieval order, so it is the
+binding stage for ranking quality. Research (web, 2024-2025) on CPU-friendly
+multilingual rerankers surfaced three candidates: PhoRanker (itdainb/PhoRanker,
+Apache-2.0, 0.1B, best MMARCO-VI NDCG@10 0.742 but needs VnCoreNLP word
+segmentation), ViRanker (CC-BY-4.0, BGE-M3 backbone), and bge-reranker-v2-m3
+(BAAI, Apache-2.0, 0.57B, multilingual, prebuilt CPU ONNX export, NDCG@10 ~0.68).
+
+Chose **bge-reranker-v2-m3** for the experiment: multilingual (improves EN and
+VI), no word-segmentation dependency, and a prebuilt ONNX that drops onto the
+same Runtime seam the embedder and reader already use. Built as
+`src/lib/reranker/` (base protocol + ONNX backend + resolver), wired into
+`SearchService` behind `RERANKER_BACKEND` (default `lexical`, so nothing ships
+until opted in), with fallback to the lexical scorer if the model is unavailable.
+
+### Two calibration bugs found and fixed (the important engineering finding)
+
+The cross-encoder emits an unbounded relevance logit; the pipeline had two gates
+calibrated for the lexical scorer's 0..1 range that silently destroyed it:
+
+1. `RAG_MIN_RELEVANCE_SCORE=0.12` (in SearchService): a passage the cross-encoder
+   ranks correctly but not confidently has a negative logit -> sigmoid < 0.12, so
+   the lexical floor deleted every candidate and search returned zero results.
+   Fix: `RERANKER_MIN_SCORE` (sigmoid space, default 0.0), applied only on the
+   cross-encoder path.
+2. `RAG_MIN_CONTEXT_SCORE=0.35` (the end-to-end confidence gate): compares against
+   the top reranker score; cross-encoder sigmoid ~0.001 tripped it on nearly every
+   question, so the reader was never called and end-to-end F1 collapsed 35.3 -> 10.0
+   even though retrieval had IMPROVED. Measured cleanly with `--no-confidence-gate`.
+
+The lesson for any future scorer swap: score-scale calibration is a first-class
+integration concern, not a detail. A better reranker looked like a catastrophic
+regression purely because its scores are on a different scale than two downstream
+thresholds.
+
+### Results (MLQA-vi, small samples within a 15-minute-per-step budget)
+
+Retrieval-only A/B, identical MiniLM corpus, 30 questions:
+
+| arm | R@1 | R@5 | R@10 | MRR | s/query |
+|---|---|---|---|---|---|
+| lexical | 53.3 | 76.7 | 76.7 | 62.78 | 1.4 |
+| cross-encoder | 43.3 | 60.0 | 73.3 | 51.60 | 8.5 |
+
+Mixed on aggregate at n=30, but on an inspected query the cross-encoder moved the
+gold document from rank 6 to rank 1, where the lexical scorer had tied four wrong
+documents at a perfect 0.75 (the exact pathology iteration 1 documented).
+
+End-to-end F1, 20 questions, confidence gate OFF (fair, bug removed):
+
+| arm | EM | F1 | answer_in_context |
+|---|---|---|---|
+| lexical | 25.0 | 35.30 | 70.0 |
+| cross-encoder | 25.0 | 35.30 | 75.0 |
+
+### Verdict — validated capability, no end-to-end gain, NOT adopted
+
+The cross-encoder demonstrably fixes ranking quality (gold 6->1; answer_in_context
+70->75) but end-to-end F1 is unchanged, because the reader's Vietnamese
+gold-context ceiling (61.4 F1) is the binding constraint, not retrieval ranking.
+Reranking cannot lift F1 above what the reader can extract from the passages it is
+handed. And it costs 6x retrieval latency (8.5 s vs 1.4 s per query, fp32 568M
+model on CPU).
+
+So it is kept as an opt-in, off-by-default capability with its calibration bugs
+fixed and documented, not adopted as the shipped default. Consistent with rule 10
+(never merge a change that does not improve the target) and the standing
+conclusion that the reader is the binding constraint. Samples were small to fit
+the time budget; the direction (retrieval up, F1 flat, latency up) is consistent
+across the retrieval and end-to-end measurements and matches the iteration-4
+mechanism, so a larger sample is not expected to change the verdict.

@@ -323,6 +323,40 @@ class Settings(BaseSettings):
     # model's own calibration; raising it abstains more often, which helps
     # UIT-ViQuAD 2.0's unanswerable half and hurts its answerable half.
     READER_NULL_THRESHOLD: float = 0.0
+    # --- Cross-encoder reranker (CPU-only, opt-in) ----------------------------
+    # The retrieval order that reaches the reader is decided by src/rag/reranker.py,
+    # a deterministic LEXICAL scorer. On MLQA / UIT-ViQuAD the question rarely
+    # shares wording with the answer passage, so that order ranks the correct
+    # passage low (iteration 4 measured fusion-weight changes as byte-identical
+    # because this lexical stage discards the fused order). A cross-encoder scores
+    # each (query, passage) pair jointly and fixes that -- for English and
+    # Vietnamese both, with no word segmentation dependency.
+    #
+    # DEFAULT IS "lexical", so this changes nothing until a deployment opts in.
+    # "onnx" selects the in-process bge-reranker-v2-m3 ONNX backend; it needs the
+    # model export at RERANKER_ONNX_DIR and the optional 'onnx' dependency group.
+    RERANKER_BACKEND: str = "lexical"
+    RERANKER_ONNX_DIR: str = "/opt/reranker-onnx"
+    RERANKER_ONNX_FILE: str = "model.onnx"
+    # CPU-only by default and by construction: the declared `onnxruntime` wheel has
+    # no CUDA provider. Override to a CUDA provider for LOCAL evaluation only; CPU
+    # is always appended as the fallback. Accuracy transfers between providers,
+    # latency/memory do not.
+    RERANKER_ONNX_PROVIDERS: str = "CPUExecutionProvider"
+    RERANKER_ONNX_THREADS: int = 4
+    # Cross-encoders truncate the passage tail (only_second) to this length. 512 is
+    # the bge-reranker-v2-m3 training length; the retrieved child chunks are far
+    # shorter, so this rarely bites.
+    RERANKER_MAX_TOKENS: int = 512
+    RERANKER_BATCH_SIZE: int = 16
+    # Relevance floor for the CROSS-ENCODER path, in sigmoid space (0..1). The
+    # lexical RAG_MIN_RELEVANCE_SCORE (0.12) is calibrated for term-overlap scores
+    # and would wrongly drop cross-encoder results: a passage the cross-encoder
+    # ranks correctly but not confidently gets a negative logit -> sigmoid < 0.12,
+    # so the lexical floor deletes every candidate and search returns nothing.
+    # 0.0 keeps the cross-encoder's ranking intact and lets the reader's own
+    # abstention decide answerability downstream.
+    RERANKER_MIN_SCORE: float = 0.0
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
     RAG_ALLOW_EXTENDED_ON_REFUSAL: bool = False
