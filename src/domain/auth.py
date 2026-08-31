@@ -6,6 +6,14 @@ from src.core.config import settings
 from src.models.user import User
 from src.repositories.user import UserRepository
 
+# One bcrypt comparison happens on every authentication attempt, including the ones where
+# no account exists. Returning 401 before hashing made the unknown-email path finish in
+# microseconds while a real address paid the full bcrypt cost, which is a remotely
+# measurable oracle for "does this address have an account here". The hash is computed
+# once at import so the equalizing comparison does not add a per-request key derivation.
+_ABSENT_ACCOUNT_PASSWORD_HASH = get_password_hash(uuid.uuid4().hex)
+
+
 class AuthService:
     def __init__(self, user_repo: UserRepository):
         self.user_repo = user_repo
@@ -13,6 +21,7 @@ class AuthService:
     async def authenticate_user(self, email: str, password: str) -> User:
         user = await self.user_repo.get_by_email(email)
         if not user:
+            verify_password(password, _ABSENT_ACCOUNT_PASSWORD_HASH)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",

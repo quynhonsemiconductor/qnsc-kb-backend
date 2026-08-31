@@ -1094,6 +1094,7 @@ async def dismiss_gap(
 @router.get("/audit-log")
 async def get_audit_log(
     limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user_id: uuid.UUID | None = Query(None),
     action: str | None = Query(None, min_length=1, max_length=50),
     start_time: datetime | None = Query(None),
@@ -1111,6 +1112,7 @@ async def get_audit_log(
     logs = await service.list_audit_logs(
         current_user,
         limit,
+        offset=offset,
         user_id=user_id,
         action=action,
         start_time=start_time,
@@ -1784,7 +1786,7 @@ async def purge_knowledge(
     Scoped to `current_user.company_domain`. A global-scope permission is required because
     the operation is unrecoverable, NOT because it crosses tenants — it does not.
     """
-    from src.domain.kb_purge import purge_knowledge_base
+    from src.domain.kb_purge import delete_purged_objects, purge_knowledge_base
 
     company_domain = current_user.company_domain
     if not company_domain:
@@ -1828,5 +1830,10 @@ async def purge_knowledge(
         )
     )
     await db.commit()
+
+    # Object storage has no rollback, so the objects go only after the rows are durable.
+    # Until this point a failed commit left the rows intact and their bytes already
+    # destroyed; now a failure leaves both, and the orphan sweep reclaims the keys.
+    await delete_purged_objects(counts)
 
     return {"dry_run": False, "company_domain": company_domain, **counts.as_dict()}

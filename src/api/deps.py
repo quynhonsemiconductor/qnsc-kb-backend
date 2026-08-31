@@ -1,5 +1,6 @@
 from typing import AsyncGenerator
-from fastapi import Cookie, Depends, HTTPException, status
+from urllib.parse import urlparse
+from fastapi import Cookie, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 import jwt
 from sqlalchemy import event, text
@@ -134,7 +135,65 @@ async def set_database_context(
         info[TENANT_CONTEXT_KEY] = context
     await db.execute(_TENANT_SQL, context)
 
+
+# Cookie credentials are attached by the browser to CROSS-SITE requests as well, so an
+# authenticated non-GET route reached from a hostile page executes with the victim's
+# session unless something proves the request came from our own application. Only the
+# /auth/* routes carried that proof (_reject_cross_site_auth_request); every other
+# mutating endpoint — publish, delete, role assignment, connector configuration — was
+# reachable by CSRF from any origin, because the SPA sends cookies on every call.
+#
+# The same allow-list and the same "a non-browser client sends neither header, and stays
+# supported" reasoning as the auth-route check, with Referer as the fallback for the
+# browsers and privacy settings that suppress Origin on same-site navigations.
+#
+# Bearer-header requests are deliberately exempt: a browser cannot attach an
+# Authorization header cross-origin without a preflight the CORS middleware would have to
+# approve first, so those requests carry their own proof of consent.
+_CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _cross_site_exception() -> HTTPException:
+    # A fresh instance per rejection, not a module-level singleton: a raised exception
+    # keeps the frames it travelled through on __traceback__, so a shared one would
+    # retain a request's frames until the next rejection overwrote them.
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Cross-site requests are not allowed",
+    )
+
+
+def _reject_cross_site_cookie_request(request: Request) -> None:
+    if request.method.upper() in _CSRF_SAFE_METHODS:
+        return
+    allowed_origins = settings.cors_origin_list
+    origin = request.headers.get("origin")
+    if origin:
+        if origin not in allowed_origins:
+            raise _cross_site_exception()
+        return
+    referer = request.headers.get("referer")
+    if not referer:
+        return
+    try:
+        parsed = urlparse(referer)
+        # Inside the try with urlparse, not after it: `.port` is what raises on a
+        # malformed authority such as `https://host:notaport/`, and urlparse itself
+        # accepts that string without complaint.
+        port = parsed.port
+    except ValueError:
+        raise _cross_site_exception()
+    if not parsed.scheme or not parsed.hostname:
+        raise _cross_site_exception()
+    referer_origin = f"{parsed.scheme}://{parsed.hostname}"
+    if port:
+        referer_origin = f"{referer_origin}:{port}"
+    if referer_origin not in allowed_origins:
+        raise _cross_site_exception()
+
+
 async def get_current_user(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     token: str | None = Depends(oauth2_scheme),
     access_token_cookie: str | None = Cookie(default=None, alias="access_token"),
@@ -144,7 +203,11 @@ async def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    token = token or access_token_cookie
+    if not token and access_token_cookie:
+        # Keyed on the cookie, not on the presence of a session: a request that
+        # authenticated with an explicit Authorization header proved its own intent.
+        _reject_cross_site_cookie_request(request)
+        token = access_token_cookie
     if not token:
         raise credentials_exception
     try:

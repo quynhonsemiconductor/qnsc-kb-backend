@@ -1691,6 +1691,7 @@ class GovernanceService:
         user: User,
         limit: int = 100,
         *,
+        offset: int = 0,
         user_id: uuid.UUID | None = None,
         action: str | None = None,
         start_time: datetime | None = None,
@@ -1704,6 +1705,7 @@ class GovernanceService:
             )
         return await self.gov_repo.list_audits(
             limit=limit,
+            offset=offset,
             user_id=user_id,
             action=action,
             start_time=start_time,

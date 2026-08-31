@@ -137,7 +137,7 @@ services:
       APP_DATABASE_ROLE: ${APP_DATABASE_USER:-qnsc_app}
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-lite-latest}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
       EMBEDDING_VERSION: ${EMBEDDING_VERSION:-minilm-l12-v1}
       # Stated, not defaulted, so local and production embed identically. ONNX on
@@ -213,7 +213,7 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
       CONNECTOR_ROOT_PATH: /app/storage/connectors
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-lite-latest}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
       EMBEDDING_VERSION: ${EMBEDDING_VERSION:-minilm-l12-v1}
       # Stated, not defaulted, so local and production embed identically. ONNX on

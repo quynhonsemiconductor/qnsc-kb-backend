@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Sequence
 from sqlalchemy import case, select, delete, and_, or_, func, update, false
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.governance import PendingDraft, DraftTransition, DraftCandidate, ApproverRule, Gap, AuditLog
@@ -204,20 +205,37 @@ class GovernanceRepository:
         what-are-people-not-finding tally is an acceptable trade.
         """
         query = (query or "")[: self._GAP_QUERY_CHARS]
-        # A query can legitimately be a gap in more than one tenant.
-        result = await self.db.execute(
-            select(Gap).where(Gap.query == query, Gap.company_domain == company_domain)
+        # ONE statement. Select-then-increment lost counts under concurrency — two searches
+        # reading count=4 both wrote 5 — and on a miss both inserted, so the loser hit
+        # uq_gaps_company_query and raised out of the search that was recording it. The
+        # upsert makes the read-modify-write atomic in the row lock the insert already takes.
+        #
+        # `dept` and `status` are set on insert only: a gap already triaged (assigned or
+        # dismissed) must not be reopened by another miss, and an existing gap's department
+        # is the one it was first seen in.
+        # A query can legitimately be a gap in more than one tenant, hence the composite index.
+        statement = (
+            pg_insert(Gap)
+            .values(
+                id=uuid.uuid4(),
+                query=query,
+                company_domain=company_domain,
+                count=1,
+                dept=dept,
+                status="open",
+            )
+            .on_conflict_do_update(
+                index_elements=[Gap.company_domain, Gap.query],
+                set_={
+                    "count": Gap.__table__.c.count + 1,
+                    "updated_at": datetime.utcnow(),
+                },
+            )
+            .returning(Gap.id)
         )
-        gap = result.scalar_one_or_none()
-        if gap:
-            gap.count += 1
-            gap.updated_at = datetime.utcnow()
-        else:
-            gap = Gap(query=query, company_domain=company_domain, count=1, dept=dept, status="open")
-            self.db.add(gap)
+        gap_id = (await self.db.execute(statement)).scalar_one()
         await self.db.commit()
-        await self.db.refresh(gap)
-        return gap
+        return await self.db.get(Gap, gap_id)
 
     async def list_gaps(self, status: str | None = None, company_domain: str | None = None) -> Sequence[Gap]:
         stmt = select(Gap)

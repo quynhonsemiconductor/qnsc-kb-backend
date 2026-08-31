@@ -20,6 +20,22 @@ celery_app = Celery(
 _ssl_options = {"ssl_cert_reqs": ssl.CERT_REQUIRED}
 _use_ssl = settings.REDIS_URL.startswith("rediss://")
 
+# The longest task in this application is a connector walk (up to MAX_CONNECTOR_FILES
+# documents, each extracted and possibly OCR'd) followed by AI restructuring, whose own
+# per-call budget is RESTRUCTURE_TIMEOUT_SECONDS of 300 s. Redis has no broker-side ack
+# deadline: Celery emulates one with `visibility_timeout`, and its default of one hour
+# is a SILENT correctness bug rather than a delay — a task still running when the timer
+# expires is redelivered, so a sync walks the same drive twice and an OCR job rasterizes
+# the same document twice, concurrently.
+#
+# So the ordering below is the invariant, not a set of independent knobs:
+#   task_soft_time_limit < task_time_limit < visibility_timeout
+# The hard limit bounds how long any task can hold its message, and the visibility
+# timeout sits above that bound, so redelivery can only ever happen after the worker has
+# been killed — which is exactly when it is wanted.
+_TASK_SOFT_TIME_LIMIT = 3300
+_TASK_HARD_TIME_LIMIT = 3600
+
 celery_app.conf.update(
     broker_use_ssl=_ssl_options if _use_ssl else None,
     redis_backend_use_ssl=_ssl_options if _use_ssl else None,
@@ -29,6 +45,34 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     imports=["src.workers.tasks"],
+    broker_transport_options={"visibility_timeout": _TASK_HARD_TIME_LIMIT + 300},
+    # Acknowledge on completion, not on receipt. With early acks a worker killed mid-sync
+    # loses the message entirely and the durable queue row stays "running" until the stale
+    # sweep notices; with late acks the broker replays it.
+    task_acks_late=True,
+    # Late acks make prefetching dangerous: a prefetched message is unacked while it waits
+    # behind a long-running task, so with the default multiplier of four it can exceed the
+    # visibility timeout and be redelivered before it has even started. One at a time.
+    worker_prefetch_multiplier=1,
+    task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
+    task_time_limit=_TASK_HARD_TIME_LIMIT,
+    # The worker consumes celery,ingestion,connectors,permissions (Dockerfile), but a task
+    # goes to the default queue unless it is routed. Without this map three of those four
+    # queues were permanently empty and every job — a 300 s restructure next to a 30 s
+    # outbox replay — contended for the same slots on `celery`.
+    task_routes={
+        "generate_embeddings_task": {"queue": "ingestion"},
+        "reprocess_index_job_task": {"queue": "ingestion"},
+        "restructure_pending_draft_task": {"queue": "ingestion"},
+        "delete_article_chunks_task": {"queue": "ingestion"},
+        "recover_stale_index_reprocess_jobs": {"queue": "ingestion"},
+        "sync_cloud_connector_task": {"queue": "connectors"},
+        "schedule_cloud_connector_syncs": {"queue": "connectors"},
+        "reconcile_cloud_connectors": {"queue": "connectors"},
+        "dispatch_pending_sync_requests": {"queue": "connectors"},
+        "renew_webhook_subscriptions": {"queue": "connectors"},
+        "recompute_permissions_task": {"queue": "permissions"},
+    },
     beat_schedule={
         "replay-domain-outbox": {
             "task": "replay_outbox_task",
@@ -74,6 +118,13 @@ celery_app.conf.update(
         "escalate-overdue-drafts": {
             "task": "escalate_overdue_drafts",
             "schedule": 21600.0,
+        },
+        # A reprocess job is a long loop of independent article re-indexes with no
+        # heartbeat, so a worker that dies mid-run leaves the row "running" forever and
+        # the operator sees a progress bar that never moves again.
+        "recover-stale-index-reprocess-jobs": {
+            "task": "recover_stale_index_reprocess_jobs",
+            "schedule": 900.0,
         },
     },
 )

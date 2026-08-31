@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.ai import AiCache, AiConversation, AiUsageLog
@@ -81,12 +81,15 @@ class PurgeCounts:
     outbox_events: int = 0
     storage_objects: int = 0
     storage_failures: list[str] = field(default_factory=list)
+    #: The keys the purge orphaned, for the caller to delete AFTER its commit. Not part of
+    #: the reported payload -- it is a work list, not a count.
+    storage_keys: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             key: value
             for key, value in self.__dict__.items()
-            if key != "storage_failures"
+            if key not in {"storage_failures", "storage_keys"}
         }
         payload["storage_failures"] = len(self.storage_failures)
         return payload
@@ -159,24 +162,41 @@ async def _storage_keys(db: AsyncSession, company_domain: str) -> list[str]:
 
 
 async def _count(db: AsyncSession, statement) -> int:
-    """How many rows a SELECT would return, for dry-run reporting."""
-    rows = await db.execute(statement)
-    return len(list(rows.scalars().all()))
+    """How many rows a SELECT would return, for dry-run reporting.
 
-
-async def _delete_objects(keys: list[str], counts: PurgeCounts) -> None:
-    """Remove the R2 objects, best-effort and one at a time.
-
-    Deliberately not fatal. The rows are already gone by the time this runs, and the daily
-    orphan sweep will retry anything that fails, so an object-store outage must not turn a
-    completed purge into a 500 that suggests nothing happened. Same reasoning as the draft
-    rejection path in domain/governance.py.
+    COUNT in the database, not len() over the rows. Every caller below passes a
+    `select(Model.id)` covering a whole tenant, so materialising them meant pulling one
+    UUID per article, chunk, source and log row into Python — tens of megabytes on a real
+    corpus, to produce eleven integers a dry run then throws away.
     """
-    if not keys:
-        return
-    from src.domain.source_storage import delete_source
+    return await db.scalar(select(func.count()).select_from(statement.subquery())) or 0
 
-    for key in keys:
+
+async def delete_purged_objects(counts: PurgeCounts) -> None:
+    """Remove the R2 objects a completed purge orphaned. Call AFTER the commit.
+
+    Touches no session and raises nothing. By the time this runs the deletions are durable,
+    so the purge has already succeeded from the caller's point of view — letting an
+    object-store failure escape would turn a completed purge into a 500 telling the operator
+    nothing happened, and invite them to run it again. Failures are logged and the keys are
+    left to `cleanup_orphaned_source_objects`, whose daily sweep now finds them genuinely
+    unreferenced. Same reasoning as the draft rejection path in domain/governance.py.
+
+    `storage_objects` is re-derived here rather than left at len(storage_keys): before the
+    commit it is a forecast, and the number in the response has to be what was actually
+    destroyed.
+    """
+    counts.storage_objects = 0
+    if not counts.storage_keys:
+        return
+    try:
+        from src.domain.source_storage import delete_source
+    except Exception as exc:  # pragma: no cover - depends on optional storage deps
+        counts.storage_failures.extend(counts.storage_keys)
+        logger.warning("Purge could not load object storage client", error=str(exc))
+        return
+
+    for key in counts.storage_keys:
         try:
             await asyncio.to_thread(delete_source, key)
             counts.storage_objects += 1
@@ -191,7 +211,9 @@ async def purge_knowledge_base(
     """Delete every article, document, chunk and connector for one tenant.
 
     One transaction, so the background workers that run every 30 seconds observe either the
-    full corpus or none of it, never a half-deleted one. The caller commits.
+    full corpus or none of it, never a half-deleted one. The caller commits, and then calls
+    `delete_purged_objects(counts)` -- object storage has no rollback, so destroying the R2
+    objects before that commit is what would make a failed commit unrecoverable.
 
     A dry run counts exactly what a real run would delete and writes nothing, which is the
     same opt-in shape the approval agent uses: the destructive path has to be asked for.
@@ -386,25 +408,27 @@ async def purge_knowledge_base(
     # when it is absent), so matching the id catches every content event including
     # PermissionChanged, which no name prefix would have caught.
     if article_ids:
-        pending_events = await db.execute(
-            select(OutboxEvent.id, OutboxEvent.payload).where(
-                OutboxEvent.status == "pending"
+        # Filtered in SQL. This used to SELECT every pending outbox row in the database --
+        # all tenants, no predicate -- and decide in Python, so one tenant's purge dragged
+        # the whole backlog through the app and read other tenants' payloads to do it.
+        # `payload` is JSON, so the id is compared as text, exactly as the notification
+        # sweep in workers/tasks.py does it.
+        result = await db.execute(
+            delete(OutboxEvent).where(
+                OutboxEvent.status == "pending",
+                OutboxEvent.payload["article_id"].as_string().in_(article_ids),
             )
         )
-        stale = [
-            event_id
-            for event_id, payload in pending_events.all()
-            if isinstance(payload, dict)
-            and str(payload.get("article_id") or "") in article_ids
-        ]
-        if stale:
-            result = await db.execute(
-                delete(OutboxEvent).where(OutboxEvent.id.in_(stale))
-            )
-            counts.outbox_events = result.rowcount or 0
+        counts.outbox_events = result.rowcount or 0
 
-    # ---- STEP 8. The objects themselves. After the rows, and never fatal.
-    await _delete_objects(keys, counts)
+    # ---- STEP 8. The objects are NOT deleted here. The caller still has an open
+    # transaction: if its commit fails, every row above comes back while the R2 objects
+    # would already be destroyed, leaving live document_sources rows pointing at storage
+    # that no longer exists -- downloads 404 forever and nothing sweeps it, because the
+    # rows still reference the keys. So the keys are handed back and
+    # `delete_purged_objects` runs after the commit.
+    counts.storage_keys = keys
+    counts.storage_objects = len(keys)
 
     logger.warning(
         "Knowledge base purged",

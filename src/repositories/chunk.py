@@ -44,22 +44,30 @@ class ChunkRepository:
 
     async def create_parent_chunk(self, parent: ParentChunk) -> ParentChunk:
         self.db.add(parent)
-        await self.db.commit()
-        await self.db.refresh(parent)
+        # FLUSH, not commit. The parent's generated id is needed immediately (the children
+        # reference it), and a flush produces it without ending the transaction. Committing
+        # here is what made a reindex non-atomic: one commit per parent, on top of the
+        # committed wipe below, so any failure mid-rebuild left the article published with
+        # a partial chunk set and no way to tell it apart from a complete one.
+        await self.db.flush()
         return parent
 
     async def create_child_chunks(self, chunks: list[ArticleChunk]) -> list[ArticleChunk]:
-        for c in chunks:
-            self.db.add(c)
-        await self.db.commit()
-        for c in chunks:
-            await self.db.refresh(c)
+        self.db.add_all(chunks)
+        await self.db.flush()
         return chunks
 
     async def delete_by_article_id(self, article_id: uuid.UUID) -> None:
+        """Remove an article's chunks WITHOUT committing.
+
+        The caller owns the commit, because for a reindex the wipe and the replacement
+        chunks have to land together. Committing the wipe first meant an article stayed
+        published and searchable with zero chunks for the whole rebuild, and permanently if
+        the rebuild failed -- retrieval returned nothing for it while index_status still
+        read "ready" from the previous run.
+        """
         await self.db.execute(delete(ParentChunk).where(ParentChunk.article_id == article_id))
         await self.db.execute(delete(ArticleChunk).where(ArticleChunk.article_id == article_id))
-        await self.db.commit()
 
     async def get_by_article_id(self, article_id: uuid.UUID) -> Sequence[ArticleChunk]:
         result = await self.db.execute(
@@ -387,6 +395,11 @@ class ChunkRepository:
             "Search candidates merged",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
             merged_result_count=len(sorted_results),
-            returned_result_count=min(len(sorted_results), limit),
         )
-        return [item["chunk"] for item in sorted_results[:limit]]
+        # The WHOLE fused pool, not the top `limit`. `limit` is the size of the final
+        # answer, and the cross-encoder is what decides which passages fill it; truncating
+        # to `limit` here handed the reranker RRF's own top-16 and threw the rest of the
+        # 48-candidate pool away, so the reranker could only ever reorder what a much
+        # weaker signal had already selected. Both branches in SearchService apply the
+        # final `limit` themselves.
+        return [item["chunk"] for item in sorted_results]

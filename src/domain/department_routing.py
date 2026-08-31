@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 import structlog
@@ -300,26 +301,58 @@ def _parse_assignments(
     return chosen
 
 
+#: Why the LLM contributed nothing to a routing decision. `off` and `not_applicable` are
+#: normal; `unavailable` and `unreadable` mean the model was asked and could not answer,
+#: and a provider that is permanently broken sits in one of those forever. They used to
+#: be the same empty dict as "the model declined", so nothing distinguished a working
+#: keyword fallback from a routing feature that had silently stopped existing.
+_ROUTING_OFF = "off"
+_ROUTING_NOT_APPLICABLE = "not_applicable"
+_ROUTING_UNAVAILABLE = "unavailable"
+_ROUTING_UNREADABLE = "unreadable"
+_ROUTING_ANSWERED = "answered"
+
+
+@dataclass(frozen=True)
+class _RoutingOutcome:
+    """What the LLM routing attempt produced, and why it produced that.
+
+    `assignments` maps 1-based section number to a Department. Empty is a valid answer --
+    the model can decline every section -- so `state` is what tells the two apart.
+    """
+
+    state: str
+    assignments: dict[int, Any]
+
+
 async def _llm_section_departments(
     title: str, sections: list[dict[str, Any]], departments: list[Any]
-) -> dict[int, Any]:
-    """Map 1-based section number to a Department, or {} when the LLM cannot be used.
+) -> _RoutingOutcome:
+    """Ask the LLM which department owns each section, and say what came back.
 
     Never raises. A routing suggestion is something a reviewer sees and can change; it
     must not be able to fail a document import, which this codebase has already paid
-    for once.
+    for once. Not raising is not the same as not reporting, though: an unavailable
+    provider is named in the outcome and logged at warning level, because "the model had
+    no opinion" and "the model could not be reached" look identical in the result and
+    only one of them is somebody's job to fix.
     """
     from src.core.config import settings
 
     if not settings.DEPARTMENT_ROUTING_LLM_ENABLED:
-        return {}
+        return _RoutingOutcome(_ROUTING_OFF, {})
     if not departments or not sections or len(sections) > _LLM_MAX_SECTIONS:
-        return {}
+        return _RoutingOutcome(_ROUTING_NOT_APPLICABLE, {})
     try:
         from src.domain.llm_client import complete, resolve_provider
 
         if resolve_provider() is None:
-            return {}
+            _logger.warning(
+                "LLM department routing unavailable: no provider configured; "
+                "using keyword ranking",
+                section_count=len(sections),
+            )
+            return _RoutingOutcome(_ROUTING_UNAVAILABLE, {})
         reply, _tokens, _model, _provider = await complete(
             [
                 {"role": "system", "content": _ROUTING_SYSTEM_PROMPT},
@@ -337,14 +370,17 @@ async def _llm_section_departments(
         _logger.warning(
             "LLM department routing unavailable; using keyword ranking", exc_info=True
         )
-        return {}
+        return _RoutingOutcome(_ROUTING_UNAVAILABLE, {})
 
     try:
         chosen = _parse_assignments(reply, len(sections), len(departments))
     except Exception:
         _logger.warning("LLM department routing returned unreadable JSON", exc_info=True)
-        return {}
-    return {section: departments[index - 1] for section, index in chosen.items()}
+        return _RoutingOutcome(_ROUTING_UNREADABLE, {})
+    return _RoutingOutcome(
+        _ROUTING_ANSWERED,
+        {section: departments[index - 1] for section, index in chosen.items()},
+    )
 
 
 async def route_document_candidates_llm(
@@ -362,7 +398,8 @@ async def route_document_candidates_llm(
         suggest_departments(section["title"], section["body_md"], department_list)
         for section in sections
     ]
-    chosen = await _llm_section_departments(title, sections, department_list)
+    outcome = await _llm_section_departments(title, sections, department_list)
+    chosen = outcome.assignments
 
     routed: list[dict[str, Any]] = []
     for index, section in enumerate(sections):
