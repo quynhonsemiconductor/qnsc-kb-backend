@@ -142,7 +142,7 @@ COPY --from=deps-ml /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml /usr/local/bin /usr/local/bin
 
 ARG BAKE_EMBEDDING_MODEL=true
-ARG EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ARG EMBEDDING_MODEL=intfloat/multilingual-e5-small
 ENV HF_HOME=/opt/huggingface
 ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
 

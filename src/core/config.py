@@ -143,12 +143,12 @@ class Settings(BaseSettings):
     # plus the matching infra/Dockerfile values and a full re-index. The `query: `/
     # `passage: ` prefixes e5 needs are already applied centrally in
     # src/lib/embeddings/__init__.py, so nothing else in the code has to change.
-    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
     # Names the MODEL that produced a vector, and hybrid_search filters on it, so a
     # mislabelled corpus is an invisible corpus. Rows written while this said
     # "bge-m3-v1" hold MiniLM vectors — provably, since a vector(384) column cannot
     # hold bge-m3's 1024 — and need re-stamping or re-indexing once.
-    EMBEDDING_VERSION: str = "minilm-l12-v1"
+    EMBEDDING_VERSION: str = "e5-small-v1"
 
     # HOW the model runs, kept separate from WHICH model runs.
     #
@@ -185,7 +185,7 @@ class Settings(BaseSettings):
     # 128 is also why chunker.py sizes retrieval children at 250 characters. Switching
     # to multilingual-e5-small (see EMBEDDING_MODEL) allows 512 and therefore larger
     # children; raise both together or neither.
-    EMBEDDING_MAX_TOKENS: int = 128
+    EMBEDDING_MAX_TOKENS: int = 512
     EMBEDDING_BATCH_SIZE: int = 32
     # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
     # embedding API during bulk ingestion, not an exceptional one: without a retry a
@@ -264,7 +264,7 @@ class Settings(BaseSettings):
     # Part of the ai_cache key (src/domain/ai_service.py:917-924), so this MUST move
     # whenever retrieval behaviour changes, or a cached answer from the old pipeline is
     # served for six hours as if it came from the new one.
-    RETRIEVAL_VERSION: str = "v2-parent-budget-confidence"
+    RETRIEVAL_VERSION: str = "v3-e5-encoder"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
