@@ -219,14 +219,14 @@ module "stack" {
   malware_scan_enabled = true
 
   // Must match develop, and must match the model the IMAGE carries — see the long note in
-  // infra/live/develop/main.tf. "BAAI/bge-m3" was never in any image: the Dockerfile bakes
-  // paraphrase-multilingual-MiniLM-L12-v2 (384) and the deploy pipeline has no build-args
-  // to override it, so EMBEDDING_DIMENSION resolved to 1024 against a 384-wide export and
-  // every embed raised. A different model between the two environments is just as bad —
-  // at the same width the spaces are unrelated, and the comparison returns nonsense
-  // rather than erroring.
-  embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  embedding_version = "minilm-l12-v1"
+  // The Dockerfile bakes intfloat/multilingual-e5-small (384) via ARG EMBEDDING_MODEL,
+  // and this must name the same model or EMBEDDING_DIMENSION resolves against the wrong
+  // export. e5-small is 384-wide like the previous MiniLM, so no pgvector column change;
+  // adopting it required a one-time re-embed migration. Both environments must run the
+  // same model -- at the same width the spaces are unrelated, so a mismatch returns
+  // nonsense rather than erroring.
+  embedding_model   = "intfloat/multilingual-e5-small"
+  embedding_version = "e5-small-v1"
 
   alarm_emails           = var.alarm_emails
   cloudflare_account_id  = var.cloudflare_account_id

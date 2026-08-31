@@ -75,9 +75,10 @@ def test_the_version_stamp_tracks_the_model():
     for environment in LIVE_ENVIRONMENTS:
         model = _infra_value(environment, "embedding_model").lower()
         version = _infra_value(environment, "embedding_version").lower()
-        assert "minilm" in model, model
-        assert "minilm" in version, f"{environment}: {version} does not name {model}"
+        assert "e5" in model, model
+        assert "e5" in version, f"{environment}: {version} does not name {model}"
         assert "bge" not in version, f"{environment}: stale stamp {version}"
+        assert "minilm" not in version, f"{environment}: stale stamp {version}"
 
 
 @pytest.mark.parametrize("environment", LIVE_ENVIRONMENTS)

@@ -267,21 +267,16 @@ module "stack" {
   //
   //   embedding backend returned 384 dimensions, but EMBEDDING_DIMENSION is 1024
   //
-  // That is exactly what "BAAI/bge-m3" did here. The Dockerfile bakes
-  // paraphrase-multilingual-MiniLM-L12-v2 (384) via ARG EMBEDDING_MODEL, and the deploy
-  // pipeline cannot override it — qnsc-ci's build-push-ecr action takes no build-args —
-  // so bge-m3 was never in any image and RAG had never once worked here. Search fell back
-  // to keyword-only and indexing failed, silently.
+  // The Dockerfile bakes intfloat/multilingual-e5-small (384) via ARG EMBEDDING_MODEL,
+  // and this must name the same model or EMBEDDING_DIMENSION resolves against the wrong
+  // export. e5-small is retrieval-trained (query:/passage: prefixes applied in
+  // src/lib/embeddings) and measured substantially better on Vietnamese retrieval.
   //
-  // Moving to bge-m3 for real is a project, not an edit: a build-args passthrough in
-  // qnsc-ci, api memory to 6144 (2.27 GB of fp32 weights do not fit the ~1.5 GiB left
-  // after clamav), pooling to "cls", and EMBEDDING_MAX_TOKENS to 8192.
-  //
-  // Fixes EMBEDDING_DIMENSION at 384, which is the pgvector column width and the HNSW
-  // index; migration 20260810_51 re-aligns the column and REFUSES to run while any
-  // embeddings exist, because vectors of different widths are not comparable.
-  embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  embedding_version = "minilm-l12-v1"
+  // Fixes EMBEDDING_DIMENSION at 384, same as the previous MiniLM, so the pgvector
+  // column and HNSW index are unchanged; adopting it required a one-time re-embed
+  // migration because the 384-wide vector space is different.
+  embedding_model   = "intfloat/multilingual-e5-small"
+  embedding_version = "e5-small-v1"
   // Parity-gated ONNX flip (cosine 1.000000 vs torch, tests/unit/test_embedding_backends.py).
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"
