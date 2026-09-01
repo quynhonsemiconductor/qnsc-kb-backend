@@ -63,11 +63,12 @@ def test_global_admin_bypass():
     assert AuthorizationService.has_permission(admin, "permission.manage", requested_scope="global")
 
 
-def test_authorization_fingerprint_changes_when_group_changes():
+def test_authorization_fingerprint_changes_when_department_membership_changes():
     user = make_user("Reader", "article.read", dept="Ops")
     first = AuthorizationService.authorization_fingerprint(user)
-    from src.models.user import AccessGroup
-    user.groups.append(AccessGroup(name="Security", bitmask_position=4))
+    user.departments.append(
+        Department(id=uuid.uuid4(), company_domain="acme.test", name="Security", active=True)
+    )
     second = AuthorizationService.authorization_fingerprint(user)
     assert first != second
 

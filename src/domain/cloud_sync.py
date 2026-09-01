@@ -29,7 +29,7 @@ from src.domain.source_extraction import (
 )
 from src.domain.source_storage import delete_source, save_source
 from src.models.article import Article, ArticleUserPermission, DocumentSource
-from src.models.user import AccessGroup, user_groups
+from src.models.user import Department, user_departments
 from src.models.user import ExternalIdentity
 from src.models.connectors import (
     DocumentVersion,
@@ -687,13 +687,13 @@ async def _save_permissions(
             await db.execute(
                 select(ExternalGroupMapping)
                 .join(
-                    AccessGroup, AccessGroup.id == ExternalGroupMapping.access_group_id
+                    Department, Department.id == ExternalGroupMapping.department_id
                 )
                 .where(
                     ExternalGroupMapping.connector_id == connector.id,
                     ExternalGroupMapping.active.is_(True),
                     ExternalGroupMapping.external_group_id.in_(group_ids),
-                    AccessGroup.company_domain == connector.company_domain,
+                    Department.company_domain == connector.company_domain,
                 )
             )
         )
@@ -773,8 +773,8 @@ async def _save_permissions(
         **previous_metadata,
         acl_present_key: True,
         "provider_acl_present": True,
-        "mapped_access_group_ids": sorted(
-            {str(item.access_group_id) for item in mappings}
+        "mapped_department_ids": sorted(
+            {str(item.department_id) for item in mappings}
         ),
         "unmapped_group_ids": sorted(
             item
@@ -795,7 +795,7 @@ async def _save_permissions(
         for key in (
             "sharepoint_acl_present",
             "provider_acl_present",
-            "mapped_access_group_ids",
+            "mapped_department_ids",
             "unmapped_group_ids",
             "mapped_source_user_ids",
             "unmapped_source_user_ids",
@@ -908,7 +908,7 @@ async def _apply_mapped_groups(
             select(Article)
             .where(Article.id == document.article_id)
             .options(
-                selectinload(Article.access_groups),
+                selectinload(Article.departments),
                 selectinload(Article.user_permissions),
             )
         )
@@ -925,7 +925,7 @@ async def _apply_mapped_groups(
     if "internal_acl_snapshot" not in metadata:
         metadata["internal_acl_snapshot"] = {
             "visibility": article.visibility,
-            "access_group_ids": [str(group.id) for group in article.access_groups],
+            "department_ids": [str(item.id) for item in article.departments],
             "allow_user_ids": [
                 str(item.user_id)
                 for item in article.user_permissions
@@ -934,9 +934,9 @@ async def _apply_mapped_groups(
         }
     internal = metadata["internal_acl_snapshot"]
     source_group_ids = {
-        str(item) for item in metadata.get("mapped_access_group_ids", [])
+        str(item) for item in metadata.get("mapped_department_ids", [])
     }
-    internal_group_ids = {str(item) for item in internal.get("access_group_ids", [])}
+    internal_group_ids = {str(item) for item in internal.get("department_ids", [])}
     source_user_ids = {str(item) for item in metadata.get("mapped_source_user_ids", [])}
     source_group_member_ids: set[str] = set()
     if source_group_ids:
@@ -944,10 +944,10 @@ async def _apply_mapped_groups(
             str(item)
             for item in (
                 await db.execute(
-                    select(user_groups.c.user_id)
-                    .join(User, User.id == user_groups.c.user_id)
+                    select(user_departments.c.user_id)
+                    .join(User, User.id == user_departments.c.user_id)
                     .where(
-                        user_groups.c.group_id.in_(source_group_ids),
+                        user_departments.c.department_id.in_(source_group_ids),
                         User.company_domain == article.company_domain,
                         User.active.is_(True),
                     )
@@ -973,21 +973,21 @@ async def _apply_mapped_groups(
             or metadata.get("sharepoint_acl_present")
         ),
     )
-    effective_group_ids = set(acl["group_ids"])
-    article.access_groups = (
+    effective_department_ids = set(acl["group_ids"])
+    article.departments = (
         list(
             (
                 await db.execute(
-                    select(AccessGroup).where(
-                        AccessGroup.id.in_(effective_group_ids),
-                        AccessGroup.company_domain == article.company_domain,
+                    select(Department).where(
+                        Department.id.in_(effective_department_ids),
+                        Department.company_domain == article.company_domain,
                     )
                 )
             )
             .scalars()
             .all()
         )
-        if effective_group_ids
+        if effective_department_ids
         else []
     )
 
@@ -1089,7 +1089,7 @@ async def _ingest_content(
             await db.execute(
                 select(Article)
                 .where(Article.id == document.article_id)
-                .options(selectinload(Article.access_groups), selectinload(Article.sources))
+                .options(selectinload(Article.departments), selectinload(Article.sources))
             )
         ).scalar_one_or_none()
         if article and article.lifecycle_status == "active":
@@ -1111,7 +1111,7 @@ async def _ingest_content(
                 "type": article.type,
                 "sensitivity": article.sensitivity,
                 "language": article.language,
-                "access_group_ids": [str(group.id) for group in article.access_groups],
+                "department_ids": [str(item.id) for item in article.departments],
                 "submission_kind": "connector_update",
                 "suggested_update_article_id": str(article.id),
             }

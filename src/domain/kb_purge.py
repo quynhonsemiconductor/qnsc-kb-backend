@@ -24,7 +24,7 @@ THE ORDER MATTERS AND IS NOT ARBITRARY. Two traps, both silent:
 
 Everything else rides on ondelete=CASCADE: one DELETE on `articles` removes parent_chunks,
 article_chunks, chunk_metadata, article_versions, article_user_permissions, article_tags,
-article_access, article_departments, comments, votes, bookmarks, article_followers and
+article_departments, comments, votes, bookmarks, article_followers and
 article_edit_requests. One DELETE on `connectors` removes the entire sync tree.
 """
 from __future__ import annotations
@@ -351,7 +351,7 @@ async def purge_knowledge_base(
 
     # ---- STEP 5. Articles. One statement, thirteen dependent tables, all via CASCADE:
     # parent_chunks, article_chunks, chunk_metadata, article_versions,
-    # article_user_permissions, article_tags, article_access, article_departments,
+    # article_user_permissions, article_tags, article_departments,
     # comments, votes, bookmarks, article_followers, article_edit_requests.
     result = await db.execute(
         delete(Article).where(Article.company_domain == company_domain)

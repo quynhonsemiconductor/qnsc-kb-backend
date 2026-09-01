@@ -64,7 +64,6 @@ def _user() -> User:
         id=uuid.uuid4(), role="Staff", company_domain="qnsc.vn", dept="Engineering"
     )
     user.departments = [Department(id=uuid.uuid4(), name="Engineering", active=True)]
-    user.access_groups = []
     return user
 
 
@@ -77,7 +76,6 @@ def _keyword_sql(query: str) -> str:
             user=_user(),
             query=query,
             query_embedding=None,
-            user_bitmask=1,
             limit=5,
             filters={},
         )

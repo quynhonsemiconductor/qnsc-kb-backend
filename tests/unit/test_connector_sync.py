@@ -152,7 +152,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     from src.models.connectors import ExternalDocument, ExternalGroupMapping
 
     connector_id = uuid.uuid4()
-    access_group_id = uuid.uuid4()
+    department_id = uuid.uuid4()
     connector = Connector(id=connector_id, company_domain="acme.test")
     permissions = [
         {"principal_type": "group", "principal_id": "provider-group", "role": "read"},
@@ -167,7 +167,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
         acl_hash=_acl_hash(permissions),
         metadata_json={
             "sharepoint_acl_present": True,
-            "mapped_access_group_ids": [],
+            "mapped_department_ids": [],
             "unmapped_group_ids": ["provider-group"],
             "mapped_source_user_ids": [],
             "unmapped_source_user_ids": [],
@@ -176,7 +176,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     mapping = ExternalGroupMapping(
         connector_id=connector_id,
         external_group_id="provider-group",
-        access_group_id=access_group_id,
+        department_id=department_id,
         active=True,
     )
 
@@ -197,7 +197,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
         async def execute(self, statement):
             self.statements.append(str(statement))
             if "external_group_mappings" in str(statement):
-                assert "access_groups.company_domain" in str(statement)
+                assert "departments.company_domain" in str(statement)
                 return Result([mapping])
             else:
                 assert "external_identities" in str(statement)
@@ -209,7 +209,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     changed = asyncio.run(_save_permissions(db, connector, document, permissions))
 
     assert changed is True
-    assert document.metadata_json["mapped_access_group_ids"] == [str(access_group_id)]
+    assert document.metadata_json["mapped_department_ids"] == [str(department_id)]
     assert document.metadata_json["unmapped_group_ids"] == []
 
 
@@ -343,12 +343,16 @@ def test_unsupported_provider_principal_is_persisted_as_unmapped():
 def test_sharepoint_permission_tightening_is_applied_on_resync():
     from src.models.article import Article, ArticleUserPermission
     from src.models.connectors import ExternalDocument
-    from src.models.user import AccessGroup
+    from src.models.user import Department
 
     article_id = uuid.uuid4()
     internal_user_id = uuid.uuid4()
-    group = AccessGroup(
-        id=uuid.uuid4(), company_domain="acme.test", name="Security", bitmask_position=3
+    department = Department(
+        id=uuid.uuid4(),
+        company_domain="acme.test",
+        name="Security",
+        description="Security audience",
+        active=True,
     )
     internal_override = ArticleUserPermission(
         article_id=article_id, user_id=internal_user_id, effect="allow"
@@ -363,7 +367,7 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
         visibility="department",
         status="published",
         lifecycle_status="active",
-        access_groups=[group],
+        departments=[department],
         user_permissions=[internal_override],
     )
     document = ExternalDocument(
@@ -375,7 +379,7 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
         name="policy.md",
         metadata_json={
             "sharepoint_acl_present": True,
-            "mapped_access_group_ids": [str(group.id)],
+            "mapped_department_ids": [str(department.id)],
             "mapped_source_user_ids": [],
             "unmapped_group_ids": [],
             "unmapped_source_user_ids": [],
@@ -406,16 +410,20 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
             if self.calls == 1:
                 return FakeResult(one=article)
             if self.calls == 2 and document.metadata_json.get(
-                "mapped_access_group_ids"
+                "mapped_department_ids"
             ):
                 sql = str(_statement)
+                # Audience membership is department membership now: members are
+                # expanded through the user_departments association, never a
+                # separate group table.
+                assert "user_departments.department_id" in sql
                 assert "users.company_domain" in sql
                 assert "users.active" in sql
                 return FakeResult(rows=[internal_user_id])
             if self.calls == 3 and document.metadata_json.get(
-                "mapped_access_group_ids"
+                "mapped_department_ids"
             ):
-                return FakeResult(rows=[group])
+                return FakeResult(rows=[department])
             return FakeResult()
 
         def add(self, item):
@@ -427,11 +435,11 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
     db = FakeDb()
     asyncio.run(_apply_mapped_groups(db, object(), document))
     assert article.visibility == "department"
-    assert article.access_groups == [group]
+    assert article.departments == [department]
 
     document.metadata_json = {
         **document.metadata_json,
-        "mapped_access_group_ids": [],
+        "mapped_department_ids": [],
         "mapped_source_user_ids": [],
         "unmapped_group_ids": [],
         "unmapped_source_user_ids": ["provider-user-no-longer-mapped"],

@@ -2,7 +2,7 @@
 
 `hnsw.ef_search` caps how many candidates a single index pass yields and defaults to 40 —
 BELOW the 48 this application asks for. pgvector also applies filtering *after* the index
-scan, so the permission bitmask, published-status and embedding_version predicates consume
+scan, so the department-audience, published-status and embedding_version predicates consume
 candidates the index already committed to:
 
     "If a condition matches 10% of rows, with HNSW and the default hnsw.ef_search of 40,
@@ -65,7 +65,6 @@ def _user() -> User:
         id=uuid.uuid4(), role="Staff", company_domain="acme.test", dept="Engineering"
     )
     user.departments = [Department(id=uuid.uuid4(), name="Engineering", active=True)]
-    user.access_groups = []
     return user
 
 
@@ -77,7 +76,6 @@ def _search(embedding: list[float] | None) -> list[tuple[str, dict]]:
             user=_user(),
             query="clock tree synthesis",
             query_embedding=embedding,
-            user_bitmask=1,
             limit=5,
             filters={"company_domain": "acme.test"},
         )

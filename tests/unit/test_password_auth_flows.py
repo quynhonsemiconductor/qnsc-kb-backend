@@ -832,7 +832,6 @@ def test_accepting_applies_the_invitations_audience_departments():
         id=uuid.uuid4(),
         company_domain="qnsc.vn",
         name="Engineering",
-        kind="access",
         active=True,
     )
     _db, _invitation, created, _result, _response = _successful_accept(

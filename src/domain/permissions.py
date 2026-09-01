@@ -1,5 +1,5 @@
 import uuid
-from src.models.user import User, AccessGroup
+from src.models.user import User
 from src.models.article import Article
 from src.domain.rbac import AuthorizationService
 
@@ -26,7 +26,7 @@ class PermissionService:
         SharePoint permissions are an intersection with the internal policy;
         a global Article permission is not a provider-side ACL bypass. The
         sync path represents mapped direct users as source-qualified allows
-        and mapped groups through ``Article.access_groups``. Empty or
+        and mapped groups through ``Article.departments``. Empty or
         unmapped provider ACLs therefore fail closed here.
         """
         if not any(
@@ -42,55 +42,9 @@ class PermissionService:
         )
         if source_user_allow:
             return True
-        user_group_ids = {group.id for group in (getattr(user, "groups", []) or [])}
-        article_group_ids = {group.id for group in (getattr(article, "access_groups", []) or [])}
-        if user_group_ids & article_group_ids:
-            return True
-        user_access_ids = {department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"}
-        article_access_ids = {department.id for department in getattr(article, "departments", []) if getattr(department, "kind", "org") == "access"}
-        return bool(user_access_ids & article_access_ids)
-
-    @staticmethod
-    def get_public_bit() -> int:
-        # Bit position 0 represents public access (always available to everyone)
-        return 0
-
-    @classmethod
-    def calculate_user_bitmask(cls, user: User) -> int:
-        """
-        Calculates user's bitmask from their access groups.
-        If user is Admin, we return a fully set bitmask (e.g. all 1s).
-        All users get the public bit (position 0) automatically.
-        """
-        if AuthorizationService.has_permission(user, "article.read", requested_scope="global"):
-            # Enable first 62 bits
-            return (1 << 62) - 1
-            
-        bitmask = 1 << cls.get_public_bit()
-        for group in user.groups:
-            if group.bitmask_position is not None:
-                bitmask |= (1 << group.bitmask_position)
-        return bitmask
-
-    @classmethod
-    def calculate_article_bitmask(cls, article: Article) -> int:
-        """
-        Calculates an article's access group bitmask.
-        If sensitivity is public, it returns just the public bit.
-        Otherwise, it returns the bitwise OR of all allowed access group bitmask positions.
-        """
-        if article.sensitivity == "public":
-            return 1 << cls.get_public_bit()
-
-        bitmask = 0
-        for group in article.access_groups:
-            if group.bitmask_position is not None:
-                bitmask |= (1 << group.bitmask_position)
-        
-        # Restricted/internal articles without an explicit access group must
-        # fail closed. Treating them as public leaks documents whenever an
-        # editor forgets to select a group.
-        return bitmask
+        user_department_ids = {department.id for department in (getattr(user, "departments", []) or [])}
+        article_department_ids = {department.id for department in (getattr(article, "departments", []) or [])}
+        return bool(user_department_ids & article_department_ids)
 
     @classmethod
     def can_view_article(cls, user: User, article: Article) -> bool:
@@ -121,9 +75,11 @@ class PermissionService:
         if explicit_effect == "allow":
             return True
         if article.sensitivity == "restricted":
-            user_group_ids = {group.id for group in getattr(user, "groups", []) or []}
-            article_group_ids = {group.id for group in getattr(article, "access_groups", []) or []}
-            if not user_group_ids & article_group_ids:
+            # Restricted content requires an explicit shared department, never
+            # a name-based match through `Article.dept`.
+            user_department_ids = {department.id for department in getattr(user, "departments", []) or []}
+            article_department_ids = {department.id for department in getattr(article, "departments", []) or []}
+            if not user_department_ids & article_department_ids:
                 return False
         if AuthorizationService.can_access_article_departments(user, article):
             return True

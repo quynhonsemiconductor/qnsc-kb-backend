@@ -17,7 +17,7 @@ from src.api.deps import SessionLocal, get_db, get_current_user, require_permiss
 from src.models import User
 from src.models.article import Article
 from src.models.governance import AuditLog, PendingDraft
-from src.models.user import AccessGroup, ExternalIdentity
+from src.models.user import Department, ExternalIdentity
 from src.models.ops import Connector, ConnectorJob
 from src.models.connectors import ConnectorNotification, ExternalAclPrincipal, ExternalDocument, ExternalGroupMapping, PermissionSnapshot, SourceScope, SyncCursor, SyncError, SyncRequest, WebhookSubscription
 from src.repositories.user import UserRepository
@@ -53,7 +53,7 @@ class ScopeSelection(BaseModel):
 
 
 class GroupMappingRequest(BaseModel):
-    access_group_id: uuid.UUID
+    department_id: uuid.UUID
     external_group_name: str | None = Field(default=None, max_length=255)
 
 
@@ -498,11 +498,11 @@ async def list_group_mappings(
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    mappings = (await db.execute(select(ExternalGroupMapping, AccessGroup.name).join(AccessGroup, AccessGroup.id == ExternalGroupMapping.access_group_id).where(
+    mappings = (await db.execute(select(ExternalGroupMapping, Department.name).join(Department, Department.id == ExternalGroupMapping.department_id).where(
         ExternalGroupMapping.connector_id == connector.id,
-        AccessGroup.company_domain == connector.company_domain,
+        Department.company_domain == connector.company_domain,
     ))).all()
-    return [{"external_group_id": mapping.external_group_id, "external_group_name": mapping.external_group_name, "access_group_id": str(mapping.access_group_id), "access_group_name": name, "active": mapping.active} for mapping, name in mappings]
+    return [{"external_group_id": mapping.external_group_id, "external_group_name": mapping.external_group_name, "department_id": str(mapping.department_id), "department_name": name, "active": mapping.active} for mapping, name in mappings]
 
 
 @router.get("/{connector_id}/acl-principals")
@@ -521,17 +521,17 @@ async def list_acl_principals(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    mapping_rows = (await db.execute(select(ExternalGroupMapping, AccessGroup.name).join(
-        AccessGroup, AccessGroup.id == ExternalGroupMapping.access_group_id,
+    mapping_rows = (await db.execute(select(ExternalGroupMapping, Department.name).join(
+        Department, Department.id == ExternalGroupMapping.department_id,
     ).where(
         ExternalGroupMapping.connector_id == connector.id,
-        AccessGroup.company_domain == connector.company_domain,
+        Department.company_domain == connector.company_domain,
     ))).all()
     group_mappings = {
         mapping.external_group_id: {
             "external_group_name": mapping.external_group_name,
-            "access_group_id": str(mapping.access_group_id),
-            "access_group_name": name,
+            "department_id": str(mapping.department_id),
+            "department_name": name,
             "active": mapping.active,
         }
         for mapping, name in mapping_rows
@@ -579,8 +579,8 @@ async def list_acl_principals(
             "roles": sorted(entry["roles"]),
             "mapping_status": "mapped" if active_mapping or mapped_user_id else "unmapped",
             "external_group_name": mapping["external_group_name"] if mapping else None,
-            "access_group_id": mapping["access_group_id"] if active_mapping else None,
-            "access_group_name": mapping["access_group_name"] if active_mapping else None,
+            "department_id": mapping["department_id"] if active_mapping else None,
+            "department_name": mapping["department_name"] if active_mapping else None,
             "internal_user_id": mapped_user_id,
         })
     return response
@@ -597,19 +597,19 @@ async def set_group_mapping(
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    group = (await db.execute(select(AccessGroup).where(
-        AccessGroup.id == request.access_group_id,
-        AccessGroup.company_domain == connector.company_domain,
+    department = (await db.execute(select(Department).where(
+        Department.id == request.department_id,
+        Department.company_domain == connector.company_domain,
     ))).scalar_one_or_none()
-    if not group:
-        raise HTTPException(status_code=404, detail="Connector or access group not found")
+    if not department:
+        raise HTTPException(status_code=404, detail="Connector or department not found")
     mapping = (await db.execute(select(ExternalGroupMapping).where(ExternalGroupMapping.connector_id == connector.id, ExternalGroupMapping.external_group_id == external_group_id))).scalar_one_or_none()
     if mapping is None:
-        mapping = ExternalGroupMapping(connector_id=connector.id, external_group_id=external_group_id, external_group_name=request.external_group_name, access_group_id=group.id, active=True)
+        mapping = ExternalGroupMapping(connector_id=connector.id, external_group_id=external_group_id, external_group_name=request.external_group_name, department_id=department.id, active=True)
         db.add(mapping)
     else:
         mapping.external_group_name = request.external_group_name or mapping.external_group_name
-        mapping.access_group_id = group.id
+        mapping.department_id = department.id
         mapping.active = True
     try:
         await db.flush()
@@ -626,7 +626,7 @@ async def set_group_mapping(
     from src.domain.events import event_bus
     for article_id in changed_article_ids:
         await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
-    return {"external_group_id": mapping.external_group_id, "access_group_id": str(mapping.access_group_id), "active": mapping.active, "articles_reconciled": len(changed_article_ids)}
+    return {"external_group_id": mapping.external_group_id, "department_id": str(mapping.department_id), "active": mapping.active, "articles_reconciled": len(changed_article_ids)}
 
 
 @router.delete("/{connector_id}/group-mappings/{external_group_id}", status_code=204)

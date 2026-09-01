@@ -3,7 +3,7 @@ from typing import Sequence
 from sqlalchemy import select, and_, false
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from src.models.user import User, AccessGroup, DepartmentManager
+from src.models.user import User, Department, DepartmentManager
 from src.models.rbac import Role, RolePermission
 from src.domain.rbac import AuthorizationService
 
@@ -34,7 +34,6 @@ class UserRepository:
         result = await self.db.execute(
             select(User)
             .where(and_(*filters))
-            .options(selectinload(User.groups))
             .options(selectinload(User.departments))
             .options(selectinload(User.department_ownerships).selectinload(DepartmentManager.department))
             .options(selectinload(User.roles).selectinload(Role.permissions).selectinload(RolePermission.permission))
@@ -54,7 +53,6 @@ class UserRepository:
         result = await self.db.execute(
             select(User)
             .where(User.email == email)
-            .options(selectinload(User.groups))
             .options(selectinload(User.departments))
             .options(selectinload(User.department_ownerships).selectinload(DepartmentManager.department))
             .options(selectinload(User.roles).selectinload(Role.permissions).selectinload(RolePermission.permission))
@@ -67,40 +65,17 @@ class UserRepository:
         await self.db.refresh(user)
         return user
 
-    async def get_group_by_name(self, name: str, company_domain: str | None = None) -> AccessGroup | None:
-        stmt = select(AccessGroup).where(AccessGroup.name == name)
+    async def get_department_by_name(self, name: str, company_domain: str | None = None) -> Department | None:
+        stmt = select(Department).where(Department.name == name)
         if company_domain is not None:
-            stmt = stmt.where(AccessGroup.company_domain == company_domain)
+            stmt = stmt.where(Department.company_domain == company_domain)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_group_by_id(self, group_id: uuid.UUID, company_domain: str | None = None) -> AccessGroup | None:
-        stmt = select(AccessGroup).where(AccessGroup.id == group_id)
-        if company_domain is not None:
-            stmt = stmt.where(AccessGroup.company_domain == company_domain)
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def create_group(self, group: AccessGroup, *, commit: bool = True) -> AccessGroup:
-        self.db.add(group)
-        if commit:
-            await self.db.commit()
-            await self.db.refresh(group)
-        else:
-            await self.db.flush()
-        return group
-
-    async def get_all_groups(self, company_domain: str | None = None) -> Sequence[AccessGroup]:
-        stmt = select(AccessGroup).order_by(AccessGroup.bitmask_position)
+    async def get_departments_by_ids(self, department_ids: list[uuid.UUID], company_domain: str | None = None) -> Sequence[Department]:
+        stmt = select(Department).where(Department.id.in_(department_ids))
         if company_domain:
-            stmt = stmt.where(AccessGroup.company_domain == company_domain)
-        result = await self.db.execute(stmt)
-        return result.scalars().all()
-
-    async def get_groups_by_ids(self, group_ids: list[uuid.UUID], company_domain: str | None = None) -> Sequence[AccessGroup]:
-        stmt = select(AccessGroup).where(AccessGroup.id.in_(group_ids))
-        if company_domain:
-            stmt = stmt.where(AccessGroup.company_domain == company_domain)
+            stmt = stmt.where(Department.company_domain == company_domain)
         result = await self.db.execute(stmt)
         return result.scalars().all()
 
@@ -125,7 +100,6 @@ class UserRepository:
         if exclude_id is not None:
             filters.append(User.id != exclude_id)
         stmt = select(User).options(
-                selectinload(User.groups),
                 selectinload(User.departments),
                 selectinload(User.department_ownerships).selectinload(DepartmentManager.department),
                 selectinload(User.roles).selectinload(Role.permissions).selectinload(RolePermission.permission),
@@ -146,8 +120,8 @@ class UserRepository:
         # write has already committed.
         return await self.get_by_id(user.id) or user
 
-    async def update_user_groups(self, user: User, groups: list[AccessGroup]) -> User:
-        user.groups = groups
+    async def update_user_departments(self, user: User, departments: list[Department]) -> User:
+        user.departments = departments
         self.db.add(user)
         await self.db.commit()
         # Same reason as update() above.

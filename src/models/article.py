@@ -1,18 +1,11 @@
 import uuid
 from datetime import datetime
 from typing import Any
-from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index, and_
+from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 from src.models.user import Department
 
-# Association table for Article <-> AccessGroup (Many-to-Many)
-article_access = Table(
-    "article_access",
-    Base.metadata,
-    Column("article_id", ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True),
-    Column("group_id", ForeignKey("access_groups.id", ondelete="CASCADE"), primary_key=True),
-)
 
 # One article may be visible in several departments. ``articles.dept`` is
 # retained as the primary/legacy department for synchronized integrations.
@@ -63,9 +56,6 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     owner: Mapped["User | None"] = relationship("User")
-    access_groups: Mapped[list["AccessGroup"]] = relationship(
-        "AccessGroup", secondary=article_access
-    )
     departments: Mapped[list["Department"]] = relationship(
         "Department", secondary=article_departments, lazy="selectin"
     )
@@ -157,11 +147,6 @@ class TagCatalog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("company_domain", "normalized_tag", name="uq_tag_catalog_company_normalized"),
         Index("ix_tag_catalog_company_active", "company_domain", "active"),
-    )
-    access_audiences: Mapped[list["Department"]] = relationship(
-        "Department", secondary=article_departments, viewonly=True,
-        primaryjoin=lambda: Article.id == article_departments.c.article_id,
-        secondaryjoin=lambda: and_(Department.id == article_departments.c.department_id, Department.kind == "access"),
     )
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)

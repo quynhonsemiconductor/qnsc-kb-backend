@@ -13,7 +13,6 @@ from src.workers.celery_app import celery_app
 from src.api.deps import SessionLocal, engine, set_database_context
 from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
-from src.domain.permissions import PermissionService
 from src.core.config import settings
 from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue, ConnectorJob, Connector
 from src.models.connectors import SyncRequest
@@ -728,7 +727,7 @@ def recover_stale_index_reprocess_jobs() -> int:
 def recompute_permissions_task(article_id_str: str):
     article_id = uuid.UUID(article_id_str)
     logger.info(
-        "Recomputing permission bitmask snapshot on chunks", article_id=article_id
+        "Recomputing permission metadata snapshot on chunks", article_id=article_id
     )
 
     async def process():
@@ -745,18 +744,15 @@ def recompute_permissions_task(article_id_str: str):
                 )
                 return
 
-            bitmap = PermissionService.calculate_article_bitmask(article)
             await chunk_repo.update_permissions(
                 article_id=article_id,
-                bitmap=bitmap,
                 sensitivity=article.sensitivity,
                 visibility=article.visibility,
                 dept=article.dept,
             )
             logger.info(
-                "Permission bitmap updated successfully",
+                "Chunk permission metadata updated successfully",
                 article_id=article_id,
-                bitmap=bitmap,
             )
 
     sync_run(process())

@@ -105,7 +105,7 @@ class ExternalGroupMapping(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     connector_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False)
     external_group_id: Mapped[str] = mapped_column(String(512), nullable=False)
     external_group_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    access_group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("access_groups.id", ondelete="CASCADE"), nullable=False)
+    department_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("departments.id", ondelete="CASCADE"), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import ForeignKey, String, Text, Integer, BigInteger, DateTime, JSON
+from sqlalchemy import ForeignKey, String, Text, Integer, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -56,11 +56,9 @@ class AiCache(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # payload even if another repository query is accidentally broadened.
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     question_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    # Exact authorization context used to create the answer.  The legacy
-    # bitmap is retained for compatibility, but must never be used as the
+    # Exact authorization context used to create the answer, and the only
     # authority for serving cached answer text.
     authorization_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="legacy")
-    access_group_bitmap: Mapped[int] = mapped_column(BigInteger, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[str] = mapped_column(Text, nullable=False)  # JSON serialized array of citations
     article_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)

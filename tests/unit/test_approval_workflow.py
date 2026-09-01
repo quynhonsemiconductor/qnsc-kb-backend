@@ -203,7 +203,7 @@ def test_unmapped_external_acl_blocks_approval():
         id=uuid.uuid4(), connector_id=uuid.uuid4(), corpus_id="drive-1", external_id="file-1", name="policy.md",
         metadata_json={
             "sharepoint_acl_present": True,
-            "mapped_access_group_ids": [],
+            "mapped_department_ids": [],
             "unmapped_group_ids": ["provider-group"],
             "mapped_source_user_ids": [],
             "unmapped_source_user_ids": [],

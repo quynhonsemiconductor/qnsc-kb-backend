@@ -67,8 +67,11 @@ from src.domain.events import event_bus
 from src.domain.permissions import PermissionService
 from src.domain.article_edit_requests import create_article_edit_request as create_edit_request
 from src.domain.rbac import AuthorizationService
-from src.domain.departments import resolve_active_department, resolve_active_departments
-from src.domain.departments import lock_company_access_groups
+from src.domain.departments import (
+    resolve_active_department,
+    resolve_active_departments,
+    lock_company_scope,
+)
 from src.core.rate_limit import source_upload_rate_limiter
 import structlog
 
@@ -180,18 +183,13 @@ async def _resolve_upload_departments(
     dept: str | None,
     department_ids: list[uuid.UUID] | None,
 ) -> tuple[Any, list[Any]]:
-    """Return (primary organisational department, access audiences).
+    """Return (primary department, full audience list).
 
-    THESE ARE TWO DIFFERENT THINGS and were previously the same list. `department_ids` is
-    an audience selection — `Article.departments` joins it with `kind == "access"`, and
-    the permission checks in permissions.py and rbac.py read only access-kind rows. The
-    article's `dept` is an ORGANISATIONAL department, and `approve_draft` re-resolves it
-    through `resolve_active_department`, which requires `kind == "org"`.
-
-    Taking the primary from `selected_departments[0]` wrote an access group's name into
-    `dept`, so a draft uploaded into "public" was created happily and could then never be
-    approved — every attempt returned 422 "Department does not exist or is inactive"
-    about a department that plainly existed and was active. Both upload paths did it.
+    `department_ids` is the read audience; `Article.dept` is the single primary
+    department that drives approval routing and is always part of the audience.
+    An explicit `dept` wins, otherwise the first selected department, otherwise
+    the uploader's own. Resolving through `resolve_active_department` keeps the
+    active/tenant check in ONE place.
     """
     audiences: list[Any] = (
         await resolve_active_departments(
@@ -200,27 +198,17 @@ async def _resolve_upload_departments(
         if department_ids
         else []
     )
-    # An explicit `dept` wins; otherwise prefer an org department the caller actually
-    # selected, and fall back to the uploader's own. Resolving through
-    # resolve_active_department is what enforces kind == "org" in ONE place.
     primary_name = (
         dept
-        or next(
-            (
-                department.name
-                for department in audiences
-                if getattr(department, "kind", "org") == "org"
-            ),
-            None,
-        )
+        or next((department.name for department in audiences), None)
         or current_user.dept
     )
     primary = await resolve_active_department(
         db, current_user.company_domain, primary_name, required=True
     )
-    # An audience-less upload keeps its previous shape: the primary is also the only row
-    # written to Article.departments, where an org-kind row is simply never loaded back.
-    return primary, (audiences or [primary])
+    if not any(department.id == primary.id for department in audiences):
+        audiences.insert(0, primary)
+    return primary, audiences
 
 
 # Schema definitions
@@ -280,13 +268,6 @@ class ConfirmTagsRequest(BaseModel):
     items: list[ConfirmTagItem] = Field(min_length=1, max_length=20)
 
 
-class GroupResponse(BaseModel):
-    id: uuid.UUID
-    name: str
-    bitmask_position: int
-    model_config = ConfigDict(from_attributes=True)
-
-
 class TagResponse(BaseModel):
     tag: str
     model_config = ConfigDict(from_attributes=True)
@@ -338,7 +319,6 @@ class ArticleResponse(BaseModel):
     index_status: str = "pending"
     index_error: str | None = None
     source_available: bool = False
-    access_groups: list[GroupResponse] = []
     tags: list[TagResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -670,7 +650,7 @@ async def upload_source(
     # or inactive articles so a document can be uploaded again after removal.
     # Reserve the tenant/hash pair while the expensive extraction and storage
     # work is still in progress. This closes the concurrent-upload race.
-    await lock_company_access_groups(
+    await lock_company_scope(
         db, f"upload:{current_user.company_domain}:{source_hash}"
     )
     fingerprint = await db.scalar(
@@ -1001,7 +981,7 @@ async def create_source_upload_intent(
     ):
         raise HTTPException(status_code=403, detail="Not authorized to upload sources")
 
-    await lock_company_access_groups(
+    await lock_company_scope(
         db,
         f"presigned-upload:{current_user.company_domain}:{request.source_hash.lower()}",
     )
@@ -1582,7 +1562,7 @@ async def create_article(
     source_hash = hashlib.sha256(
         f"{current_user.company_domain}\0{normalized_body}".encode("utf-8")
     ).hexdigest()
-    await lock_company_access_groups(
+    await lock_company_scope(
         db, f"upload:{current_user.company_domain}:{source_hash}"
     )
     existing_fingerprint = await db.scalar(
@@ -1891,9 +1871,8 @@ async def update_article(
             detail="Every explicit Article user must belong to the Article company",
         )
 
-    # Legacy domain/type/sensitivity and ACL values are preserved from the
+    # Legacy domain/type/sensitivity values are preserved from the
     # synchronized article. They are no longer editable through this API.
-    groups = list(current.access_groups)
     tags = (
         article_in.tags
         if article_in.tags is not None
@@ -1932,7 +1911,7 @@ async def update_article(
     source_hash = hashlib.sha256(
         f"{current.company_domain}\0{normalized_body}".encode("utf-8")
     ).hexdigest()
-    await lock_company_access_groups(
+    await lock_company_scope(
         db, f"upload:{current.company_domain}:{source_hash}"
     )
     duplicate_fingerprint = await db.scalar(
@@ -1989,7 +1968,6 @@ async def update_article(
             "department_ids": [
                 str(department.id) for department in selected_departments
             ],
-            "access_group_ids": [str(group.id) for group in groups],
             "next_review": next_review.isoformat() if next_review else None,
             "submission_kind": "manual_update",
             "suggested_update_article_id": str(current.id),
@@ -2186,7 +2164,7 @@ async def restore_version(
             "type": str(snapshot.get("type") or current.type),
             "sensitivity": str(snapshot.get("sensitivity") or current.sensitivity),
             "language": str(snapshot.get("language") or current.language),
-            "access_group_ids": [str(group.id) for group in current.access_groups],
+            "department_ids": [str(department.id) for department in current.departments],
             "next_review": (
                 current.next_review.isoformat() if current.next_review else None
             ),

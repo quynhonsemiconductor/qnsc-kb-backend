@@ -27,30 +27,10 @@ async def resolve_active_department(
         select(Department).where(
             Department.company_domain == company_domain,
             Department.active.is_(True),
-            Department.kind == "org",
             func.lower(Department.name) == canonical.lower(),
         )
     )
     if department is None:
-        # "does not exist or is inactive" is a LIE for the commonest cause of getting
-        # here: an access group's name. `public` exists, is active, and is rejected only
-        # because kind != "org" — and reporting that as non-existence sent a real
-        # investigation into CloudWatch instead of reading the message on screen.
-        # The extra query runs on the failure path only.
-        conflicting = await db.scalar(
-            select(Department).where(
-                Department.company_domain == company_domain,
-                func.lower(Department.name) == canonical.lower(),
-            )
-        )
-        if conflicting is not None and conflicting.active:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"'{conflicting.name}' is an access group, not an organisational "
-                    "department, so it cannot be an article's department"
-                ),
-            )
         raise HTTPException(status_code=422, detail="Department does not exist or is inactive")
     return department
 
@@ -79,8 +59,8 @@ async def resolve_active_departments(
     return [by_id[department_id] for department_id in unique_ids]
 
 
-async def lock_company_access_groups(db: AsyncSession, company_domain: str) -> None:
-    """Serialize bit-position allocation for one tenant on PostgreSQL."""
+async def lock_company_scope(db: AsyncSession, company_domain: str) -> None:
+    """Serialize per-tenant critical sections on PostgreSQL."""
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:domain, 0))"),
         {"domain": company_domain},
