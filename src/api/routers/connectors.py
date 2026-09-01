@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.api.deps import SessionLocal, get_db, get_current_user, require_permission, set_database_context
@@ -54,7 +54,11 @@ class ScopeSelection(BaseModel):
 
 class GroupMappingRequest(BaseModel):
     department_id: uuid.UUID
-    external_group_name: str | None = Field(default=None, max_length=255)
+    # The provider's own type for this principal. Defaults to `group` so a client written
+    # against the group-only API keeps working; anything else must say what it is, because
+    # a mapping row is identified by (connector, type, id).
+    principal_type: str = Field(default="group", min_length=1, max_length=30)
+    principal_name: str | None = Field(default=None, max_length=255)
 
 
 _SENSITIVE_CONFIG_KEYS = {"clientsecret", "accesstoken", "refreshtoken", "token", "apikey", "password", "secret"}
@@ -502,7 +506,7 @@ async def list_group_mappings(
         ExternalGroupMapping.connector_id == connector.id,
         Department.company_domain == connector.company_domain,
     ))).all()
-    return [{"external_group_id": mapping.external_group_id, "external_group_name": mapping.external_group_name, "department_id": str(mapping.department_id), "department_name": name, "active": mapping.active} for mapping, name in mappings]
+    return [{"principal_type": mapping.principal_type, "principal_id": mapping.principal_id, "principal_name": mapping.principal_name, "department_id": str(mapping.department_id), "department_name": name, "active": mapping.active} for mapping, name in mappings]
 
 
 @router.get("/{connector_id}/acl-principals")
@@ -528,8 +532,8 @@ async def list_acl_principals(
         Department.company_domain == connector.company_domain,
     ))).all()
     group_mappings = {
-        mapping.external_group_id: {
-            "external_group_name": mapping.external_group_name,
+        (mapping.principal_type, mapping.principal_id): {
+            "principal_name": mapping.principal_name,
             "department_id": str(mapping.department_id),
             "department_name": name,
             "active": mapping.active,
@@ -557,28 +561,64 @@ async def list_acl_principals(
         if principal.role:
             entry["roles"].update(item.strip() for item in principal.role.split(",") if item.strip())
 
+    # Identity resolution must agree with `cloud_sync._save_permissions`, which is what
+    # actually decides whether approval is blocked. This query used to hardcode
+    # `microsoft_entra`, skip the email fallback and ignore `User.active`, so the panel
+    # could report a principal resolved that the approval gate still counted as unmapped
+    # (and vice versa).
+    identity_provider = (
+        "microsoft_entra" if connector.system == "sharepoint" else connector.system
+    )
     user_subjects = [principal_id for principal_type, principal_id in by_principal if principal_type in {"user", "siteUser"}]
+    lowered_subjects = {str(item).lower() for item in user_subjects}
     identities = (await db.execute(
         select(ExternalIdentity).join(User, User.id == ExternalIdentity.user_id).where(
-            ExternalIdentity.provider == "microsoft_entra",
-            ExternalIdentity.subject.in_(user_subjects),
+            ExternalIdentity.provider == identity_provider,
+            or_(
+                ExternalIdentity.subject.in_(user_subjects),
+                func.lower(ExternalIdentity.email).in_(lowered_subjects),
+            ),
             User.company_domain == connector.company_domain,
+            User.active.is_(True),
         )
     )).scalars().all() if user_subjects else []
-    mapped_users = {str(identity.subject): str(identity.user_id) for identity in identities}
+    mapped_users: dict[str, str] = {}
+    for identity in identities:
+        mapped_users[str(identity.subject)] = str(identity.user_id)
+        if identity.email:
+            mapped_users[str(identity.email).lower()] = str(identity.user_id)
+    if connector.system == "google_drive" and lowered_subjects:
+        email_users = (await db.execute(
+            select(User).where(
+                func.lower(User.email).in_(lowered_subjects),
+                User.company_domain == connector.company_domain,
+                User.active.is_(True),
+            )
+        )).scalars().all()
+        mapped_users.update({str(item.email).lower(): str(item.id) for item in email_users})
 
     response: list[dict[str, Any]] = []
     for (principal_type, principal_id), entry in sorted(by_principal.items()):
-        mapping = group_mappings.get(principal_id) if principal_type in {"group", "siteGroup"} else None
-        mapped_user_id = mapped_users.get(principal_id) if principal_type in {"user", "siteUser"} else None
-        active_mapping = mapping and mapping["active"]
+        # Every observed principal can be mapped to a department, whatever its type. A
+        # provider `user`, `link`, `domain` or `unknown` principal previously had no route
+        # at all: it blocked approval and no UI control could resolve it.
+        mapping = group_mappings.get((principal_type, principal_id))
+        mapped_user_id = (
+            mapped_users.get(principal_id)
+            or mapped_users.get(str(principal_id).lower())
+            if principal_type in {"user", "siteUser"}
+            else None
+        )
+        active_mapping = bool(mapping and mapping["active"])
         response.append({
             "principal_type": principal_type,
             "principal_id": principal_id,
             "principal_name": entry["principal_name"],
             "roles": sorted(entry["roles"]),
             "mapping_status": "mapped" if active_mapping or mapped_user_id else "unmapped",
-            "external_group_name": mapping["external_group_name"] if mapping else None,
+            # Server-owned policy: the client must not re-derive who is mappable from the
+            # principal type.
+            "mappable": True,
             "department_id": mapping["department_id"] if active_mapping else None,
             "department_name": mapping["department_name"] if active_mapping else None,
             "internal_user_id": mapped_user_id,
@@ -586,11 +626,28 @@ async def list_acl_principals(
     return response
 
 
-@router.put("/{connector_id}/group-mappings/{external_group_id}")
-async def set_group_mapping(
+async def _observed_principal_types(
+    db: AsyncSession, connector: Connector, principal_id: str
+) -> set[str]:
+    """Return the provider types this connector has actually observed for an id."""
+    rows = (await db.execute(
+        select(ExternalAclPrincipal.principal_type)
+        .join(PermissionSnapshot, PermissionSnapshot.id == ExternalAclPrincipal.permission_snapshot_id)
+        .join(ExternalDocument, ExternalDocument.id == PermissionSnapshot.external_document_id)
+        .where(
+            ExternalDocument.connector_id == connector.id,
+            ExternalDocument.state != "deleted",
+            ExternalAclPrincipal.principal_id == principal_id,
+        )
+    )).scalars().all()
+    return {str(item) for item in rows}
+
+
+@router.put("/{connector_id}/principal-mappings/{principal_id}")
+async def set_principal_mapping(
     connector_id: uuid.UUID,
     request: GroupMappingRequest,
-    external_group_id: str = Path(..., min_length=1, max_length=512),
+    principal_id: str = Path(..., min_length=1, max_length=512),
     current_user: User = Depends(require_permission("connector.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
@@ -603,12 +660,37 @@ async def set_group_mapping(
     ))).scalar_one_or_none()
     if not department:
         raise HTTPException(status_code=404, detail="Connector or department not found")
-    mapping = (await db.execute(select(ExternalGroupMapping).where(ExternalGroupMapping.connector_id == connector.id, ExternalGroupMapping.external_group_id == external_group_id))).scalar_one_or_none()
+    # Only a principal this connector has actually seen may be mapped. Any string used to
+    # be accepted, which was harmless while only groups could be read back, but every type
+    # is now honoured — so an arbitrary id would be an unauditable grant.
+    observed = await _observed_principal_types(db, connector, principal_id)
+    if not observed:
+        raise HTTPException(
+            status_code=404,
+            detail="That principal has not been observed on this connector; run a sync first",
+        )
+    if request.principal_type not in observed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"This connector observed '{principal_id}' as {sorted(observed)}, not '{request.principal_type}'",
+        )
+    mapping = (await db.execute(select(ExternalGroupMapping).where(
+        ExternalGroupMapping.connector_id == connector.id,
+        ExternalGroupMapping.principal_type == request.principal_type,
+        ExternalGroupMapping.principal_id == principal_id,
+    ))).scalar_one_or_none()
     if mapping is None:
-        mapping = ExternalGroupMapping(connector_id=connector.id, external_group_id=external_group_id, external_group_name=request.external_group_name, department_id=department.id, active=True)
+        mapping = ExternalGroupMapping(
+            connector_id=connector.id,
+            principal_type=request.principal_type,
+            principal_id=principal_id,
+            principal_name=request.principal_name,
+            department_id=department.id,
+            active=True,
+        )
         db.add(mapping)
     else:
-        mapping.external_group_name = request.external_group_name or mapping.external_group_name
+        mapping.principal_name = request.principal_name or mapping.principal_name
         mapping.department_id = department.id
         mapping.active = True
     try:
@@ -626,20 +708,25 @@ async def set_group_mapping(
     from src.domain.events import event_bus
     for article_id in changed_article_ids:
         await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
-    return {"external_group_id": mapping.external_group_id, "department_id": str(mapping.department_id), "active": mapping.active, "articles_reconciled": len(changed_article_ids)}
+    return {"principal_type": mapping.principal_type, "principal_id": mapping.principal_id, "department_id": str(mapping.department_id), "active": mapping.active, "articles_reconciled": len(changed_article_ids)}
 
 
-@router.delete("/{connector_id}/group-mappings/{external_group_id}", status_code=204)
-async def delete_group_mapping(
+@router.delete("/{connector_id}/principal-mappings/{principal_id}", status_code=204)
+async def delete_principal_mapping(
     connector_id: uuid.UUID,
-    external_group_id: str = Path(..., min_length=1, max_length=512),
+    principal_id: str = Path(..., min_length=1, max_length=512),
+    principal_type: str = Query(default="group", min_length=1, max_length=30),
     current_user: User = Depends(require_permission("connector.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    mapping = (await db.execute(select(ExternalGroupMapping).where(ExternalGroupMapping.connector_id == connector.id, ExternalGroupMapping.external_group_id == external_group_id))).scalar_one_or_none()
+    mapping = (await db.execute(select(ExternalGroupMapping).where(
+        ExternalGroupMapping.connector_id == connector.id,
+        ExternalGroupMapping.principal_type == principal_type,
+        ExternalGroupMapping.principal_id == principal_id,
+    ))).scalar_one_or_none()
     if mapping:
         mapping.active = False
         try:
@@ -657,6 +744,7 @@ async def delete_group_mapping(
         from src.domain.events import event_bus
         for article_id in changed_article_ids:
             await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
+
 
 async def _run_cloud_sync_inline(
     connector_id: uuid.UUID,

@@ -175,7 +175,8 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     )
     mapping = ExternalGroupMapping(
         connector_id=connector_id,
-        external_group_id="provider-group",
+        principal_type="group",
+        principal_id="provider-group",
         department_id=department_id,
         active=True,
     )
@@ -211,6 +212,83 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     assert changed is True
     assert document.metadata_json["mapped_department_ids"] == [str(department_id)]
     assert document.metadata_json["unmapped_group_ids"] == []
+
+
+def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval():
+    """An `unknown` principal used to be permanently unresolvable.
+
+    `_save_permissions` only ever looked up ids drawn from `group`/`siteGroup`, and
+    `unmapped_principal_ids` was computed without consulting the mapping table at all. So
+    a SharePoint `unknown`, `link`, `domain`, `application` or `device` principal — and a
+    provider `user` who had never signed in here — sat in the blocking set forever and
+    `approve_draft` refused the draft with `external_acl_mapping_required`, with no UI
+    control able to fix it.
+
+    Mapping such a principal now grants through its department like any other.
+    """
+    from src.models.connectors import ExternalDocument, ExternalGroupMapping
+
+    connector_id = uuid.uuid4()
+    department_id = uuid.uuid4()
+    connector = Connector(id=connector_id, company_domain="acme.test")
+    permissions = [
+        {"principal_type": "unknown", "principal_id": "opaque-guid", "role": "read"},
+        {"principal_type": "link", "principal_id": "link:organization", "role": "read"},
+    ]
+    document = ExternalDocument(
+        id=uuid.uuid4(),
+        connector_id=connector_id,
+        corpus_id="sharepoint",
+        external_id="file-1",
+        name="policy.md",
+        acl_hash=_acl_hash(permissions),
+    )
+    # The administrator resolved the opaque principal; the sharing link is left alone.
+    mapping = ExternalGroupMapping(
+        connector_id=connector_id,
+        principal_type="unknown",
+        principal_id="opaque-guid",
+        department_id=department_id,
+        active=True,
+    )
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalar_one_or_none(self):
+            return None
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class Db:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, statement):
+            if "external_group_mappings" in str(statement):
+                # Tenant scope must survive the widening.
+                assert "departments.company_domain" in str(statement)
+                return Result([mapping])
+            return Result([])
+
+        def add(self, item):
+            self.added.append(item)
+
+        async def flush(self):
+            return None
+
+    asyncio.run(_save_permissions(Db(), connector, document, permissions))
+
+    # The mapped principal now grants its department and has left the blocking set.
+    assert document.metadata_json["mapped_department_ids"] == [str(department_id)]
+    # The unmapped sharing link still blocks: fail-closed is not weakened by mapping a
+    # DIFFERENT principal.
+    assert document.metadata_json["unmapped_principal_ids"] == ["link:link:organization"]
 
 
 def test_sharepoint_acl_intersection_never_broadens_internal_policy():
@@ -321,6 +399,15 @@ def test_unsupported_provider_principal_is_persisted_as_unmapped():
     class Result:
         def scalar_one_or_none(self):
             return None
+
+        # Every observed principal is now looked up in external_group_mappings, not just
+        # group-kind ones, so a domain-only ACL reaches this query too. No mapping exists
+        # here, which is what keeps the principal in the blocking set below.
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
 
     class Db:
         def __init__(self):
