@@ -32,7 +32,6 @@ from src.core.security import get_password_hash, verify_password
 from src.repositories.audit import AuditRepository
 from src.models.rbac import Permission, Role, RolePermission
 from src.models.user import (
-    AccessGroup,
     Department,
     DepartmentManager,
     User,
@@ -49,7 +48,6 @@ from src.domain.rbac import AuthorizationService, SCOPES, bootstrap_rbac
 from src.domain.departments import (
     resolve_active_department,
     normalize_department_name,
-    lock_company_access_groups,
 )
 from src.core.rate_limit import auth_rate_limiter
 from src.domain import entra_auth
@@ -174,11 +172,7 @@ class RolePermissionInput(BaseModel):
     scope: str = Field(default="company", min_length=1, max_length=20)
 
 
-class AccessGroupInput(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-
-
-class AccessGroupMembersInput(BaseModel):
+class DepartmentMembersInput(BaseModel):
     user_ids: list[uuid.UUID] = Field(max_length=1_000)
 
 
@@ -489,26 +483,6 @@ async def list_users(
     return [_user_response(user) for user in users]
 
 
-@router.get("/groups")
-async def list_access_groups(
-    current_user: Any = Depends(require_permission("user.read")),
-    db: AsyncSession = Depends(get_db),
-) -> Any:
-    global_admin = AuthorizationService.can_view_all_access_groups(current_user)
-    groups = await UserRepository(db).get_all_groups(
-        None if global_admin else current_user.company_domain
-    )
-    return [
-        {
-            "id": group.id,
-            "name": group.name,
-            "company_domain": group.company_domain,
-            "bitmask_position": group.bitmask_position,
-        }
-        for group in groups
-    ]
-
-
 @router.get("/departments")
 async def list_departments(
     current_user: Any = Depends(get_current_user), db: AsyncSession = Depends(get_db)
@@ -532,7 +506,6 @@ async def list_departments(
             "description": item.description,
             "company_domain": item.company_domain,
             "active": item.active,
-            "kind": item.kind,
             "contact_email": item.contact_email,
             "owner": next(
                 (
@@ -1151,43 +1124,11 @@ async def create_department(
     ).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="Department already exists")
-    await lock_company_access_groups(db, f"department:{company_domain}")
-    department_group = (
-        await db.execute(
-            select(AccessGroup).where(
-                AccessGroup.company_domain == company_domain,
-                func.lower(AccessGroup.name) == f"dept_{name.lower()}".lower(),
-            )
-        )
-    ).scalar_one_or_none()
-    if department_group is None:
-        next_position = (
-            int(
-                (
-                    await db.execute(
-                        select(
-                            func.coalesce(func.max(AccessGroup.bitmask_position), -1)
-                        ).where(
-                            AccessGroup.company_domain == company_domain,
-                        )
-                    )
-                ).scalar_one()
-            )
-            + 1
-        )
-        db.add(
-            AccessGroup(
-                name=f"dept_{name.lower()}",
-                company_domain=company_domain,
-                bitmask_position=next_position,
-            )
-        )
     item = Department(
         company_domain=company_domain,
         name=name,
         description=payload.description.strip(),
         active=True,
-        kind="org",
         contact_email=str(payload.contact_email).lower() if payload.contact_email else None,
     )
     db.add(item)
@@ -1202,7 +1143,6 @@ async def create_department(
         "description": item.description,
         "company_domain": item.company_domain,
         "active": item.active,
-        "kind": item.kind,
         "contact_email": item.contact_email,
     }
 
@@ -1251,29 +1191,6 @@ async def update_department(
         if duplicate:
             raise HTTPException(status_code=409, detail="Department already exists")
         old_name = item.name
-        old_group_name = f"dept_{old_name.lower()}"
-        new_group_name = f"dept_{name.lower()}"
-        old_group = (
-            await db.execute(
-                select(AccessGroup).where(
-                    AccessGroup.company_domain == item.company_domain,
-                    func.lower(AccessGroup.name) == old_group_name.lower(),
-                )
-            )
-        ).scalar_one_or_none()
-        new_group = (
-            await db.execute(
-                select(AccessGroup).where(
-                    AccessGroup.company_domain == item.company_domain,
-                    func.lower(AccessGroup.name) == new_group_name.lower(),
-                )
-            )
-        ).scalar_one_or_none()
-        if old_group and new_group and old_group.id != new_group.id:
-            raise HTTPException(
-                status_code=409,
-                detail="The target department name already has an access group; consolidate that group before renaming",
-            )
         item.name = name
         # Department names are currently denormalized in content and user
         # records. Keep the rename atomic so access rules do not point at a
@@ -1321,8 +1238,6 @@ async def update_department(
             .where(FeatureFlag.department == old_name)
             .values(department=name)
         )
-        if old_group:
-            old_group.name = new_group_name
     if payload.description is not None:
         item.description = payload.description.strip()
     if payload.active is not None:
@@ -1340,7 +1255,6 @@ async def update_department(
         "description": item.description,
         "company_domain": item.company_domain,
         "active": item.active,
-        "kind": item.kind,
         "contact_email": item.contact_email,
     }
 
@@ -1451,108 +1365,45 @@ async def delete_department(
     return {"id": department_id, "deleted": True}
 
 
-@router.post("/groups", status_code=status.HTTP_201_CREATED)
-async def create_access_group(
-    payload: AccessGroupInput,
+@router.put("/departments/{department_id}/members")
+async def replace_department_members(
+    department_id: uuid.UUID,
+    payload: DepartmentMembersInput,
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    company_domain = current_user.company_domain
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Access group name cannot be blank")
-    await lock_company_access_groups(db, company_domain)
-    exists = (
-        await db.execute(
-            select(AccessGroup).where(
-                AccessGroup.company_domain == company_domain,
-                func.lower(AccessGroup.name) == name.lower(),
-            )
-        )
-    ).scalar_one_or_none()
-    if exists:
-        raise HTTPException(
-            status_code=409, detail="An access group with this name already exists"
-        )
-    next_position = (
-        int(
-            (
-                await db.execute(
-                    select(
-                        func.coalesce(func.max(AccessGroup.bitmask_position), 0)
-                    ).where(AccessGroup.company_domain == company_domain)
-                )
-            ).scalar_one()
-        )
-        + 1
-    )
-    group = AccessGroup(
-        name=name, company_domain=company_domain, bitmask_position=next_position
-    )
-    created = await UserRepository(db).create_group(group)
-    await AuditRepository(db).record(
-        current_user.id, "group_create", "access_group", str(created.id)
-    )
-    return {
-        "id": created.id,
-        "name": created.name,
-        "company_domain": created.company_domain,
-        "bitmask_position": created.bitmask_position,
-    }
-
-
-@router.put("/groups/{group_id}/members")
-async def replace_access_group_members(
-    group_id: uuid.UUID,
-    payload: AccessGroupMembersInput,
-    current_user: Any = Depends(require_permission("user.manage")),
-    db: AsyncSession = Depends(get_db),
-) -> Any:
-    can_manage_globally = AuthorizationService.has_permission(
-        current_user, "user.manage", requested_scope="global"
-    )
-    group = await UserRepository(db).get_group_by_id(
-        group_id,
-        company_domain=None if can_manage_globally else current_user.company_domain,
-    )
-    if not group:
-        raise HTTPException(status_code=404, detail="Access group not found")
+    department = await _department_for_management(db, department_id, current_user)
+    unique_ids = list(set(payload.user_ids))
     users = await UserRepository(db).get_by_ids(
-        list(set(payload.user_ids)),
-        company_domain=group.company_domain,
+        unique_ids, company_domain=department.company_domain
     )
-    if len(users) != len(set(payload.user_ids)):
+    if len(users) != len(unique_ids):
         raise HTTPException(
-            status_code=422, detail="Every group member must be in the same company"
+            status_code=422, detail="Every department member must be in the same company"
         )
-    group.users = list(users)
+    await db.refresh(department, attribute_names=["members"])
+    department.members = list(users)
     await db.commit()
     await AuditRepository(db).record(
-        current_user.id, "group_members_update", "access_group", str(group.id)
+        current_user.id, "department_members_update", "department", str(department.id)
     )
-    return {"id": group.id, "member_ids": [str(user.id) for user in users]}
+    return {"id": department.id, "member_ids": [str(user.id) for user in users]}
 
 
-@router.get("/groups/{group_id}/members")
-async def list_access_group_members(
-    group_id: uuid.UUID,
+@router.get("/departments/{department_id}/members")
+async def list_department_members(
+    department_id: uuid.UUID,
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """Return the tenant-scoped members for the access-group admin surface."""
-    can_manage_globally = AuthorizationService.has_permission(
-        current_user, "user.manage", requested_scope="global"
-    )
-    group = await UserRepository(db).get_group_by_id(
-        group_id,
-        company_domain=None if can_manage_globally else current_user.company_domain,
-    )
-    if not group:
-        raise HTTPException(status_code=404, detail="Access group not found")
-    await db.refresh(group, attribute_names=["users"])
+    """Return the tenant-scoped members for the department admin surface."""
+    department = await _department_for_management(db, department_id, current_user)
+    await db.refresh(department, attribute_names=["members"])
     return [
         {"id": str(user.id), "name": user.name, "email": user.email, "active": user.active}
-        for user in sorted(group.users, key=lambda item: (item.name.lower(), item.email.lower()))
+        for user in sorted(
+            department.members, key=lambda item: (item.name.lower(), item.email.lower())
+        )
     ]
 
 

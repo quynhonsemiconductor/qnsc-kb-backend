@@ -43,7 +43,6 @@ def _ai_user() -> User:
         company_domain="acme.test",
         role="Staff",
         active=True,
-        groups=[],
     )
     role = Role(name="Staff", company_domain="acme.test", active=True)
     role.permissions.append(

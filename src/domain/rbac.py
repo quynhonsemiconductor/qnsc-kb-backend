@@ -147,17 +147,7 @@ class AuthorizationService:
             return True
         member_departments = cls.member_department_names(user)
         article_departments = cls.article_department_names(article)
-        if member_departments & article_departments:
-            return True
-        user_group_ids = {group.id for group in getattr(user, "groups", []) or []}
-        article_group_ids = {group.id for group in getattr(article, "access_groups", []) or []}
-        # Access groups are read audiences just like departments.  They may
-        # cross the organisation tree, but are not used for approval routing.
-        if user_group_ids & article_group_ids:
-            return True
-        user_access_ids = {department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"}
-        article_access_ids = {department.id for department in getattr(article, "departments", []) if getattr(department, "kind", "org") == "access"}
-        return bool(user_access_ids & article_access_ids)
+        return bool(member_departments & article_departments)
 
     @classmethod
     def restrict_article_metadata(cls, user: User, article: object) -> None:
@@ -195,7 +185,7 @@ class AuthorizationService:
 
     @classmethod
     def has_narrow_article_access(cls, user: User, resource: object | None = None) -> bool:
-        """Whether own/department scope grants access without group membership."""
+        """Whether own/department scope grants access without company-wide read."""
         return (
             not cls.has_permission(user, "article.read", requested_scope="company")
             and any(
@@ -258,15 +248,6 @@ class AuthorizationService:
         )
 
     @classmethod
-    def can_view_all_access_groups(cls, user: User) -> bool:
-        """Access-group membership metadata belongs to identity management.
-
-        A global article reader may retrieve documents across companies, but
-        must not automatically enumerate every company's groups and names.
-        """
-        return cls.has_permission(user, "user.read", requested_scope="global")
-
-    @classmethod
     def has_global_identity_management(cls, user: User) -> bool:
         """Whether tenant RLS may expose cross-company identity records."""
         return any(
@@ -310,18 +291,19 @@ class AuthorizationService:
     def authorization_fingerprint(cls, user: User) -> str:
         """Return a stable, user-specific authorization snapshot.
 
-        Cached answers contain document text, so a coarse access bitmap is not
-        sufficient.  Include the user identity because ``own`` scope can vary
-        even when two users have identical roles, and include groups/roles so
-        role or group changes naturally select a new cache namespace.
+        Cached answers contain document text, so a coarse audience summary is
+        not sufficient.  Include the user identity because ``own`` scope can
+        vary even when two users have identical roles, and include
+        departments/roles so a membership or role change naturally selects a
+        new cache namespace.
         """
         roles = sorted(
             (str(role.id), role.name, role.company_domain, bool(role.active))
             for role in user.roles
         )
-        groups = sorted(
-            (str(group.id), group.name, group.bitmask_position)
-            for group in user.groups
+        departments = sorted(
+            (str(department.id), department.name)
+            for department in user.departments
         )
         payload = {
             "user_id": str(user.id),
@@ -330,7 +312,7 @@ class AuthorizationService:
             "owned_departments": sorted(cls.owned_department_names(user)),
             "roles": roles,
             "permissions": cls.get_effective_permissions(user),
-            "groups": groups,
+            "departments": departments,
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")

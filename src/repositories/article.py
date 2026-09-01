@@ -9,7 +9,6 @@ from src.models.article import (
     ArticleUserPermission,
     ArticleTag,
     DocumentSource,
-    article_access,
 )
 from src.models.user import User, Department
 from src.domain.rbac import AuthorizationService
@@ -99,14 +98,6 @@ class ArticleRepository:
                 Article.owner_id == user.id,
                 explicit_allow,
             ]
-            group_ids = [group.id for group in getattr(user, "groups", [])]
-            access_audience_ids = [department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"]
-            if group_ids:
-                permission_conditions.append(
-                    Article.access_groups.any(article_access.c.group_id.in_(group_ids))
-                )
-            if access_audience_ids:
-                permission_conditions.append(Article.departments.any(Department.id.in_(access_audience_ids)))
             if AuthorizationService.has_permission(
                 user, "article.read", requested_scope="department"
             ):
@@ -120,9 +111,9 @@ class ArticleRepository:
                             ),
                         )
                     )
-            # Departments and access groups are the same read-time audience
-            # concept.  Do not require both, otherwise a cross-department
-            # access-group member is incorrectly denied.
+            # Department membership IS the read-time audience: one condition,
+            # matched by name so `Article.dept` and the multi-department
+            # relation are both honoured.
             non_user_scope = and_(
                 Article.visibility != "users",
                 or_(department_scope, *permission_conditions),
@@ -144,14 +135,9 @@ class ArticleRepository:
             DocumentSource.source_system == "sharepoint"
         )
         source_acl_allows: list[Any] = [source_explicit_allow]
-        group_ids = [group.id for group in getattr(user, "groups", [])]
-        access_audience_ids = [department.id for department in getattr(user, "departments", []) if getattr(department, "kind", "org") == "access"]
-        if group_ids:
-            source_acl_allows.append(
-                Article.access_groups.any(article_access.c.group_id.in_(group_ids))
-            )
-        if access_audience_ids:
-            source_acl_allows.append(Article.departments.any(Department.id.in_(access_audience_ids)))
+        audience_ids = [department.id for department in getattr(user, "departments", [])]
+        if audience_ids:
+            source_acl_allows.append(Article.departments.any(Department.id.in_(audience_ids)))
         filters.append(
             or_(
                 not_(source_acl_article),
@@ -218,7 +204,6 @@ class ArticleRepository:
             select(Article)
             .where(and_(*filters))
             .options(
-                selectinload(Article.access_groups),
                 selectinload(Article.departments),
                 selectinload(Article.tags),
                 selectinload(Article.owner),
@@ -242,7 +227,6 @@ class ArticleRepository:
             .where(and_(*filters))
             .with_for_update()
             .options(
-                selectinload(Article.access_groups),
                 selectinload(Article.departments),
                 selectinload(Article.tags),
                 selectinload(Article.owner),
@@ -267,7 +251,6 @@ class ArticleRepository:
         offset: int = 0,
     ) -> Sequence[Article]:
         stmt = select(Article).options(
-            selectinload(Article.access_groups),
             selectinload(Article.departments),
             selectinload(Article.tags),
             selectinload(Article.owner),
@@ -323,7 +306,6 @@ class ArticleRepository:
         stmt = (
             select(Article)
             .options(
-                selectinload(Article.access_groups),
                 selectinload(Article.departments),
                 selectinload(Article.tags),
                 selectinload(Article.owner),

@@ -21,7 +21,6 @@ logger = structlog.get_logger()
 #:
 #:   parent_chunk.child_chunks  the parent passage and `child_texts` in the response
 #:   article.owner              `owner_email` in the response
-#:   article.access_groups      PermissionService.can_view_article (restricted sensitivity)
 #:   article.departments        AuthorizationService.can_access_article_departments
 #:   article.user_permissions   PermissionService._explicit_user_effect
 #:   article.sources            PermissionService._sharepoint_acl_allows
@@ -31,7 +30,6 @@ logger = structlog.get_logger()
 RETRIEVAL_LOAD_OPTIONS = (
     selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
     selectinload(ArticleChunk.article).selectinload(Article.owner),
-    selectinload(ArticleChunk.article).selectinload(Article.access_groups),
     selectinload(ArticleChunk.article).selectinload(Article.departments),
     selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
     selectinload(ArticleChunk.article).selectinload(Article.sources),
@@ -88,7 +86,7 @@ class ChunkRepository:
 
         Selects the id COLUMN, not the entity. Authorization is decided entirely by
         _authorized_article_filters in SQL, so the five eager loads this used to carry
-        (sources, owner, access_groups, departments, user_permissions) issued five extra
+        (sources, owner, departments, user_permissions) issued four extra
         round trips and materialised whole object graphs per citation check, and every
         one of them was discarded — the method only ever returned ids.
         """
@@ -103,12 +101,11 @@ class ChunkRepository:
         )
         return {str(chunk_id) for chunk_id in result.scalars().all()}
 
-    async def update_permissions(self, article_id: uuid.UUID, bitmap: int, sensitivity: str, visibility: str, dept: str) -> None:
+    async def update_permissions(self, article_id: uuid.UUID, sensitivity: str, visibility: str, dept: str) -> None:
         await self.db.execute(
             update(ArticleChunk)
             .where(ArticleChunk.article_id == article_id)
             .values(
-                access_group_bitmap=bitmap,
                 sensitivity=sensitivity,
                 visibility=visibility,
                 department_id=dept
@@ -120,7 +117,6 @@ class ChunkRepository:
         self,
         query: str,
         query_embedding: list[float] | None,
-        user_bitmask: int,
         user: object,
         limit: int = 5,
         filters: dict | None = None
@@ -130,7 +126,7 @@ class ChunkRepository:
         - If query_embedding is provided, calculates vector similarity.
         - Performs a full-text search on chunk_text using tsvector.
         - Merges the two lists using a reciprocal rank scoring mechanism.
-        - Enforces access control natively: (access_group_bitmap & user_bitmask) != 0.
+        - Enforces access control natively via the shared Article predicate.
         """
         filters = filters or {}
         
@@ -143,9 +139,8 @@ class ChunkRepository:
             Article.index_status == "ready",
         ]
         # Apply the complete Article authorization predicate in the retrieval
-        # query. The bitmask remains the fast native ACL for ordinary content;
-        # explicit-user visibility and explicit denies are relational policy
-        # records and are included in the same SQL statement.
+        # query. Explicit-user visibility and explicit denies are relational
+        # policy records and are included in the same SQL statement.
         where_clauses.extend(ArticleRepository._authorized_article_filters(user))
         # An explicit ALLOW is already part of the shared Article predicate above; only
         # the DENY needs adding here. This used to build an unused `explicit_allow`
@@ -157,8 +152,7 @@ class ChunkRepository:
         ))
         where_clauses.append(not_(explicit_deny))
         # Audience authorization is already present in the shared Article
-        # predicate above.  Keeping a second bitmask gate here made search a
-        # different permission algorithm and imposed a 62-group ceiling.
+        # predicate above.
 
         if filters.get("company_domain"):
             where_clauses.append(Article.company_domain == filters["company_domain"])
@@ -219,7 +213,6 @@ class ChunkRepository:
             "Search candidate scope",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
             query_length=len(query),
-            user_access_bitmask=user_bitmask,
             filters=filters,
             embedding_available=query_embedding is not None,
         )
@@ -228,7 +221,7 @@ class ChunkRepository:
         # cannot arrive. hnsw.ef_search defaults to 40 and caps how many candidates one
         # index pass yields, but the query below asks for RAG_CANDIDATE_POOL_SIZE (48) —
         # so 8 were unobtainable even before filtering. And pgvector applies filtering
-        # AFTER the index scan, so the permission bitmask, published-status and
+        # AFTER the index scan, so the permission, published-status and
         # embedding_version predicates all cut into that 40: "If a condition matches 10%
         # of rows, with HNSW and the default hnsw.ef_search of 40, only 4 rows will match
         # on average" (pgvector README, Filtering). Every filtered search was silently

@@ -169,7 +169,6 @@ class InteractionRepository:
             .options(
                 selectinload(Article.tags),
                 selectinload(Article.owner),
-                selectinload(Article.access_groups),
                 selectinload(Article.departments),
                 selectinload(Article.sources),
             )

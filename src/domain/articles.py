@@ -67,7 +67,7 @@ class ArticleService:
         sensitivity: str,
         tags: list[str],
         language: str = "vi",
-        access_group_ids: list[uuid.UUID] | None = None,
+        audience_department_ids: list[uuid.UUID] | None = None,
         next_review: datetime | None = None,
         external_id: str | None = None,
         original_body_md: str | None = None,
@@ -81,26 +81,23 @@ class ArticleService:
             company_domain=user.company_domain, dept=dept, owner_id=user.id
         )
 
-        # Resolve access groups
-        groups = []
-        if access_group_ids:
-            groups = list(
-                await self.user_repo.get_groups_by_ids(
-                    access_group_ids, user.company_domain
+        # Resolve the read audience. The primary department is always part of
+        # it, so a non-public article always has at least one audience row.
+        audiences = [department]
+        if audience_department_ids:
+            resolved = list(
+                await self.user_repo.get_departments_by_ids(
+                    audience_department_ids, user.company_domain
                 )
             )
-            if len({group.id for group in groups}) != len(set(access_group_ids)):
+            if len({item.id for item in resolved}) != len(set(audience_department_ids)):
                 raise HTTPException(
-                    status_code=422, detail="One or more access groups do not exist"
+                    status_code=422, detail="One or more departments do not exist"
                 )
+            audiences.extend(item for item in resolved if item.id != department.id)
 
         if sensitivity not in {"public", "internal", "confidential", "restricted"}:
             raise HTTPException(status_code=422, detail="Invalid article sensitivity")
-        if sensitivity != "public" and not groups:
-            raise HTTPException(
-                status_code=422,
-                detail="Non-public articles require at least one access group",
-            )
 
         # Default sensitivity and status logic:
         # Department owners/admins can publish directly, staff create drafts
@@ -127,8 +124,7 @@ class ArticleService:
             version=1,
             next_review=next_review,
             last_reviewed=datetime.utcnow() if initial_status == "published" else None,
-            access_groups=groups,
-            departments=[department],
+            departments=audiences,
         )
 
         # Single transaction: article row, tags, version snapshot, and audit
@@ -211,7 +207,7 @@ class ArticleService:
         language: str | None = None,
         status_: str | None = None,
         tags: list[str] | None = None,
-        access_group_ids: list[uuid.UUID] | None = None,
+        audience_department_ids: list[uuid.UUID] | None = None,
         next_review: datetime | None = None,
     ) -> Article:
         article = await self.article_repo.get_by_id(article_id, user=user)
@@ -253,27 +249,24 @@ class ArticleService:
                     detail="Not authorized to move an article to this department",
                 )
 
-        proposed_groups = list(article.access_groups)
-        if access_group_ids is not None:
-            proposed_groups = list(
-                await self.user_repo.get_groups_by_ids(
-                    access_group_ids, article.company_domain
+        proposed_audiences = list(article.departments)
+        if audience_department_ids is not None:
+            proposed_audiences = list(
+                await self.user_repo.get_departments_by_ids(
+                    audience_department_ids, article.company_domain
                 )
             )
-            if len({group.id for group in proposed_groups}) != len(
-                set(access_group_ids)
+            if len({item.id for item in proposed_audiences}) != len(
+                set(audience_department_ids)
             ):
                 raise HTTPException(
-                    status_code=422, detail="One or more access groups do not exist"
+                    status_code=422, detail="One or more departments do not exist"
                 )
-        proposed_sensitivity = (
-            sensitivity if sensitivity is not None else article.sensitivity
-        )
-        if proposed_sensitivity != "public" and not proposed_groups:
-            raise HTTPException(
-                status_code=422,
-                detail="Non-public articles require at least one access group",
-            )
+            if not proposed_audiences:
+                raise HTTPException(
+                    status_code=422,
+                    detail="An article requires at least one department",
+                )
 
         # Track changes for permission recalculation and version incrementing
         permissions_changed = False
@@ -288,13 +281,11 @@ class ArticleService:
             article.language = language
             content_changed = True
 
-        if access_group_ids is not None:
-            new_groups = proposed_groups
-            # Compare access groups
-            old_group_ids = {g.id for g in article.access_groups}
-            new_group_ids = {g.id for g in new_groups}
-            if old_group_ids != new_group_ids:
-                article.access_groups = new_groups
+        if audience_department_ids is not None:
+            old_audience_ids = {item.id for item in article.departments}
+            new_audience_ids = {item.id for item in proposed_audiences}
+            if old_audience_ids != new_audience_ids:
+                article.departments = proposed_audiences
                 permissions_changed = True
 
         if title is not None and title != article.title:

@@ -256,7 +256,7 @@ class Settings(BaseSettings):
     # +400ms retrieval p50. Left at 48 until the encoder that justifies it is adopted.
     RAG_CANDIDATE_POOL_SIZE: int = 240
     # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
-    # the index scan: the permission bitmask and published-status predicates consume
+    # the index scan: the permission and published-status predicates consume
     # candidates the index already committed to. pgvector's default is 40, i.e. below
     # the pool we ask for. Measured recall on a 128-dim/1M set: 40 -> 95.4%, 200 ->
     # 99.8%, at 1.19ms -> 4.60ms p99 (jkatz05.com/post/postgres/pgvector-scalar-binary-quantization).

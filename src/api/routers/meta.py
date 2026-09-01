@@ -2,24 +2,16 @@ from typing import Any
 import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from src.api.deps import get_db, get_current_user
 from src.models import User
 from src.domain.meta import MetaService
-from src.domain.rbac import AuthorizationService
 from src.models.article import TagCatalog
 from src.api.deps import require_permission
 
 router = APIRouter()
-
-class GroupResponse(BaseModel):
-    id: uuid.UUID
-    name: str
-    bitmask_position: int
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class TagCatalogRequest(BaseModel):
@@ -83,12 +75,3 @@ async def get_glossary(
 ) -> Any:
     service = MetaService(db)
     return await service.get_glossary()
-
-@router.get("/groups", response_model=list[GroupResponse])
-async def get_groups(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    from src.repositories.user import UserRepository
-    user_repo = UserRepository(db)
-    return await user_repo.get_all_groups(None if AuthorizationService.can_view_all_access_groups(current_user) else current_user.company_domain)

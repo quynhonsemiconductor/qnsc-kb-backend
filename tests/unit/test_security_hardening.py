@@ -274,7 +274,7 @@ def test_only_the_global_admin_role_gets_the_database_wide_bypass():
     assert AuthorizationService.is_global_administrator(admin)
 
 
-def test_global_article_read_does_not_grant_group_directory_access():
+def test_global_article_read_does_not_grant_identity_directory_access():
     from src.domain.rbac import AuthorizationService
     from src.models.rbac import Permission, Role, RolePermission
     from src.models.user import User
@@ -287,7 +287,7 @@ def test_global_article_read_does_not_grant_group_directory_access():
     assert AuthorizationService.has_permission(
         user, "article.read", requested_scope="global"
     )
-    assert not AuthorizationService.can_view_all_access_groups(user)
+    assert not AuthorizationService.has_global_identity_management(user)
 
 
 def test_explicit_global_user_management_enables_only_identity_routing():

@@ -9,11 +9,11 @@ def test_migrations_have_one_current_head():
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     # Pinned on purpose: a new revision must be a deliberate act, and a second head
-    # means one was chained off the wrong parent. Bumped for 20260831_70, which adds the
-    # two chunk page_number columns and chunk_metadata — declared in the models but
-    # created by no migration, so they existed only on databases built by the create_all
-    # baseline and were missing from every forward-migrated one.
-    assert script.get_heads() == ["20260831_70"]
+    # means one was chained off the wrong parent. Bumped for 20260901_71, which retires
+    # AccessGroup so Department is the only audience — dropping access_groups,
+    # user_groups, article_access, departments.kind and the two access_group_bitmap
+    # columns, and repointing external_group_mappings at departments.
+    assert script.get_heads() == ["20260901_71"]
 
 
 def test_production_compose_is_explicitly_hardened():

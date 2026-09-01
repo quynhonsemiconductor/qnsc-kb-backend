@@ -173,20 +173,16 @@ class SearchService:
 
         started = time.perf_counter()
 
-        user_bitmask = PermissionService.calculate_user_bitmask(user)
         effective_filters = dict(filters or {})
         if not AuthorizationService.has_permission(user, "article.read", requested_scope="global"):
             effective_filters["company_domain"] = user.company_domain
-        effective_filters["bypass_access_groups"] = AuthorizationService.has_full_company_article_access(user)
         if not AuthorizationService.has_full_company_article_access(user):
             effective_filters["departments"] = sorted(AuthorizationService.member_department_names(user))
         if not AuthorizationService.has_permission(user, "article.read", requested_scope="company"):
             if AuthorizationService.has_permission(user, "article.read", requested_scope="department"):
                 effective_filters["departments"] = sorted(AuthorizationService.owned_department_names(user))
-                effective_filters["bypass_access_groups"] = True
             elif AuthorizationService.has_permission(user, "article.read", requested_scope="own"):
                 effective_filters["owner_id"] = user.id
-                effective_filters["bypass_access_groups"] = True
         logger.info(
             "Search started",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
@@ -196,8 +192,7 @@ class SearchService:
             user_id=str(user.id),
             user_role=user.role,
             user_department=user.dept,
-            access_group_count=len(user.groups),
-            user_access_bitmask=user_bitmask,
+            department_count=len(user.departments),
         )
         
         # Question words such as "what is" / "là gì" are not useful search
@@ -235,7 +230,6 @@ class SearchService:
         candidates = await self.chunk_repo.hybrid_search(
             query=retrieval_query,
             query_embedding=embedding,
-            user_bitmask=user_bitmask,
             user=user,
             limit=limit,
             filters=effective_filters
@@ -280,7 +274,6 @@ class SearchService:
                 "Search returned zero results, logging gap",
                 query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
                 reason="no published, permission-matching chunks matched vector or keyword search",
-                user_access_bitmask=user_bitmask,
                 filters=effective_filters,
             )
             await self._record_gap(user, query)

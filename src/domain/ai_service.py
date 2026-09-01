@@ -834,7 +834,6 @@ class AIService:
             except HTTPException as exc:
                 raise
 
-        user_bitmask = PermissionService.calculate_user_bitmask(user)
         authorization_fingerprint = AuthorizationService.authorization_fingerprint(user)
 
         # Conversation messages are persisted by the API before this method is
@@ -1526,7 +1525,6 @@ class AIService:
                 owner_user_id=user.id,
                 question_hash=question_hash,
                 authorization_fingerprint=authorization_fingerprint,
-                access_group_bitmap=user_bitmask,
                 answer=cached_answer,
                 citations=json.dumps(citations),
                 article_ids=list(

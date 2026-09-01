@@ -5,7 +5,6 @@ import structlog
 
 from src.api.deps import SessionLocal, set_database_context
 from src.core.config import settings
-from src.domain.permissions import PermissionService
 from src.domain.search_service import get_text_embeddings
 from src.domain.text_noise import detect_boilerplate, strip_noise
 from src.models.chunk import ArticleChunk, ParentChunk
@@ -250,7 +249,6 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                                 chunk_type=chunk_type,
                                 heading=heading,
                                 chunking_version=settings.CHUNKING_VERSION,
-                                access_group_bitmap=PermissionService.calculate_article_bitmask(article),
                                 department_id=article.dept,
                                 sensitivity=article.sensitivity,
                                 visibility=article.visibility,
@@ -297,7 +295,6 @@ async def recompute_article_permissions(article_id: uuid.UUID) -> None:
                 return
             await chunk_repo.update_permissions(
                 article_id=article_id,
-                bitmap=PermissionService.calculate_article_bitmask(article),
                 sensitivity=article.sensitivity,
                 visibility=article.visibility,
                 dept=article.dept,
