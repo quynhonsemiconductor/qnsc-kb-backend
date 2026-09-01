@@ -482,18 +482,29 @@ async def run_restructure_pending_draft(
             # Batch review operates on the formatted reading view, not raw extraction.
             # Recreate candidates only after formatting has completed, then use the
             # active department descriptions to choose an editable default route.
-            await db.execute(
-                delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
+            #
+            # NOT for a draft that IS a committed split product. `commit_candidates`
+            # creates each child with restructure_status="lossless_ready", the UI offers
+            # "Retry AI format" on anything that is not "llm", and re-splitting a child
+            # by department yields >1 candidate again -> batch_review_required -> commit
+            # -> more children, forever, fanning out on every pass. Reformatting a
+            # child's reading view is still useful, so only the re-split is skipped.
+            is_split_product = (
+                (draft.content_metadata or {}).get("submission_kind") == "split_candidate"
             )
-            for item in await route_document_candidates_llm(
-                draft.title, result.body_md, departments
-            ):
-                db.add(
-                    DraftCandidate(
-                        draft_id=draft.id,
-                        **item,
-                    )
+            if not is_split_product:
+                await db.execute(
+                    delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
                 )
+                for item in await route_document_candidates_llm(
+                    draft.title, result.body_md, departments
+                ):
+                    db.add(
+                        DraftCandidate(
+                            draft_id=draft.id,
+                            **item,
+                        )
+                    )
             db.add(
                 AuditLog(
                     user_id=user.id if user else None,

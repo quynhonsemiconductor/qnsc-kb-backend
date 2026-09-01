@@ -674,12 +674,23 @@ async def _save_permissions(
         document.acl_hash = acl_hash
     # Mapping/identity changes must reconcile an unchanged provider ACL too.
     # Keep these lists deterministic so a repeated sync is idempotent.
+    #
+    # Every observed principal is looked up, not just groups. Restricting this to
+    # `group`/`siteGroup` was what made a provider `user`, `link`, `domain` or `unknown`
+    # principal permanently unmappable: it landed in `unmapped_principal_ids` below and
+    # blocked approval with no route to resolve it.
+    observed_principals = sorted(
+        {
+            (item.get("principal_type") or "unknown", item.get("principal_id") or "")
+            for item in permissions
+            if item.get("principal_id")
+        }
+    )
     group_ids = sorted(
         {
-            item.get("principal_id", "")
-            for item in permissions
-            if item.get("principal_type") in {"group", "siteGroup"}
-            and item.get("principal_id")
+            principal_id
+            for principal_type, principal_id in observed_principals
+            if principal_type in {"group", "siteGroup"}
         }
     )
     mappings = (
@@ -692,16 +703,22 @@ async def _save_permissions(
                 .where(
                     ExternalGroupMapping.connector_id == connector.id,
                     ExternalGroupMapping.active.is_(True),
-                    ExternalGroupMapping.external_group_id.in_(group_ids),
+                    ExternalGroupMapping.principal_id.in_(
+                        [principal_id for _, principal_id in observed_principals]
+                    ),
                     Department.company_domain == connector.company_domain,
                 )
             )
         )
         .scalars()
         .all()
-        if group_ids
+        if observed_principals
         else []
     )
+    # Keyed by (type, id) so a group and a user sharing an id stay distinct.
+    mapped_by_principal = {
+        (mapping.principal_type, mapping.principal_id): mapping for mapping in mappings
+    }
     user_ids = sorted(
         {
             item.get("principal_id", "")
@@ -757,11 +774,14 @@ async def _save_permissions(
         mapped_user_ids.update(
             {str(item.email).lower(): str(item.id) for item in email_users}
         )
+    # A principal an administrator has explicitly mapped is resolved, whatever its type.
+    # This used to be computed with no reference to the mapping table at all, so every
+    # `unknown`/`link`/`domain` principal stayed in the blocking set permanently.
     unmapped_principal_ids = sorted(
-        f"{item.get('principal_type', 'unknown')}:{item.get('principal_id', '')}"
-        for item in permissions
-        if item.get("principal_type") not in {"group", "siteGroup", "user", "siteUser"}
-        and item.get("principal_id")
+        f"{principal_type}:{principal_id}"
+        for principal_type, principal_id in observed_principals
+        if principal_type not in {"group", "siteGroup", "user", "siteUser"}
+        and (principal_type, principal_id) not in mapped_by_principal
     )
     previous_metadata = document.metadata_json or {}
     acl_present_key = (
@@ -777,15 +797,24 @@ async def _save_permissions(
             {str(item.department_id) for item in mappings}
         ),
         "unmapped_group_ids": sorted(
-            item
-            for item in group_ids
-            if item not in {mapping.external_group_id for mapping in mappings}
+            principal_id
+            for principal_type, principal_id in observed_principals
+            if principal_type in {"group", "siteGroup"}
+            and (principal_type, principal_id) not in mapped_by_principal
         ),
         "mapped_source_user_ids": sorted(
             mapped_user_ids[item] for item in user_ids if item in mapped_user_ids
         ),
+        # A user principal resolves EITHER through an internal identity match or through
+        # an explicit department mapping; the latter grants via the department rather than
+        # naming a person, which is the only option when the provider user has never
+        # signed in here.
         "unmapped_source_user_ids": sorted(
-            item for item in user_ids if item not in mapped_user_ids
+            principal_id
+            for principal_type, principal_id in observed_principals
+            if principal_type in {"user", "siteUser"}
+            and principal_id not in mapped_user_ids
+            and (principal_type, principal_id) not in mapped_by_principal
         ),
         "unmapped_principal_ids": unmapped_principal_ids,
     }

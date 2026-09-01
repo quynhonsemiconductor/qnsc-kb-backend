@@ -72,7 +72,7 @@ def _anonymous_path(path: str) -> str:
         "company_domain": "acme.test",
         "version_num": "1",
         "key": "test-flag",
-        "external_group_id": "external-group",
+        "principal_id": "provider-principal",
     }
 
     def replace(match: re.Match[str]) -> str:
