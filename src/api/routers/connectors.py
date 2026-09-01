@@ -24,7 +24,13 @@ from src.repositories.user import UserRepository
 from src.domain.connectors import sync_local_folder
 from src.core.config import settings
 from src.domain.rbac import AuthorizationService
-from src.domain.connector_adapters import adapter_for, ConnectorProviderError, SharePointAdapter, GoogleDriveAdapter
+from src.domain.connector_adapters import adapter_for, ConnectorProviderError
+from src.domain.connector_availability import available_providers, provider_availability
+from src.domain.connector_providers import (
+    CONNECTOR_PROVIDERS,
+    identity_provider as provider_identity,
+    is_microsoft_graph,
+)
 from src.domain.connector_auth import ensure_connector_authorized
 from src.domain.webhook_subscriptions import WebhookConfigurationError, ensure_webhook_subscriptions
 from src.domain.sync_queue import claim_sync_request, enqueue_connector_sync
@@ -35,7 +41,7 @@ router = APIRouter()
 
 class ConnectorCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
-    system: Literal["local_folder", "google_drive", "sharepoint"] = "local_folder"
+    system: Literal["local_folder", "google_drive", "sharepoint", "onedrive"] = "local_folder"
     path: str = Field(default="", max_length=1_000)
     config: dict[str, Any] = Field(default_factory=dict)
 
@@ -104,7 +110,7 @@ async def _apply_connector_departments(db: AsyncSession, connector: Connector, c
 def _response(connector: Connector) -> dict[str, Any]:
     config = connector.config_json or {}
     application_authorized = bool(
-        connector.system == "sharepoint"
+        is_microsoft_graph(connector.system)
         and settings.microsoft_connector_auth_mode == "application"
         and settings.MICROSOFT_CLIENT_ID
         and settings.MICROSOFT_CLIENT_SECRET
@@ -193,14 +199,47 @@ async def list_connectors(
         stmt = stmt.where(Connector.company_domain == current_user.company_domain)
     return [_response(item) for item in (await db.execute(stmt)).scalars().all()]
 
+
+# Declared BEFORE /{connector_id} routes would ever be consulted for this path, and
+# distinct from them: "providers" is a literal segment, not a connector UUID.
+@router.get("/providers")
+async def list_providers(
+    _current_user: User = Depends(require_permission("connector.manage")),
+) -> list[dict[str, Any]]:
+    """Which source providers this deployment can offer, and what each still needs.
+
+    Unavailable providers are returned rather than omitted so the UI can hide them
+    while an operator retains a way to see WHY one is absent.
+    """
+    return [
+        {
+            "system": item.system,
+            "available": item.available,
+            "missing_settings": list(item.missing),
+        }
+        for item in available_providers()
+    ]
+
 @router.post("", status_code=201)
 async def create_connector(
     request: ConnectorCreate,
     current_user: User = Depends(require_permission("connector.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    if request.system not in {"local_folder", "google_drive", "sharepoint"}:
+    if request.system not in CONNECTOR_PROVIDERS:
         raise HTTPException(status_code=422, detail="Unsupported connector provider")
+    # Refuse at creation, not at the first OAuth attempt. A connector created for an
+    # unconfigured provider is a permanent dead end: authorization fails, and the row
+    # stays in the list looking like a source that merely needs a click.
+    availability = provider_availability(request.system)
+    if not availability.available:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{request.system} is not configured on this deployment. "
+                f"Set {', '.join(availability.missing)} in the API environment."
+            ),
+        )
     folder = None
     if request.system == "local_folder":
         from src.domain.connectors import _safe_folder
@@ -308,9 +347,9 @@ async def start_oauth(
         raise HTTPException(status_code=404, detail="Connector not found")
     if connector.system == "local_folder":
         raise HTTPException(status_code=422, detail="Local folders do not require OAuth")
-    if connector.system == "sharepoint" and settings.microsoft_connector_auth_mode == "application":
+    if is_microsoft_graph(connector.system) and settings.microsoft_connector_auth_mode == "application":
         raise HTTPException(status_code=422, detail="Microsoft connector is using app-only mode; configure Entra application permissions and use Discover scopes directly")
-    if connector.system == "sharepoint" and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI)):
+    if is_microsoft_graph(connector.system) and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI)):
         raise HTTPException(status_code=422, detail="Microsoft connector is not configured. Set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, and MICROSOFT_REDIRECT_URI in the API environment.")
     if connector.system == "google_drive" and not all((settings.GOOGLE_CLIENT_ID, settings.GOOGLE_CLIENT_SECRET, settings.GOOGLE_REDIRECT_URI)):
         raise HTTPException(status_code=422, detail="Google Drive connector is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in the API environment.")
@@ -319,12 +358,13 @@ async def start_oauth(
     connector.oauth_state_expires_at = datetime.utcnow() + timedelta(minutes=10)
     await db.commit()
     adapter = adapter_for(connector)
-    if isinstance(adapter, SharePointAdapter):
-        url = adapter.oauth_url(state)
-    elif isinstance(adapter, GoogleDriveAdapter):
-        url = adapter.oauth_url(state)
-    else:
+    # Capability, not class identity. The isinstance chain here had to name every
+    # adapter that supports OAuth, so a new provider silently fell through to the
+    # "not configured" branch despite having a working oauth_url.
+    oauth_url = getattr(adapter, "oauth_url", None)
+    if not callable(oauth_url):
         raise HTTPException(status_code=422, detail="OAuth is not configured for this provider")
+    url = oauth_url(state)
     return {"authorization_url": url}
 
 
@@ -420,7 +460,7 @@ async def preview_connector(
         raise HTTPException(status_code=422, detail="Preview is not available for local folders")
     scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)))).scalars().all()
     if not scopes:
-        raise HTTPException(status_code=409, detail="Select at least one SharePoint library or folder before previewing")
+        raise HTTPException(status_code=409, detail="Select at least one library, drive, or folder before previewing")
     adapter = adapter_for(connector)
     await ensure_connector_authorized(db, connector)
     items: list[dict[str, Any]] = []
@@ -566,9 +606,7 @@ async def list_acl_principals(
     # `microsoft_entra`, skip the email fallback and ignore `User.active`, so the panel
     # could report a principal resolved that the approval gate still counted as unmapped
     # (and vice versa).
-    identity_provider = (
-        "microsoft_entra" if connector.system == "sharepoint" else connector.system
-    )
+    identity_provider = provider_identity(connector.system)
     user_subjects = [principal_id for principal_type, principal_id in by_principal if principal_type in {"user", "siteUser"}]
     lowered_subjects = {str(item).lower() for item in user_subjects}
     identities = (await db.execute(
@@ -826,7 +864,13 @@ async def sync_connector(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
     if connector.system != "local_folder":
-        if settings.microsoft_connector_auth_mode != "application" and not connector.oauth_access_token and not connector.oauth_refresh_token:
+        # Only a Graph connector can be authorized without a stored token, and only
+        # in app-only mode. This condition ignored the provider entirely, so with
+        # MICROSOFT_CONNECTOR_AUTH_MODE=application an unauthorized Google Drive
+        # connector passed the gate and failed later inside the worker instead of
+        # returning 409 here.
+        app_only = is_microsoft_graph(connector.system) and settings.microsoft_connector_auth_mode == "application"
+        if not app_only and not connector.oauth_access_token and not connector.oauth_refresh_token:
             raise HTTPException(status_code=409, detail="Authorize the connector before syncing")
         active_job = (await db.execute(
             select(ConnectorJob)
@@ -1209,6 +1253,25 @@ async def sharepoint_lifecycle_webhook(
     if validationToken:
         return Response(content=validationToken, media_type="text/plain")
     return await _enqueue_webhook(request, "sharepoint", lifecycle_only=True)
+
+
+# `callback_urls` derives the path from `connector.system`, so these two must exist
+# for a OneDrive subscription to be accepted at all: Graph validates every
+# notificationUrl and lifecycleNotificationUrl during POST /subscriptions.
+@router.post("/webhooks/onedrive")
+async def onedrive_webhook(request: Request, validationToken: str | None = Query(default=None)) -> Response:
+    if validationToken:
+        return Response(content=validationToken, media_type="text/plain")
+    return await _enqueue_webhook(request, "onedrive")
+
+
+@router.post("/webhooks/onedrive/lifecycle")
+async def onedrive_lifecycle_webhook(
+    request: Request, validationToken: str | None = Query(default=None)
+) -> Response:
+    if validationToken:
+        return Response(content=validationToken, media_type="text/plain")
+    return await _enqueue_webhook(request, "onedrive", lifecycle_only=True)
 
 
 @router.post("/webhooks/google-drive")

@@ -413,6 +413,10 @@ async def _inline_connector_sync_dispatch_loop() -> None:
     from src.domain.sync_queue import enqueue_connector_sync
     from src.models.connectors import SourceScope, SyncCursor, SyncRequest
     from src.models.ops import Connector
+    from src.domain.connector_providers import (
+        REMOTE_PROVIDERS,
+        cursor_type as provider_cursor_type,
+    )
 
     while True:
         await asyncio.sleep(settings.CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS)
@@ -429,7 +433,7 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                 connectors = (
                     await db.execute(
                         select(Connector).where(
-                            Connector.system.in_(["sharepoint", "google_drive"]),
+                            Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                             Connector.status.in_(["active", "error"]),
                         )
                     )
@@ -458,7 +462,7 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                             cursor = SyncCursor(
                                 connector_id=connector.id,
                                 scope_id=scope.id,
-                                cursor_type="delta" if connector.system == "sharepoint" else "changes",
+                                cursor_type=provider_cursor_type(connector.system),
                             )
                             db.add(cursor)
                         cursor.full_sync_required = True

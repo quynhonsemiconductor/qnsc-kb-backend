@@ -40,6 +40,7 @@ from src.domain.departments import resolve_active_department
 from src.domain.content_restructure import build_restructure_report, split_into_chunks
 from src.domain.department_routing import suggest_departments
 from src.domain.llm_client import resolve_provider
+from src.domain.connector_providers import REMOTE_PROVIDERS
 import structlog
 
 logger = structlog.get_logger()
@@ -1195,7 +1196,13 @@ async def get_health_metrics(
         )
         else current_user.company_domain
     )
-    connector_filters = [Connector.system == "sharepoint", Connector.status == "active"]
+    # Every remote provider counts toward the connector-sync signal. Filtering on
+    # SharePoint alone reported "no active connector" on a tenant running only
+    # OneDrive or Google Drive.
+    connector_filters = [
+        Connector.system.in_(sorted(REMOTE_PROVIDERS)),
+        Connector.status == "active",
+    ]
     index_filters = [
         Article.status == "published",
         Article.lifecycle_status == "active",
@@ -1213,6 +1220,12 @@ async def get_health_metrics(
     metrics["dependencies"] = {
         "r2": {"configured": _r2_is_configured()},
         "sharepoint": {
+            "configured": bool(connector_count),
+            "active_connectors": int(connector_count or 0),
+        },
+        # Same numbers under a provider-neutral name. `sharepoint` is retained
+        # because the deployed frontend reads that key.
+        "connectors": {
             "configured": bool(connector_count),
             "active_connectors": int(connector_count or 0),
         },

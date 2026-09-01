@@ -20,6 +20,12 @@ from src.domain.connector_adapters import (
     NormalizedChange,
     adapter_for,
 )
+from src.domain.connector_providers import (
+    SOURCE_ACL_PROVIDERS,
+    acl_present_key as provider_acl_present_key,
+    cursor_type as provider_cursor_type,
+    identity_provider as provider_identity,
+)
 from src.domain.connector_auth import ensure_connector_authorized
 from src.domain.events import event_bus
 from src.domain.source_extraction import (
@@ -727,9 +733,7 @@ async def _save_permissions(
             and item.get("principal_id")
         }
     )
-    identity_provider = (
-        "microsoft_entra" if connector.system == "sharepoint" else connector.system
-    )
+    identity_provider = provider_identity(connector.system)
     identities = (
         (
             await db.execute(
@@ -784,11 +788,7 @@ async def _save_permissions(
         and (principal_type, principal_id) not in mapped_by_principal
     )
     previous_metadata = document.metadata_json or {}
-    acl_present_key = (
-        "sharepoint_acl_present"
-        if connector.system == "sharepoint"
-        else "provider_acl_present"
-    )
+    acl_present_key = provider_acl_present_key(connector.system)
     next_metadata = {
         **previous_metadata,
         acl_present_key: True,
@@ -875,7 +875,7 @@ async def reconcile_connector_acl_mappings(
     return changed_article_ids
 
 
-def _sharepoint_acl_intersection(
+def _provider_acl_intersection(
     *,
     internal_visibility: str,
     internal_group_ids: set[str],
@@ -950,15 +950,20 @@ async def _apply_mapped_groups(
     # Older unit fixtures passed a lightweight connector object; retain the
     # historical SharePoint source marker for those callers while real
     # connectors use their provider name.
-    permission_source = getattr(connector, "system", "sharepoint")
+    permission_source = getattr(connector, "system", None) or "sharepoint"
     if "internal_acl_snapshot" not in metadata:
         metadata["internal_acl_snapshot"] = {
             "visibility": article.visibility,
             "department_ids": [str(item.id) for item in article.departments],
+            # EVERY source-managed row is excluded, not just this provider's.
+            # Comparing against `permission_source` alone captured another
+            # provider's mirror row as internal policy, and since the snapshot is
+            # written once and only ever narrows afterwards, that permanently
+            # widened the intersection with a grant no provider had made.
             "allow_user_ids": [
                 str(item.user_id)
                 for item in article.user_permissions
-                if item.effect == "allow" and item.source != permission_source
+                if item.effect == "allow" and item.source not in SOURCE_ACL_PROVIDERS
             ],
         }
     internal = metadata["internal_acl_snapshot"]
@@ -985,7 +990,7 @@ async def _apply_mapped_groups(
             .scalars()
             .all()
         }
-    acl = _sharepoint_acl_intersection(
+    acl = _provider_acl_intersection(
         internal_visibility=str(internal.get("visibility") or "department"),
         internal_group_ids=internal_group_ids,
         internal_user_ids={str(item) for item in internal.get("allow_user_ids", [])},
@@ -1357,7 +1362,7 @@ async def sync_cloud_connector(
                         cursor_row = SyncCursor(
                             connector_id=connector.id,
                             scope_id=scope.id,
-                            cursor_type=("delta" if connector.system == "sharepoint" else "changes"),
+                            cursor_type=provider_cursor_type(connector.system),
                         )
                         db.add(cursor_row)
                     cursor_row.cursor_value = None
@@ -1610,9 +1615,7 @@ async def sync_cloud_connector(
                 cursor_row = SyncCursor(
                     connector_id=connector_id,
                     scope_id=scope_id_value,
-                    cursor_type=(
-                        "delta" if connector.system == "sharepoint" else "changes"
-                    ),
+                    cursor_type=provider_cursor_type(connector.system),
                 )
                 db.add(cursor_row)
             cursor_row.cursor_value = next_cursor or cursor_row.cursor_value
