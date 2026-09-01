@@ -1,6 +1,7 @@
 import uuid
 from src.models.user import User
 from src.models.article import Article
+from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.rbac import AuthorizationService
 
 class PermissionService:
@@ -20,24 +21,32 @@ class PermissionService:
         return None
 
     @staticmethod
-    def _sharepoint_acl_allows(user: User, article: Article) -> bool:
+    def _source_acl_allows(user: User, article: Article) -> bool:
         """Apply the provider ACL even to global/company internal readers.
 
-        SharePoint permissions are an intersection with the internal policy;
-        a global Article permission is not a provider-side ACL bypass. The
-        sync path represents mapped direct users as source-qualified allows
-        and mapped groups through ``Article.departments``. Empty or
-        unmapped provider ACLs therefore fail closed here.
+        Provider permissions are an intersection with the internal policy; a
+        global Article permission is not a provider-side ACL bypass. The sync
+        path represents mapped direct users as source-qualified allows and
+        mapped groups through ``Article.departments``. Empty or unmapped
+        provider ACLs therefore fail closed here.
+
+        Every remote provider counts, not just SharePoint. This used to compare
+        against the literal ``"sharepoint"``, so a OneDrive or Google Drive
+        Article — whose provenance rows are stamped with ``connector.system`` —
+        fell straight through to ``return True`` and served content the provider
+        had not shared with the reader.
         """
-        if not any(
-            getattr(source, "source_system", None) == "sharepoint"
+        source_systems = {
+            getattr(source, "source_system", None)
             for source in (getattr(article, "sources", []) or [])
-        ):
+        }
+        governed_by = source_systems & set(SOURCE_ACL_PROVIDERS)
+        if not governed_by:
             return True
         source_user_allow = any(
             override.user_id == user.id
             and override.effect == "allow"
-            and override.source == "sharepoint"
+            and override.source in governed_by
             for override in (getattr(article, "user_permissions", []) or [])
         )
         if source_user_allow:
@@ -55,7 +64,7 @@ class PermissionService:
         explicit_effect = cls._explicit_user_effect(user, article)
         if explicit_effect == "deny":
             return False
-        if not cls._sharepoint_acl_allows(user, article):
+        if not cls._source_acl_allows(user, article):
             return False
         if getattr(article, "visibility", None) == "users":
             return explicit_effect == "allow"

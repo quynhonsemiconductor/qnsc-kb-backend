@@ -25,6 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.domain.connector_adapters import ConnectorProviderError, adapter_for
+from src.domain.connector_providers import (
+    REMOTE_PROVIDERS,
+    supports_lifecycle_webhooks,
+)
 from src.domain.connector_auth import ensure_connector_authorized
 from src.models.connectors import SourceScope, WebhookSubscription
 from src.models.ops import Connector, NotificationQueue
@@ -56,7 +60,7 @@ def callback_urls(connector: Connector) -> tuple[str, str | None]:
         )
     callback = f"{base}/api/v1/connectors/webhooks/{connector.system.replace('_', '-')}"
     # Only Graph sends lifecycle events (subscriptionRemoved, reauthorizationRequired).
-    lifecycle = f"{callback}/lifecycle" if connector.system == "sharepoint" else None
+    lifecycle = f"{callback}/lifecycle" if supports_lifecycle_webhooks(connector.system) else None
     return callback, lifecycle
 
 
@@ -247,7 +251,7 @@ async def repair_webhook_subscriptions(db: AsyncSession, *, set_context=None) ->
         (
             await db.execute(
                 select(Connector.id).where(
-                    Connector.system.in_(["sharepoint", "google_drive"]),
+                    Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                     Connector.status.in_(["active", "error"]),
                 )
             )

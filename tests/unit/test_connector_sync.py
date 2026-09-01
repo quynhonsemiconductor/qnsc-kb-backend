@@ -4,7 +4,7 @@ from src.domain.cloud_sync import (
     _needs_content_ingest,
     _record_permission_change_audits,
     _save_permissions,
-    _sharepoint_acl_intersection,
+    _provider_acl_intersection,
     _upsert_document,
 )
 import asyncio
@@ -21,7 +21,7 @@ from src.domain.cloud_sync import (
     _handle_deleted_document,
     _needs_content_ingest,
     _save_permissions,
-    _sharepoint_acl_intersection,
+    _provider_acl_intersection,
 )
 from src.domain.connector_adapters import (
     ConnectorAdapter,
@@ -291,8 +291,8 @@ def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval():
     assert document.metadata_json["unmapped_principal_ids"] == ["link:link:organization"]
 
 
-def test_sharepoint_acl_intersection_never_broadens_internal_policy():
-    result = _sharepoint_acl_intersection(
+def test_provider_acl_intersection_never_broadens_internal_policy():
+    result = _provider_acl_intersection(
         internal_visibility="department",
         internal_group_ids={"g-internal"},
         internal_user_ids={"u-internal", "u-other"},
@@ -308,8 +308,8 @@ def test_sharepoint_acl_intersection_never_broadens_internal_policy():
     assert result["visibility"] == "department"
 
 
-def test_empty_or_unmapped_sharepoint_acl_fails_closed():
-    result = _sharepoint_acl_intersection(
+def test_empty_or_unmapped_provider_acl_fails_closed():
+    result = _provider_acl_intersection(
         internal_visibility="public",
         internal_group_ids=set(),
         internal_user_ids={"u-internal"},
