@@ -27,6 +27,7 @@ from src.api.deps import (
 )
 from src.repositories.user import UserRepository
 from src.domain.auth import AuthService
+from src.domain.factory_reset import is_reset_operator
 from src.core.config import settings
 from src.core.security import get_password_hash, verify_password
 from src.repositories.audit import AuditRepository
@@ -584,6 +585,16 @@ async def create_invitation(
     existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if existing and existing.active:
         raise HTTPException(status_code=409, detail="An active account already exists for this email")
+    if is_reset_operator(email):
+        # Same reasoning as the rename guard in update_user, but this is the wider hole:
+        # an invitation becomes an account whose password the ACCEPTER chooses, so
+        # inviting the allowlisted address would hand over database-reset authority
+        # without ever needing its mailbox. Blocked here rather than at accept time so
+        # the refusal happens before a token is minted and emailed.
+        raise HTTPException(
+            status_code=403,
+            detail="This address is reserved for database-reset operations and cannot be invited",
+        )
     audience_ids = [str(item) for item in (payload.audience_ids or [])]
     if audience_ids:
         count = int((await db.execute(
@@ -1419,6 +1430,14 @@ async def create_managed_user(
         raise HTTPException(
             status_code=403, detail="Users must be created inside your company"
         )
+    if is_reset_operator(str(user_in.email).lower()):
+        # The most direct escalation of the three: this route sets the password itself,
+        # so creating the allowlisted address would hand over database-reset authority
+        # outright. Allowlist membership is granted in the API environment only.
+        raise HTTPException(
+            status_code=403,
+            detail="This address is reserved for database-reset operations and cannot be created here",
+        )
     if not can_manage_globally and user_in.role in {"Admin", "CEO"}:
         raise HTTPException(
             status_code=403,
@@ -1689,6 +1708,16 @@ async def update_managed_user(
             raise HTTPException(
                 status_code=422,
                 detail="Changing a user's company domain is not supported; create a new account instead",
+            )
+        # The factory-reset allowlist is matched on email, and this route can change an
+        # email. Without this the allowlist is an escalation path rather than a
+        # restriction: anyone holding global user.manage renames an account they control
+        # to the allowlisted address and inherits the ability to erase the database.
+        # Membership must be granted in the API environment, never through this API.
+        if is_reset_operator(new_email) and not is_reset_operator(user.email):
+            raise HTTPException(
+                status_code=403,
+                detail="This address is reserved for database-reset operations and cannot be assigned here",
             )
         user.email = new_email
         user.company_domain = new_email.rsplit("@", 1)[-1]

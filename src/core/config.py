@@ -349,6 +349,19 @@ class Settings(BaseSettings):
     # a run that decides a few hundred documents unattended should be a deliberate act
     # repeated, not one call with no upper bound.
     APPROVAL_AGENT_BATCH_LIMIT: int = 50
+    # Factory reset: who may erase every non-identity table, and whether the
+    # endpoint exists at all.
+    #
+    # Both are REQUIRED. The allowlist alone would leave a permanently loaded gun
+    # in every deployment that happens to have that account, so the capability is
+    # off unless an operator turns it on in the API environment — somewhere a
+    # compromised session cannot reach.
+    #
+    # Comma-separated so a second operator can be added without a code change.
+    # Matched case-insensitively against the CURRENT verified account, never
+    # against a token claim.
+    FACTORY_RESET_ENABLED: bool = False
+    FACTORY_RESET_ALLOWED_EMAILS: str = ""
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
