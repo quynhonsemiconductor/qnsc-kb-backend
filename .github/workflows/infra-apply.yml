@@ -74,7 +74,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: QNSC-VN/qnsc-ci/actions/setup-tofu-aws@v1.10.0
+      - uses: BKL-HCM/qnsc-ci/actions/setup-tofu-aws@v1.10.0
         with:
           role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/qnsc-kb-github-infra-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -110,7 +110,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: QNSC-VN/qnsc-ci/actions/setup-tofu-aws@v1.10.0
+      - uses: BKL-HCM/qnsc-ci/actions/setup-tofu-aws@v1.10.0
         with:
           role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/qnsc-kb-github-infra-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -221,7 +221,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: QNSC-VN/qnsc-ci/actions/setup-tofu-aws@v1.10.0
+      - uses: BKL-HCM/qnsc-ci/actions/setup-tofu-aws@v1.10.0
         with:
           role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/qnsc-kb-github-infra-apply
           aws-region: ${{ env.AWS_REGION }}

@@ -157,8 +157,8 @@ module "stack" {
   // it is the Celery broker rather than a cache that can be missed. rally-develop had the
   // same node for the same reason: two at $15.45 each.
   //
-  // Saves $15.45/mo across the account. Node created in QNSC-VN/qnsc-infra#69, and rally
-  // moved onto it in QNSC-VN/rally#448.
+  // Saves $15.45/mo across the account. Node created in BKL-HCM/qnsc-infra#69, and rally
+  // moved onto it in BKL-HCM/rally#448.
   //
   // DATABASE 1. rally holds 0. This is a Valkey database index, not a key prefix — a
   // prefix has to be honoured by every library touching the connection, while an index is
