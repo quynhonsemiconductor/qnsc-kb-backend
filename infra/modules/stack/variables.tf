@@ -171,7 +171,7 @@ variable "cache" {
     node_type = optional(string, "cache.t4g.micro")
 
     # Use the SHARED node in the runtime layer instead of creating one for this product.
-    # DEVELOP ONLY — see the description below. Created in QNSC-VN/qnsc-infra#69.
+    # DEVELOP ONLY — see the description below. Created in BKL-HCM/qnsc-infra#69.
     shared = optional(bool, false)
 
     # Which Valkey database this product uses on the shared node. Ignored when
