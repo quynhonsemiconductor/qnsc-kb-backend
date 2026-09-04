@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Copy to terraform.tfvars (git-ignored) and fill in.
 # Prerequisite: qnsc-infra/live/bootstrap must have been applied first.
-# CI passes nothing here — the default github_org is correct for BKL-HCM.
+# CI passes nothing here — the default github_org is correct for QNSC-VN.
 # ─────────────────────────────────────────────────────────────────────────────
 
-github_org = "BKL-HCM"
+github_org = "QNSC-VN"

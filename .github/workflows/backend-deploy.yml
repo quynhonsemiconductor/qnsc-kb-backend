@@ -175,8 +175,8 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-      packages: read # build-push-ecr pulls private @bkl-hcm/* from GitHub Packages
-    uses: BKL-HCM/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
+      packages: read # build-push-ecr pulls private @qnsc-vn/* from GitHub Packages
+    uses: QNSC-VN/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
     with:
       product: qnsc-kb
       # ── No registry build cache ────────────────────────────────────────────
