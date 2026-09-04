@@ -59,7 +59,7 @@ data "terraform_remote_state" "platform" {
 # migrator. `beat` is deliberately absent — Celery beat runs as a second container
 # off the WORKER image with its own command, so it needs no image of its own.
 module "ecr" {
-  source = "git::https://github.com/BKL-HCM/qnsc-tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
+  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
 
   # Lower than the module defaults (30 releases / 20 builds), but for a narrower reason
   # than "the images are big".
@@ -104,15 +104,15 @@ module "ecr" {
 # v3.0.1 trusts BOTH shapes of the GitHub OIDC subject, and THIS REPOSITORY REQUIRES IT.
 # GitHub issues newer repositories an ID-augmented subject:
 #
-#   repo:BKL-HCM@297362956/qnsc-kb-backend@1312007613:pull_request
+#   repo:QNSC-VN@297362956/qnsc-kb-backend@1312007613:pull_request
 #
-# while older ones like rally emit `repo:BKL-HCM/rally:...`. Nobody configures this — it
+# while older ones like rally emit `repo:QNSC-VN/rally:...`. Nobody configures this — it
 # is fixed by GitHub at repository creation, and both repos report identical, default
 # settings. On v3.0.0 every job here failed with "Not authorized to perform
 # sts:AssumeRoleWithWebIdentity", which names neither the subject nor the mismatch; the
 # presented claim is only visible in CloudTrail's userIdentity.userName.
 module "iam_oidc" {
-  source = "git::https://github.com/BKL-HCM/qnsc-tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
+  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
 
   product           = "qnsc-kb"
   github_org        = local.github_org

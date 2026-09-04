@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: BKL-HCM/qnsc-ci/.github/workflows/actions-security.yml@v1
+    uses: QNSC-VN/qnsc-ci/.github/workflows/actions-security.yml@v1
     with:
       blocking: true
 
@@ -47,7 +47,7 @@ jobs:
       contents: read
       security-events: write # SARIF upload
       packages: read
-    uses: BKL-HCM/qnsc-ci/.github/workflows/security.yml@v1.10.0
+    uses: QNSC-VN/qnsc-ci/.github/workflows/security.yml@v1.10.0
     with:
       product: qnsc-kb
       image_target: api
