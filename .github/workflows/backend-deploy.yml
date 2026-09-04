@@ -176,7 +176,7 @@ jobs:
       id-token: write
       attestations: write
       packages: read # build-push-ecr pulls private @qnsc-vn/* from GitHub Packages
-    uses: QNSC-VN/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
+    uses: quynhonsemiconductor/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
     with:
       product: qnsc-kb
       # ── No registry build cache ────────────────────────────────────────────

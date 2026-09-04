@@ -463,7 +463,7 @@ jobs:
 
       - name: Detect breaking API changes
         if: github.event_name == 'pull_request'
-        uses: QNSC-VN/qnsc-ci/actions/validate-openapi-contract@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
+        uses: quynhonsemiconductor/qnsc-ci/actions/validate-openapi-contract@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
         with:
           current-spec-path: openapi.json
           base-spec-path: /tmp/openapi-base.json
@@ -471,6 +471,6 @@ jobs:
       # Uploaded on every run so the frontend repo has a spec to check its client
       # against, and so a reviewer can read what the API surface became.
       - name: Publish OpenAPI spec
-        uses: QNSC-VN/qnsc-ci/actions/publish-openapi-spec@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
+        uses: quynhonsemiconductor/qnsc-ci/actions/publish-openapi-spec@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
         with:
           spec-path: openapi.json
