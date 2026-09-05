@@ -59,7 +59,7 @@ data "terraform_remote_state" "platform" {
 # migrator. `beat` is deliberately absent — Celery beat runs as a second container
 # off the WORKER image with its own command, so it needs no image of its own.
 module "ecr" {
-  source = "git::https://github.com/quynhonsemiconductor/qnsc-tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
 
   # Lower than the module defaults (30 releases / 20 builds), but for a narrower reason
   # than "the images are big".
@@ -112,7 +112,7 @@ module "ecr" {
 # sts:AssumeRoleWithWebIdentity", which names neither the subject nor the mismatch; the
 # presented claim is only visible in CloudTrail's userIdentity.userName.
 module "iam_oidc" {
-  source = "git::https://github.com/quynhonsemiconductor/qnsc-tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
 
   product           = "qnsc-kb"
   github_org        = local.github_org
