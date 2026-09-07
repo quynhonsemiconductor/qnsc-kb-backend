@@ -94,7 +94,7 @@ locals {
   )
 
   // Every app secret this stack owns. Terraform creates the CONTAINER; values are
-  // pasted in out of band and never enter state. The deploy preflight in qnsc-ci
+  // pasted in out of band and never enter state. The deploy preflight in ci
   // refuses to deploy while any injected secret is still empty.
   // A MAP of key → description, not a list: the module keys the bundle's JSON off these
   // names and uses the description on the secret itself.
@@ -260,7 +260,7 @@ locals {
 // Manager bills per SECRET regardless of size.
 //
 // Secrets Manager and not SSM Parameter Store, following the reasoning recorded in
-// rally's stack: a Secrets Manager secret can exist while holding NO value, and that
+// rova's stack: a Secrets Manager secret can exist while holding NO value, and that
 // empty state is what makes "unpopulated" unambiguous. Parameter Store rejects an
 // empty value, so the same guarantee needs a placeholder plus a version check plus a
 // runtime guard — three mechanisms replacing one property. Revisit past ~30 secrets,
@@ -270,7 +270,7 @@ module "secrets" {
   # an UNKNOWN-LENGTH list while the secrets do not exist yet — and ecs-service gates its
   # execution policy on `count = length(var.secret_arns) > 0`, so the plan failed outright
   # on a first apply. Only ever visible when creating a new environment.
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/secrets?ref=secrets-v2.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/secrets?ref=secrets-v2.1.1"
 
   prefix               = "${var.product}/${var.env}"
   kms_key_arn          = local.kms_key_arn
@@ -288,7 +288,7 @@ module "secrets" {
 // and 20260806_13, which is why the migrator connects as the MASTER user — creating an
 // extension is not something the least-privilege application role may do.
 module "rds" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/rds?ref=rds-v2.1.2"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/rds?ref=rds-v2.1.2"
 
   identifier        = local.name
   subnet_ids        = data.terraform_remote_state.runtime.outputs.data_subnet_ids
@@ -313,7 +313,7 @@ module "cache" {
   # `shared` destroys the dedicated node — that is where the saving is — and issues a
   # different endpoint, so it is a task-definition revision and a rolling deploy.
   count  = var.cache.enabled && !var.cache.shared ? 1 : 0
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/cache?ref=cache-v1.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cache?ref=cache-v1.0.0"
 
   name              = "${local.name}-cache"
   subnet_ids        = data.terraform_remote_state.runtime.outputs.data_subnet_ids
@@ -328,7 +328,7 @@ module "cache" {
 
 // ── ECS cluster ───────────────────────────────────────────────────────────────
 module "ecs_cluster" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-cluster?ref=ecs-cluster-v2.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-cluster?ref=ecs-cluster-v2.0.0"
 
   name               = local.name
   container_insights = var.container_insights
@@ -338,13 +338,13 @@ module "ecs_cluster" {
 // ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
 // Created by Terraform, not by hand. The provider exposes the tunnel's id, its CNAME
 // target and its connector token as attributes, so nothing here needs a dashboard visit
-// or a token pasted into a secret — which is what rally still does.
+// or a token pasted into a secret — which is what rova still does.
 //
 // Count-gated on the account id for the same reason as the Pages project: the AWS half
 // of this stack must be able to apply before Cloudflare is wired up.
 module "tunnel" {
   count  = var.tunnel_enabled && var.cloudflare_account_id != "" ? 1 : 0
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/cf-tunnel?ref=cf-tunnel-v0.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cf-tunnel?ref=cf-tunnel-v0.1.1"
 
   account_id = var.cloudflare_account_id
   // One tunnel per product per environment. Sharing one across environments would let a
@@ -442,7 +442,7 @@ locals {
 // Ingress without an ALB: cloudflared dials out, so the task needs no inbound listener
 // and no public IPv4. The worker has no HTTP surface and gets none.
 module "tunnel_api" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/tunnel-agent?ref=tunnel-agent-v1.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/tunnel-agent?ref=tunnel-agent-v1.0.0"
 
   tunnel_token_secret_arn = length(aws_secretsmanager_secret.tunnel_token) > 0 ? aws_secretsmanager_secret.tunnel_token[0].arn : ""
   app_port                = 8000
@@ -466,7 +466,7 @@ module "tunnel_api" {
 
 // ── API service ───────────────────────────────────────────────────────────────
 module "api" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
 
   service_name = "api"
   cluster_name = module.ecs_cluster.cluster_name
@@ -549,7 +549,7 @@ module "api" {
 //           which is why var.worker caps max_count at 1.
 //   clamav  the malware scanner the worker and api talk to over localhost
 module "worker" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
 
   service_name = "worker"
   cluster_name = module.ecs_cluster.cluster_name
@@ -622,7 +622,7 @@ module "worker" {
 
 // ── Migrator — one-shot task run by the deploy pipeline before rolling services ──
 module "migrator" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/oneshot-task?ref=oneshot-task-v2.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/oneshot-task?ref=oneshot-task-v2.0.0"
 
   name               = "${local.name}-migrator"
   container_name     = "migrator"
@@ -675,12 +675,12 @@ module "migrator" {
 // custom domain; the project NAME is what that repo's deploy workflow needs, published
 // to it as the PAGES_PROJECT environment variable by infra-apply.
 //
-// No production_env_vars: unlike rally, this SPA is not a Pages-Functions BFF. It calls
+// No production_env_vars: unlike rova, this SPA is not a Pages-Functions BFF. It calls
 // the API directly with a bearer token, and VITE_API_BASE_URL is baked in at build
 // time by the frontend's own pipeline.
 module "web" {
   count  = var.cloudflare_account_id != "" ? 1 : 0
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/pages-web?ref=pages-web-v1.0.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/pages-web?ref=pages-web-v1.0.1"
 
   account_id  = var.cloudflare_account_id
   name        = "${local.name}-web"
@@ -692,7 +692,7 @@ module "web" {
 
 // ── DNS — api_domain → the tunnel ────────────────────────────────────────────
 module "dns_api" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/dns-record?ref=dns-record-v1.1.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/dns-record?ref=dns-record-v1.1.0"
 
   enabled = local.cloudflare_zone_id != "" && length(module.tunnel) > 0
   zone_id = local.cloudflare_zone_id
@@ -995,7 +995,7 @@ resource "aws_scheduler_schedule" "ecs_scale_up" {
 // external health check, which belongs at go-live rather than against an environment
 // deliberately running zero tasks.
 module "observability" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/observability?ref=observability-v4.1.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/observability?ref=observability-v4.1.0"
 
   name             = local.name
   region           = var.region

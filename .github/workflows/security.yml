@@ -1,5 +1,5 @@
 # =============================================================================
-# Security · Scan — thin caller of the shared reusable (qnsc-ci).
+# Security · Scan — thin caller of the shared reusable (ci).
 #
 # Trivy (filesystem + built image), Semgrep, gitleaks, and OSV over the dependency
 # lockfile. Language-agnostic: OSV reads poetry.lock directly.
@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: QNSC-VN/qnsc-ci/.github/workflows/actions-security.yml@v1
+    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@v1
     with:
       blocking: true
 
@@ -47,7 +47,7 @@ jobs:
       contents: read
       security-events: write # SARIF upload
       packages: read
-    uses: QNSC-VN/qnsc-ci/.github/workflows/security.yml@v1.10.0
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@v1
     with:
       product: qnsc-kb
       image_target: api

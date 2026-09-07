@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from src.api.deps import get_db, get_current_user
+from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
@@ -32,6 +32,7 @@ from src.domain.source_extraction import (
     SourceExtractionError,
     extract_source_markdown,
     extract_source_pages,
+    extraction_failed_pages,
 )
 from src.domain.source_storage import (
     save_source,
@@ -66,8 +67,11 @@ from src.domain.events import event_bus
 from src.domain.permissions import PermissionService
 from src.domain.article_edit_requests import create_article_edit_request as create_edit_request
 from src.domain.rbac import AuthorizationService
-from src.domain.departments import resolve_active_department, resolve_active_departments
-from src.domain.departments import lock_company_access_groups
+from src.domain.departments import (
+    resolve_active_department,
+    resolve_active_departments,
+    lock_company_scope,
+)
 from src.core.rate_limit import source_upload_rate_limiter
 import structlog
 
@@ -179,18 +183,13 @@ async def _resolve_upload_departments(
     dept: str | None,
     department_ids: list[uuid.UUID] | None,
 ) -> tuple[Any, list[Any]]:
-    """Return (primary organisational department, access audiences).
+    """Return (primary department, full audience list).
 
-    THESE ARE TWO DIFFERENT THINGS and were previously the same list. `department_ids` is
-    an audience selection — `Article.departments` joins it with `kind == "access"`, and
-    the permission checks in permissions.py and rbac.py read only access-kind rows. The
-    article's `dept` is an ORGANISATIONAL department, and `approve_draft` re-resolves it
-    through `resolve_active_department`, which requires `kind == "org"`.
-
-    Taking the primary from `selected_departments[0]` wrote an access group's name into
-    `dept`, so a draft uploaded into "public" was created happily and could then never be
-    approved — every attempt returned 422 "Department does not exist or is inactive"
-    about a department that plainly existed and was active. Both upload paths did it.
+    `department_ids` is the read audience; `Article.dept` is the single primary
+    department that drives approval routing and is always part of the audience.
+    An explicit `dept` wins, otherwise the first selected department, otherwise
+    the uploader's own. Resolving through `resolve_active_department` keeps the
+    active/tenant check in ONE place.
     """
     audiences: list[Any] = (
         await resolve_active_departments(
@@ -199,27 +198,17 @@ async def _resolve_upload_departments(
         if department_ids
         else []
     )
-    # An explicit `dept` wins; otherwise prefer an org department the caller actually
-    # selected, and fall back to the uploader's own. Resolving through
-    # resolve_active_department is what enforces kind == "org" in ONE place.
     primary_name = (
         dept
-        or next(
-            (
-                department.name
-                for department in audiences
-                if getattr(department, "kind", "org") == "org"
-            ),
-            None,
-        )
+        or next((department.name for department in audiences), None)
         or current_user.dept
     )
     primary = await resolve_active_department(
         db, current_user.company_domain, primary_name, required=True
     )
-    # An audience-less upload keeps its previous shape: the primary is also the only row
-    # written to Article.departments, where an org-kind row is simply never loaded back.
-    return primary, (audiences or [primary])
+    if not any(department.id == primary.id for department in audiences):
+        audiences.insert(0, primary)
+    return primary, audiences
 
 
 # Schema definitions
@@ -249,6 +238,11 @@ class ArticleUpdate(BaseModel):
     visibility: str | None = Field(default=None, pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
     denied_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+    # The article version the client loaded, for optimistic concurrency. Optional, so a
+    # caller that does not send it keeps the previous last-write-wins behaviour; when it
+    # is sent and no longer matches, the update is refused with 409 rather than silently
+    # overwriting an edit the client never saw.
+    version: int | None = Field(default=None, ge=1)
 
 
 class ArticleEditRequestCreate(BaseModel):
@@ -272,13 +266,6 @@ class ConfirmTagItem(BaseModel):
 
 class ConfirmTagsRequest(BaseModel):
     items: list[ConfirmTagItem] = Field(min_length=1, max_length=20)
-
-
-class GroupResponse(BaseModel):
-    id: uuid.UUID
-    name: str
-    bitmask_position: int
-    model_config = ConfigDict(from_attributes=True)
 
 
 class TagResponse(BaseModel):
@@ -332,7 +319,6 @@ class ArticleResponse(BaseModel):
     index_status: str = "pending"
     index_error: str | None = None
     source_available: bool = False
-    access_groups: list[GroupResponse] = []
     tags: list[TagResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -585,7 +571,14 @@ async def upload_source(
     tags: str | None = Form(None),
     dept: str | None = Form(None),
     department_ids: str | None = Form(None),
-    current_user: User = Depends(get_current_user),
+    # Rejected before a byte is read. Authenticating alone was enough to reach this
+    # endpoint, so an identity holding only `article.read` could spend the ingestion,
+    # storage and malware-scan budget on drafts it was never allowed to create — the
+    # resource-scoped check further down refused the draft, but only after the whole
+    # extract-and-OCR pass had already run. `scope="own"` is the weakest grant of
+    # `article.create`, so every role that may create anything still passes here and the
+    # department/company/global decision remains with the resource check below.
+    current_user: User = Depends(require_permission("article.create", scope="own")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     # A batch shares one DB session and should consume one request quota, not
@@ -650,13 +643,14 @@ async def upload_source(
         raise HTTPException(
             status_code=422, detail="Could not process uploaded source"
         ) from exc
+    unreadable_pages = extraction_failed_pages(extracted_pages)
 
     source_hash = hashlib.sha256(data).hexdigest()
     # Article deletion is soft-delete. Ignore source rows belonging to deleted
     # or inactive articles so a document can be uploaded again after removal.
     # Reserve the tenant/hash pair while the expensive extraction and storage
     # work is still in progress. This closes the concurrent-upload race.
-    await lock_company_access_groups(
+    await lock_company_scope(
         db, f"upload:{current_user.company_domain}:{source_hash}"
     )
     fingerprint = await db.scalar(
@@ -790,7 +784,17 @@ async def upload_source(
         content_metadata={
             "department_ids": [
                 str(department.id) for department in selected_departments
-            ]
+            ],
+            # Recorded on the draft, not merely logged, because it changes what a
+            # reviewer is looking at: pages listed here were NOT read, so the reading
+            # view is incomplete and approving it publishes a document with holes in it.
+            # Absent when extraction was clean, so existing drafts and responses are
+            # unchanged.
+            **(
+                {"unreadable_pages": unreadable_pages}
+                if unreadable_pages
+                else {}
+            ),
         },
     )
     db.add(
@@ -870,10 +874,18 @@ async def upload_source(
             else []
         ),
         "tags": requested_tags,
+        # Reported to the uploader as well as recorded on the draft: silence here is what
+        # let a partially-unreadable scan look like a successful upload.
+        "unreadable_pages": unreadable_pages,
         "message": (
             "Source stored and queued for reviewer approval. AI reading view is formatting in the background."
             if restructuring_enabled
             else "Source extracted and queued for reviewer approval."
+        ) + (
+            f" {len(unreadable_pages)} page(s) could not be read and are excluded: "
+            f"{', '.join(str(page) for page in unreadable_pages)}."
+            if unreadable_pages
+            else ""
         ),
     }
 
@@ -886,7 +898,8 @@ async def upload_sources(
     tags: str | list[str] | None = Form(None),
     dept: str | None = Form(None),
     department_ids: str | None = Form(None),
-    current_user: User = Depends(get_current_user),
+    # Same gate as the single-file endpoint: this one fans out to twenty of them.
+    current_user: User = Depends(require_permission("article.create", scope="own")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Process a batch without letting one bad or duplicate file stop the batch."""
@@ -968,7 +981,7 @@ async def create_source_upload_intent(
     ):
         raise HTTPException(status_code=403, detail="Not authorized to upload sources")
 
-    await lock_company_access_groups(
+    await lock_company_scope(
         db,
         f"presigned-upload:{current_user.company_domain}:{request.source_hash.lower()}",
     )
@@ -1259,9 +1272,13 @@ async def complete_source_upload(
         if similarity_level == "partial"
         else None
     )
+    unreadable_pages = extraction_failed_pages(extracted_pages)
     draft.content_metadata = {
         **(draft.content_metadata or {}),
         "upload_mode": "presigned_complete",
+        # Same reason as the direct upload path: pages that could not be read make the
+        # reviewer's reading view incomplete, and that has to travel with the draft.
+        **({"unreadable_pages": unreadable_pages} if unreadable_pages else {}),
     }
     fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
@@ -1545,7 +1562,7 @@ async def create_article(
     source_hash = hashlib.sha256(
         f"{current_user.company_domain}\0{normalized_body}".encode("utf-8")
     ).hexdigest()
-    await lock_company_access_groups(
+    await lock_company_scope(
         db, f"upload:{current_user.company_domain}:{source_hash}"
     )
     existing_fingerprint = await db.scalar(
@@ -1744,6 +1761,19 @@ async def update_article(
         raise HTTPException(
             status_code=403, detail="Not authorized to edit this article"
         )
+    # Optimistic concurrency, checked before any of the expensive work below (LLM
+    # restructuring, similarity search) rather than at the write: refusing early costs the
+    # loser of the race nothing. The publish path bumps `version` (governance.py: the new
+    # article row is written with update_target.version + 1), so a client that reloads
+    # after each save always holds the version its editor was opened on.
+    if article_in.version is not None and article_in.version != current.version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This article was modified by someone else while you were editing. "
+                "Reload it and reapply your changes."
+            ),
+        )
     if article_in.status is not None and article_in.status != current.status:
         raise HTTPException(
             status_code=422,
@@ -1841,9 +1871,8 @@ async def update_article(
             detail="Every explicit Article user must belong to the Article company",
         )
 
-    # Legacy domain/type/sensitivity and ACL values are preserved from the
+    # Legacy domain/type/sensitivity values are preserved from the
     # synchronized article. They are no longer editable through this API.
-    groups = list(current.access_groups)
     tags = (
         article_in.tags
         if article_in.tags is not None
@@ -1882,7 +1911,7 @@ async def update_article(
     source_hash = hashlib.sha256(
         f"{current.company_domain}\0{normalized_body}".encode("utf-8")
     ).hexdigest()
-    await lock_company_access_groups(
+    await lock_company_scope(
         db, f"upload:{current.company_domain}:{source_hash}"
     )
     duplicate_fingerprint = await db.scalar(
@@ -1939,7 +1968,6 @@ async def update_article(
             "department_ids": [
                 str(department.id) for department in selected_departments
             ],
-            "access_group_ids": [str(group.id) for group in groups],
             "next_review": next_review.isoformat() if next_review else None,
             "submission_kind": "manual_update",
             "suggested_update_article_id": str(current.id),
@@ -2136,7 +2164,7 @@ async def restore_version(
             "type": str(snapshot.get("type") or current.type),
             "sensitivity": str(snapshot.get("sensitivity") or current.sensitivity),
             "language": str(snapshot.get("language") or current.language),
-            "access_group_ids": [str(group.id) for group in current.access_groups],
+            "department_ids": [str(department.id) for department in current.departments],
             "next_review": (
                 current.next_review.isoformat() if current.next_review else None
             ),

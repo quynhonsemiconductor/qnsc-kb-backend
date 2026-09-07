@@ -52,7 +52,25 @@ def reset_query_embedding_cache() -> None:
     _QUERY_EMBEDDING_CACHE.clear()
 
 
-async def get_text_embedding(text: str) -> list[float] | None:
+class VectorSearchUnavailable(RuntimeError):
+    """The query could not be embedded, so only keyword retrieval ran.
+
+    Raised by `embed_query`, and carried on `SearchService.vector_search_degraded` for
+    the callers that would rather serve keyword hits than nothing. It exists because the
+    two states this used to collapse into a bare `None` are not the same thing: "the
+    knowledge base has nothing on this" is an answer, and "half of retrieval is broken"
+    is an incident.
+    """
+
+
+async def embed_query(text: str) -> list[float]:
+    """Embed a query, raising `VectorSearchUnavailable` when the model cannot.
+
+    Failing loudly is the point. Returning None here meant every caller silently
+    continued on lexical matching alone, including the RAG answer path, which then
+    grounded answers in a pool that was never scored by similarity -- with nothing in
+    the response, and nothing short of reading the logs, to say so.
+    """
     key = _query_embedding_key(text)
     cached = _QUERY_EMBEDDING_CACHE.get(key)
     if cached is not None:
@@ -60,24 +78,30 @@ async def get_text_embedding(text: str) -> list[float] | None:
         return list(cached)
     try:
         embedding = await asyncio.to_thread(get_bge_embedding, text)
-        if embedding:
-            _QUERY_EMBEDDING_CACHE[key] = tuple(embedding)
-            while len(_QUERY_EMBEDDING_CACHE) > _QUERY_EMBEDDING_CACHE_MAX:
-                _QUERY_EMBEDDING_CACHE.popitem(last=False)
-        logger.info(
-            "Search embedding generated",
-            query_length=len(text),
-            embedding_dimension=len(embedding) if embedding else 0,
-            embedding_model=settings.EMBEDDING_MODEL,
-        )
-        return embedding
-    except Exception as e:
+    except Exception as exc:
         logger.error(
-            "Error generating local BGE embedding; continuing with keyword search",
-            error=str(e),
+            "Query embedding failed; vector search is unavailable for this query",
+            error=str(exc),
             embedding_model=settings.EMBEDDING_MODEL,
         )
-        return None
+        raise VectorSearchUnavailable(str(exc)) from exc
+    if not embedding:
+        # An empty vector is as unusable as an exception, and pgvector would reject it.
+        logger.error(
+            "Query embedding returned no vector; vector search is unavailable",
+            embedding_model=settings.EMBEDDING_MODEL,
+        )
+        raise VectorSearchUnavailable("the embedding model returned no vector")
+    _QUERY_EMBEDDING_CACHE[key] = tuple(embedding)
+    while len(_QUERY_EMBEDDING_CACHE) > _QUERY_EMBEDDING_CACHE_MAX:
+        _QUERY_EMBEDDING_CACHE.popitem(last=False)
+    logger.info(
+        "Search embedding generated",
+        query_length=len(text),
+        embedding_dimension=len(embedding),
+        embedding_model=settings.EMBEDDING_MODEL,
+    )
+    return embedding
 
 
 async def get_text_embeddings(texts: list[str]) -> list[list[float]] | None:
@@ -92,6 +116,13 @@ class SearchService:
         self.chunk_repo = chunk_repo
         self.gov_repo = gov_repo
         self.feature_flags = feature_flags
+        #: Whether the most recent `search` ran without vector retrieval because the
+        #: query could not be embedded. A caller that grounds anything on the results —
+        #: `AiService.ask` above all — must read this, because a keyword-only pool is a
+        #: different pool, and "found nothing" and "could only look lexically" call for
+        #: different answers. One service instance serves one request here, so this is
+        #: per-request state, not shared.
+        self.vector_search_degraded = False
 
     async def _record_gap(self, user: User, query: str) -> None:
         """Note that a search found nothing, without letting that end the search.
@@ -129,6 +160,9 @@ class SearchService:
         filters: dict | None = None,
         limit: int = 5
     ) -> list[dict[str, Any]]:
+        # Reset before any early return, so a caller never reads the previous query's
+        # verdict for one that never reached the embedder.
+        self.vector_search_degraded = False
         if not query.strip():
             return []
         if not any(
@@ -139,20 +173,16 @@ class SearchService:
 
         started = time.perf_counter()
 
-        user_bitmask = PermissionService.calculate_user_bitmask(user)
         effective_filters = dict(filters or {})
         if not AuthorizationService.has_permission(user, "article.read", requested_scope="global"):
             effective_filters["company_domain"] = user.company_domain
-        effective_filters["bypass_access_groups"] = AuthorizationService.has_full_company_article_access(user)
         if not AuthorizationService.has_full_company_article_access(user):
             effective_filters["departments"] = sorted(AuthorizationService.member_department_names(user))
         if not AuthorizationService.has_permission(user, "article.read", requested_scope="company"):
             if AuthorizationService.has_permission(user, "article.read", requested_scope="department"):
                 effective_filters["departments"] = sorted(AuthorizationService.owned_department_names(user))
-                effective_filters["bypass_access_groups"] = True
             elif AuthorizationService.has_permission(user, "article.read", requested_scope="own"):
                 effective_filters["owner_id"] = user.id
-                effective_filters["bypass_access_groups"] = True
         logger.info(
             "Search started",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
@@ -162,8 +192,7 @@ class SearchService:
             user_id=str(user.id),
             user_role=user.role,
             user_department=user.dept,
-            access_group_count=len(user.groups),
-            user_access_bitmask=user_bitmask,
+            department_count=len(user.departments),
         )
         
         # Question words such as "what is" / "là gì" are not useful search
@@ -182,13 +211,25 @@ class SearchService:
             return []
 
         # 1. Get embedding asynchronously
-        embedding = await get_text_embedding(retrieval_query)
+        try:
+            embedding = await embed_query(retrieval_query)
+        except VectorSearchUnavailable as exc:
+            # Keyword retrieval still finds things, and abandoning the search entirely
+            # would take the product down for a recoverable model fault. But the caller
+            # is told, so an answer built on this pool can say what it is built on.
+            self.vector_search_degraded = True
+            embedding = None
+            logger.warning(
+                "Search degraded to keyword-only retrieval",
+                query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                reason=str(exc),
+                embedding_model=settings.EMBEDDING_MODEL,
+            )
         
         # 2. Query hybrid search
         candidates = await self.chunk_repo.hybrid_search(
             query=retrieval_query,
             query_embedding=embedding,
-            user_bitmask=user_bitmask,
             user=user,
             limit=limit,
             filters=effective_filters
@@ -221,6 +262,7 @@ class SearchService:
             "Search repository completed",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
             embedding_available=embedding is not None,
+            vector_search_degraded=self.vector_search_degraded,
             candidate_count=len(candidates),
             reranking_enabled=reranking_enabled,
             result_count=len(chunks),
@@ -232,7 +274,6 @@ class SearchService:
                 "Search returned zero results, logging gap",
                 query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
                 reason="no published, permission-matching chunks matched vector or keyword search",
-                user_access_bitmask=user_bitmask,
                 filters=effective_filters,
             )
             await self._record_gap(user, query)

@@ -4,16 +4,22 @@ import structlog
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from sqlalchemy import delete, select
+from typing import Any
+from sqlalchemy import JSON, DateTime, Uuid, delete, exists, literal, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 from celery.signals import worker_ready, worker_process_init, task_prerun, task_failure
 from src.workers.celery_app import celery_app
 from src.api.deps import SessionLocal, engine, set_database_context
 from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
-from src.domain.permissions import PermissionService
 from src.core.config import settings
 from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue, ConnectorJob, Connector
 from src.models.connectors import SyncRequest
+from src.domain.connector_providers import (
+    REMOTE_PROVIDERS,
+    cursor_type as provider_cursor_type,
+)
 from src.models.governance import PendingDraft
 from src.models.user import User
 from src.services.email import get_email_sender
@@ -88,12 +94,25 @@ def handle_domain_event_task(event_type: str, payload: dict):
         sync_run(mark_dispatched())
 
 
+# Shared with EventBus.recover_outbox_once, which is the inline-mode equivalent of this
+# task: both walk the same table, so a poison event must die at the same attempt count
+# whichever one reaches it first.
+OUTBOX_MAX_ATTEMPTS = 5
+
+
 @celery_app.task(name="replay_outbox_task")
 def replay_outbox_task():
     async def replay():
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            result = await db.execute(
+            # Claimed under a row lock, and the whole batch is claimed in ONE transaction
+            # before anything is dispatched. Selecting unlocked rows and committing per
+            # row let a second beat tick (or the inline recovery loop) read the same
+            # "processing" row between the commit and the dispatch, so the event was
+            # handled twice. skip_locked means a concurrent tick takes different rows
+            # instead of blocking, which is the same claim pattern as
+            # claim_sync_request and deliver_notification_queue.
+            events = (await db.execute(
                 select(OutboxEvent)
                 .where(
                     OutboxEvent.status.in_(["pending", "failed", "processing"]),
@@ -101,41 +120,107 @@ def replay_outbox_task():
                 )
                 .order_by(OutboxEvent.created_at)
                 .limit(100)
-            )
-            events = result.scalars().all()
+                .with_for_update(skip_locked=True)
+            )).scalars().all()
+            dispatchable: list[tuple[str, dict]] = []
             for event in events:
+                if event.attempts >= OUTBOX_MAX_ATTEMPTS:
+                    # Terminal, and the row is kept for inspection. Without this an event
+                    # whose handler always raises was re-selected and re-dispatched on
+                    # every tick, forever.
+                    event.status = "dead"
+                    continue
                 event.status = "processing"
                 event.attempts += 1
                 event.next_attempt_at = datetime.utcnow() + timedelta(
                     minutes=min(30, 2 ** min(event.attempts, 5))
                 )
-                await db.commit()
                 payload = dict(event.payload)
                 payload["_outbox_id"] = str(event.id)
-                handle_domain_event_task.delay(event.event_type, payload)
+                dispatchable.append((event.event_type, payload))
+            await db.commit()
+            # After the commit that releases the locks: a task handed to Celery before
+            # its claim is durable can be executed, and finish, before the claiming
+            # transaction is visible to anyone else.
+            for event_type, payload in dispatchable:
+                handle_domain_event_task.delay(event_type, payload)
 
     sync_run(replay())
+
+
+# Small enough that one pass finishes well inside the timeout below, repeated until the
+# table is clean. A month of api_request_metrics is millions of rows, and as ONE unbounded
+# DELETE it could never complete within the shared engine's 5 s budget: the retention
+# sweep failed on every run and the table only ever grew.
+_PRUNE_BATCH_ROWS = 5_000
+_PRUNE_COMMAND_TIMEOUT_SECONDS = 120
 
 
 @celery_app.task(name="prune_operational_metrics")
 def prune_operational_metrics() -> None:
     """Bound telemetry growth and remove physically expired answer caches."""
 
-    async def prune() -> None:
-        async with SessionLocal() as db:
-            await set_database_context(db, None, True)
-            cutoff = datetime.utcnow() - timedelta(days=settings.METRICS_RETENTION_DAYS)
-            await db.execute(
-                ApiRequestMetric.__table__.delete().where(
-                    ApiRequestMetric.created_at < cutoff
-                )
-            )
-            # Cache answers can contain authorized document passages. Their
-            # six-hour expiry must remove storage as well as disable reads.
-            await db.execute(
-                AiCache.__table__.delete().where(AiCache.expires_at < datetime.utcnow())
-            )
+    async def prune_batched(db, table, predicate) -> int:
+        """Delete matching rows in bounded passes; returns the total removed."""
+        removed = 0
+        while True:
+            # A subquery over the primary key, because Postgres has no DELETE ... LIMIT.
+            victims = select(table.c.id).where(predicate).limit(_PRUNE_BATCH_ROWS)
+            deleted = (
+                await db.execute(table.delete().where(table.c.id.in_(victims)))
+            ).rowcount or 0
             await db.commit()
+            removed += deleted
+            if deleted < _PRUNE_BATCH_ROWS:
+                return removed
+
+    async def prune() -> None:
+        # Its own engine, because the shared one pins command_timeout to 5 s (deps.py) so
+        # that no request can hold a pooled connection longer than that. asyncpg enforces
+        # that ceiling CLIENT-side, which is why a server-side `SET LOCAL
+        # statement_timeout` cannot lift it — the driver cancels the statement before the
+        # server's limit is ever consulted. NullPool plus an explicit dispose keeps this
+        # from leaving idle connections behind between daily runs.
+        prune_engine = create_async_engine(
+            settings.DATABASE_URL,
+            poolclass=NullPool,
+            connect_args={
+                "timeout": 10,
+                "command_timeout": _PRUNE_COMMAND_TIMEOUT_SECONDS,
+            },
+        )
+        try:
+            factory = async_sessionmaker(
+                autocommit=False,
+                autoflush=False,
+                expire_on_commit=False,
+                bind=prune_engine,
+                class_=AsyncSession,
+            )
+            async with factory() as db:
+                await set_database_context(db, None, True)
+                cutoff = datetime.utcnow() - timedelta(
+                    days=settings.METRICS_RETENTION_DAYS
+                )
+                metrics_removed = await prune_batched(
+                    db,
+                    ApiRequestMetric.__table__,
+                    ApiRequestMetric.created_at < cutoff,
+                )
+                # Cache answers can contain authorized document passages. Their
+                # six-hour expiry must remove storage as well as disable reads.
+                cache_removed = await prune_batched(
+                    db,
+                    AiCache.__table__,
+                    AiCache.expires_at < datetime.utcnow(),
+                )
+            logger.info(
+                "Operational retention sweep completed",
+                api_request_metrics_deleted=metrics_removed,
+                ai_cache_deleted=cache_removed,
+            )
+        finally:
+            await prune_engine.dispose()
 
     sync_run(prune())
 
@@ -206,22 +291,47 @@ def escalate_overdue_drafts() -> None:
                     recipient = users.get(user_id)
                     if not recipient:
                         continue
-                    recent = await db.scalar(select(NotificationQueue.id).where(
+                    payload = {
+                        "event": "draft_overdue",
+                        "draft_id": str(draft.id),
+                        "to": recipient.email,
+                        "subject": f"Approval overdue: {draft.title}",
+                        "text": f"The draft '{draft.title}' has been awaiting approval beyond the {settings.REVIEW_SLA_DAYS}-day SLA.",
+                    }
+                    # The dedupe check and the insert are ONE statement, so the window
+                    # between them cannot be interleaved: a SELECT followed by db.add()
+                    # let two concurrent runs — or a Celery retry of this task — both see
+                    # no recent notification and both queue an escalation, so the
+                    # approver got the same overdue email twice.
+                    #
+                    # Expressed in-query rather than with a unique index because a
+                    # partial-unique index on a JSON payload plus a 24-hour window is not
+                    # something a UNIQUE constraint can state, and adding one would need
+                    # a migration owned elsewhere. Postgres evaluates the NOT EXISTS
+                    # against the same snapshot that performs the insert, which is what
+                    # closes the race.
+                    duplicate = select(NotificationQueue.id).where(
                         NotificationQueue.recipient_user_id == recipient.id,
                         NotificationQueue.type == "email",
                         NotificationQueue.created_at >= datetime.utcnow() - timedelta(hours=24),
                         NotificationQueue.payload["event"].as_string() == "draft_overdue",
                         NotificationQueue.payload["draft_id"].as_string() == str(draft.id),
-                    ).limit(1))
-                    if recent:
-                        continue
-                    db.add(NotificationQueue(
-                        recipient_user_id=recipient.id,
-                        type="email",
-                        payload={"event": "draft_overdue", "draft_id": str(draft.id), "to": recipient.email,
-                                 "subject": f"Approval overdue: {draft.title}",
-                                 "text": f"The draft '{draft.title}' has been awaiting approval beyond the {settings.REVIEW_SLA_DAYS}-day SLA."},
-                    ))
+                    )
+                    await db.execute(
+                        NotificationQueue.__table__.insert().from_select(
+                            ["id", "recipient_user_id", "type", "payload", "status", "attempts", "created_at", "updated_at"],
+                            select(
+                                literal(uuid.uuid4(), type_=Uuid),
+                                literal(recipient.id, type_=Uuid),
+                                literal("email"),
+                                literal(payload, type_=JSON),
+                                literal("pending"),
+                                literal(0),
+                                literal(datetime.utcnow(), type_=DateTime),
+                                literal(datetime.utcnow(), type_=DateTime),
+                            ).where(~exists(duplicate)),
+                        )
+                    )
             await db.commit()
     sync_run(escalate())
 
@@ -376,18 +486,29 @@ async def run_restructure_pending_draft(
             # Batch review operates on the formatted reading view, not raw extraction.
             # Recreate candidates only after formatting has completed, then use the
             # active department descriptions to choose an editable default route.
-            await db.execute(
-                delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
+            #
+            # NOT for a draft that IS a committed split product. `commit_candidates`
+            # creates each child with restructure_status="lossless_ready", the UI offers
+            # "Retry AI format" on anything that is not "llm", and re-splitting a child
+            # by department yields >1 candidate again -> batch_review_required -> commit
+            # -> more children, forever, fanning out on every pass. Reformatting a
+            # child's reading view is still useful, so only the re-split is skipped.
+            is_split_product = (
+                (draft.content_metadata or {}).get("submission_kind") == "split_candidate"
             )
-            for item in await route_document_candidates_llm(
-                draft.title, result.body_md, departments
-            ):
-                db.add(
-                    DraftCandidate(
-                        draft_id=draft.id,
-                        **item,
-                    )
+            if not is_split_product:
+                await db.execute(
+                    delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
                 )
+                for item in await route_document_candidates_llm(
+                    draft.title, result.body_md, departments
+                ):
+                    db.add(
+                        DraftCandidate(
+                            draft_id=draft.id,
+                            **item,
+                        )
+                    )
             db.add(
                 AuditLog(
                     user_id=user.id if user else None,
@@ -511,26 +632,34 @@ async def run_reprocess_index_job(job_id_str: str) -> None:
         job.started_at = datetime.utcnow()
         await db.commit()
     for article_id in article_ids:
+        # Atomic increments, not read-modify-write. Each iteration used its own session to
+        # load the row, add one in Python and commit, so two workers on the same job (a
+        # broker redelivery, or a manual re-queue) could each read `completed = 7` and
+        # each write 8 — losing a completion and leaving a progress bar that never reaches
+        # its total. `completed = completed + 1` is resolved by the database.
+        #
+        # `updated_at` is set explicitly because a Core UPDATE bypasses the ORM's onupdate
+        # hook, and the stale-job sweep uses that column as this job's only heartbeat.
         try:
             await index_article(article_id)
-            async with SessionLocal() as progress_db:
-                await set_database_context(progress_db, None, True)
-                progress = await progress_db.get(
-                    IndexReprocessJob, uuid.UUID(job_id_str)
-                )
-                if progress:
-                    progress.completed += 1
-                    await progress_db.commit()
+            progress_values: dict[str, Any] = {
+                "completed": IndexReprocessJob.completed + 1,
+                "updated_at": datetime.utcnow(),
+            }
         except Exception as exc:
-            async with SessionLocal() as progress_db:
-                await set_database_context(progress_db, None, True)
-                progress = await progress_db.get(
-                    IndexReprocessJob, uuid.UUID(job_id_str)
-                )
-                if progress:
-                    progress.failed += 1
-                    progress.last_error = str(exc)[:2000]
-                    await progress_db.commit()
+            progress_values = {
+                "failed": IndexReprocessJob.failed + 1,
+                "last_error": str(exc)[:2000],
+                "updated_at": datetime.utcnow(),
+            }
+        async with SessionLocal() as progress_db:
+            await set_database_context(progress_db, None, True)
+            await progress_db.execute(
+                update(IndexReprocessJob)
+                .where(IndexReprocessJob.id == uuid.UUID(job_id_str))
+                .values(**progress_values)
+            )
+            await progress_db.commit()
     async with SessionLocal() as db:
         await set_database_context(db, None, True)
         job = await db.get(IndexReprocessJob, uuid.UUID(job_id_str))
@@ -546,11 +675,74 @@ def reprocess_index_job_task(job_id_str: str):
     sync_run(run_reprocess_index_job(job_id_str))
 
 
+# A reprocess run has no heartbeat other than the `updated_at` each article's progress
+# write touches, so "no progress for this long" is the only available liveness signal.
+# Generous, because one article can involve a slow embedding pass and a job with a single
+# very large article must not be declared dead while it is still working.
+INDEX_JOB_STALE_MINUTES = 60
+# Re-queued at most this many times. Past that the job is a persistent failure rather than
+# an interrupted one, and re-dispatching it forever would re-index the same set on every
+# sweep.
+INDEX_JOB_MAX_RETRIES = 2
+
+
+@celery_app.task(name="recover_stale_index_reprocess_jobs")
+def recover_stale_index_reprocess_jobs() -> int:
+    """Resume or fail reprocess jobs abandoned by a dead worker.
+
+    ``run_reprocess_index_job`` sets ``running`` and only clears it after the whole loop,
+    so a worker killed mid-run left the row ``running`` forever: the operator saw a frozen
+    progress bar, and nothing ever retried the remaining articles.
+    """
+
+    async def recover() -> int:
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            cutoff = datetime.utcnow() - timedelta(minutes=INDEX_JOB_STALE_MINUTES)
+            jobs = (await db.execute(
+                select(IndexReprocessJob)
+                .where(
+                    IndexReprocessJob.status == "running",
+                    IndexReprocessJob.updated_at < cutoff,
+                )
+                .limit(20)
+                .with_for_update(skip_locked=True)
+            )).scalars().all()
+            requeued: list[uuid.UUID] = []
+            for job in jobs:
+                if job.retry_count >= INDEX_JOB_MAX_RETRIES:
+                    job.status = "failed"
+                    job.completed_at = datetime.utcnow()
+                    job.last_error = (
+                        "Abandoned by an interrupted worker and past the retry limit"
+                    )
+                    continue
+                job.retry_count += 1
+                job.status = "queued"
+                job.last_error = "Recovered after worker/process interruption"
+                requeued.append(job.id)
+            await db.commit()
+        # After the commit, for the same reason as replay_outbox_task: a task dispatched
+        # before its claim is durable can start, and finish, against the pre-claim row.
+        for job_id in requeued:
+            reprocess_index_job_task.delay(str(job_id))
+        if jobs:
+            logger.info(
+                "Stale index reprocess sweep completed",
+                examined=len(jobs),
+                requeued=len(requeued),
+                failed=len(jobs) - len(requeued),
+            )
+        return len(requeued)
+
+    return sync_run(recover())
+
+
 @celery_app.task(name="recompute_permissions_task")
 def recompute_permissions_task(article_id_str: str):
     article_id = uuid.UUID(article_id_str)
     logger.info(
-        "Recomputing permission bitmask snapshot on chunks", article_id=article_id
+        "Recomputing permission metadata snapshot on chunks", article_id=article_id
     )
 
     async def process():
@@ -567,18 +759,15 @@ def recompute_permissions_task(article_id_str: str):
                 )
                 return
 
-            bitmap = PermissionService.calculate_article_bitmask(article)
             await chunk_repo.update_permissions(
                 article_id=article_id,
-                bitmap=bitmap,
                 sensitivity=article.sensitivity,
                 visibility=article.visibility,
                 dept=article.dept,
             )
             logger.info(
-                "Permission bitmap updated successfully",
+                "Chunk permission metadata updated successfully",
                 article_id=article_id,
-                bitmap=bitmap,
             )
 
     sync_run(process())
@@ -594,6 +783,9 @@ def delete_article_chunks_task(article_id_str: str):
             await set_database_context(db, None, True)
             chunk_repo = ChunkRepository(db)
             await chunk_repo.delete_by_article_id(article_id)
+            # ChunkRepository stages the delete without committing, so that a rebuild can
+            # be one transaction. A standalone deletion has to commit it.
+            await db.commit()
             logger.info("Article chunks deleted successfully", article_id=article_id)
 
     sync_run(process())
@@ -669,7 +861,7 @@ def schedule_cloud_connector_syncs():
                 (
                     await db.execute(
                         select(Connector).where(
-                            Connector.system.in_(["sharepoint", "google_drive"]),
+                            Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                             Connector.status.in_(["active", "error"]),
                         )
                     )
@@ -739,7 +931,7 @@ def reconcile_cloud_connectors():
             connectors = (
                 await db.execute(
                     select(Connector).where(
-                        Connector.system.in_(["sharepoint", "google_drive"]),
+                        Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                         Connector.status.in_(["active", "error"]),
                     )
                 )
@@ -766,7 +958,7 @@ def reconcile_cloud_connectors():
                         cursor = SyncCursor(
                             connector_id=connector.id,
                             scope_id=scope.id,
-                            cursor_type="delta" if connector.system == "sharepoint" else "changes",
+                            cursor_type=provider_cursor_type(connector.system),
                         )
                         db.add(cursor)
                     cursor.full_sync_required = True

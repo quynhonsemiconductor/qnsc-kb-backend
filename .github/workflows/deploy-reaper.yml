@@ -1,5 +1,5 @@
 # =============================================================================
-# Deploy Reaper — thin caller of the shared reusable (qnsc-ci).
+# Deploy Reaper — thin caller of the shared reusable (ci).
 #
 # Fires on the same release tag as Backend·Deploy and cancels any EARLIER deploy run
 # still parked on the production Environment reviewer gate.
@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   reap:
-    uses: QNSC-VN/qnsc-ci/.github/workflows/deploy-reaper.yml@v1.10.0
+    uses: quynhonsemiconductor/ci/.github/workflows/deploy-reaper.yml@v1
     # A called workflow can only REDUCE the caller's token scope, so actions:write must
     # be granted here or the reusable cannot cancel anything.
     permissions:

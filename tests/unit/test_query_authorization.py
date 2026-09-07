@@ -12,7 +12,7 @@ from src.models.article import Article, ArticleUserPermission, DocumentSource
 from src.models.interaction import Vote
 from src.models.governance import PendingDraft
 from src.models.rbac import Permission, Role, RolePermission
-from src.models.user import AccessGroup, Department, User
+from src.models.user import Department, User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
 from src.repositories.governance import GovernanceRepository
@@ -254,25 +254,59 @@ def test_article_version_queries_include_authorization_predicate():
     assert "articles.lifecycle_status" in version_sql
 
 
-def test_article_list_query_contains_tenant_department_and_group_acl_predicates():
+def test_article_list_query_contains_tenant_and_department_audience_predicates():
     db = _DB()
     user = _reader()
-    user.groups = [
-        AccessGroup(
+    user.departments.append(
+        Department(
             id=uuid.uuid4(),
             company_domain="acme.test",
             name="Security",
-            bitmask_position=4,
+            active=True,
         )
-    ]
+    )
 
     asyncio.run(ArticleRepository(db).list_articles(user))
-    sql = _compiled(db.statement)
+    sql = _compiled(db.statement).lower()
 
     assert "articles.company_domain" in sql
-    assert "departments" in sql
-    assert "article_access" in sql
+    assert "article_departments" in sql
+    assert "departments.name in" in sql
+    assert "departments.id in" in sql
     assert "articles.status" in sql
+
+
+def test_shared_audience_department_reads_across_the_primary_department():
+    """Audience matching is an OR, not an AND.
+
+    A department the user shares is sufficient even when its name differs from
+    the article's primary ``dept``; a user outside every audience department of
+    the article stays out.
+    """
+    user = _reader(department="Engineering")
+    engineering = user.departments[0]
+    article = Article(
+        company_domain="acme.test",
+        dept="Finance",
+        domain="Security",
+        visibility="department",
+        sensitivity="internal",
+        status="published",
+        lifecycle_status="active",
+        departments=[engineering],
+    )
+
+    assert PermissionService.can_view_article(user, article) is True
+
+    article.departments = [
+        Department(
+            id=uuid.uuid4(),
+            company_domain="acme.test",
+            name="Finance",
+            active=True,
+        )
+    ]
+    assert PermissionService.can_view_article(user, article) is False
 
 
 def test_article_list_query_keeps_sharepoint_acl_for_global_readers():
@@ -284,12 +318,12 @@ def test_article_list_query_keeps_sharepoint_acl_for_global_readers():
     role = Role(name="Admin", company_domain=None)
     role.permissions = [RolePermission(permission=permission, scope="global")]
     user.roles = [role]
-    user.groups = [
-        AccessGroup(
+    user.departments = [
+        Department(
             id=uuid.uuid4(),
             company_domain="acme.test",
             name="Security",
-            bitmask_position=4,
+            active=True,
         )
     ]
 
@@ -298,7 +332,8 @@ def test_article_list_query_keeps_sharepoint_acl_for_global_readers():
 
     assert "document_sources" in sql
     assert "document_sources.source_system" in sql
-    assert "article_access" in sql
+    assert "article_departments" in sql
+    assert "departments.id in" in sql
 
 
 def test_similarity_query_uses_the_shared_sql_article_authorization_predicate():
@@ -336,7 +371,6 @@ def test_search_applies_effective_department_and_owner_scope_in_sql():
         ChunkRepository(db).hybrid_search(
             query="policy",
             query_embedding=None,
-            user_bitmask=1,
             user=user,
             filters={"departments": ["Finance"], "owner_id": user.id},
         )
@@ -440,12 +474,14 @@ def test_eligible_approver_user_query_pushes_resource_predicates_into_sql():
     assert "users.active" in sql
 
 
-def test_access_group_member_queries_are_company_scoped():
+def test_department_member_queries_are_company_scoped():
     db = _DB()
     repo = UserRepository(db)
 
-    asyncio.run(repo.get_group_by_id(uuid.uuid4(), company_domain="acme.test"))
-    assert "access_groups.company_domain" in _compiled(db.statement).lower()
+    asyncio.run(
+        repo.get_departments_by_ids([uuid.uuid4()], company_domain="acme.test")
+    )
+    assert "departments.company_domain" in _compiled(db.statement).lower()
 
     asyncio.run(repo.get_by_ids([uuid.uuid4()], company_domain="acme.test"))
     assert "users.company_domain" in _compiled(db.statement).lower()
@@ -509,9 +545,9 @@ def test_explicit_deny_wins_over_public_and_role_access():
     assert PermissionService.can_view_article(user, article) is False
 
 
-def test_sharepoint_acl_restricts_global_reader_to_mapped_group_or_source_user():
-    group = AccessGroup(
-        id=uuid.uuid4(), company_domain="acme.test", name="Security", bitmask_position=4
+def test_sharepoint_acl_restricts_global_reader_to_mapped_department_or_source_user():
+    department = Department(
+        id=uuid.uuid4(), company_domain="acme.test", name="Security", active=True
     )
     user = User(
         id=uuid.uuid4(), role="Admin", company_domain="acme.test", dept="Engineering"
@@ -531,7 +567,7 @@ def test_sharepoint_acl_restricts_global_reader_to_mapped_group_or_source_user()
         visibility="department",
         status="published",
         lifecycle_status="active",
-        access_groups=[group],
+        departments=[department],
         sources=[
             DocumentSource(
                 source_system="sharepoint", source_ref="file-1", source_hash="hash"
@@ -540,11 +576,11 @@ def test_sharepoint_acl_restricts_global_reader_to_mapped_group_or_source_user()
     )
 
     assert PermissionService.can_view_article(user, article) is False
-    user.groups = [group]
+    user.departments = [department]
     assert PermissionService.can_view_article(user, article) is True
 
-    user.groups = []
-    article.access_groups = []
+    user.departments = []
+    article.departments = []
     article.visibility = "users"
     article.user_permissions = [
         ArticleUserPermission(user_id=user.id, effect="allow", source="sharepoint")

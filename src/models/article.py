@@ -1,18 +1,15 @@
 import uuid
 from datetime import datetime
 from typing import Any
-from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index, and_
+from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 from src.models.user import Department
 
-# Association table for Article <-> AccessGroup (Many-to-Many)
-article_access = Table(
-    "article_access",
-    Base.metadata,
-    Column("article_id", ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True),
-    Column("group_id", ForeignKey("access_groups.id", ondelete="CASCADE"), primary_key=True),
-)
+# Import-safe: connector_providers is a pure constants/predicate module with no
+# imports of its own, so a model may depend on it without an ORM import cycle.
+from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
+
 
 # One article may be visible in several departments. ``articles.dept`` is
 # retained as the primary/legacy department for synchronized integrations.
@@ -63,9 +60,6 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     owner: Mapped["User | None"] = relationship("User")
-    access_groups: Mapped[list["AccessGroup"]] = relationship(
-        "AccessGroup", secondary=article_access
-    )
     departments: Mapped[list["Department"]] = relationship(
         "Department", secondary=article_departments, lazy="selectin"
     )
@@ -88,11 +82,13 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     @property
     def explicit_user_ids(self) -> list[uuid.UUID]:
-        return [item.user_id for item in self.user_permissions if item.effect == "allow" and item.source != "sharepoint"]
+        # Source-managed rows are provider ACL mirrors, not internal grants, so
+        # they are excluded from the internal allow/deny lists an editor sees.
+        return [item.user_id for item in self.user_permissions if item.effect == "allow" and item.source not in SOURCE_ACL_PROVIDERS]
 
     @property
     def explicit_denied_user_ids(self) -> list[uuid.UUID]:
-        return [item.user_id for item in self.user_permissions if item.effect == "deny" and item.source != "sharepoint"]
+        return [item.user_id for item in self.user_permissions if item.effect == "deny" and item.source not in SOURCE_ACL_PROVIDERS]
 
 class ArticleVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "article_versions"
@@ -157,11 +153,6 @@ class TagCatalog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("company_domain", "normalized_tag", name="uq_tag_catalog_company_normalized"),
         Index("ix_tag_catalog_company_active", "company_domain", "active"),
-    )
-    access_audiences: Mapped[list["Department"]] = relationship(
-        "Department", secondary=article_departments, viewonly=True,
-        primaryjoin=lambda: Article.id == article_departments.c.article_id,
-        secondaryjoin=lambda: and_(Department.id == article_departments.c.department_id, Department.kind == "access"),
     )
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)

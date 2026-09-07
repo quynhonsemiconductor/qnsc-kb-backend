@@ -73,6 +73,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      # Explicit, because the Settings default is now `production`: unset, this stack
+      # would refuse to start rather than run with the well-known dev credentials above.
+      - ENVIRONMENT=development
       # This stack RUNS celery (worker + beat), so the API must not also run the inline
       # loops. JOB_MODE defaults to "inline", and dev never set it: the API was replaying
       # the outbox and dispatching connector syncs at the same time as the worker, and a
@@ -109,6 +112,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      - ENVIRONMENT=development
       - JOB_MODE=celery
       - AUTO_CREATE_SCHEMA=false
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
@@ -158,6 +162,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      - ENVIRONMENT=development
       - JOB_MODE=celery
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
@@ -204,6 +209,7 @@ services:
       - .:/app
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
+      - ENVIRONMENT=development
     depends_on:
       db:
         condition: service_healthy

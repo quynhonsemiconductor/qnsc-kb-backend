@@ -59,7 +59,7 @@ data "terraform_remote_state" "platform" {
 # migrator. `beat` is deliberately absent — Celery beat runs as a second container
 # off the WORKER image with its own command, so it needs no image of its own.
 module "ecr" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
 
   # Lower than the module defaults (30 releases / 20 builds), but for a narrower reason
   # than "the images are big".
@@ -99,20 +99,20 @@ module "ecr" {
 #
 # v3 adds ssm:DescribeParameters to the deploy role, which the shared deploy workflow's
 # secret preflight needs to verify that SSM SecureString parameters were populated —
-# metadata only (names and version numbers, never values). rally still pins v2.1.0.
+# metadata only (names and version numbers, never values). rova still pins v2.1.0.
 #
 # v3.0.1 trusts BOTH shapes of the GitHub OIDC subject, and THIS REPOSITORY REQUIRES IT.
 # GitHub issues newer repositories an ID-augmented subject:
 #
-#   repo:QNSC-VN@297362956/qnsc-kb-backend@1312007613:pull_request
+#   repo:quynhonsemiconductor@297362956/qnsc-kb-backend@1312007613:pull_request
 #
-# while older ones like rally emit `repo:QNSC-VN/rally:...`. Nobody configures this — it
+# while older ones like rova emit `repo:quynhonsemiconductor/rova:...`. Nobody configures this — it
 # is fixed by GitHub at repository creation, and both repos report identical, default
 # settings. On v3.0.0 every job here failed with "Not authorized to perform
 # sts:AssumeRoleWithWebIdentity", which names neither the subject nor the mismatch; the
 # presented claim is only visible in CloudTrail's userIdentity.userName.
 module "iam_oidc" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
 
   product           = "qnsc-kb"
   github_org        = local.github_org
@@ -135,7 +135,7 @@ module "iam_oidc" {
   }
 
   # Both are the BACKEND repo: qnsc-kb splits frontend and backend across two repos,
-  # but infra lives beside the backend (infra/ in this repo), exactly as rally's lives
+  # but infra lives beside the backend (infra/ in this repo), exactly as rova's lives
   # in its monorepo. The frontend repo is absent on purpose — it deploys to Cloudflare
   # Pages and assumes no AWS role, so listing it would grant access nothing uses.
   app_repo_names         = ["qnsc-kb-backend"]
@@ -152,7 +152,7 @@ module "iam_oidc" {
   # buggy qnsc-kb apply cannot destroy the platform's foundations (state bucket, lock
   # table, OIDC provider, CMK, artifacts bucket) or mint IAM users. Those are owned by
   # qnsc-infra bootstrap and shared with every other product — the one place where a
-  # mistake here would take rally and opshub down with it.
+  # mistake here would take rova and opshub down with it.
   infra_apply_guardrail = {
     state_bucket_arn     = "arn:aws:s3:::qnsc-tofu-state"
     lock_table_arn       = "arn:aws:dynamodb:ap-southeast-1:${data.aws_caller_identity.current.account_id}:table/qnsc-tofu-locks"

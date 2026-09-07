@@ -1,8 +1,12 @@
-"""Provider adapters for the first-party SharePoint and Google Drive MVP.
+"""Provider adapters for the first-party SharePoint, OneDrive and Google Drive connectors.
 
 Adapters return normalized changes; synchronization, persistence and retry
 policy remain in the connector service so additional providers do not create
 provider-specific ingestion paths.
+
+Provider IDENTITY questions — is this Graph, which cursor, which identity
+provider, which ACL key — belong in ``domain/connector_providers.py``, not in
+string comparisons at call sites.
 """
 from __future__ import annotations
 
@@ -122,7 +126,12 @@ class ConnectorAdapter:
                         raise ConnectorProviderError("Provider returned too many redirects", retryable=False, code="unsafe_redirect")
                 if status_code in {429, 500, 502, 503, 504}:
                     retry_after = response_headers.get("retry-after")
-                    delay = float(retry_after) if retry_after and retry_after.isdigit() else min(16, 2 ** attempt) + secrets.randbelow(500) / 1000
+                    # The provider chooses this number, so it is untrusted input: a
+                    # misconfigured or hostile tenant answering `Retry-After: 86400`
+                    # parks a sync worker for a day. Capped at the top of our own
+                    # backoff curve; past the attempt ceiling the durable queue
+                    # reschedules the whole request anyway.
+                    delay = min(60.0, float(retry_after)) if retry_after and retry_after.isdigit() else min(16, 2 ** attempt) + secrets.randbelow(500) / 1000
                     if attempt == 3:
                         raise ConnectorProviderError(f"Provider retry limit reached ({status_code})", code=str(status_code))
                     await asyncio.sleep(delay)
@@ -199,13 +208,27 @@ class ConnectorAdapter:
         return None
 
 
-class SharePointAdapter(ConnectorAdapter):
-    provider = "sharepoint"
+class MicrosoftGraphAdapter(ConnectorAdapter):
+    """Shared Microsoft Graph transport for SharePoint and OneDrive.
+
+    Both providers are drives behind the same Graph endpoints: identical delta
+    semantics, identical permission entries, identical subscription lifecycle,
+    identical Entra application registration. Only scope DISCOVERY differs —
+    SharePoint enumerates sites and their libraries, OneDrive enumerates user
+    drives — so that is the single method subclasses override.
+    """
+
     graph = "https://graph.microsoft.com/v1.0"
     allowed_api_hosts = frozenset({"graph.microsoft.com"})
     # A /delta called without a token replays the drive (or folder subtree) from empty
     # and pages to the end, so the result is the full current state of the scope.
     full_walk_is_authoritative = True
+    #: Delegated consent scopes. Declared per provider because OneDrive has no use
+    #: for Sites.Read.All, and requesting permission a provider does not need is
+    #: exactly how least privilege gets lost.
+    oauth_scope = "offline_access openid profile User.Read Files.Read.All Sites.Read.All"
+    #: The (drive-level, folder-level) ``scope_type`` values this provider emits.
+    scope_types: tuple[str, str] = ("sharepoint_library", "sharepoint_folder")
 
     def oauth_url(self, state: str) -> str:
         params = {
@@ -213,7 +236,7 @@ class SharePointAdapter(ConnectorAdapter):
             "response_type": "code",
             "redirect_uri": settings.MICROSOFT_REDIRECT_URI or "",
             "response_mode": "query",
-            "scope": "offline_access openid profile User.Read Files.Read.All Sites.Read.All",
+            "scope": self.oauth_scope,
             "state": state,
         }
         return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?{urlencode(params)}"
@@ -228,7 +251,7 @@ class SharePointAdapter(ConnectorAdapter):
                     "grant_type": "authorization_code",
                     "code": code,
                     "redirect_uri": settings.MICROSOFT_REDIRECT_URI,
-                    "scope": "offline_access openid profile User.Read Files.Read.All Sites.Read.All",
+                    "scope": self.oauth_scope,
                 },
             )
             if response.status_code >= 400:
@@ -255,153 +278,48 @@ class SharePointAdapter(ConnectorAdapter):
                 raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
             response = await client.post(
                 f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
-                data={"client_id": settings.MICROSOFT_CLIENT_ID, "client_secret": settings.MICROSOFT_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh, "scope": "offline_access openid profile User.Read Files.Read.All Sites.Read.All"},
+                data={"client_id": settings.MICROSOFT_CLIENT_ID, "client_secret": settings.MICROSOFT_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh, "scope": self.oauth_scope},
             )
             if response.status_code >= 400:
                 raise ConnectorProviderError("Microsoft token refresh failed", retryable=False, code=str(response.status_code))
             return response.json()
 
-    async def discover_scopes(self) -> list[dict[str, Any]]:
-        # ``/drives`` often returns only a generic library such as
-        # "Documents". Resolve SharePoint sites first so reviewers can see the
-        # real site/library/folder location instead of guessing where it lives.
-        auth_mode = settings.microsoft_connector_auth_mode
-        configured_site_ids = [
-            value.strip() for value in settings.MICROSOFT_SHAREPOINT_SITE_IDS.split(",") if value.strip()
-        ]
-        configured_user_ids = [
-            value.strip() for value in settings.MICROSOFT_ONEDRIVE_USER_IDS.split(",") if value.strip()
-        ]
-        if auth_mode == "application" and not configured_site_ids and not configured_user_ids:
-            raise ConnectorProviderError(
-                "Application mode requires MICROSOFT_SHAREPOINT_SITE_IDS or MICROSOFT_ONEDRIVE_USER_IDS",
-                retryable=False,
-                code="scope_allowlist_required",
-            )
-        if configured_site_ids:
-            site_values: list[dict[str, Any]] = []
-            for site_id in configured_site_ids:
-                site_values.append(await self._request(
-                    "GET",
-                    f"{self.graph}/sites/{quote(site_id, safe='')}?$select=id,name,displayName,webUrl",
-                ))
-            sites = site_values
-        elif auth_mode == "application":
-            sites = []
-        else:
-            sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
-            sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
+    @staticmethod
+    def _configured_ids(raw: str) -> list[str]:
+        """Split a comma-separated allowlist setting, dropping blanks."""
+        return [value.strip() for value in (raw or "").split(",") if value.strip()]
+
+    async def _folder_scopes(
+        self, drive_id: str, *, base_config: dict[str, Any], location: str
+    ) -> list[dict[str, Any]]:
+        """The top-level folders of one drive, as individually selectable scopes.
+
+        Folder scopes exist so an administrator can ingest one folder instead of a
+        whole library. ``external_scope_id`` stays ``drive:folder`` because the sync
+        path needs both halves to call ``/drives/{drive}/items/{folder}/delta``.
+        """
+
+        folders = await self._request(
+            "GET",
+            f"{self.graph}/drives/{quote(drive_id, safe='')}/root/children?$select=id,name,folder,webUrl",
+        )
         result: list[dict[str, Any]] = []
-
-        for site in sites:
-            site_id = str(site.get("id") or "")
-            if not site_id:
+        for folder in folders.get("value", []):  # type: ignore[union-attr]
+            if not folder.get("folder"):
                 continue
-            site_name = str(site.get("displayName") or site.get("name") or site_id)
-            site_url = site.get("webUrl")
-            drives_data = await self._request(
-                "GET",
-                f"{self.graph}/sites/{quote(site_id, safe='')}/drives?$select=id,name,driveType,webUrl",
-            )
-            for drive in drives_data.get("value", []):  # type: ignore[union-attr]
-                drive_id = str(drive.get("id") or "")
-                if not drive_id:
-                    continue
-                drive_name = str(drive.get("name") or drive_id)
-                location = f"{site_name} / {drive_name}"
-                drive_config = {
-                    "site_id": site_id,
-                    "site_name": site_name,
-                    "site_url": site_url,
-                    "drive_id": drive_id,
-                    "drive_name": drive_name,
-                    "web_url": drive.get("webUrl") or site_url,
-                    "location_label": location,
-                }
-                result.append({
-                    "external_scope_id": drive_id,
-                    "scope_type": "sharepoint_library",
-                    "display_name": location,
-                    "config": drive_config,
-                })
-                folders = await self._request(
-                    "GET",
-                    f"{self.graph}/drives/{quote(drive_id, safe='')}/root/children?$select=id,name,folder,webUrl",
-                )
-                for folder in folders.get("value", []):  # type: ignore[union-attr]
-                    if folder.get("folder"):
-                        folder_name = str(folder.get("name") or folder.get("id"))
-                        result.append({
-                            "external_scope_id": f"{drive_id}:{folder['id']}",
-                            "scope_type": "sharepoint_folder",
-                            "display_name": f"{location} / {folder_name}",
-                            "config": {
-                                **drive_config,
-                                "folder_id": folder["id"],
-                                "web_url": folder.get("webUrl") or drive.get("webUrl") or site_url,
-                                "location_label": f"{location} / {folder_name}",
-                            },
-                        })
-
-        for user_id in configured_user_ids:
-            drive = await self._request(
-                "GET",
-                f"{self.graph}/users/{quote(user_id, safe='')}/drive?$select=id,name,driveType,webUrl",
-            )
-            drive_id = str(drive.get("id") or "") if isinstance(drive, dict) else ""
-            if not drive_id:
-                continue
-            drive_name = str(drive.get("name") or "OneDrive")
-            location = f"OneDrive / {user_id} / {drive_name}"
+            folder_name = str(folder.get("name") or folder.get("id"))
+            label = f"{location} / {folder_name}"
             result.append({
-                "external_scope_id": drive_id,
-                "scope_type": "onedrive_drive",
-                "display_name": location,
+                "external_scope_id": f"{drive_id}:{folder['id']}",
+                "scope_type": self.scope_types[1],
+                "display_name": label,
                 "config": {
-                    "drive_id": drive_id,
-                    "drive_name": drive_name,
-                    "user_id": user_id,
-                    "web_url": drive.get("webUrl"),
-                    "location_label": location,
+                    **base_config,
+                    "folder_id": folder["id"],
+                    "web_url": folder.get("webUrl") or base_config.get("web_url"),
+                    "location_label": label,
                 },
             })
-            folders = await self._request(
-                "GET",
-                f"{self.graph}/drives/{quote(drive_id, safe='')}/root/children?$select=id,name,folder,webUrl",
-            )
-            for folder in folders.get("value", []):  # type: ignore[union-attr]
-                if folder.get("folder"):
-                    folder_name = str(folder.get("name") or folder.get("id"))
-                    result.append({
-                        "external_scope_id": f"{drive_id}:{folder['id']}",
-                        "scope_type": "onedrive_folder",
-                        "display_name": f"{location} / {folder_name}",
-                        "config": {
-                            "drive_id": drive_id,
-                            "drive_name": drive_name,
-                            "user_id": user_id,
-                            "folder_id": folder["id"],
-                            "web_url": folder.get("webUrl") or drive.get("webUrl"),
-                            "location_label": f"{location} / {folder_name}",
-                        },
-                    })
-
-        if result:
-            return result
-
-        # Keep a fallback for tenants where site search is disabled but the
-        # delegated token can still enumerate drives.
-        data = await self._request("GET", f"{self.graph}/drives?$select=id,name,driveType,webUrl")
-        for item in data.get("value", []):  # type: ignore[union-attr]
-            drive_id = str(item.get("id") or "")
-            drive_name = str(item.get("name") or drive_id)
-            location = f"Available SharePoint library / {drive_name}"
-            result.append({"external_scope_id": drive_id, "scope_type": "sharepoint_library", "display_name": location, "config": {"drive_id": drive_id, "drive_name": drive_name, "web_url": item.get("webUrl"), "location_label": location}})
-            folders = await self._request("GET", f"{self.graph}/drives/{quote(drive_id, safe='')}/root/children?$select=id,name,folder,webUrl")
-            for folder in folders.get("value", []):  # type: ignore[union-attr]
-                if folder.get("folder"):
-                    folder_name = str(folder.get("name") or folder.get("id"))
-                    result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "sharepoint_folder", "display_name": f"{location} / {folder_name}", "config": {"drive_id": drive_id, "folder_id": folder["id"], "web_url": folder.get("webUrl") or item.get("webUrl"), "location_label": f"{location} / {folder_name}"}})
         return result
 
     async def create_webhook(
@@ -492,6 +410,186 @@ class SharePointAdapter(ConnectorAdapter):
     async def download(self, change: NormalizedChange) -> bytes:
         drive_id = change.corpus_id
         return await self._request("GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/content")  # type: ignore[return-value]
+
+
+class SharePointAdapter(MicrosoftGraphAdapter):
+    provider = "sharepoint"
+    scope_types = ("sharepoint_library", "sharepoint_folder")
+
+    async def discover_scopes(self) -> list[dict[str, Any]]:
+        # ``/drives`` often returns only a generic library such as
+        # "Documents". Resolve SharePoint sites first so reviewers can see the
+        # real site/library/folder location instead of guessing where it lives.
+        auth_mode = settings.microsoft_connector_auth_mode
+        configured_site_ids = self._configured_ids(settings.MICROSOFT_SHAREPOINT_SITE_IDS)
+        if auth_mode == "application" and not configured_site_ids:
+            raise ConnectorProviderError(
+                "Application mode requires MICROSOFT_SHAREPOINT_SITE_IDS",
+                retryable=False,
+                code="scope_allowlist_required",
+            )
+        if configured_site_ids:
+            sites: list[Any] = [
+                await self._request(
+                    "GET",
+                    f"{self.graph}/sites/{quote(site_id, safe='')}?$select=id,name,displayName,webUrl",
+                )
+                for site_id in configured_site_ids
+            ]
+        else:
+            sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
+            sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
+        result: list[dict[str, Any]] = []
+
+        for site in sites:
+            site_id = str(site.get("id") or "")
+            if not site_id:
+                continue
+            site_name = str(site.get("displayName") or site.get("name") or site_id)
+            site_url = site.get("webUrl")
+            drives_data = await self._request(
+                "GET",
+                f"{self.graph}/sites/{quote(site_id, safe='')}/drives?$select=id,name,driveType,webUrl",
+            )
+            for drive in drives_data.get("value", []):  # type: ignore[union-attr]
+                drive_id = str(drive.get("id") or "")
+                if not drive_id:
+                    continue
+                drive_name = str(drive.get("name") or drive_id)
+                location = f"{site_name} / {drive_name}"
+                drive_config = {
+                    "site_id": site_id,
+                    "site_name": site_name,
+                    "site_url": site_url,
+                    "drive_id": drive_id,
+                    "drive_name": drive_name,
+                    "web_url": drive.get("webUrl") or site_url,
+                    "location_label": location,
+                }
+                result.append({
+                    "external_scope_id": drive_id,
+                    "scope_type": self.scope_types[0],
+                    "display_name": location,
+                    "config": drive_config,
+                })
+                result.extend(
+                    await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+                )
+
+        if result:
+            return result
+
+        # Keep a fallback for tenants where site search is disabled but the
+        # delegated token can still enumerate drives.
+        data = await self._request("GET", f"{self.graph}/drives?$select=id,name,driveType,webUrl")
+        for item in data.get("value", []):  # type: ignore[union-attr]
+            drive_id = str(item.get("id") or "")
+            drive_name = str(item.get("name") or drive_id)
+            location = f"Available SharePoint library / {drive_name}"
+            drive_config = {"drive_id": drive_id, "drive_name": drive_name, "web_url": item.get("webUrl"), "location_label": location}
+            result.append({"external_scope_id": drive_id, "scope_type": self.scope_types[0], "display_name": location, "config": drive_config})
+            result.extend(
+                await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+            )
+        return result
+
+
+class OneDriveAdapter(MicrosoftGraphAdapter):
+    """Per-user OneDrive for Business drives.
+
+    Sites.Read.All is deliberately absent from the consent request: this
+    provider never reads a SharePoint site, and asking for the permission
+    anyway would make a OneDrive-only integration a tenant-wide site reader.
+
+    Discovery is allowlist-driven in BOTH auth modes. ``/me/drive`` is the only
+    self-service alternative and it resolves to the single account that clicked
+    consent, which is not a knowledge-base source anyone can administer. When
+    the allowlist is empty in delegated mode the signed-in user's own drive is
+    the honest interpretation, so it is offered explicitly rather than pretending
+    a tenant-wide enumeration happened.
+    """
+
+    provider = "onedrive"
+    oauth_scope = "offline_access openid profile User.Read Files.Read.All"
+    scope_types = ("onedrive_drive", "onedrive_folder")
+
+    async def _user_drive(self, user_id: str) -> dict[str, Any] | None:
+        """One user's drive, or None when the account has none provisioned.
+
+        A licensed account with OneDrive never provisioned answers 404, and one
+        such account in the allowlist must not abort discovery for every other.
+        """
+        try:
+            drive = await self._request(
+                "GET",
+                f"{self.graph}/users/{quote(user_id, safe='')}/drive?$select=id,name,driveType,webUrl",
+            )
+        except ConnectorProviderError as exc:
+            if exc.code == "404":
+                return None
+            raise
+        return drive if isinstance(drive, dict) else None
+
+    async def discover_scopes(self) -> list[dict[str, Any]]:
+        configured_user_ids = self._configured_ids(settings.MICROSOFT_ONEDRIVE_USER_IDS)
+        if settings.microsoft_connector_auth_mode == "application" and not configured_user_ids:
+            raise ConnectorProviderError(
+                "Application mode requires MICROSOFT_ONEDRIVE_USER_IDS",
+                retryable=False,
+                code="scope_allowlist_required",
+            )
+        result: list[dict[str, Any]] = []
+        for user_id in configured_user_ids:
+            drive = await self._user_drive(user_id)
+            drive_id = str((drive or {}).get("id") or "")
+            if not drive_id:
+                continue
+            drive_name = str(drive.get("name") or "OneDrive")  # type: ignore[union-attr]
+            location = f"OneDrive / {user_id} / {drive_name}"
+            drive_config = {
+                "drive_id": drive_id,
+                "drive_name": drive_name,
+                "user_id": user_id,
+                "web_url": drive.get("webUrl"),  # type: ignore[union-attr]
+                "location_label": location,
+            }
+            result.append({
+                "external_scope_id": drive_id,
+                "scope_type": self.scope_types[0],
+                "display_name": location,
+                "config": drive_config,
+            })
+            result.extend(
+                await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+            )
+        if result or configured_user_ids:
+            return result
+
+        drive = await self._request("GET", f"{self.graph}/me/drive?$select=id,name,driveType,webUrl,owner")
+        drive_id = str(drive.get("id") or "") if isinstance(drive, dict) else ""
+        if not drive_id:
+            return result
+        owner = ((drive.get("owner") or {}).get("user") or {}) if isinstance(drive, dict) else {}
+        owner_label = str(owner.get("email") or owner.get("displayName") or "signed-in user")
+        drive_name = str(drive.get("name") or "OneDrive")
+        location = f"OneDrive / {owner_label} / {drive_name}"
+        drive_config = {
+            "drive_id": drive_id,
+            "drive_name": drive_name,
+            "owner_label": owner_label,
+            "web_url": drive.get("webUrl"),
+            "location_label": location,
+        }
+        result.append({
+            "external_scope_id": drive_id,
+            "scope_type": self.scope_types[0],
+            "display_name": location,
+            "config": drive_config,
+        })
+        result.extend(
+            await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+        )
+        return result
 
 
 class GoogleDriveAdapter(ConnectorAdapter):
@@ -693,12 +791,20 @@ class GoogleDriveAdapter(ConnectorAdapter):
         return await self._request("GET", f"{self.api}/files/{change.external_id}?alt=media&supportsAllDrives=true")  # type: ignore[return-value]
 
 
+#: Provider name -> adapter. A table rather than an if-chain so registering a
+#: provider is one line and cannot half-happen.
+_ADAPTERS: dict[str, type[ConnectorAdapter]] = {
+    SharePointAdapter.provider: SharePointAdapter,
+    OneDriveAdapter.provider: OneDriveAdapter,
+    GoogleDriveAdapter.provider: GoogleDriveAdapter,
+}
+
+
 def adapter_for(connector: Connector) -> ConnectorAdapter:
-    if connector.system == "sharepoint":
-        return SharePointAdapter(connector)
-    if connector.system == "google_drive":
-        return GoogleDriveAdapter(connector)
-    raise ConnectorProviderError(f"Unsupported connector provider: {connector.system}", retryable=False, code="unsupported_provider")
+    adapter = _ADAPTERS.get(connector.system)
+    if adapter is None:
+        raise ConnectorProviderError(f"Unsupported connector provider: {connector.system}", retryable=False, code="unsupported_provider")
+    return adapter(connector)
 
 
 #: The identity kinds a SharePoint identity set can carry, and what each is to us.

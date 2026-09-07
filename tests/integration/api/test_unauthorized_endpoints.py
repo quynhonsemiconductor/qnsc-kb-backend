@@ -72,7 +72,7 @@ def _anonymous_path(path: str) -> str:
         "company_domain": "acme.test",
         "version_num": "1",
         "key": "test-flag",
-        "external_group_id": "external-group",
+        "principal_id": "provider-principal",
     }
 
     def replace(match: re.Match[str]) -> str:
@@ -149,8 +149,12 @@ def test_api_data_endpoints_reject_anonymous_requests(monkeypatch):
             ("POST", "/api/v1/knowledge/role-preview", {"role": "Staff"}),
             ("GET", "/api/v1/meta/tags", None),
             ("GET", "/api/v1/meta/glossary", None),
-            ("GET", "/api/v1/meta/groups", None),
-            ("PUT", f"/api/v1/auth/groups/{uuid.uuid4()}/members", {"user_ids": []}),
+            ("GET", f"/api/v1/auth/departments/{uuid.uuid4()}/members", None),
+            (
+                "PUT",
+                f"/api/v1/auth/departments/{uuid.uuid4()}/members",
+                {"user_ids": []},
+            ),
             ("GET", "/api/v1/notifications", None),
             ("POST", f"/api/v1/notifications/{uuid.uuid4()}/read", None),
             (

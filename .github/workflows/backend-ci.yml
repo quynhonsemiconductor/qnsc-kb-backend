@@ -287,11 +287,32 @@ jobs:
       - name: Bootstrap application role
         run: poetry run python scripts/bootstrap_db_role.py
 
+      # `migrations` AND `src` together, deliberately. The 20260802_00 baseline builds
+      # the schema with `Base.metadata.create_all` against the LIVE models, so checking
+      # out main's migrations while leaving src at the PR head runs main's history
+      # against the PR's models — a combination that exists in no deploy, and which
+      # fails as soon as a PR removes a mapped table that main's later migrations still
+      # reference by name. Retiring access_groups/user_groups/article_access hit exactly
+      # that: main's 20260802_03 indexed a table the PR's models no longer create.
+      #
+      # Pinning both to main makes phase 1 a faithful "production as it is today", and
+      # phase 2 below the real upgrade onto it.
+      # `rm -rf migrations` before checking main's copy out, deliberately. A plain
+      # `git checkout origin/main -- migrations` overwrites files main also has but
+      # LEAVES files only this PR added, and alembic loads the whole directory — so the
+      # PR's own revision ran as part of the "baseline", phase 2 became a no-op, and the
+      # upgrade path this job exists to test was never exercised. Deleting the directory
+      # first makes the baseline exactly main's head, with no leftovers and no shell
+      # loop over `git diff` to get wrong.
       - name: Apply baseline (main) migrations
         run: |
-          git checkout origin/main -- migrations
+          rm -rf migrations
+          git checkout origin/main -- migrations src
           poetry run alembic -c migrations/alembic.ini upgrade head
-          git checkout HEAD -- migrations
+          echo "Baseline head:"
+          poetry run alembic -c migrations/alembic.ini current
+          rm -rf migrations
+          git checkout HEAD -- migrations src
 
       - name: Apply new migrations on top of baseline
         run: poetry run alembic -c migrations/alembic.ini upgrade head
@@ -442,7 +463,7 @@ jobs:
 
       - name: Detect breaking API changes
         if: github.event_name == 'pull_request'
-        uses: QNSC-VN/qnsc-ci/actions/validate-openapi-contract@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
+        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@v1 # v1.10.0
         with:
           current-spec-path: openapi.json
           base-spec-path: /tmp/openapi-base.json
@@ -450,6 +471,6 @@ jobs:
       # Uploaded on every run so the frontend repo has a spec to check its client
       # against, and so a reviewer can read what the API surface became.
       - name: Publish OpenAPI spec
-        uses: QNSC-VN/qnsc-ci/actions/publish-openapi-spec@77236732b51c949693e06bc7bc3f8a2676edcdca # v1.10.0
+        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@v1 # v1.10.0
         with:
           spec-path: openapi.json

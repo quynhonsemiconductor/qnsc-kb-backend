@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, status, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from src.api.deps import get_db, get_current_user, require_permission
+from src.api.deps import get_db, get_current_user, require_permission, set_database_context
 from src.models import User
 from src.models.article import Article
 from src.models.user import Department
@@ -40,6 +40,7 @@ from src.domain.departments import resolve_active_department
 from src.domain.content_restructure import build_restructure_report, split_into_chunks
 from src.domain.department_routing import suggest_departments
 from src.domain.llm_client import resolve_provider
+from src.domain.connector_providers import REMOTE_PROVIDERS
 import structlog
 
 logger = structlog.get_logger()
@@ -1094,6 +1095,7 @@ async def dismiss_gap(
 @router.get("/audit-log")
 async def get_audit_log(
     limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user_id: uuid.UUID | None = Query(None),
     action: str | None = Query(None, min_length=1, max_length=50),
     start_time: datetime | None = Query(None),
@@ -1111,6 +1113,7 @@ async def get_audit_log(
     logs = await service.list_audit_logs(
         current_user,
         limit,
+        offset=offset,
         user_id=user_id,
         action=action,
         start_time=start_time,
@@ -1193,7 +1196,13 @@ async def get_health_metrics(
         )
         else current_user.company_domain
     )
-    connector_filters = [Connector.system == "sharepoint", Connector.status == "active"]
+    # Every remote provider counts toward the connector-sync signal. Filtering on
+    # SharePoint alone reported "no active connector" on a tenant running only
+    # OneDrive or Google Drive.
+    connector_filters = [
+        Connector.system.in_(sorted(REMOTE_PROVIDERS)),
+        Connector.status == "active",
+    ]
     index_filters = [
         Article.status == "published",
         Article.lifecycle_status == "active",
@@ -1211,6 +1220,12 @@ async def get_health_metrics(
     metrics["dependencies"] = {
         "r2": {"configured": _r2_is_configured()},
         "sharepoint": {
+            "configured": bool(connector_count),
+            "active_connectors": int(connector_count or 0),
+        },
+        # Same numbers under a provider-neutral name. `sharepoint` is retained
+        # because the deployed frontend reads that key.
+        "connectors": {
             "configured": bool(connector_count),
             "active_connectors": int(connector_count or 0),
         },
@@ -1784,7 +1799,7 @@ async def purge_knowledge(
     Scoped to `current_user.company_domain`. A global-scope permission is required because
     the operation is unrecoverable, NOT because it crosses tenants — it does not.
     """
-    from src.domain.kb_purge import purge_knowledge_base
+    from src.domain.kb_purge import delete_purged_objects, purge_knowledge_base
 
     company_domain = current_user.company_domain
     if not company_domain:
@@ -1829,4 +1844,109 @@ async def purge_knowledge(
     )
     await db.commit()
 
+    # Object storage has no rollback, so the objects go only after the rows are durable.
+    # Until this point a failed commit left the rows intact and their bytes already
+    # destroyed; now a failure leaves both, and the orphan sweep reclaims the keys.
+    await delete_purged_objects(counts)
+
     return {"dry_run": False, "company_domain": company_domain, **counts.as_dict()}
+
+
+class FactoryResetRequest(BaseModel):
+    #: Defaults to a dry run, like the knowledge purge above. A destructive path is
+    #: something a caller asks for, never what happens when a field is forgotten.
+    dry_run: bool = True
+    #: Must equal FACTORY_RESET_CONFIRM_PHRASE. A boolean is too easy to resend from
+    #: saved request history; typing the phrase proves the operator knows this is not
+    #: the tenant-scoped content purge.
+    confirm: str | None = Field(default=None, max_length=255)
+
+
+#: Deliberately not the company domain — that is the knowledge purge's phrase, and
+#: reusing it would let a saved purge request execute a full reset.
+FACTORY_RESET_CONFIRM_PHRASE = "RESET ENTIRE DATABASE"
+
+
+@router.post("/system/factory-reset")
+async def factory_reset_database(
+    payload: FactoryResetRequest,
+    current_user: User = Depends(require_permission("role.manage", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Erase every table except identity, for every tenant. IRREVERSIBLE.
+
+    Returns the deployment to a just-released state: users, roles, permissions,
+    departments and SSO identity links survive; all knowledge, drafts, connectors,
+    audit history, feature flags and the LLM provider configuration do not.
+
+    Four independent gates, because no single one is enough for an operation with
+    no undo:
+
+    1. `role.manage` at global scope — the strongest permission the RBAC model has.
+    2. `FACTORY_RESET_ENABLED`, so the capability does not exist in a deployment
+       that never asked for it.
+    3. An email allowlist, checked against the verified account.
+    4. An exact confirmation phrase, and `dry_run` defaults to true.
+
+    Gates 2 and 3 live in the API environment, which a compromised session cannot
+    edit. That is the point: permission alone would mean any future global admin
+    inherits the ability to destroy the deployment.
+    """
+    from src.domain.factory_reset import (
+        delete_reset_objects,
+        factory_reset,
+        is_reset_operator,
+    )
+
+    if not settings.FACTORY_RESET_ENABLED:
+        # 404, not 403: an endpoint that is switched off should not advertise that it
+        # exists and is merely refusing this caller.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Not Found"
+        )
+    if not is_reset_operator(current_user.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "not_reset_operator",
+                "message": "This account is not authorised to reset the database.",
+            },
+        )
+    if not payload.dry_run and payload.confirm != FACTORY_RESET_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "confirmation_mismatch",
+                "message": "Set confirm to the exact phrase to run this for real.",
+                "expected": FACTORY_RESET_CONFIRM_PHRASE,
+            },
+        )
+
+    # Every table here FORCEs row security. Without a global-admin context the
+    # DELETEs are silently FILTERED rather than refused, and the run would report
+    # success having removed only the caller's own tenant.
+    await set_database_context(db, None, True, user_id=str(current_user.id))
+
+    counts = await factory_reset(db, dry_run=payload.dry_run)
+    if payload.dry_run:
+        return {"dry_run": True, **counts.as_dict()}
+
+    # AFTER the deletes, not before: `audit_logs` is one of the cleared tables, so a
+    # row written first would be erased by the reset it was recording. Same
+    # transaction, so the record cannot survive without the reset or vice versa.
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="factory_reset",
+            target_type="database",
+            target_id="all",
+            outcome="success",
+            detail_json=counts.as_dict(),
+        )
+    )
+    await db.commit()
+
+    # Object storage has no rollback, so the bytes go only once the rows are durable.
+    await delete_reset_objects(counts)
+
+    return {"dry_run": False, **counts.as_dict()}

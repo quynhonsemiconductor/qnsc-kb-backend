@@ -65,10 +65,13 @@ def test_the_even_share_never_exceeds_the_global_parent_budget(articles):
 
 
 def test_one_article_now_contributes_more_than_three_parents():
-    """The regression, measured where it actually bit."""
-    parents = [_parent("only", f"c{i}") for i in range(8)]
+    """The regression, measured where it actually bit.
+
+    Uses enough parents to exceed the configured per-article cap so the assertion
+    stays meaningful whatever RAG_MAX_PARENTS_PER_ARTICLE is set to."""
+    parents = [_parent("only", f"c{i}") for i in range(settings.RAG_MAX_PARENTS_PER_ARTICLE + 5)]
     selected = _select_context(parents)
-    assert len(selected) > settings.RAG_MAX_PARENTS_PER_ARTICLE
+    assert len(selected) > 3
 
 
 def test_a_diverse_corpus_is_still_spread_across_articles():

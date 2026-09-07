@@ -154,13 +154,13 @@ module "stack" {
   // ElastiCache has no stopped state — only delete — so this was the one component of an
   // idled environment that kept billing all 730 hours of the month, while the schedule
   // above now runs develop 55 hours a week. It could never be turned off either, because
-  // it is the Celery broker rather than a cache that can be missed. rally-develop had the
+  // it is the Celery broker rather than a cache that can be missed. rova-develop had the
   // same node for the same reason: two at $15.45 each.
   //
-  // Saves $15.45/mo across the account. Node created in QNSC-VN/qnsc-infra#69, and rally
-  // moved onto it in QNSC-VN/rally#448.
+  // Saves $15.45/mo across the account. Node created in quynhonsemiconductor/infra#69, and rova
+  // moved onto it in quynhonsemiconductor/rova#448.
   //
-  // DATABASE 1. rally holds 0. This is a Valkey database index, not a key prefix — a
+  // DATABASE 1. rova holds 0. This is a Valkey database index, not a key prefix — a
   // prefix has to be honoured by every library touching the connection, while an index is
   // enforced by the server. Cluster mode is disabled on the shared node, so all 16
   // databases exist and SELECT works. Indexes are allocated centrally in the stack
@@ -170,9 +170,9 @@ module "stack" {
   // CELERY IS WHY THE EVICTION POLICY MATTERS, and this is the product that carries the
   // risk. Broker keys have no TTL, so evicting one loses a QUEUED TASK rather than missing
   // a cache. The shared node runs the default `volatile-lru`, which evicts only keys that
-  // HAVE a TTL — rally's rate-limit counters and denylist entries go first, and Celery's
+  // HAVE a TTL — rova's rate-limit counters and denylist entries go first, and Celery's
   // queue is never a candidate. If anyone sets `allkeys-lru` on that node to improve
-  // rally's hit rate, this product silently starts dropping background work.
+  // rova's hit rate, this product silently starts dropping background work.
   //
   // `mode` is deliberately NOT set here. It sizes a node this stack no longer creates —
   // the shared node's mode is decided in qnsc-infra's runtime layer — so passing it would
@@ -199,7 +199,7 @@ module "stack" {
   // ── Off-hours idling ───────────────────────────────────────────────────────
   // Two passes, not one. A single nightly stop does not hold, because the deploy
   // pipeline's `ensure_rds` step wakes this environment whenever a deploy lands — so a
-  // merge after the stop leaves everything running until the following night. rally
+  // merge after the stop leaves everything running until the following night. rova
   // measured exactly that: its develop database published CPU datapoints every hour of
   // every night while a stop schedule fired correctly each evening.
   //
@@ -213,10 +213,10 @@ module "stack" {
   //
   // THREE passes were tried (19:00/22:00/02:00, replacing 0,3) to move the money — develop
   // was up 08:00-00:00, so the 19:00-00:00 tail cost ~$8.13/mo of RDS and Fargate across
-  // both develop environments. rally moved BACK to `0,3` on 2026-08-19 on request: a 19:00
+  // both develop environments. rova moved BACK to `0,3` on 2026-08-19 on request: a 19:00
   // stop cut the evening short, and develop being down while somebody is still working
   // costs more in interruption than the hours save. This repo follows the same reversal —
-  // see rally's infra/live/develop/main.tf for the fuller history.
+  // see rova's infra/live/develop/main.tf for the fuller history.
   //
   // TWO PASSES, and the second is not optional. 00:00 ends the day; 03:00 catches a deploy
   // that landed late and woke the environment, because nothing else would put it back down
@@ -255,7 +255,7 @@ module "stack" {
   // working day rather than during its first minutes.
   //
   // IF qnsc-kb ever goes properly dormant, build a one-click `Wake develop` workflow first
-  // (qnsc-ci already has the `ensure-environment-awake` action; nothing exposes it as a
+  // (ci already has the `ensure-environment-awake` action; nothing exposes it as a
   // dispatchable workflow), THEN remove this line. In that order.
   wake_schedule = "cron(0 8 ? * MON-FRI *)"
 
@@ -267,21 +267,16 @@ module "stack" {
   //
   //   embedding backend returned 384 dimensions, but EMBEDDING_DIMENSION is 1024
   //
-  // That is exactly what "BAAI/bge-m3" did here. The Dockerfile bakes
-  // paraphrase-multilingual-MiniLM-L12-v2 (384) via ARG EMBEDDING_MODEL, and the deploy
-  // pipeline cannot override it — qnsc-ci's build-push-ecr action takes no build-args —
-  // so bge-m3 was never in any image and RAG had never once worked here. Search fell back
-  // to keyword-only and indexing failed, silently.
+  // The Dockerfile bakes intfloat/multilingual-e5-small (384) via ARG EMBEDDING_MODEL,
+  // and this must name the same model or EMBEDDING_DIMENSION resolves against the wrong
+  // export. e5-small is retrieval-trained (query:/passage: prefixes applied in
+  // src/lib/embeddings) and measured substantially better on Vietnamese retrieval.
   //
-  // Moving to bge-m3 for real is a project, not an edit: a build-args passthrough in
-  // qnsc-ci, api memory to 6144 (2.27 GB of fp32 weights do not fit the ~1.5 GiB left
-  // after clamav), pooling to "cls", and EMBEDDING_MAX_TOKENS to 8192.
-  //
-  // Fixes EMBEDDING_DIMENSION at 384, which is the pgvector column width and the HNSW
-  // index; migration 20260810_51 re-aligns the column and REFUSES to run while any
-  // embeddings exist, because vectors of different widths are not comparable.
-  embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  embedding_version = "minilm-l12-v1"
+  // Fixes EMBEDDING_DIMENSION at 384, same as the previous MiniLM, so the pgvector
+  // column and HNSW index are unchanged; adopting it required a one-time re-embed
+  // migration because the 384-wide vector space is different.
+  embedding_model   = "intfloat/multilingual-e5-small"
+  embedding_version = "e5-small-v1"
   // Parity-gated ONNX flip (cosine 1.000000 vs torch, tests/unit/test_embedding_backends.py).
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"

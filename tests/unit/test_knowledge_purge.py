@@ -11,8 +11,10 @@ in production:
   sync path skips ingest when both match. Deleting articles while keeping that cache means
   the next reconcile walk finds every file unchanged and re-imports nothing, so the corpus
   ends up permanently empty rather than freshly empty.
-* Scope. Users, roles, RBAC, departments, access groups and the audit log are not content.
-  A purge that removes them is a factory reset, which is not what this is.
+* Scope. Users, roles, RBAC, departments and the audit log are not content. A purge that
+  removes them is a factory reset, which is not what this is. Department membership IS
+  audience membership now, so `user_departments` survives too: stripping it would silently
+  revoke every reader's access.
 * Connectors survive. They hold the OAuth grant. Deleting them would force an operator to
   reconnect SharePoint by hand after every test reset.
 """
@@ -74,6 +76,18 @@ class _PurgeDB:
                 return _Result([])
             return _Result([])
         return _Result(rowcount=self._rowcount)
+
+    async def scalar(self, statement, params=None, *args, **kwargs):
+        """The dry-run counter aggregates in SQL, so it reads a scalar COUNT.
+
+        It used to pull every id into Python and take len(), which on a real corpus meant
+        millions of UUIDs crossing the wire to produce one integer.
+        """
+        rendered = str(statement.compile(dialect=postgresql.dialect()))
+        self.statements.append(rendered)
+        if "count(" in rendered.lower() and "from articles" in rendered.lower():
+            return len(self._article_ids)
+        return 0
 
     async def commit(self):
         self.committed = True
@@ -205,7 +219,7 @@ def test_connectors_are_never_deleted_because_they_hold_the_oauth_grant():
         "permissions",
         "role_permissions",
         "departments",
-        "access_groups",
+        "user_departments",
         "audit_logs",
         "tag_catalog",
         "feature_flags",

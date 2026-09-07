@@ -130,7 +130,6 @@ async def find_similar_documents(
         .where(*ArticleRepository._authorized_article_filters(user))
         .options(
             selectinload(Article.sources),
-            selectinload(Article.access_groups),
             selectinload(Article.departments),
             selectinload(Article.user_permissions),
         )

@@ -28,12 +28,14 @@ import asyncio
 import os
 import sys
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
 from src.domain.auth import AuthService
 from src.domain.rbac import bootstrap_rbac
+from src.models.rbac import Role
 from src.repositories.user import UserRepository
 
 
@@ -80,10 +82,29 @@ async def main() -> int:
                 allow_privileged_role=True,
             )
 
-            # Creates the role catalogue and attaches the GLOBAL Admin role — the one
-            # with company_domain = NULL. AuthorizationService.is_global_administrator
-            # checks for exactly that, so a company-scoped Admin is not the same thing.
+            # Creates the role catalogue, including the global Admin role. The BACKFILL in
+            # bootstrap_rbac deliberately hands a company-scoped Admin role to any user
+            # that has a company_domain — that is what keeps an ordinary account from
+            # becoming a cross-tenant administrator by acquiring the role string "Admin" —
+            # so the global grant this script exists to make has to be stated here.
             await bootstrap_rbac(db)
+            admin_role = await db.scalar(
+                select(Role)
+                .where(Role.name == "Admin", Role.company_domain.is_(None))
+                .options(selectinload(Role.permissions))
+            )
+            if admin_role is None:
+                print(
+                    "global Admin role is missing after the RBAC bootstrap; no administrator created",
+                    file=sys.stderr,
+                )
+                await db.rollback()
+                return 1
+            # AuthorizationService.is_global_administrator looks for exactly this role: the
+            # one with company_domain = NULL. A company-scoped Admin is not the same thing
+            # and cannot administer another tenant.
+            user = await repo.get_by_id(user.id)
+            user.roles = [admin_role]
             await db.commit()
 
             print(f"created global administrator {email} (id={user.id})")

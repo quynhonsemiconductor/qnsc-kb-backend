@@ -49,30 +49,43 @@ class EventBus:
         # article lifecycle event completes so permission/content changes can
         # never serve stale grounded context.
         if event_type in {"ArticlePublished", "ArticleUpdated", "PermissionChanged", "ArticleDeleted"}:
-            try:
-                from sqlalchemy import delete
-                from sqlalchemy.dialects.postgresql import JSONB
-                from src.api.deps import SessionLocal, set_database_context
-                from src.models.ai import AiCache
-                async with SessionLocal() as db:
-                    await set_database_context(db, None, True)
-                    article_id = payload.get("article_id")
-                    result = await db.execute(
-                        delete(AiCache).where(AiCache.article_ids.cast(JSONB).contains([str(article_id)]))
-                        if article_id else delete(AiCache)
-                    )
-                    await db.commit()
-                    logger.info("AI cache invalidated after article event", event_type=event_type, invalidated_count=result.rowcount)
-            except Exception as exc:
-                logger.error("AI cache invalidation failed", event_type=event_type, error=str(exc))
+            article_id = payload.get("article_id")
+            # No article id, no invalidation. The fallback here used to be a bare
+            # delete(AiCache) with no predicate, which wipes every cached answer for every
+            # user in every tenant — a global cache flush triggered by one malformed
+            # payload, and ai_cache carries no company_domain to narrow it by (it is
+            # owner-scoped, models/ai.py:57). Every publisher of these four events sends
+            # article_id, so an absent one is a bug to see in the log, not a reason to
+            # discard other tenants' answers. Skipping is also the safe direction: the
+            # entries expire on `expires_at` regardless.
+            if not article_id:
+                logger.warning(
+                    "Skipping AI cache invalidation; event carries no article_id",
+                    event_type=event_type,
+                )
+            else:
                 try:
-                    from src.api.deps import SessionLocal
-                    from src.models.ops import DeadLetterJob
+                    from sqlalchemy import delete
+                    from sqlalchemy.dialects.postgresql import JSONB
+                    from src.api.deps import SessionLocal, set_database_context
+                    from src.models.ai import AiCache
                     async with SessionLocal() as db:
-                        db.add(DeadLetterJob(source_queue=f"cache:{event_type}", payload=payload, error=str(exc)))
+                        await set_database_context(db, None, True)
+                        result = await db.execute(
+                            delete(AiCache).where(AiCache.article_ids.cast(JSONB).contains([str(article_id)]))
+                        )
                         await db.commit()
-                except Exception as dlq_error:
-                    logger.error("Failed to persist cache invalidation dead-letter record", error=str(dlq_error))
+                        logger.info("AI cache invalidated after article event", event_type=event_type, invalidated_count=result.rowcount)
+                except Exception as exc:
+                    logger.error("AI cache invalidation failed", event_type=event_type, error=str(exc))
+                    try:
+                        from src.api.deps import SessionLocal
+                        from src.models.ops import DeadLetterJob
+                        async with SessionLocal() as db:
+                            db.add(DeadLetterJob(source_queue=f"cache:{event_type}", payload=payload, error=str(exc)))
+                            await db.commit()
+                    except Exception as dlq_error:
+                        logger.error("Failed to persist cache invalidation dead-letter record", error=str(dlq_error))
 
         if settings.JOB_MODE.lower() == "celery":
             try:
