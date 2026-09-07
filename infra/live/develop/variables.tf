@@ -92,17 +92,17 @@ variable "email_provider" {
 
 variable "mail_from_email" {
   type    = string
-  default = ""
+  default = "no-reply@qnsc.vn"
 
   description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM under EMAIL_PROVIDER=ses,
-    e.g. "no-reply@qnsc.vn".
+    Mailbox that invitations and password resets are sent FROM under EMAIL_PROVIDER=ses.
 
-    Left EMPTY deliberately until that address (or its domain) has a verified SES
-    identity. While empty, SesEmailSender raises "MAIL_FROM_EMAIL is not configured" on
-    every attempt and deliver_notification_queue retries every 30 seconds without ever
-    arriving — the same dead-mail shape microsoft_graph_sender has above, just under the
-    ses provider instead of graph.
+    The domain is verified automatically (aws_sesv2_email_identity + module.dns_ses_dkim
+    in modules/stack/main.tf, gated on email_provider == "ses"), so this only needs to
+    change if the local part should differ. Emptying it reintroduces the dead-mail shape
+    microsoft_graph_sender has above: SesEmailSender raises "MAIL_FROM_EMAIL is not
+    configured" on every attempt, and deliver_notification_queue retries every 30 seconds
+    without ever arriving.
   EOT
 }
 
