@@ -1,5 +1,5 @@
 # =============================================================================
-# PR Labeler — thin caller of the shared reusable (qnsc-ci). The label map
+# PR Labeler — thin caller of the shared reusable (ci). The label map
 # (.github/labeler.yml) stays product-local; this only wires the plumbing.
 # =============================================================================
 name: PR Labeler

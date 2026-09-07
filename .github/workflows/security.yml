@@ -1,5 +1,5 @@
 # =============================================================================
-# Security · Scan — thin caller of the shared reusable (qnsc-ci).
+# Security · Scan — thin caller of the shared reusable (ci).
 #
 # Trivy (filesystem + built image), Semgrep, gitleaks, and OSV over the dependency
 # lockfile. Language-agnostic: OSV reads poetry.lock directly.

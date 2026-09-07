@@ -73,9 +73,9 @@ variable "tunnel_enabled" {
     Serve the API through a cloudflared sidecar that dials OUT to Cloudflare, instead
     of an ALB target group.
 
-    Default true, unlike rally's, because there is no shared ALB to fall back on:
+    Default true, unlike rova's, because there is no shared ALB to fall back on:
     `enable_alb` is false on both platform runtime stacks (since 2026-08-02, after
-    rally's own tunnel cutover — an idle load balancer with no target groups is
+    rova's own tunnel cutover — an idle load balancer with no target groups is
     $25.70/mo for nothing). Setting this false therefore requires turning that ALB
     back on first.
   EOT
@@ -175,7 +175,7 @@ variable "cache" {
     shared = optional(bool, false)
 
     # Which Valkey database this product uses on the shared node. Ignored when
-    # `shared = false`. Allocated centrally: 0 = rally, 1 = qnsc-kb.
+    # `shared = false`. Allocated centrally: 0 = rova, 1 = qnsc-kb.
     db_index = optional(number, 0)
   })
   default = {}
@@ -192,17 +192,17 @@ variable "cache" {
     in the runtime layer (qnsc-infra live/runtime-dev, module.shared_cache) instead of
     creating a node of its own. ElastiCache cannot be stopped — only deleted — so a
     per-product dev node bills all 730 hours of the month however little the environment
-    runs, and develop now runs 55 hours a week. rally and qnsc-kb were paying $15.45 each
+    runs, and develop now runs 55 hours a week. rova and qnsc-kb were paying $15.45 each
     for two nodes.
 
     `db_index` selects the Valkey database, NOT a key prefix: a prefix has to be honoured
     by every library touching the connection, while an index is enforced by the server.
     Cluster mode is disabled on the shared node, so all 16 databases exist and SELECT
-    works. Allocated centrally — 0 is rally, 1 is qnsc-kb.
+    works. Allocated centrally — 0 is rova, 1 is qnsc-kb.
 
     THIS PRODUCT IS THE REASON THE EVICTION POLICY MATTERS. Celery's broker keys carry no
     TTL, so evicting one loses a QUEUED TASK rather than missing a cache. The shared node
-    runs the default `volatile-lru`, which only evicts keys that have a TTL — rally's
+    runs the default `volatile-lru`, which only evicts keys that have a TTL — rova's
     rate-limit counters and denylist entries go first and Celery's queue is never a
     candidate. Anyone setting `allkeys-lru` on that node to improve another product's hit
     rate would silently start dropping this product's background work.
@@ -412,7 +412,7 @@ variable "idle_schedule" {
     LOOP, not three independent switches. The deploy reusable's `ensure_rds` step starts
     a stopped database and restores a service left at zero, so ANY deploy wakes the
     environment regardless of the hour. A single nightly stop therefore does not hold —
-    rally measured exactly that, with its develop database publishing CPU datapoints
+    rova measured exactly that, with its develop database publishing CPU datapoints
     every hour of every night because deploys kept landing after the stop.
 
     Two passes are the fix (e.g. "cron(0 0,3 * * ? *)"): the first ends the working day,
@@ -429,7 +429,7 @@ variable "idle_schedule" {
   //
   // Both products shipped "cron(0 1 ? * SUN *)" in production on the reasoning that an
   // environment already at zero tasks with a stopped database only needs a backstop. That
-  // holds for the ECS half and fails for RDS. Measured on rally-prod before the fix: 59 of
+  // holds for the ECS half and fails for RDS. Measured on rova-prod before the fix: 59 of
   // 168 hours in a week published CloudWatch datapoints — a pre-launch database with no
   // users, no tasks and no cache running 35% of the time.
   //
@@ -446,7 +446,7 @@ variable "idle_schedule" {
     error_message = <<-EOT
       idle_schedule must fire at least daily: day-of-month, month and day-of-week must all
       be "*" or "?". AWS force-starts a stopped RDS instance after 7 days, so a weekly
-      schedule leaves it running for up to six of them — rally-prod measured 35% uptime
+      schedule leaves it running for up to six of them — rova-prod measured 35% uptime
       under "cron(0 1 ? * SUN *)". Use "cron(0 1 * * ? *)" for a daily pass.
     EOT
   }

@@ -2,7 +2,7 @@
 # Release Please — opens a "chore(release): vX.Y.Z" PR on every push to main, then
 # tags when that PR is merged. The tag is what triggers the production deploy.
 #
-# Delegates to the shared reusable in qnsc-ci so release logic stays identical across
+# Delegates to the shared reusable in ci so release logic stays identical across
 # products. RELEASE_BOT_APP_ID (org variable) is read by the reusable;
 # RELEASE_BOT_PRIVATE_KEY is passed explicitly.
 #

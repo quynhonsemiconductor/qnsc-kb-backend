@@ -23,7 +23,7 @@ or Terraform destroys and recreates it.
 | `qnsc-infra` `bootstrap` | state bucket, lock table, GitHub OIDC provider, KMS CMK |
 | `qnsc-infra` `runtime-{dev,prod}` | VPC, subnets, NAT, security groups |
 | `qnsc-infra` `storage-{dev,prod}` | the R2 sources bucket |
-| `qnsc-tf-modules` | every module, pinned per module version |
+| `tf-modules` | every module, pinned per module version |
 
 Those must exist before a product apply. The OIDC provider in particular is an account
 singleton — AWS permits one per issuer URL — so this product consumes it and must never

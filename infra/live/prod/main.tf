@@ -204,7 +204,7 @@ module "stack" {
   // it is a backstop AGAINST is AWS force-starting a stopped instance after 7 days — and
   // a force-start landing on a Monday then runs until the following Sunday.
   //
-  // Measured on rally-prod, which had the identical setting: 59 of 168 hours in a week
+  // Measured on rova-prod, which had the identical setting: 59 of 168 hours in a week
   // published CloudWatch datapoints. A "stopped" pre-launch database was running 35% of
   // the time, roughly $4/mo. Daily bounds that exposure at one day instead of seven.
   //

@@ -94,7 +94,7 @@ locals {
   )
 
   // Every app secret this stack owns. Terraform creates the CONTAINER; values are
-  // pasted in out of band and never enter state. The deploy preflight in qnsc-ci
+  // pasted in out of band and never enter state. The deploy preflight in ci
   // refuses to deploy while any injected secret is still empty.
   // A MAP of key → description, not a list: the module keys the bundle's JSON off these
   // names and uses the description on the secret itself.
@@ -260,7 +260,7 @@ locals {
 // Manager bills per SECRET regardless of size.
 //
 // Secrets Manager and not SSM Parameter Store, following the reasoning recorded in
-// rally's stack: a Secrets Manager secret can exist while holding NO value, and that
+// rova's stack: a Secrets Manager secret can exist while holding NO value, and that
 // empty state is what makes "unpopulated" unambiguous. Parameter Store rejects an
 // empty value, so the same guarantee needs a placeholder plus a version check plus a
 // runtime guard — three mechanisms replacing one property. Revisit past ~30 secrets,
@@ -338,7 +338,7 @@ module "ecs_cluster" {
 // ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
 // Created by Terraform, not by hand. The provider exposes the tunnel's id, its CNAME
 // target and its connector token as attributes, so nothing here needs a dashboard visit
-// or a token pasted into a secret — which is what rally still does.
+// or a token pasted into a secret — which is what rova still does.
 //
 // Count-gated on the account id for the same reason as the Pages project: the AWS half
 // of this stack must be able to apply before Cloudflare is wired up.
@@ -675,7 +675,7 @@ module "migrator" {
 // custom domain; the project NAME is what that repo's deploy workflow needs, published
 // to it as the PAGES_PROJECT environment variable by infra-apply.
 //
-// No production_env_vars: unlike rally, this SPA is not a Pages-Functions BFF. It calls
+// No production_env_vars: unlike rova, this SPA is not a Pages-Functions BFF. It calls
 // the API directly with a bearer token, and VITE_API_BASE_URL is baked in at build
 // time by the frontend's own pipeline.
 module "web" {
