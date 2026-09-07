@@ -549,7 +549,7 @@ module "api" {
 //           which is why var.worker caps max_count at 1.
 //   clamav  the malware scanner the worker and api talk to over localhost
 module "worker" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
+  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-service?ref=ecs-service-v2.3.2"
 
   service_name = "worker"
   cluster_name = module.ecs_cluster.cluster_name
