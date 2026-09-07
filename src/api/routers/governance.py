@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, status, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from src.api.deps import get_db, get_current_user, require_permission
+from src.api.deps import get_db, get_current_user, require_permission, set_database_context
 from src.models import User
 from src.models.article import Article
 from src.models.user import Department
@@ -29,7 +29,7 @@ from src.domain.ai_service import AIService
 from src.domain.search_service import SearchService
 from src.repositories.chunk import ChunkRepository
 from src.repositories.ai import AIRepository
-from src.models.ops import EvalQuestion, EvalSet, EvalRun, IndexReprocessJob, Connector
+from src.models.ops import EvalQuestion, EvalSet, EvalRun, IndexReprocessJob, Connector, ApiRequestMetric
 from src.rag.evaluator import answer_correctness, context_recall, lexical_faithfulness
 from src.core.config import is_cloudflare_r2_endpoint, settings
 from src.models.ops import FeatureFlag
@@ -40,6 +40,10 @@ from src.domain.departments import resolve_active_department
 from src.domain.content_restructure import build_restructure_report, split_into_chunks
 from src.domain.department_routing import suggest_departments
 from src.domain.llm_client import resolve_provider
+from src.domain.connector_providers import REMOTE_PROVIDERS
+import structlog
+
+logger = structlog.get_logger()
 
 router = APIRouter()
 
@@ -696,6 +700,217 @@ async def reject_draft(
     return {"id": str(draft.id), "title": draft.title, "status": draft.status}
 
 
+async def _reload_actor(db: AsyncSession, actor_id: uuid.UUID) -> User | None:
+    """Re-fetch the acting user by PRIMITIVE id after a failed decision.
+
+    MEASURED, and the primitive id is the whole point. `approve_draft` calls `db.rollback()`
+    when it refuses a draft (governance.py:1424), and a rollback EXPIRES the entire identity
+    map — `expire_on_commit=False` governs commits, not rollbacks. Every attribute of the
+    acting user then becomes a lazy load, so in async context:
+
+      * the next draft's permission check reads `user.roles` -> MissingGreenlet
+        (`rbac.py:224 in has_permission`), and
+      * even reading `actor.id` to RELOAD the user raises the same error.
+
+    That second point is why an earlier version of this helper, which took the `User`
+    instance, could not work: it had to touch the expired object to recover from the
+    expiry. Observed three times over — 2 of 5 drafts approved, then 24 MissingGreenlets.
+
+    So the caller captures the id as a `uuid.UUID` BEFORE the first decision, and this
+    function never touches an ORM instance it did not just load.
+    """
+    return await UserRepository(db).get_by_id(actor_id)
+
+
+class BulkDecideRequest(BaseModel):
+    """Approve or reject many drafts in one request.
+
+    WHY THIS EXISTS. Every draft endpoint above is `/{id}`-scoped, so a 122-deep queue cost
+    122 separate approvals — four interactions each, roughly 500 clicks and 4-10 hours of
+    specialist time, while the connector beat task refilled the queue every 600 seconds.
+    That is why 270 synced documents produced 7 articles: the ingest side converts at 45%,
+    and pending->approved converts at 6%.
+
+    Deliberately NOT a new approval path. Each id goes through the same
+    `GovernanceService.approve_draft` / `reject_draft` a single review calls, so every
+    permission check, similarity gate, ACL-mapping gate and split-candidate gate applies
+    unchanged. This endpoint only removes the per-draft round trip.
+    """
+
+    draft_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    decision: str = Field(pattern="^(approve|reject)$")
+    #: Applied to every draft in the batch. A draft needing a decision this cannot express
+    #: — choosing an update target, resolving a split — is reported as blocked rather than
+    #: guessed at.
+    dept: str | None = None
+    department_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
+    visibility: str | None = Field(default=None, pattern="^(public|department)$")
+    review_note: str | None = Field(default=None, max_length=2000)
+
+
+@router.post("/pending-drafts/bulk-decide")
+async def bulk_decide_drafts(
+    req: BulkDecideRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Decide up to 100 drafts, reporting each outcome separately.
+
+    PARTIAL SUCCESS IS THE POINT. A queue this size always contains drafts that cannot be
+    decided in bulk — one needs a split committed, another needs its connector ACL mapped,
+    a third needs a human to choose which article it updates. Failing the whole batch on the
+    first of those would make the endpoint useless exactly when it is most needed, and
+    skipping them silently would hide work the reviewer must still do.
+
+    A refused draft must not poison the ones after it. `approve_draft` rolls back on refusal
+    (governance.py:1424), which expires the whole identity map, so the acting user is
+    re-loaded by primitive id after every failure — see `_reload_actor` for the measurement.
+    The reviewer gets a shorter queue plus an exact list of what still needs attention.
+    """
+    gov_repo = GovernanceRepository(db)
+    art_repo = ArticleRepository(db)
+    service = GovernanceService(gov_repo, art_repo)
+
+    # Captured as a plain UUID BEFORE any decision runs. After a refusal the `current_user`
+    # instance is expired, and reading even `.id` off it raises MissingGreenlet — so the
+    # recovery path must not depend on the object it is recovering from.
+    actor_id: uuid.UUID = current_user.id
+
+    if req.decision == "reject" and not (req.review_note or "").strip():
+        # reject_draft requires a note; catching it here reports one clear error instead of
+        # the same validation failure repeated for every id in the batch.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "review_note_required",
+                "message": "A review note is required when rejecting drafts.",
+            },
+        )
+
+    decided: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+
+    # dict.fromkeys: de-duplicate while keeping the reviewer's order, so a repeated id
+    # cannot be decided twice and the report reads in the order they selected.
+    #
+    # NO savepoint wrapper, deliberately. `approve_draft` is ALREADY per-draft atomic: it
+    # commits at governance.py:1421 and rolls back at :1424. Wrapping a self-committing call
+    # in `db.begin_nested()` closes the savepoint underneath it, and the reload after the
+    # commit then dies with "Can't operate on closed transaction inside context manager" —
+    # measured. Each iteration is therefore its own transaction by virtue of the service,
+    # which is exactly the isolation this endpoint needs.
+    for draft_id in dict.fromkeys(req.draft_ids):
+        try:
+            if req.decision == "approve":
+                article = await service.approve_draft(
+                    user=current_user,
+                    draft_id=draft_id,
+                    dept=req.dept,
+                    department_ids=req.department_ids,
+                    review_note=req.review_note,
+                    visibility=req.visibility,
+                )
+                decided.append(
+                    {
+                        "draft_id": str(draft_id),
+                        "article_id": str(article.id),
+                        "title": article.title,
+                        "version": article.version,
+                    }
+                )
+            else:
+                draft = await service.reject_draft(
+                    current_user, draft_id, req.review_note or ""
+                )
+                decided.append(
+                    {"draft_id": str(draft_id), "title": draft.title, "status": draft.status}
+                )
+        except HTTPException as exc:
+            # The service already explains itself, including the structured codes the UI
+            # keys off (batch_review_required, update_confirmation_required,
+            # external_acl_mapping_required). Pass them through rather than flattening to
+            # a string the frontend cannot branch on.
+            detail = exc.detail
+            blocked.append(
+                {
+                    "draft_id": str(draft_id),
+                    "status_code": exc.status_code,
+                    "code": detail.get("code") if isinstance(detail, dict) else None,
+                    "reason": detail.get("message") if isinstance(detail, dict) else detail,
+                }
+            )
+            reloaded = await _reload_actor(db, actor_id)
+            if reloaded is None:
+                # The acting user vanished mid-batch (deactivated, deleted). Stop rather
+                # than attempt further decisions with an unusable actor.
+                break
+            current_user = reloaded
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception(
+                "Bulk decision failed for a draft",
+                draft_id=str(draft_id),
+                decision=req.decision,
+            )
+            blocked.append(
+                {
+                    "draft_id": str(draft_id),
+                    "status_code": 500,
+                    "code": "unexpected_error",
+                    "reason": str(exc)[:200],
+                }
+            )
+            reloaded = await _reload_actor(db, actor_id)
+            if reloaded is None:
+                break
+            current_user = reloaded
+
+    # Audited AFTER the loop, in its own transaction. It cannot share one with the
+    # decisions: each approve_draft/reject_draft already committed its own work, so by the
+    # time we get here there is nothing left to join. The audit row is therefore a record
+    # OF the batch rather than part of it — if this insert failed, the decisions would
+    # still stand, which is the right way round for an irreversible publish.
+    #
+    # Direct-ORM style because AuditLog is already imported and used this way five times in
+    # this file; importing AuditRepository would put a second audit convention beside it.
+    db.add(
+        AuditLog(
+            # actor_id, not current_user.id: after a refusal the instance is expired and
+            # reading .id off it raises MissingGreenlet.
+            user_id=actor_id,
+            action=f"draft_bulk_{req.decision}",
+            target_type="pending_draft",
+            # No single target id: the batch IS the subject, so the decided count goes in
+            # the target slot and the ids live in the detail payload.
+            target_id=str(len(decided)),
+            # "success" even when some drafts are blocked: the request itself succeeded and
+            # the blocked ids are in detail_json. Inventing a fourth outcome value would
+            # break the audit-log filter, which only knows success/failure/applied.
+            outcome="success",
+            detail_json={
+                "requested": len(set(req.draft_ids)),
+                "decided": [item["draft_id"] for item in decided],
+                "blocked": blocked,
+            },
+        )
+    )
+    await db.commit()
+    logger.info(
+        "Bulk draft decision",
+        decision=req.decision,
+        requested=len(set(req.draft_ids)),
+        decided=len(decided),
+        blocked=len(blocked),
+    )
+    return {
+        "decision": req.decision,
+        "requested": len(set(req.draft_ids)),
+        "decided_count": len(decided),
+        "blocked_count": len(blocked),
+        "decided": decided,
+        "blocked": blocked,
+    }
+
+
 @router.post("/pending-drafts/{id}/restructure")
 async def restructure_draft(
     id: uuid.UUID,
@@ -880,6 +1095,7 @@ async def dismiss_gap(
 @router.get("/audit-log")
 async def get_audit_log(
     limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user_id: uuid.UUID | None = Query(None),
     action: str | None = Query(None, min_length=1, max_length=50),
     start_time: datetime | None = Query(None),
@@ -897,12 +1113,71 @@ async def get_audit_log(
     logs = await service.list_audit_logs(
         current_user,
         limit,
+        offset=offset,
         user_id=user_id,
         action=action,
         start_time=start_time,
         end_time=end_time,
     )
     return [_audit_response(audit) for audit in logs]
+
+
+@router.get("/request-failures")
+async def get_request_failures(
+    limit: int = Query(50, ge=1, le=500),
+    path: str | None = Query(None, min_length=1, max_length=255),
+    request_id: str | None = Query(None, min_length=1, max_length=100),
+    min_status: int = Query(500, ge=400, le=599),
+    since: datetime | None = Query(None),
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Recent failed requests, WITH the exception that caused each one.
+
+    Exists so a 500 can be diagnosed without CloudWatch. The middleware always caught
+    the exception and logged it, but only the status code was persisted, which meant
+    reading production errors required an AWS role switch. Now the same information is
+    queryable here.
+
+    `path` matches the resolved route template (`/upload-source`, not `/upload-source?x=1`),
+    because that is what the metric records — bounded cardinality is why it is stored that
+    way. `request_id` looks up the exact failure a user reports, since the id is already
+    returned to them in the `X-Request-ID` response header.
+    """
+    conditions = [ApiRequestMetric.status_code >= min_status]
+    if path:
+        conditions.append(ApiRequestMetric.path.ilike(f"%{path}%"))
+    if request_id:
+        conditions.append(ApiRequestMetric.request_id == request_id)
+    if since:
+        conditions.append(ApiRequestMetric.created_at >= since)
+
+    rows = await db.execute(
+        select(ApiRequestMetric)
+        .where(*conditions)
+        .order_by(ApiRequestMetric.created_at.desc())
+        .limit(limit)
+    )
+    failures = rows.scalars().all()
+
+    return {
+        "count": len(failures),
+        "failures": [
+            {
+                "request_id": failure.request_id,
+                "at": failure.created_at.isoformat() if failure.created_at else None,
+                "method": failure.method,
+                "path": failure.path,
+                "status_code": failure.status_code,
+                "duration_ms": failure.duration_ms,
+                "error_type": failure.error_type,
+                # NULL for anything recorded before the detail columns existed, and for
+                # failures raised as deliberate HTTPExceptions rather than crashes.
+                "error_detail": failure.error_detail,
+            }
+            for failure in failures
+        ],
+    }
 
 
 @router.get("/health-metrics")
@@ -921,7 +1196,13 @@ async def get_health_metrics(
         )
         else current_user.company_domain
     )
-    connector_filters = [Connector.system == "sharepoint", Connector.status == "active"]
+    # Every remote provider counts toward the connector-sync signal. Filtering on
+    # SharePoint alone reported "no active connector" on a tenant running only
+    # OneDrive or Google Drive.
+    connector_filters = [
+        Connector.system.in_(sorted(REMOTE_PROVIDERS)),
+        Connector.status == "active",
+    ]
     index_filters = [
         Article.status == "published",
         Article.lifecycle_status == "active",
@@ -939,6 +1220,12 @@ async def get_health_metrics(
     metrics["dependencies"] = {
         "r2": {"configured": _r2_is_configured()},
         "sharepoint": {
+            "configured": bool(connector_count),
+            "active_connectors": int(connector_count or 0),
+        },
+        # Same numbers under a provider-neutral name. `sharepoint` is retained
+        # because the deployed frontend reads that key.
+        "connectors": {
             "configured": bool(connector_count),
             "active_connectors": int(connector_count or 0),
         },
@@ -1477,3 +1764,189 @@ async def run_approval_agent(
     return await run_agent(
         db, current_user.company_domain, limit=payload.limit, dry_run=payload.dry_run
     )
+
+
+class KnowledgePurgeRequest(BaseModel):
+    # Defaults to a dry run, like the approval agent above. Deleting an entire corpus
+    # should be something a caller asks for explicitly, not what happens if a field is
+    # forgotten by a script.
+    dry_run: bool = True
+    #: Must equal the company_domain being purged. A boolean alone is too easy to send by
+    #: accident from a saved request; typing the tenant name proves the operator knows
+    #: WHICH corpus they are erasing, which is the mistake worth preventing when several
+    #: environments share a client.
+    confirm: str | None = Field(default=None, max_length=255)
+
+
+@router.post("/knowledge/purge")
+async def purge_knowledge(
+    payload: KnowledgePurgeRequest,
+    current_user: User = Depends(require_permission("role.manage", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Delete every article, document, chunk and sync record for the caller's tenant.
+
+    IRREVERSIBLE. Intended for resetting a test corpus, which is otherwise a long manual
+    job that does not even work: deleting articles by hand leaves the connector's
+    revision/content-hash cache intact, so the next sync decides every provider file is
+    unchanged and re-imports nothing.
+
+    Keeps users, roles, departments, access groups, tag vocabulary, feature flags and the
+    audit log. Keeps connector rows too, so the SharePoint grant survives and the operator
+    does not have to reconnect after each reset — only their synchronisation state is
+    reset, which is what makes the next sync re-import everything.
+
+    Scoped to `current_user.company_domain`. A global-scope permission is required because
+    the operation is unrecoverable, NOT because it crosses tenants — it does not.
+    """
+    from src.domain.kb_purge import delete_purged_objects, purge_knowledge_base
+
+    company_domain = current_user.company_domain
+    if not company_domain:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "tenant_unresolved",
+                "message": "This account has no company domain, so no corpus can be scoped.",
+            },
+        )
+
+    if not payload.dry_run and payload.confirm != company_domain:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "confirmation_mismatch",
+                "message": (
+                    "Set confirm to the company domain being purged to run this for real."
+                ),
+                "expected": company_domain,
+            },
+        )
+
+    counts = await purge_knowledge_base(db, company_domain, dry_run=payload.dry_run)
+
+    if payload.dry_run:
+        # Nothing was written, so there is nothing to audit and nothing to commit.
+        return {"dry_run": True, "company_domain": company_domain, **counts.as_dict()}
+
+    # The audit row lands in the SAME transaction as the deletions, so the record of the
+    # purge cannot survive without the purge or vice versa. audit_logs is deliberately not
+    # one of the purged tables.
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="knowledge_purge",
+            target_type="knowledge_base",
+            target_id=company_domain,
+            outcome="success",
+            detail_json=counts.as_dict(),
+        )
+    )
+    await db.commit()
+
+    # Object storage has no rollback, so the objects go only after the rows are durable.
+    # Until this point a failed commit left the rows intact and their bytes already
+    # destroyed; now a failure leaves both, and the orphan sweep reclaims the keys.
+    await delete_purged_objects(counts)
+
+    return {"dry_run": False, "company_domain": company_domain, **counts.as_dict()}
+
+
+class FactoryResetRequest(BaseModel):
+    #: Defaults to a dry run, like the knowledge purge above. A destructive path is
+    #: something a caller asks for, never what happens when a field is forgotten.
+    dry_run: bool = True
+    #: Must equal FACTORY_RESET_CONFIRM_PHRASE. A boolean is too easy to resend from
+    #: saved request history; typing the phrase proves the operator knows this is not
+    #: the tenant-scoped content purge.
+    confirm: str | None = Field(default=None, max_length=255)
+
+
+#: Deliberately not the company domain — that is the knowledge purge's phrase, and
+#: reusing it would let a saved purge request execute a full reset.
+FACTORY_RESET_CONFIRM_PHRASE = "RESET ENTIRE DATABASE"
+
+
+@router.post("/system/factory-reset")
+async def factory_reset_database(
+    payload: FactoryResetRequest,
+    current_user: User = Depends(require_permission("role.manage", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Erase every table except identity, for every tenant. IRREVERSIBLE.
+
+    Returns the deployment to a just-released state: users, roles, permissions,
+    departments and SSO identity links survive; all knowledge, drafts, connectors,
+    audit history, feature flags and the LLM provider configuration do not.
+
+    Four independent gates, because no single one is enough for an operation with
+    no undo:
+
+    1. `role.manage` at global scope — the strongest permission the RBAC model has.
+    2. `FACTORY_RESET_ENABLED`, so the capability does not exist in a deployment
+       that never asked for it.
+    3. An email allowlist, checked against the verified account.
+    4. An exact confirmation phrase, and `dry_run` defaults to true.
+
+    Gates 2 and 3 live in the API environment, which a compromised session cannot
+    edit. That is the point: permission alone would mean any future global admin
+    inherits the ability to destroy the deployment.
+    """
+    from src.domain.factory_reset import (
+        delete_reset_objects,
+        factory_reset,
+        is_reset_operator,
+    )
+
+    if not settings.FACTORY_RESET_ENABLED:
+        # 404, not 403: an endpoint that is switched off should not advertise that it
+        # exists and is merely refusing this caller.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Not Found"
+        )
+    if not is_reset_operator(current_user.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "not_reset_operator",
+                "message": "This account is not authorised to reset the database.",
+            },
+        )
+    if not payload.dry_run and payload.confirm != FACTORY_RESET_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "confirmation_mismatch",
+                "message": "Set confirm to the exact phrase to run this for real.",
+                "expected": FACTORY_RESET_CONFIRM_PHRASE,
+            },
+        )
+
+    # Every table here FORCEs row security. Without a global-admin context the
+    # DELETEs are silently FILTERED rather than refused, and the run would report
+    # success having removed only the caller's own tenant.
+    await set_database_context(db, None, True, user_id=str(current_user.id))
+
+    counts = await factory_reset(db, dry_run=payload.dry_run)
+    if payload.dry_run:
+        return {"dry_run": True, **counts.as_dict()}
+
+    # AFTER the deletes, not before: `audit_logs` is one of the cleared tables, so a
+    # row written first would be erased by the reset it was recording. Same
+    # transaction, so the record cannot survive without the reset or vice versa.
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            action="factory_reset",
+            target_type="database",
+            target_id="all",
+            outcome="success",
+            detail_json=counts.as_dict(),
+        )
+    )
+    await db.commit()
+
+    # Object storage has no rollback, so the bytes go only once the rows are durable.
+    await delete_reset_objects(counts)
+
+    return {"dry_run": False, **counts.as_dict()}

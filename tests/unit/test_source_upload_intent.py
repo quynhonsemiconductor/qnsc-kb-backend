@@ -42,7 +42,7 @@ def test_failed_direct_upload_can_reissue_its_existing_intent(monkeypatch):
         return None
 
     monkeypatch.setattr(articles, "resolve_active_department", resolve_department)
-    monkeypatch.setattr(articles, "lock_company_access_groups", lock)
+    monkeypatch.setattr(articles, "lock_company_scope", lock)
     monkeypatch.setattr(
         articles.AuthorizationService, "has_permission", lambda *_args, **_kwargs: True
     )

@@ -19,7 +19,7 @@ from src.repositories.governance import GovernanceRepository
 from src.domain.search_service import SearchService
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
-from src.rag.citations import extract_citation_ids
+from src.rag.citations import extract_citation_ids, strip_unknown_markers
 from src.rag.answer_sections import (
     EXTENDED_SENTINEL,
     GROUNDED_SENTINEL,
@@ -31,6 +31,7 @@ from src.rag.answer_sections import (
     strip_source_metadata,
 )
 from src.rag.compressor import compress_context
+from src.rag.prompt_fencing import fence_untrusted
 from src.rag.reranker import is_definition_query
 from src.domain.llm_client import ProviderAuthError, ProviderRateLimitError, complete, resolve_provider
 from src.domain.article_edit_requests import create_article_edit_request
@@ -384,24 +385,46 @@ def _conflict_answer(
     return "\n".join(lines), citations
 
 
+#: A follow-up refers back to what was said instead of restating it. These are the ways
+#: people do that. There were no Vietnamese ones, so in a Vietnamese deployment this
+#: never fired and a follow-up never received the conversation context it exists to add.
+_FOLLOWUP_PHRASES = (
+    "what about",
+    "how about",
+    "and next",
+    "what then",
+    "next year",
+    "next month",
+    "thì sao",
+    "thế còn",
+    "vậy còn",
+    "còn lại",
+    "tiếp theo",
+    "vậy thì",
+    "thế thì",
+    "ngoài ra",
+)
+
+#: Words that point at something already named rather than naming it.
+_FOLLOWUP_ANAPHORA = re.compile(
+    r"\b(?:that|those|it|they|them|also|more"
+    r"|đó|này|nó|chúng|kia|ấy|thêm|nữa|cũng|vậy)\b"
+)
+
+#: Vietnamese is written in syllables, so the same sentence counts far more "words" than
+#: its English equivalent -- "cung cấp cho tôi" is four where English has two. A cap
+#: chosen for English was therefore much tighter in Vietnamese than anyone intended.
+_FOLLOWUP_MAX_WORDS = 16
+
+
 def _needs_query_rewrite(question: str, conversation_messages: list[Any]) -> bool:
     """Use conversation context only for likely follow-up questions."""
     if not conversation_messages:
         return False
     normalized = " ".join((question or "").lower().split())
-    phrase_markers = (
-        "what about",
-        "how about",
-        "and next",
-        "what then",
-        "next year",
-        "next month",
-    )
-    pronoun_markers = re.search(
-        r"\b(?:that|those|it|they|them|also|more)\b", normalized
-    )
-    return len(normalized.split()) <= 12 and (
-        any(marker in normalized for marker in phrase_markers) or bool(pronoun_markers)
+    return len(normalized.split()) <= _FOLLOWUP_MAX_WORDS and (
+        any(marker in normalized for marker in _FOLLOWUP_PHRASES)
+        or bool(_FOLLOWUP_ANAPHORA.search(normalized))
     )
 
 
@@ -524,8 +547,18 @@ class AIService:
         self.gov_repo = gov_repo
 
     def _check_input_guardrail(self, question: str) -> bool:
-        """
-        Lightweight input guardrail to intercept basic prompt injections
+        """Reject the handful of injection attempts that are worth a friendly message.
+
+        NOT a security control, and it cannot become one: it is eight English substrings,
+        so any paraphrase, any typo and every Vietnamese equivalent walks straight past
+        it. Do not add phrases here in the belief that the list is closing — the list is
+        unclosable, and treating it as a defence is how the real one gets skipped.
+
+        What actually keeps an injected instruction from being obeyed is structural:
+        `fence_untrusted` makes the prompt's delimiters unrepresentable in untrusted text
+        (passages, titles, prior turns and the question itself), so injected text cannot
+        escape its fence and reach the model as instruction. This function only turns the
+        most obvious attempts into a clear refusal instead of a confusing empty answer.
         """
         blocklist = [
             "ignore previous instructions",
@@ -801,7 +834,6 @@ class AIService:
             except HTTPException as exc:
                 raise
 
-        user_bitmask = PermissionService.calculate_user_bitmask(user)
         authorization_fingerprint = AuthorizationService.authorization_fingerprint(user)
 
         # Conversation messages are persisted by the API before this method is
@@ -995,12 +1027,41 @@ class AIService:
                 user, retrieval_query, limit=settings.RAG_RERANK_LIMIT
             )
 
+        # A keyword-only pool is not the pool this answer path is calibrated for: the
+        # relevance threshold, the reranker and the citation guard all assume similarity
+        # retrieval ran. `SearchService` deliberately reports the degradation instead of
+        # returning None and letting it look like a normal search, so the two outcomes
+        # can be told apart here.
+        vector_search_degraded = self.search_service.vector_search_degraded
         logger.info(
             "AI retrieval completed",
             question_hash=question_hash,
             retrieval_query_length=len(retrieval_query),
             result_count=len(retrieved_results),
+            vector_search_degraded=vector_search_degraded,
         )
+
+        if vector_search_degraded:
+            # "The knowledge base has nothing on this" and "half of retrieval is down"
+            # are different facts, and answering the second as if it were the first is
+            # how a broken embedding model stays broken: every answer still looks
+            # plausible, just quietly worse. 503 names the fault to the reader and to
+            # monitoring.
+            logger.error(
+                "AI answer refused because vector retrieval is unavailable",
+                question_hash=question_hash,
+                result_count=len(retrieved_results),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Tìm kiếm theo ngữ nghĩa đang không khả dụng nên chưa thể tạo câu trả lời "
+                    "có căn cứ. Vui lòng thử lại sau ít phút."
+                    if language == "vi"
+                    else "Semantic search is unavailable, so a grounded answer cannot be produced "
+                    "right now. Please retry in a few minutes."
+                ),
+            )
 
         if not retrieved_results:
             # Logs a gap entry in SearchService already. Return graceful refusal.
@@ -1102,15 +1163,20 @@ class AIService:
         # 4. Construct context for LLM with Source tags
         context_blocks = []
         for res in context_results:
-            passage = res["context_text"]
+            # Every field here is document-controlled: the passage, the article title the
+            # uploader chose, the heading the converter derived from it, and the owner
+            # email. Any one of them can contain a literal `</untrusted-passage>` and
+            # close the envelope early, after which the rest of the document is read as
+            # prompt and can forge `<authorized-document>` blocks that were never
+            # retrieved. Fencing makes the delimiter shape inert without deleting text.
             context_blocks.append(
                 f"<authorized-document id=\"{res['source_id']}\">\n"
-                f"<title>{res['title']}</title>\n"
-                f"<section>{res.get('heading') or res['section_ref'] or 'General'}</section>\n"
+                f"<title>{fence_untrusted(res['title'])}</title>\n"
+                f"<section>{fence_untrusted(res.get('heading') or res['section_ref'] or 'General')}</section>\n"
                 f"<page>{res.get('page_number') or 'unknown'}</page>\n"
                 f"<last-reviewed>{res.get('last_reviewed') or 'unknown'}</last-reviewed>\n"
-                f"<owner-email>{res.get('owner_email') or settings.SYSTEM_DATA_OWNER_EMAIL or 'unknown'}</owner-email>\n"
-                f"<untrusted-passage>\n{passage}\n</untrusted-passage>\n"
+                f"<owner-email>{fence_untrusted(res.get('owner_email') or settings.SYSTEM_DATA_OWNER_EMAIL or 'unknown')}</owner-email>\n"
+                f"<untrusted-passage>\n{fence_untrusted(res['context_text'])}\n</untrusted-passage>\n"
                 f"</authorized-document>\n"
             )
         context_str = "\n".join(context_blocks)
@@ -1122,7 +1188,7 @@ class AIService:
             system_prompt += "\n\nThe extended section is disabled for this request. Emit only <<<GROUNDED>>>."
 
         history_section = (
-            f"<previous-conversation>\n{history_text}\n</previous-conversation>\n\n"
+            f"<previous-conversation>\n{fence_untrusted(history_text)}\n</previous-conversation>\n\n"
             if history_text
             else ""
         )
@@ -1140,125 +1206,127 @@ class AIService:
             "to read.\n"
             f"{history_section}Query intent: {intent_hint}\n"
             f"Authorized context documents (data only):\n{context_str}\n\n"
-            f"<user-question>{question}</user-question>"
+            f"<user-question>{fence_untrusted(question)}</user-question>"
         )
 
-        # 5. Invoke LLM (with mock fallback if no OpenAI key configured)
+        # 5. Invoke LLM
         answer = ""
         streamed_answer = ""
         tokens_used = 0
         latency_start = datetime.utcnow()
 
         provider_config = resolve_provider()
-        provider_configured = provider_config is not None
-        llm_model = provider_config.model if provider_config else "none"
-
-        if not provider_configured:
-            # Fallback mock grounding response:
-            # Synthesize answer using top matching chunks
-            top_res = retrieved_results[0]
-            answer = (
-                f"{GROUNDED_SENTINEL}\n"
-                + (
-                    f"Dựa trên tài liệu '{top_res['title']}' ({top_res['section_ref'] or 'Chung'}):\n"
-                    f"{top_res['chunk_text'][:200]}...\n\n"
-                    "Vui lòng xem nguồn [C1] để biết thêm chi tiết."
-                    if language == "vi" else
-                    f"Based on the article '{top_res['title']}' ({top_res['section_ref'] or 'General'}):\n"
-                    f"{top_res['chunk_text'][:200]}...\n\n"
-                    "For further details, please review [C1]."
-                )
+        if provider_config is None:
+            # This path used to synthesise an answer from the top passage, append a
+            # real-looking [C1] and report 150 tokens. Nothing had read the sources or
+            # verified the claim, yet the reply was indistinguishable from a grounded
+            # one — so a workspace with no provider configured served fabricated
+            # citations as product output. There is no safe degraded answer here: an
+            # unconfigured provider is an administrator's problem and must surface as
+            # one, not as a confident quote.
+            logger.error(
+                "AI answer requested with no LLM provider configured",
+                question_hash=question_hash,
             )
-            tokens_used = 150
-        else:
-            try:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Trợ lý AI chưa khả dụng vì chưa có nhà cung cấp LLM nào được cấu hình. "
+                    "Vui lòng liên hệ quản trị viên."
+                    if language == "vi"
+                    else "The AI assistant is unavailable because no LLM provider is configured. "
+                    "An administrator needs to configure one."
+                ),
+            )
+        llm_model = provider_config.model
 
-                # Releases each token as soon as it cannot be part of a section
-                # sentinel, so the answer builds up on screen while the provider is
-                # still generating. The final rendered answer still replaces this
-                # atomically below, so what the reader ends up with is unchanged.
-                incremental = IncrementalAnswerStream()
+        try:
+            # Releases each token as soon as it cannot be part of a section
+            # sentinel, so the answer builds up on screen while the provider is
+            # still generating. The final rendered answer still replaces this
+            # atomically below, so what the reader ends up with is unchanged.
+            incremental = IncrementalAnswerStream()
 
-                async def append_token(token: str) -> None:
-                    nonlocal answer, streamed_answer
-                    answer += token
-                    streamed_answer += token
-                    if on_token:
-                        safe = incremental.feed(token)
-                        if safe:
-                            await on_token(safe)
+            async def append_token(token: str) -> None:
+                nonlocal answer, streamed_answer
+                answer += token
+                streamed_answer += token
+                if on_token:
+                    safe = incremental.feed(token)
+                    if safe:
+                        await on_token(safe)
 
-                answer, tokens_used, llm_model, provider = await complete(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    timeout=settings.LLM_TIMEOUT_SECONDS,
-                    max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
-                    # EXPLICIT, and the reason answers were being cut off mid-word.
-                    # `_payload` only sends glm's `thinking` field when this is not None,
-                    # so leaving it unset handed glm-4.5 its own default — reasoning
-                    # ENABLED — and those hidden tokens are spent from the same
-                    # max_tokens budget as the answer. The visible reply then ran out
-                    # part-way through the EXTENDED section, which is generated last in
-                    # the same call. content_restructure has always passed thinking=False;
-                    # only this path did not, and only glm was affected, because the
-                    # Gemini branch always sets thinkingConfig.
-                    thinking=False,
-                    on_token=append_token if on_token else None,
-                )
-            except ProviderRateLimitError as exc:
-                # Nothing is wrong with the question. Groq's free tier allows 8,000
-                # tokens per minute and one grounded answer costs about 5,000, so a
-                # second question inside the same minute is refused. Reporting that as
-                # "AI generation failed" sent people to re-check their content.
-                logger.warning(
-                    "LLM provider rate limited",
-                    provider=provider_config.name if provider_config else "none",
-                    retry_after=exc.retry_after,
-                )
-                wait = f" Vui lòng thử lại sau {exc.retry_after} giây." if exc.retry_after else " Vui lòng thử lại sau ít phút."
-                wait_en = f" Please retry in {exc.retry_after} seconds." if exc.retry_after else " Please retry shortly."
-                raise HTTPException(
-                    status_code=429,
-                    detail=(
-                        f"Nhà cung cấp AI đang giới hạn lưu lượng.{wait}"
-                        if language == "vi"
-                        else f"The AI provider is rate limiting requests.{wait_en}"
-                    ),
-                    headers=(
-                        {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
-                    ),
-                )
-            except ProviderAuthError as exc:
-                # Retrying, rephrasing and re-indexing all fail identically here. Name
-                # the actual problem so an administrator fixes the key instead of the
-                # content: a key copied with a stray space reads as "Authentication
-                # Failed" at the provider and as "AI generation failed" to the user.
-                logger.error(
-                    "LLM provider rejected the configured API key",
-                    provider=provider_config.name if provider_config else "none",
-                    error=str(exc),
-                )
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Nhà cung cấp AI từ chối API key đang cấu hình. "
-                        "Quản trị viên cần kiểm tra lại API key và endpoint trong cấu hình LLM."
-                        if language == "vi"
-                        else "The AI provider rejected the configured API key. "
-                        "An administrator needs to check the workspace LLM key and endpoint."
-                    ),
-                )
-            except Exception as e:
-                logger.error(
-                    "LLM API call failed",
-                    error=str(e),
-                    provider=provider_config.name if provider_config else "none",
-                )
-                raise HTTPException(
-                    status_code=502, detail="AI generation failed. Please try again."
-                )
+            answer, tokens_used, llm_model, provider = await complete(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                timeout=settings.LLM_TIMEOUT_SECONDS,
+                max_tokens=settings.RAG_MAX_ANSWER_TOKENS,
+                # EXPLICIT, and the reason answers were being cut off mid-word.
+                # `_payload` only sends glm's `thinking` field when this is not None,
+                # so leaving it unset handed glm-4.5 its own default — reasoning
+                # ENABLED — and those hidden tokens are spent from the same
+                # max_tokens budget as the answer. The visible reply then ran out
+                # part-way through the EXTENDED section, which is generated last in
+                # the same call. content_restructure has always passed thinking=False;
+                # only this path did not, and only glm was affected, because the
+                # Gemini branch always sets thinkingConfig.
+                thinking=False,
+                on_token=append_token if on_token else None,
+            )
+        except ProviderRateLimitError as exc:
+            # Nothing is wrong with the question. Groq's free tier allows 8,000
+            # tokens per minute and one grounded answer costs about 5,000, so a
+            # second question inside the same minute is refused. Reporting that as
+            # "AI generation failed" sent people to re-check their content.
+            logger.warning(
+                "LLM provider rate limited",
+                provider=provider_config.name,
+                retry_after=exc.retry_after,
+            )
+            wait = f" Vui lòng thử lại sau {exc.retry_after} giây." if exc.retry_after else " Vui lòng thử lại sau ít phút."
+            wait_en = f" Please retry in {exc.retry_after} seconds." if exc.retry_after else " Please retry shortly."
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Nhà cung cấp AI đang giới hạn lưu lượng.{wait}"
+                    if language == "vi"
+                    else f"The AI provider is rate limiting requests.{wait_en}"
+                ),
+                headers=(
+                    {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+                ),
+            )
+        except ProviderAuthError as exc:
+            # Retrying, rephrasing and re-indexing all fail identically here. Name
+            # the actual problem so an administrator fixes the key instead of the
+            # content: a key copied with a stray space reads as "Authentication
+            # Failed" at the provider and as "AI generation failed" to the user.
+            logger.error(
+                "LLM provider rejected the configured API key",
+                provider=provider_config.name,
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Nhà cung cấp AI từ chối API key đang cấu hình. "
+                    "Quản trị viên cần kiểm tra lại API key và endpoint trong cấu hình LLM."
+                    if language == "vi"
+                    else "The AI provider rejected the configured API key. "
+                    "An administrator needs to check the workspace LLM key and endpoint."
+                ),
+            )
+        except Exception as e:
+            logger.error(
+                "LLM API call failed",
+                error=str(e),
+                provider=provider_config.name,
+            )
+            raise HTTPException(
+                status_code=502, detail="AI generation failed. Please try again."
+            )
 
         latency_ms = int((datetime.utcnow() - latency_start).total_seconds() * 1000)
 
@@ -1300,50 +1368,67 @@ class AIService:
         source_matches = extract_citation_ids(grounded_answer)
         context_by_id = {item["source_id"]: item for item in context_results}
         is_refusal = _is_grounding_refusal(grounded_answer)
-        citation_guard_failed = any(
-            marker not in context_by_id for marker in source_matches
-        )
-        if citation_guard_failed:
-            # A provider-issued marker that is not present in the retrieved
-            # context is not a citation. Fail closed instead of returning a
-            # dangling marker or silently attaching a different source.
+        unknown_markers = sorted(set(source_matches) - set(context_by_id))
+        if unknown_markers:
+            # A marker naming a passage that was never retrieved is not a citation, and it
+            # must not survive into the answer. But discarding the WHOLE answer over it —
+            # which is what this did — threw away the valid citations alongside the
+            # invented one, and the user saw "no grounded answer could be produced" for a
+            # correct, sourced reply. Measured in production: an answer citing [C1][C2]
+            # correctly plus one hallucinated [C3] was replaced wholesale.
+            #
+            # Dropping just the dangling marker keeps the property the guard exists to
+            # protect — every marker left resolves to a passage that was actually
+            # consulted — without punishing the user for the model's arithmetic.
             logger.warning(
                 "AI output contained an unretrieved citation marker",
                 question_hash=question_hash,
-                unknown_markers=sorted(set(source_matches) - set(context_by_id)),
+                unknown_markers=unknown_markers,
+                retrieved_markers=sorted(context_by_id),
             )
-            grounded_answer = (
-                "Không thể tạo câu trả lời có căn cứ từ các nguồn được cấp quyền trong Cơ sở tri thức."
-                if language == "vi" else UNVERIFIABLE_GROUNDED_ANSWER
+            grounded_answer = strip_unknown_markers(grounded_answer, set(context_by_id))
+            extended_answer = strip_unknown_markers(
+                extended_answer, set(context_by_id)
             )
-            extended_answer = ""
-            source_matches = []
-            is_refusal = True
+            source_matches = extract_citation_ids(grounded_answer)
+            is_refusal = _is_grounding_refusal(grounded_answer)
+
+        # Only a stripped answer with NO citation left is unusable: nothing in it can be
+        # attributed to a permitted source, so it falls through to the uncited-answer
+        # refusal below rather than being special-cased here.
+        citation_guard_failed = bool(unknown_markers) and not source_matches
 
         if is_refusal and context_results and not citation_guard_failed:
+            # The model declined, so nothing here is a grounded answer. This used to
+            # replace the refusal with the top passage attributed as `[C1]`, which
+            # presented unverified retrieved text as a cited answer — the marker asserts
+            # "this passage supports this claim", and no one had checked that.
+            #
+            # The refusal is kept verbatim and the passage is offered underneath it as
+            # something to read, deliberately WITHOUT a marker: it stays out of
+            # `source_matches`, so it produces no citation and the answer is still
+            # treated as a refusal everywhere downstream. Markers inside the passage
+            # itself are stripped, because retrieved text must not be able to mint one.
             result = context_results[0]
-            snippet = result["context_text"].strip()
+            snippet = strip_citation_markers(result["context_text"].strip())
             if len(snippet) > 900:
                 snippet = snippet[:900].rstrip() + " …"
-            source_id = result["source_id"]
             grounded_answer = (
-                f"Tôi tìm thấy một đoạn phù hợp trong **{result['title']}** "
-                f"({result['section_ref'] or 'Chung'}):\n\n"
-                f"> {snippet}\n\n"
-                f"Nguồn: [{source_id}]"
+                f"{grounded_answer}\n\n"
+                f"Một đoạn có thể liên quan trong **{result['title']}** "
+                f"({result['section_ref'] or 'Chung'}) — chưa được xác minh là câu trả lời:\n\n"
+                f"> {snippet}"
                 if language == "vi" else
-                f"I found a matching passage in **{result['title']}** "
-                f"({result['section_ref'] or 'General'}):\n\n"
-                f"> {snippet}\n\n"
-                f"Source: [{source_id}]"
+                f"{grounded_answer}\n\n"
+                f"A possibly related passage in **{result['title']}** "
+                f"({result['section_ref'] or 'General'}) — not verified as an answer:\n\n"
+                f"> {snippet}"
             )
-            source_matches = [source_id]
-            is_refusal = False
             logger.warning(
-                "LLM refusal recovered from retrieved context",
+                "LLM refused; offering an unverified passage without a citation",
                 question_hash=question_hash,
                 source_title=result["title"],
-                source_id=source_id,
+                source_id=result["source_id"],
             )
 
         if is_refusal and not settings.RAG_ALLOW_EXTENDED_ON_REFUSAL:
@@ -1400,7 +1485,7 @@ class AIService:
             tokens_used=tokens_used,
             latency_ms=latency_ms,
             prompt_version=settings.PROMPT_VERSION,
-            llm_model=llm_model if provider_configured else "mock-local",
+            llm_model=llm_model,
             retrieval_version=settings.RETRIEVAL_VERSION,
             reranker_version=settings.RERANKER_VERSION,
             retrieved_chunk_ids=json.dumps(
@@ -1440,7 +1525,6 @@ class AIService:
                 owner_user_id=user.id,
                 question_hash=question_hash,
                 authorization_fingerprint=authorization_fingerprint,
-                access_group_bitmap=user_bitmask,
                 answer=cached_answer,
                 citations=json.dumps(citations),
                 article_ids=list(

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import ForeignKey, String, Integer, Text, BigInteger
+from sqlalchemy import ForeignKey, String, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 try:
     from pgvector.sqlalchemy import Vector
@@ -46,9 +46,7 @@ class ArticleChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
     embedding_version: Mapped[str] = mapped_column(String(50), nullable=False)
     
-    # Denormalized permission and organizational metadata for O(1) retrieval
-    # Represents a bitwise OR of authorized AccessGroup.bitmask_positions
-    access_group_bitmap: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    # Denormalized organizational metadata for retrieval filtering
     department_id: Mapped[str] = mapped_column(String(100), nullable=False)
     sensitivity: Mapped[str] = mapped_column(String(50), nullable=False)
     visibility: Mapped[str] = mapped_column(String(50), nullable=False)

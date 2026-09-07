@@ -20,6 +20,12 @@ from src.domain.connector_adapters import (
     NormalizedChange,
     adapter_for,
 )
+from src.domain.connector_providers import (
+    SOURCE_ACL_PROVIDERS,
+    acl_present_key as provider_acl_present_key,
+    cursor_type as provider_cursor_type,
+    identity_provider as provider_identity,
+)
 from src.domain.connector_auth import ensure_connector_authorized
 from src.domain.events import event_bus
 from src.domain.source_extraction import (
@@ -29,7 +35,7 @@ from src.domain.source_extraction import (
 )
 from src.domain.source_storage import delete_source, save_source
 from src.models.article import Article, ArticleUserPermission, DocumentSource
-from src.models.user import AccessGroup, user_groups
+from src.models.user import Department, user_departments
 from src.models.user import ExternalIdentity
 from src.models.connectors import (
     DocumentVersion,
@@ -674,12 +680,23 @@ async def _save_permissions(
         document.acl_hash = acl_hash
     # Mapping/identity changes must reconcile an unchanged provider ACL too.
     # Keep these lists deterministic so a repeated sync is idempotent.
+    #
+    # Every observed principal is looked up, not just groups. Restricting this to
+    # `group`/`siteGroup` was what made a provider `user`, `link`, `domain` or `unknown`
+    # principal permanently unmappable: it landed in `unmapped_principal_ids` below and
+    # blocked approval with no route to resolve it.
+    observed_principals = sorted(
+        {
+            (item.get("principal_type") or "unknown", item.get("principal_id") or "")
+            for item in permissions
+            if item.get("principal_id")
+        }
+    )
     group_ids = sorted(
         {
-            item.get("principal_id", "")
-            for item in permissions
-            if item.get("principal_type") in {"group", "siteGroup"}
-            and item.get("principal_id")
+            principal_id
+            for principal_type, principal_id in observed_principals
+            if principal_type in {"group", "siteGroup"}
         }
     )
     mappings = (
@@ -687,21 +704,27 @@ async def _save_permissions(
             await db.execute(
                 select(ExternalGroupMapping)
                 .join(
-                    AccessGroup, AccessGroup.id == ExternalGroupMapping.access_group_id
+                    Department, Department.id == ExternalGroupMapping.department_id
                 )
                 .where(
                     ExternalGroupMapping.connector_id == connector.id,
                     ExternalGroupMapping.active.is_(True),
-                    ExternalGroupMapping.external_group_id.in_(group_ids),
-                    AccessGroup.company_domain == connector.company_domain,
+                    ExternalGroupMapping.principal_id.in_(
+                        [principal_id for _, principal_id in observed_principals]
+                    ),
+                    Department.company_domain == connector.company_domain,
                 )
             )
         )
         .scalars()
         .all()
-        if group_ids
+        if observed_principals
         else []
     )
+    # Keyed by (type, id) so a group and a user sharing an id stay distinct.
+    mapped_by_principal = {
+        (mapping.principal_type, mapping.principal_id): mapping for mapping in mappings
+    }
     user_ids = sorted(
         {
             item.get("principal_id", "")
@@ -710,9 +733,7 @@ async def _save_permissions(
             and item.get("principal_id")
         }
     )
-    identity_provider = (
-        "microsoft_entra" if connector.system == "sharepoint" else connector.system
-    )
+    identity_provider = provider_identity(connector.system)
     identities = (
         (
             await db.execute(
@@ -757,35 +778,43 @@ async def _save_permissions(
         mapped_user_ids.update(
             {str(item.email).lower(): str(item.id) for item in email_users}
         )
+    # A principal an administrator has explicitly mapped is resolved, whatever its type.
+    # This used to be computed with no reference to the mapping table at all, so every
+    # `unknown`/`link`/`domain` principal stayed in the blocking set permanently.
     unmapped_principal_ids = sorted(
-        f"{item.get('principal_type', 'unknown')}:{item.get('principal_id', '')}"
-        for item in permissions
-        if item.get("principal_type") not in {"group", "siteGroup", "user", "siteUser"}
-        and item.get("principal_id")
+        f"{principal_type}:{principal_id}"
+        for principal_type, principal_id in observed_principals
+        if principal_type not in {"group", "siteGroup", "user", "siteUser"}
+        and (principal_type, principal_id) not in mapped_by_principal
     )
     previous_metadata = document.metadata_json or {}
-    acl_present_key = (
-        "sharepoint_acl_present"
-        if connector.system == "sharepoint"
-        else "provider_acl_present"
-    )
+    acl_present_key = provider_acl_present_key(connector.system)
     next_metadata = {
         **previous_metadata,
         acl_present_key: True,
         "provider_acl_present": True,
-        "mapped_access_group_ids": sorted(
-            {str(item.access_group_id) for item in mappings}
+        "mapped_department_ids": sorted(
+            {str(item.department_id) for item in mappings}
         ),
         "unmapped_group_ids": sorted(
-            item
-            for item in group_ids
-            if item not in {mapping.external_group_id for mapping in mappings}
+            principal_id
+            for principal_type, principal_id in observed_principals
+            if principal_type in {"group", "siteGroup"}
+            and (principal_type, principal_id) not in mapped_by_principal
         ),
         "mapped_source_user_ids": sorted(
             mapped_user_ids[item] for item in user_ids if item in mapped_user_ids
         ),
+        # A user principal resolves EITHER through an internal identity match or through
+        # an explicit department mapping; the latter grants via the department rather than
+        # naming a person, which is the only option when the provider user has never
+        # signed in here.
         "unmapped_source_user_ids": sorted(
-            item for item in user_ids if item not in mapped_user_ids
+            principal_id
+            for principal_type, principal_id in observed_principals
+            if principal_type in {"user", "siteUser"}
+            and principal_id not in mapped_user_ids
+            and (principal_type, principal_id) not in mapped_by_principal
         ),
         "unmapped_principal_ids": unmapped_principal_ids,
     }
@@ -795,7 +824,7 @@ async def _save_permissions(
         for key in (
             "sharepoint_acl_present",
             "provider_acl_present",
-            "mapped_access_group_ids",
+            "mapped_department_ids",
             "unmapped_group_ids",
             "mapped_source_user_ids",
             "unmapped_source_user_ids",
@@ -846,7 +875,7 @@ async def reconcile_connector_acl_mappings(
     return changed_article_ids
 
 
-def _sharepoint_acl_intersection(
+def _provider_acl_intersection(
     *,
     internal_visibility: str,
     internal_group_ids: set[str],
@@ -908,7 +937,7 @@ async def _apply_mapped_groups(
             select(Article)
             .where(Article.id == document.article_id)
             .options(
-                selectinload(Article.access_groups),
+                selectinload(Article.departments),
                 selectinload(Article.user_permissions),
             )
         )
@@ -921,22 +950,27 @@ async def _apply_mapped_groups(
     # Older unit fixtures passed a lightweight connector object; retain the
     # historical SharePoint source marker for those callers while real
     # connectors use their provider name.
-    permission_source = getattr(connector, "system", "sharepoint")
+    permission_source = getattr(connector, "system", None) or "sharepoint"
     if "internal_acl_snapshot" not in metadata:
         metadata["internal_acl_snapshot"] = {
             "visibility": article.visibility,
-            "access_group_ids": [str(group.id) for group in article.access_groups],
+            "department_ids": [str(item.id) for item in article.departments],
+            # EVERY source-managed row is excluded, not just this provider's.
+            # Comparing against `permission_source` alone captured another
+            # provider's mirror row as internal policy, and since the snapshot is
+            # written once and only ever narrows afterwards, that permanently
+            # widened the intersection with a grant no provider had made.
             "allow_user_ids": [
                 str(item.user_id)
                 for item in article.user_permissions
-                if item.effect == "allow" and item.source != permission_source
+                if item.effect == "allow" and item.source not in SOURCE_ACL_PROVIDERS
             ],
         }
     internal = metadata["internal_acl_snapshot"]
     source_group_ids = {
-        str(item) for item in metadata.get("mapped_access_group_ids", [])
+        str(item) for item in metadata.get("mapped_department_ids", [])
     }
-    internal_group_ids = {str(item) for item in internal.get("access_group_ids", [])}
+    internal_group_ids = {str(item) for item in internal.get("department_ids", [])}
     source_user_ids = {str(item) for item in metadata.get("mapped_source_user_ids", [])}
     source_group_member_ids: set[str] = set()
     if source_group_ids:
@@ -944,10 +978,10 @@ async def _apply_mapped_groups(
             str(item)
             for item in (
                 await db.execute(
-                    select(user_groups.c.user_id)
-                    .join(User, User.id == user_groups.c.user_id)
+                    select(user_departments.c.user_id)
+                    .join(User, User.id == user_departments.c.user_id)
                     .where(
-                        user_groups.c.group_id.in_(source_group_ids),
+                        user_departments.c.department_id.in_(source_group_ids),
                         User.company_domain == article.company_domain,
                         User.active.is_(True),
                     )
@@ -956,7 +990,7 @@ async def _apply_mapped_groups(
             .scalars()
             .all()
         }
-    acl = _sharepoint_acl_intersection(
+    acl = _provider_acl_intersection(
         internal_visibility=str(internal.get("visibility") or "department"),
         internal_group_ids=internal_group_ids,
         internal_user_ids={str(item) for item in internal.get("allow_user_ids", [])},
@@ -973,21 +1007,21 @@ async def _apply_mapped_groups(
             or metadata.get("sharepoint_acl_present")
         ),
     )
-    effective_group_ids = set(acl["group_ids"])
-    article.access_groups = (
+    effective_department_ids = set(acl["group_ids"])
+    article.departments = (
         list(
             (
                 await db.execute(
-                    select(AccessGroup).where(
-                        AccessGroup.id.in_(effective_group_ids),
-                        AccessGroup.company_domain == article.company_domain,
+                    select(Department).where(
+                        Department.id.in_(effective_department_ids),
+                        Department.company_domain == article.company_domain,
                     )
                 )
             )
             .scalars()
             .all()
         )
-        if effective_group_ids
+        if effective_department_ids
         else []
     )
 
@@ -1089,7 +1123,7 @@ async def _ingest_content(
             await db.execute(
                 select(Article)
                 .where(Article.id == document.article_id)
-                .options(selectinload(Article.access_groups), selectinload(Article.sources))
+                .options(selectinload(Article.departments), selectinload(Article.sources))
             )
         ).scalar_one_or_none()
         if article and article.lifecycle_status == "active":
@@ -1111,7 +1145,7 @@ async def _ingest_content(
                 "type": article.type,
                 "sensitivity": article.sensitivity,
                 "language": article.language,
-                "access_group_ids": [str(group.id) for group in article.access_groups],
+                "department_ids": [str(item.id) for item in article.departments],
                 "submission_kind": "connector_update",
                 "suggested_update_article_id": str(article.id),
             }
@@ -1328,7 +1362,7 @@ async def sync_cloud_connector(
                         cursor_row = SyncCursor(
                             connector_id=connector.id,
                             scope_id=scope.id,
-                            cursor_type=("delta" if connector.system == "sharepoint" else "changes"),
+                            cursor_type=provider_cursor_type(connector.system),
                         )
                         db.add(cursor_row)
                     cursor_row.cursor_value = None
@@ -1581,9 +1615,7 @@ async def sync_cloud_connector(
                 cursor_row = SyncCursor(
                     connector_id=connector_id,
                     scope_id=scope_id_value,
-                    cursor_type=(
-                        "delta" if connector.system == "sharepoint" else "changes"
-                    ),
+                    cursor_type=provider_cursor_type(connector.system),
                 )
                 db.add(cursor_row)
             cursor_row.cursor_value = next_cursor or cursor_row.cursor_value

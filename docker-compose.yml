@@ -1,6 +1,16 @@
 services:
   db:
-    image: ankane/pgvector:v0.5.1
+    # Matches CI (.github/workflows/backend-ci.yml) and the RDS PG16 engine, so dev is
+    # the same Postgres major AND the same pgvector as everything else. It was
+    # ankane/pgvector:v0.5.1 — PG 15.4 with pgvector 0.5.1 — which predates the
+    # iterative index scans src/repositories/chunk.py asks for, so filtered vector
+    # search behaved differently here than in production and the difference was silent.
+    #
+    # ONE-TIME, DESTRUCTIVE for existing dev volumes: PG16 refuses to start on a PG15
+    # data directory. Run `docker compose down -v` once to drop the old pgdata, then
+    # re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
+    # database nobody needs to keep.
+    image: pgvector/pgvector:pg16
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
       # be reachable from the LAN.
@@ -63,6 +73,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      # Explicit, because the Settings default is now `production`: unset, this stack
+      # would refuse to start rather than run with the well-known dev credentials above.
+      - ENVIRONMENT=development
       # This stack RUNS celery (worker + beat), so the API must not also run the inline
       # loops. JOB_MODE defaults to "inline", and dev never set it: the API was replaying
       # the outbox and dispatching connector syncs at the same time as the worker, and a
@@ -99,6 +112,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      - ENVIRONMENT=development
       - JOB_MODE=celery
       - AUTO_CREATE_SCHEMA=false
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
@@ -148,6 +162,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:devredis@redis:6379/0
+      - ENVIRONMENT=development
       - JOB_MODE=celery
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
@@ -194,6 +209,7 @@ services:
       - .:/app
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
+      - ENVIRONMENT=development
     depends_on:
       db:
         condition: service_healthy

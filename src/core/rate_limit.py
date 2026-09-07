@@ -33,18 +33,30 @@ class InMemoryRateLimiter:
             return True, 0
 
 
+def _is_development_environment() -> bool:
+    """Same development set validate_production() admits, so the two guards agree."""
+    return settings.ENVIRONMENT.lower() in {"development", "dev", "local"}
+
+
 class RedisRateLimiter:
     """Fixed-window limiter shared by every API process through Redis.
 
     Redis is mandatory in production Compose.  If a developer runs without
     it, retain a conservative per-process fallback instead of making login
     and AI unavailable.
+
+    ``fail_closed`` limiters refuse the request instead of degrading, because a
+    per-process fallback multiplies the effective limit by the replica count and a
+    Redis outage would otherwise remove the limit altogether — an open window for
+    credential stuffing and invitation-token guessing.  Development keeps the
+    fallback so a local stack without Redis still serves logins.
     """
 
-    def __init__(self, namespace: str, limit: int, window_seconds: int = 60):
+    def __init__(self, namespace: str, limit: int, window_seconds: int = 60, fail_closed: bool = False):
         self.namespace = namespace
         self.limit = limit
         self.window_seconds = window_seconds
+        self.fail_closed = fail_closed
         self.fallback = InMemoryRateLimiter(limit, window_seconds)
 
     async def allow(self, key: str) -> tuple[bool, int]:
@@ -63,6 +75,13 @@ class RedisRateLimiter:
                 return False, max(1, int(ttl))
             return True, 0
         except Exception as exc:
+            if self.fail_closed and not _is_development_environment():
+                logger.error(
+                    "Redis rate limit unavailable; refusing request",
+                    namespace=self.namespace,
+                    error=str(exc),
+                )
+                return False, self.window_seconds
             logger.warning("Redis rate limit unavailable; using local fallback", namespace=self.namespace, error=str(exc))
             return self.fallback.allow(key)
         finally:
@@ -71,5 +90,5 @@ class RedisRateLimiter:
 
 
 ai_rate_limiter = RedisRateLimiter("ai", limit=settings.AI_RATE_LIMIT_PER_MINUTE)
-auth_rate_limiter = RedisRateLimiter("auth", limit=10, window_seconds=60)
+auth_rate_limiter = RedisRateLimiter("auth", limit=10, window_seconds=60, fail_closed=True)
 source_upload_rate_limiter = RedisRateLimiter("source_upload", limit=10, window_seconds=60)

@@ -10,21 +10,27 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.api.deps import SessionLocal, get_db, get_current_user, require_permission, set_database_context
 from src.models import User
 from src.models.article import Article
 from src.models.governance import AuditLog, PendingDraft
-from src.models.user import AccessGroup, ExternalIdentity
+from src.models.user import Department, ExternalIdentity
 from src.models.ops import Connector, ConnectorJob
 from src.models.connectors import ConnectorNotification, ExternalAclPrincipal, ExternalDocument, ExternalGroupMapping, PermissionSnapshot, SourceScope, SyncCursor, SyncError, SyncRequest, WebhookSubscription
 from src.repositories.user import UserRepository
 from src.domain.connectors import sync_local_folder
 from src.core.config import settings
 from src.domain.rbac import AuthorizationService
-from src.domain.connector_adapters import adapter_for, ConnectorProviderError, SharePointAdapter, GoogleDriveAdapter
+from src.domain.connector_adapters import adapter_for, ConnectorProviderError
+from src.domain.connector_availability import available_providers, provider_availability
+from src.domain.connector_providers import (
+    CONNECTOR_PROVIDERS,
+    identity_provider as provider_identity,
+    is_microsoft_graph,
+)
 from src.domain.connector_auth import ensure_connector_authorized
 from src.domain.webhook_subscriptions import WebhookConfigurationError, ensure_webhook_subscriptions
 from src.domain.sync_queue import claim_sync_request, enqueue_connector_sync
@@ -35,7 +41,7 @@ router = APIRouter()
 
 class ConnectorCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
-    system: Literal["local_folder", "google_drive", "sharepoint"] = "local_folder"
+    system: Literal["local_folder", "google_drive", "sharepoint", "onedrive"] = "local_folder"
     path: str = Field(default="", max_length=1_000)
     config: dict[str, Any] = Field(default_factory=dict)
 
@@ -53,8 +59,12 @@ class ScopeSelection(BaseModel):
 
 
 class GroupMappingRequest(BaseModel):
-    access_group_id: uuid.UUID
-    external_group_name: str | None = Field(default=None, max_length=255)
+    department_id: uuid.UUID
+    # The provider's own type for this principal. Defaults to `group` so a client written
+    # against the group-only API keeps working; anything else must say what it is, because
+    # a mapping row is identified by (connector, type, id).
+    principal_type: str = Field(default="group", min_length=1, max_length=30)
+    principal_name: str | None = Field(default=None, max_length=255)
 
 
 _SENSITIVE_CONFIG_KEYS = {"clientsecret", "accesstoken", "refreshtoken", "token", "apikey", "password", "secret"}
@@ -100,7 +110,7 @@ async def _apply_connector_departments(db: AsyncSession, connector: Connector, c
 def _response(connector: Connector) -> dict[str, Any]:
     config = connector.config_json or {}
     application_authorized = bool(
-        connector.system == "sharepoint"
+        is_microsoft_graph(connector.system)
         and settings.microsoft_connector_auth_mode == "application"
         and settings.MICROSOFT_CLIENT_ID
         and settings.MICROSOFT_CLIENT_SECRET
@@ -189,14 +199,47 @@ async def list_connectors(
         stmt = stmt.where(Connector.company_domain == current_user.company_domain)
     return [_response(item) for item in (await db.execute(stmt)).scalars().all()]
 
+
+# Declared BEFORE /{connector_id} routes would ever be consulted for this path, and
+# distinct from them: "providers" is a literal segment, not a connector UUID.
+@router.get("/providers")
+async def list_providers(
+    _current_user: User = Depends(require_permission("connector.manage")),
+) -> list[dict[str, Any]]:
+    """Which source providers this deployment can offer, and what each still needs.
+
+    Unavailable providers are returned rather than omitted so the UI can hide them
+    while an operator retains a way to see WHY one is absent.
+    """
+    return [
+        {
+            "system": item.system,
+            "available": item.available,
+            "missing_settings": list(item.missing),
+        }
+        for item in available_providers()
+    ]
+
 @router.post("", status_code=201)
 async def create_connector(
     request: ConnectorCreate,
     current_user: User = Depends(require_permission("connector.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    if request.system not in {"local_folder", "google_drive", "sharepoint"}:
+    if request.system not in CONNECTOR_PROVIDERS:
         raise HTTPException(status_code=422, detail="Unsupported connector provider")
+    # Refuse at creation, not at the first OAuth attempt. A connector created for an
+    # unconfigured provider is a permanent dead end: authorization fails, and the row
+    # stays in the list looking like a source that merely needs a click.
+    availability = provider_availability(request.system)
+    if not availability.available:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{request.system} is not configured on this deployment. "
+                f"Set {', '.join(availability.missing)} in the API environment."
+            ),
+        )
     folder = None
     if request.system == "local_folder":
         from src.domain.connectors import _safe_folder
@@ -304,9 +347,9 @@ async def start_oauth(
         raise HTTPException(status_code=404, detail="Connector not found")
     if connector.system == "local_folder":
         raise HTTPException(status_code=422, detail="Local folders do not require OAuth")
-    if connector.system == "sharepoint" and settings.microsoft_connector_auth_mode == "application":
+    if is_microsoft_graph(connector.system) and settings.microsoft_connector_auth_mode == "application":
         raise HTTPException(status_code=422, detail="Microsoft connector is using app-only mode; configure Entra application permissions and use Discover scopes directly")
-    if connector.system == "sharepoint" and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI)):
+    if is_microsoft_graph(connector.system) and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI)):
         raise HTTPException(status_code=422, detail="Microsoft connector is not configured. Set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, and MICROSOFT_REDIRECT_URI in the API environment.")
     if connector.system == "google_drive" and not all((settings.GOOGLE_CLIENT_ID, settings.GOOGLE_CLIENT_SECRET, settings.GOOGLE_REDIRECT_URI)):
         raise HTTPException(status_code=422, detail="Google Drive connector is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in the API environment.")
@@ -315,12 +358,13 @@ async def start_oauth(
     connector.oauth_state_expires_at = datetime.utcnow() + timedelta(minutes=10)
     await db.commit()
     adapter = adapter_for(connector)
-    if isinstance(adapter, SharePointAdapter):
-        url = adapter.oauth_url(state)
-    elif isinstance(adapter, GoogleDriveAdapter):
-        url = adapter.oauth_url(state)
-    else:
+    # Capability, not class identity. The isinstance chain here had to name every
+    # adapter that supports OAuth, so a new provider silently fell through to the
+    # "not configured" branch despite having a working oauth_url.
+    oauth_url = getattr(adapter, "oauth_url", None)
+    if not callable(oauth_url):
         raise HTTPException(status_code=422, detail="OAuth is not configured for this provider")
+    url = oauth_url(state)
     return {"authorization_url": url}
 
 
@@ -416,7 +460,7 @@ async def preview_connector(
         raise HTTPException(status_code=422, detail="Preview is not available for local folders")
     scopes = (await db.execute(select(SourceScope).where(SourceScope.connector_id == connector.id, SourceScope.selected.is_(True)))).scalars().all()
     if not scopes:
-        raise HTTPException(status_code=409, detail="Select at least one SharePoint library or folder before previewing")
+        raise HTTPException(status_code=409, detail="Select at least one library, drive, or folder before previewing")
     adapter = adapter_for(connector)
     await ensure_connector_authorized(db, connector)
     items: list[dict[str, Any]] = []
@@ -498,11 +542,11 @@ async def list_group_mappings(
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    mappings = (await db.execute(select(ExternalGroupMapping, AccessGroup.name).join(AccessGroup, AccessGroup.id == ExternalGroupMapping.access_group_id).where(
+    mappings = (await db.execute(select(ExternalGroupMapping, Department.name).join(Department, Department.id == ExternalGroupMapping.department_id).where(
         ExternalGroupMapping.connector_id == connector.id,
-        AccessGroup.company_domain == connector.company_domain,
+        Department.company_domain == connector.company_domain,
     ))).all()
-    return [{"external_group_id": mapping.external_group_id, "external_group_name": mapping.external_group_name, "access_group_id": str(mapping.access_group_id), "access_group_name": name, "active": mapping.active} for mapping, name in mappings]
+    return [{"principal_type": mapping.principal_type, "principal_id": mapping.principal_id, "principal_name": mapping.principal_name, "department_id": str(mapping.department_id), "department_name": name, "active": mapping.active} for mapping, name in mappings]
 
 
 @router.get("/{connector_id}/acl-principals")
@@ -521,17 +565,17 @@ async def list_acl_principals(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    mapping_rows = (await db.execute(select(ExternalGroupMapping, AccessGroup.name).join(
-        AccessGroup, AccessGroup.id == ExternalGroupMapping.access_group_id,
+    mapping_rows = (await db.execute(select(ExternalGroupMapping, Department.name).join(
+        Department, Department.id == ExternalGroupMapping.department_id,
     ).where(
         ExternalGroupMapping.connector_id == connector.id,
-        AccessGroup.company_domain == connector.company_domain,
+        Department.company_domain == connector.company_domain,
     ))).all()
     group_mappings = {
-        mapping.external_group_id: {
-            "external_group_name": mapping.external_group_name,
-            "access_group_id": str(mapping.access_group_id),
-            "access_group_name": name,
+        (mapping.principal_type, mapping.principal_id): {
+            "principal_name": mapping.principal_name,
+            "department_id": str(mapping.department_id),
+            "department_name": name,
             "active": mapping.active,
         }
         for mapping, name in mapping_rows
@@ -557,59 +601,135 @@ async def list_acl_principals(
         if principal.role:
             entry["roles"].update(item.strip() for item in principal.role.split(",") if item.strip())
 
+    # Identity resolution must agree with `cloud_sync._save_permissions`, which is what
+    # actually decides whether approval is blocked. This query used to hardcode
+    # `microsoft_entra`, skip the email fallback and ignore `User.active`, so the panel
+    # could report a principal resolved that the approval gate still counted as unmapped
+    # (and vice versa).
+    identity_provider = provider_identity(connector.system)
     user_subjects = [principal_id for principal_type, principal_id in by_principal if principal_type in {"user", "siteUser"}]
+    lowered_subjects = {str(item).lower() for item in user_subjects}
     identities = (await db.execute(
         select(ExternalIdentity).join(User, User.id == ExternalIdentity.user_id).where(
-            ExternalIdentity.provider == "microsoft_entra",
-            ExternalIdentity.subject.in_(user_subjects),
+            ExternalIdentity.provider == identity_provider,
+            or_(
+                ExternalIdentity.subject.in_(user_subjects),
+                func.lower(ExternalIdentity.email).in_(lowered_subjects),
+            ),
             User.company_domain == connector.company_domain,
+            User.active.is_(True),
         )
     )).scalars().all() if user_subjects else []
-    mapped_users = {str(identity.subject): str(identity.user_id) for identity in identities}
+    mapped_users: dict[str, str] = {}
+    for identity in identities:
+        mapped_users[str(identity.subject)] = str(identity.user_id)
+        if identity.email:
+            mapped_users[str(identity.email).lower()] = str(identity.user_id)
+    if connector.system == "google_drive" and lowered_subjects:
+        email_users = (await db.execute(
+            select(User).where(
+                func.lower(User.email).in_(lowered_subjects),
+                User.company_domain == connector.company_domain,
+                User.active.is_(True),
+            )
+        )).scalars().all()
+        mapped_users.update({str(item.email).lower(): str(item.id) for item in email_users})
 
     response: list[dict[str, Any]] = []
     for (principal_type, principal_id), entry in sorted(by_principal.items()):
-        mapping = group_mappings.get(principal_id) if principal_type in {"group", "siteGroup"} else None
-        mapped_user_id = mapped_users.get(principal_id) if principal_type in {"user", "siteUser"} else None
-        active_mapping = mapping and mapping["active"]
+        # Every observed principal can be mapped to a department, whatever its type. A
+        # provider `user`, `link`, `domain` or `unknown` principal previously had no route
+        # at all: it blocked approval and no UI control could resolve it.
+        mapping = group_mappings.get((principal_type, principal_id))
+        mapped_user_id = (
+            mapped_users.get(principal_id)
+            or mapped_users.get(str(principal_id).lower())
+            if principal_type in {"user", "siteUser"}
+            else None
+        )
+        active_mapping = bool(mapping and mapping["active"])
         response.append({
             "principal_type": principal_type,
             "principal_id": principal_id,
             "principal_name": entry["principal_name"],
             "roles": sorted(entry["roles"]),
             "mapping_status": "mapped" if active_mapping or mapped_user_id else "unmapped",
-            "external_group_name": mapping["external_group_name"] if mapping else None,
-            "access_group_id": mapping["access_group_id"] if active_mapping else None,
-            "access_group_name": mapping["access_group_name"] if active_mapping else None,
+            # Server-owned policy: the client must not re-derive who is mappable from the
+            # principal type.
+            "mappable": True,
+            "department_id": mapping["department_id"] if active_mapping else None,
+            "department_name": mapping["department_name"] if active_mapping else None,
             "internal_user_id": mapped_user_id,
         })
     return response
 
 
-@router.put("/{connector_id}/group-mappings/{external_group_id}")
-async def set_group_mapping(
+async def _observed_principal_types(
+    db: AsyncSession, connector: Connector, principal_id: str
+) -> set[str]:
+    """Return the provider types this connector has actually observed for an id."""
+    rows = (await db.execute(
+        select(ExternalAclPrincipal.principal_type)
+        .join(PermissionSnapshot, PermissionSnapshot.id == ExternalAclPrincipal.permission_snapshot_id)
+        .join(ExternalDocument, ExternalDocument.id == PermissionSnapshot.external_document_id)
+        .where(
+            ExternalDocument.connector_id == connector.id,
+            ExternalDocument.state != "deleted",
+            ExternalAclPrincipal.principal_id == principal_id,
+        )
+    )).scalars().all()
+    return {str(item) for item in rows}
+
+
+@router.put("/{connector_id}/principal-mappings/{principal_id}")
+async def set_principal_mapping(
     connector_id: uuid.UUID,
     request: GroupMappingRequest,
-    external_group_id: str = Path(..., min_length=1, max_length=512),
+    principal_id: str = Path(..., min_length=1, max_length=512),
     current_user: User = Depends(require_permission("connector.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    group = (await db.execute(select(AccessGroup).where(
-        AccessGroup.id == request.access_group_id,
-        AccessGroup.company_domain == connector.company_domain,
+    department = (await db.execute(select(Department).where(
+        Department.id == request.department_id,
+        Department.company_domain == connector.company_domain,
     ))).scalar_one_or_none()
-    if not group:
-        raise HTTPException(status_code=404, detail="Connector or access group not found")
-    mapping = (await db.execute(select(ExternalGroupMapping).where(ExternalGroupMapping.connector_id == connector.id, ExternalGroupMapping.external_group_id == external_group_id))).scalar_one_or_none()
+    if not department:
+        raise HTTPException(status_code=404, detail="Connector or department not found")
+    # Only a principal this connector has actually seen may be mapped. Any string used to
+    # be accepted, which was harmless while only groups could be read back, but every type
+    # is now honoured — so an arbitrary id would be an unauditable grant.
+    observed = await _observed_principal_types(db, connector, principal_id)
+    if not observed:
+        raise HTTPException(
+            status_code=404,
+            detail="That principal has not been observed on this connector; run a sync first",
+        )
+    if request.principal_type not in observed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"This connector observed '{principal_id}' as {sorted(observed)}, not '{request.principal_type}'",
+        )
+    mapping = (await db.execute(select(ExternalGroupMapping).where(
+        ExternalGroupMapping.connector_id == connector.id,
+        ExternalGroupMapping.principal_type == request.principal_type,
+        ExternalGroupMapping.principal_id == principal_id,
+    ))).scalar_one_or_none()
     if mapping is None:
-        mapping = ExternalGroupMapping(connector_id=connector.id, external_group_id=external_group_id, external_group_name=request.external_group_name, access_group_id=group.id, active=True)
+        mapping = ExternalGroupMapping(
+            connector_id=connector.id,
+            principal_type=request.principal_type,
+            principal_id=principal_id,
+            principal_name=request.principal_name,
+            department_id=department.id,
+            active=True,
+        )
         db.add(mapping)
     else:
-        mapping.external_group_name = request.external_group_name or mapping.external_group_name
-        mapping.access_group_id = group.id
+        mapping.principal_name = request.principal_name or mapping.principal_name
+        mapping.department_id = department.id
         mapping.active = True
     try:
         await db.flush()
@@ -626,20 +746,25 @@ async def set_group_mapping(
     from src.domain.events import event_bus
     for article_id in changed_article_ids:
         await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
-    return {"external_group_id": mapping.external_group_id, "access_group_id": str(mapping.access_group_id), "active": mapping.active, "articles_reconciled": len(changed_article_ids)}
+    return {"principal_type": mapping.principal_type, "principal_id": mapping.principal_id, "department_id": str(mapping.department_id), "active": mapping.active, "articles_reconciled": len(changed_article_ids)}
 
 
-@router.delete("/{connector_id}/group-mappings/{external_group_id}", status_code=204)
-async def delete_group_mapping(
+@router.delete("/{connector_id}/principal-mappings/{principal_id}", status_code=204)
+async def delete_principal_mapping(
     connector_id: uuid.UUID,
-    external_group_id: str = Path(..., min_length=1, max_length=512),
+    principal_id: str = Path(..., min_length=1, max_length=512),
+    principal_type: str = Query(default="group", min_length=1, max_length=30),
     current_user: User = Depends(require_permission("connector.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     connector = await _connector_for_user(db, connector_id, current_user)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    mapping = (await db.execute(select(ExternalGroupMapping).where(ExternalGroupMapping.connector_id == connector.id, ExternalGroupMapping.external_group_id == external_group_id))).scalar_one_or_none()
+    mapping = (await db.execute(select(ExternalGroupMapping).where(
+        ExternalGroupMapping.connector_id == connector.id,
+        ExternalGroupMapping.principal_type == principal_type,
+        ExternalGroupMapping.principal_id == principal_id,
+    ))).scalar_one_or_none()
     if mapping:
         mapping.active = False
         try:
@@ -657,6 +782,7 @@ async def delete_group_mapping(
         from src.domain.events import event_bus
         for article_id in changed_article_ids:
             await event_bus.publish("PermissionChanged", {"article_id": str(article_id)})
+
 
 async def _run_cloud_sync_inline(
     connector_id: uuid.UUID,
@@ -738,7 +864,13 @@ async def sync_connector(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
     if connector.system != "local_folder":
-        if settings.microsoft_connector_auth_mode != "application" and not connector.oauth_access_token and not connector.oauth_refresh_token:
+        # Only a Graph connector can be authorized without a stored token, and only
+        # in app-only mode. This condition ignored the provider entirely, so with
+        # MICROSOFT_CONNECTOR_AUTH_MODE=application an unauthorized Google Drive
+        # connector passed the gate and failed later inside the worker instead of
+        # returning 409 here.
+        app_only = is_microsoft_graph(connector.system) and settings.microsoft_connector_auth_mode == "application"
+        if not app_only and not connector.oauth_access_token and not connector.oauth_refresh_token:
             raise HTTPException(status_code=409, detail="Authorize the connector before syncing")
         active_job = (await db.execute(
             select(ConnectorJob)
@@ -1022,8 +1154,14 @@ async def _enqueue_webhook(request: Request, provider: str, lifecycle_only: bool
             if not subscription or not subscription.active:
                 continue
             expected_token = subscription.verification_token_hash
+            # No stored token means nothing can authenticate this notification, so the
+            # only safe answer is to drop it. Comparing only when a hash happens to
+            # exist made an unverifiable subscription MORE permissive than a verified
+            # one: anyone who learned a subscription id could enqueue provider syncs.
+            if not expected_token:
+                continue
             received_token = hashlib.sha256(item_client_state.encode("utf-8")).hexdigest() if item_client_state else None
-            if expected_token and (not received_token or not hmac.compare_digest(expected_token, received_token)):
+            if not received_token or not hmac.compare_digest(expected_token, received_token):
                 continue
 
             lifecycle_event = str(item.get("lifecycleEvent") or body.get("lifecycleEvent") or "") or None
@@ -1115,6 +1253,25 @@ async def sharepoint_lifecycle_webhook(
     if validationToken:
         return Response(content=validationToken, media_type="text/plain")
     return await _enqueue_webhook(request, "sharepoint", lifecycle_only=True)
+
+
+# `callback_urls` derives the path from `connector.system`, so these two must exist
+# for a OneDrive subscription to be accepted at all: Graph validates every
+# notificationUrl and lifecycleNotificationUrl during POST /subscriptions.
+@router.post("/webhooks/onedrive")
+async def onedrive_webhook(request: Request, validationToken: str | None = Query(default=None)) -> Response:
+    if validationToken:
+        return Response(content=validationToken, media_type="text/plain")
+    return await _enqueue_webhook(request, "onedrive")
+
+
+@router.post("/webhooks/onedrive/lifecycle")
+async def onedrive_lifecycle_webhook(
+    request: Request, validationToken: str | None = Query(default=None)
+) -> Response:
+    if validationToken:
+        return Response(content=validationToken, media_type="text/plain")
+    return await _enqueue_webhook(request, "onedrive", lifecycle_only=True)
 
 
 @router.post("/webhooks/google-drive")

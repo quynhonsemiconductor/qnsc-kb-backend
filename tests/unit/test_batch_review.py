@@ -187,3 +187,38 @@ def test_batch_commit_creates_pending_children_with_source_positions():
         {"start": 1, "end": 2, "heading": "Second"},
     ]
     assert repo.audits[-1].action == "batch_commit"
+
+
+def test_committed_children_are_marked_as_split_products_so_retry_cannot_re_split():
+    """The infinite batch-review loop, pinned at its source.
+
+    `commit_candidates` stamps every child `restructure_status="lossless_ready"`, and the
+    reviewer lands straight back on those children. Retrying AI format on one used to
+    re-run `route_document_candidates_llm`, which splits by DEPARTMENT rather than by
+    size, so a child came back with >1 candidates, demanded another batch review, and
+    produced a further generation of children — fanning out on every pass instead of
+    converging.
+
+    `run_restructure_pending_draft` now skips candidate regeneration when this key is
+    present, so the contract worth pinning is that commit actually sets it. Losing it
+    would silently restore the loop.
+    """
+    draft = make_draft()
+    first = make_candidate(draft.id, 1, "First", "A", 0, 1)
+    second = make_candidate(draft.id, 2, "Second", "B", 1, 2)
+    draft.candidates = [first, second]
+    repo = BatchRepository(draft)
+    service = GovernanceService(repo, object())
+
+    children = asyncio.run(service.commit_candidates(make_reviewer(), draft.id))
+
+    assert [item.content_metadata["submission_kind"] for item in children] == [
+        "split_candidate",
+        "split_candidate",
+    ]
+    # The status that makes the retry control eligible in the first place; if this ever
+    # stops being a settled state the frontend gate has to change with it.
+    assert [item.restructure_status for item in children] == [
+        "lossless_ready",
+        "lossless_ready",
+    ]

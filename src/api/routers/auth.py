@@ -27,12 +27,12 @@ from src.api.deps import (
 )
 from src.repositories.user import UserRepository
 from src.domain.auth import AuthService
+from src.domain.factory_reset import is_reset_operator
 from src.core.config import settings
-from src.core.security import get_password_hash
+from src.core.security import get_password_hash, verify_password
 from src.repositories.audit import AuditRepository
 from src.models.rbac import Permission, Role, RolePermission
 from src.models.user import (
-    AccessGroup,
     Department,
     DepartmentManager,
     User,
@@ -44,17 +44,19 @@ from src.models.article import Article, article_departments
 from src.models.chunk import ArticleChunk
 from src.models.governance import Gap, PendingDraft
 from src.models.ops import FeatureFlag, NotificationQueue
-from src.models.sessions import RefreshSession
+from src.models.sessions import RefreshSession, PasswordResetToken
 from src.domain.rbac import AuthorizationService, SCOPES, bootstrap_rbac
 from src.domain.departments import (
     resolve_active_department,
     normalize_department_name,
-    lock_company_access_groups,
 )
 from src.core.rate_limit import auth_rate_limiter
 from src.domain import entra_auth
 from sqlalchemy import delete, select, func, update
 from sqlalchemy.orm import selectinload
+import structlog
+
+logger = structlog.get_logger()
 
 router = APIRouter()
 
@@ -171,11 +173,7 @@ class RolePermissionInput(BaseModel):
     scope: str = Field(default="company", min_length=1, max_length=20)
 
 
-class AccessGroupInput(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-
-
-class AccessGroupMembersInput(BaseModel):
+class DepartmentMembersInput(BaseModel):
     user_ids: list[uuid.UUID] = Field(max_length=1_000)
 
 
@@ -379,9 +377,14 @@ async def _system_role(db: AsyncSession, name: str, company_domain: str | None) 
 
 
 async def _set_primary_role(db: AsyncSession, user: Any, name: str) -> None:
-    """Keep the legacy display role and authoritative RBAC relationship aligned."""
-    role_company = None if name == "Admin" else user.company_domain
-    role = await _system_role(db, name, role_company)
+    """Keep the legacy display role and authoritative RBAC relationship aligned.
+
+    An "Admin" primary role resolves to the target's own company Admin role. The
+    company_domain = NULL Admin role bypasses tenant RLS entirely, so granting it here
+    would turn a company-scoped promotion into a cross-tenant one; it stays reserved for
+    the identities that attach it deliberately (src/domain/admin_bootstrap.py).
+    """
+    role = await _system_role(db, name, user.company_domain)
     user.roles = [role]
     user.role = name
 
@@ -481,26 +484,6 @@ async def list_users(
     return [_user_response(user) for user in users]
 
 
-@router.get("/groups")
-async def list_access_groups(
-    current_user: Any = Depends(require_permission("user.read")),
-    db: AsyncSession = Depends(get_db),
-) -> Any:
-    global_admin = AuthorizationService.can_view_all_access_groups(current_user)
-    groups = await UserRepository(db).get_all_groups(
-        None if global_admin else current_user.company_domain
-    )
-    return [
-        {
-            "id": group.id,
-            "name": group.name,
-            "company_domain": group.company_domain,
-            "bitmask_position": group.bitmask_position,
-        }
-        for group in groups
-    ]
-
-
 @router.get("/departments")
 async def list_departments(
     current_user: Any = Depends(get_current_user), db: AsyncSession = Depends(get_db)
@@ -524,7 +507,6 @@ async def list_departments(
             "description": item.description,
             "company_domain": item.company_domain,
             "active": item.active,
-            "kind": item.kind,
             "contact_email": item.contact_email,
             "owner": next(
                 (
@@ -590,9 +572,29 @@ async def create_invitation(
         raise HTTPException(status_code=403, detail="Employee email must remain in the company domain")
     if payload.role not in MANAGED_PRIMARY_ROLES:
         raise HTTPException(status_code=422, detail="Unsupported employee role")
+    if payload.role in {"Admin", "CEO"} and not _is_global_user_manager(current_user):
+        # An invitation is a deferred role grant, so it needs the same authority check
+        # every immediate grant goes through. Without this a company-scoped user.manage
+        # holder can invite an address in their own domain as "Admin"; accept_invitation
+        # copies the role onto the new account and bootstrap_rbac then resolves it to an
+        # Admin role, which is the one identity that escapes tenant isolation.
+        raise HTTPException(
+            status_code=403,
+            detail="Only global user managers can assign global or executive roles",
+        )
     existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if existing and existing.active:
         raise HTTPException(status_code=409, detail="An active account already exists for this email")
+    if is_reset_operator(email):
+        # Same reasoning as the rename guard in update_user, but this is the wider hole:
+        # an invitation becomes an account whose password the ACCEPTER chooses, so
+        # inviting the allowlisted address would hand over database-reset authority
+        # without ever needing its mailbox. Blocked here rather than at accept time so
+        # the refusal happens before a token is minted and emailed.
+        raise HTTPException(
+            status_code=403,
+            detail="This address is reserved for database-reset operations and cannot be invited",
+        )
     audience_ids = [str(item) for item in (payload.audience_ids or [])]
     if audience_ids:
         count = int((await db.execute(
@@ -670,6 +672,446 @@ async def revoke_invitation(
     return _invitation_response(item)
 
 
+# ── Password credentials ────────────────────────────────────────────────────────────────
+#
+# Invitations existed but were Entra-SSO only, so an admin-created account could only ever
+# be reached through Microsoft sign-in and a forgotten password had no route back except
+# asking an administrator to set one. These five endpoints close that gap.
+#
+# Every one of them is reachable WITHOUT a session, so each carries its own defences:
+# cross-site rejection, rate limiting on both the identifier and the source IP, and a
+# hashed single-use token with an expiry. None of them reveals whether an account exists.
+
+#: bcrypt truncates silently past 72 BYTES and `get_password_hash` raises above it. A
+#: Vietnamese character is 3 bytes in UTF-8, so "72 characters" is not the same limit and
+#: counting characters would let a 30-character Vietnamese passphrase fail at the hash.
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_BYTES = 72
+
+
+def _validate_password(password: str) -> str:
+    """Enforce the password policy in one place, for every entry point."""
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Password must be at least {PASSWORD_MIN_LENGTH} characters",
+        )
+    if len(password.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Password must be at most {PASSWORD_MAX_BYTES} bytes; accented and "
+                "Vietnamese characters count as more than one"
+            ),
+        )
+    return password
+
+
+def _token_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class InvitationPreview(BaseModel):
+    email: EmailStr
+    name: str
+    role: str
+    company_domain: str
+    expires_at: datetime
+
+
+class InvitationAccept(BaseModel):
+    token: str = Field(min_length=16, max_length=256)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=256)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=256)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=256)
+
+
+async def _live_invitation(db: AsyncSession, raw_token: str) -> Invitation:
+    """Resolve a raw invitation token, or raise the reason it cannot be used.
+
+    404 for unknown and 410 for spent/revoked/expired are deliberately different: a user
+    clicking a week-old link deserves "this expired, ask for another" rather than "not
+    found", which reads as though the invitation never existed.
+    """
+    item = (
+        await db.execute(
+            select(Invitation).where(Invitation.token_hash == _token_hash(raw_token))
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if item.revoked_at:
+        raise HTTPException(status_code=410, detail="This invitation was revoked")
+    if item.used_at:
+        raise HTTPException(
+            status_code=409, detail="This invitation has already been accepted"
+        )
+    if item.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=410, detail="This invitation has expired")
+    return item
+
+
+@router.get("/invitations/preview", response_model=InvitationPreview)
+async def preview_invitation(
+    request: Request,
+    token: str = Query(min_length=16, max_length=256),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Show an invitee who the invitation is for, before they choose a password.
+
+    Public by necessity — the recipient has no account yet. Safe because the token is the
+    secret: without it there is nothing to look up, and the response reveals only what the
+    inviter already sent to that address.
+    """
+    _reject_cross_site_auth_request(request)
+    client_ip = request.client.host if request and request.client else "unknown"
+    allowed, retry_after = await auth_rate_limiter.allow(f"invite-preview:{client_ip}")
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    # No session, so nothing has set the tenant context; RLS needs it before the read.
+    await set_database_context(db, None, True)
+    item = await _live_invitation(db, token)
+    return {
+        "email": item.email,
+        "name": item.name,
+        "role": item.role,
+        "company_domain": item.company_domain,
+        "expires_at": item.expires_at,
+    }
+
+
+@router.post("/invitations/accept", response_model=TokenResponse, response_model_exclude_none=True)
+async def accept_invitation(
+    request: Request,
+    response: Response,
+    payload: InvitationAccept,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Turn an invitation into a real account with a password, and sign the user in.
+
+    Mirrors the account the Entra callback provisions from the same invitation — same role,
+    same audience memberships, same RBAC bootstrap — so an invitee ends up in the identical
+    state whichever route they took. The only difference is that this one sets a password
+    the user chose instead of a random unusable one.
+
+    Returns the login payload and sets the auth cookies, so accepting lands the invitee
+    straight in the app rather than bouncing them to a second sign-in.
+    """
+    _reject_cross_site_auth_request(request)
+    client_ip = request.client.host if request and request.client else "unknown"
+    allowed, retry_after = await auth_rate_limiter.allow(f"invite-accept:{client_ip}")
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    _validate_password(payload.password)
+    await set_database_context(db, None, True)
+    item = await _live_invitation(db, payload.token)
+
+    existing = (
+        await db.execute(select(User).where(User.email == item.email))
+    ).scalar_one_or_none()
+    if existing is not None and existing.active:
+        raise HTTPException(
+            status_code=409, detail="An active account already exists for this email"
+        )
+
+    if existing is not None:
+        # A deactivated account being re-invited: reuse the row so its history, authored
+        # articles and audit trail survive rather than orphaning them behind a new id.
+        user = existing
+        user.name = item.name or user.name
+        user.role = item.role
+        user.active = True
+        user.password_hash = get_password_hash(payload.password)
+        user.auth_version += 1
+    else:
+        user = User(
+            email=item.email,
+            name=item.name,
+            password_hash=get_password_hash(payload.password),
+            company_domain=item.company_domain,
+            role=item.role,
+            active=True,
+        )
+        db.add(user)
+    await db.flush()
+    await bootstrap_rbac(db)
+
+    if item.audience_ids:
+        memberships = (
+            await db.execute(
+                select(Department).where(
+                    Department.id.in_([uuid.UUID(value) for value in item.audience_ids]),
+                    Department.company_domain == user.company_domain,
+                )
+            )
+        ).scalars().all()
+        user.departments = list(memberships)
+        if memberships and not user.dept:
+            user.dept = memberships[0].name
+
+    item.used_at = datetime.utcnow()
+    item.accepted_user_id = user.id
+    await db.flush()
+
+    reloaded = await UserRepository(db).get_by_id(user.id)
+    if reloaded is None:
+        raise HTTPException(status_code=500, detail="Could not provision the account")
+    user = reloaded
+
+    auth_service = AuthService(UserRepository(db))
+    access = auth_service.create_token(user)
+    refresh = auth_service.create_refresh_token(user)
+    await _store_refresh_session(db, user, refresh)
+    await AuditRepository(db).record(
+        user.id,
+        "invitation_accept",
+        "user",
+        str(user.id),
+        detail={"invitation_id": str(item.id), "reactivated": existing is not None},
+        commit=False,
+    )
+    await db.commit()
+    _set_auth_cookies(response, access, refresh)
+    return {
+        "access_token": access,
+        "token_type": "bearer",
+        "user": _user_response(user),
+    }
+
+
+@router.post("/password/forgot", status_code=status.HTTP_202_ACCEPTED)
+async def forgot_password(
+    request: Request,
+    payload: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Mail a single-use reset link, and say nothing about whether the account exists.
+
+    ALWAYS 202, for every address. Returning 404 for an unknown email turns this endpoint
+    into an account-enumeration oracle: an attacker learns which of a leaked address list
+    are real employees here. The cost of that discipline is that a user who mistypes their
+    address gets a confirmation and no email, which is why the response text says "if an
+    account exists".
+
+    Rate limited on the address AND the source IP, like login: the address key stops one
+    account being mail-bombed from many IPs, the IP key stops one host enumerating many
+    addresses.
+    """
+    _reject_cross_site_auth_request(request)
+    client_ip = request.client.host if request and request.client else "unknown"
+    email = str(payload.email).strip().lower()
+    address_allowed, address_retry = await auth_rate_limiter.allow(f"forgot:{email}")
+    ip_allowed, ip_retry = await auth_rate_limiter.allow(f"forgot-ip:{client_ip}")
+    if not address_allowed or not ip_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many reset requests",
+            headers={"Retry-After": str(max(address_retry, ip_retry))},
+        )
+    await set_database_context(db, None, True)
+
+    user = (
+        await db.execute(select(User).where(User.email == email, User.active.is_(True)))
+    ).scalar_one_or_none()
+
+    if user is not None:
+        raw_token = secrets.token_urlsafe(32)
+        db.add(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=_token_hash(raw_token),
+                # Deliberately short. A reset link is a bearer credential for the account;
+                # a 7-day window like the invitation's would leave one sitting in a mailbox.
+                expires_at=datetime.utcnow() + timedelta(hours=1),
+                requested_for_email=email,
+            )
+        )
+        db.add(
+            NotificationQueue(
+                # Owned by the account being reset, which is also the only recipient — the
+                # recipient-scoped notification RLS policy stays valid.
+                recipient_user_id=user.id,
+                type="email",
+                payload={
+                    "to": email,
+                    "subject": "Reset your QNSC Knowledge Base password",
+                    "text": (
+                        "A password reset was requested for your account. This link works "
+                        "once and expires in 1 hour: "
+                        f"{settings.FRONTEND_URL.rstrip('/')}/reset-password?token={raw_token}"
+                        "\n\nIf you did not request this, you can ignore this email; your "
+                        "current password still works."
+                    ),
+                },
+            )
+        )
+        await db.commit()
+        await AuditRepository(db).record(
+            user.id, "password_reset_request", "user", str(user.id)
+        )
+    else:
+        # No row, no email, no audit entry that could confirm the address — but the same
+        # response and a comparable amount of work.
+        logger.info("Password reset requested for unknown address", ip=client_ip)
+
+    return {"status": "sent"}
+
+
+@router.post("/password/reset")
+async def reset_password(
+    request: Request,
+    payload: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Consume a reset token and set the new password.
+
+    Every existing session dies: `auth_version` increments, which invalidates every issued
+    access token through the check in `deps.get_current_user`, and the refresh sessions are
+    revoked. Anyone resetting a password may be locking out whoever compromised it, so
+    leaving other sessions alive would defeat the point.
+
+    The endpoint does NOT sign the user in. It returns a bare status so the UI sends them to
+    the login form — proving the new password works, and matching what every other product
+    does here.
+    """
+    _reject_cross_site_auth_request(request)
+    client_ip = request.client.host if request and request.client else "unknown"
+    allowed, retry_after = await auth_rate_limiter.allow(f"reset:{client_ip}")
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    _validate_password(payload.password)
+    await set_database_context(db, None, True)
+
+    grant = (
+        await db.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.token_hash == _token_hash(payload.token)
+            )
+        )
+    ).scalar_one_or_none()
+    if grant is None:
+        raise HTTPException(status_code=404, detail="This reset link is not valid")
+    if grant.used_at:
+        raise HTTPException(status_code=410, detail="This reset link has already been used")
+    if grant.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=410, detail="This reset link has expired")
+
+    user = (
+        await db.execute(select(User).where(User.id == grant.user_id))
+    ).scalar_one_or_none()
+    if user is None or not user.active:
+        raise HTTPException(status_code=410, detail="This account is no longer active")
+
+    user.password_hash = get_password_hash(payload.password)
+    user.auth_version += 1
+    grant.used_at = datetime.utcnow()
+    # Any other outstanding grant for this user is now void too, or a second link from the
+    # same mailbox would still work after the password changed.
+    await db.execute(
+        PasswordResetToken.__table__.update()
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=datetime.utcnow())
+    )
+    await _revoke_refresh_sessions(db, user.id)
+    await db.commit()
+    await AuditRepository(db).record(
+        user.id, "password_reset", "user", str(user.id)
+    )
+    return {"status": "reset"}
+
+
+@router.post("/password/change")
+async def change_password(
+    request: Request,
+    response: Response,
+    payload: ChangePasswordRequest,
+    current_user: Any = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Change the password of the signed-in user, proving the current one first.
+
+    Requiring `current_password` is what stops a stolen access token from taking permanent
+    ownership of an account: a token grants requests, not the right to lock the owner out.
+
+    Every other session is revoked and `auth_version` increments, which would invalidate
+    THIS caller's tokens too — so fresh ones are minted and set as cookies before returning.
+    Without that the user would be signed out by their own successful password change.
+    """
+    _reject_cross_site_auth_request(request)
+    allowed, retry_after = await auth_rate_limiter.allow(f"change:{current_user.id}")
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    if not verify_password(payload.current_password, current_user.password_hash):
+        await AuditRepository(db).record(
+            current_user.id,
+            "password_change",
+            "user",
+            str(current_user.id),
+            outcome="failure",
+        )
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    _validate_password(payload.new_password)
+    if payload.new_password == payload.current_password:
+        raise HTTPException(
+            status_code=422, detail="The new password must differ from the current one"
+        )
+
+    user = (
+        await db.execute(select(User).where(User.id == current_user.id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    user.password_hash = get_password_hash(payload.new_password)
+    user.auth_version += 1
+    await _revoke_refresh_sessions(db, user.id)
+    await db.flush()
+
+    reloaded = await UserRepository(db).get_by_id(user.id)
+    user = reloaded or user
+    auth_service = AuthService(UserRepository(db))
+    access = auth_service.create_token(user)
+    refresh = auth_service.create_refresh_token(user)
+    await _store_refresh_session(db, user, refresh)
+    await db.commit()
+    await AuditRepository(db).record(
+        current_user.id, "password_change", "user", str(current_user.id)
+    )
+    _set_auth_cookies(response, access, refresh)
+    return {"status": "changed"}
+
+
 @router.post("/departments", status_code=status.HTTP_201_CREATED)
 async def create_department(
     payload: DepartmentInput,
@@ -693,43 +1135,11 @@ async def create_department(
     ).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="Department already exists")
-    await lock_company_access_groups(db, f"department:{company_domain}")
-    department_group = (
-        await db.execute(
-            select(AccessGroup).where(
-                AccessGroup.company_domain == company_domain,
-                func.lower(AccessGroup.name) == f"dept_{name.lower()}".lower(),
-            )
-        )
-    ).scalar_one_or_none()
-    if department_group is None:
-        next_position = (
-            int(
-                (
-                    await db.execute(
-                        select(
-                            func.coalesce(func.max(AccessGroup.bitmask_position), -1)
-                        ).where(
-                            AccessGroup.company_domain == company_domain,
-                        )
-                    )
-                ).scalar_one()
-            )
-            + 1
-        )
-        db.add(
-            AccessGroup(
-                name=f"dept_{name.lower()}",
-                company_domain=company_domain,
-                bitmask_position=next_position,
-            )
-        )
     item = Department(
         company_domain=company_domain,
         name=name,
         description=payload.description.strip(),
         active=True,
-        kind="org",
         contact_email=str(payload.contact_email).lower() if payload.contact_email else None,
     )
     db.add(item)
@@ -744,7 +1154,6 @@ async def create_department(
         "description": item.description,
         "company_domain": item.company_domain,
         "active": item.active,
-        "kind": item.kind,
         "contact_email": item.contact_email,
     }
 
@@ -793,29 +1202,6 @@ async def update_department(
         if duplicate:
             raise HTTPException(status_code=409, detail="Department already exists")
         old_name = item.name
-        old_group_name = f"dept_{old_name.lower()}"
-        new_group_name = f"dept_{name.lower()}"
-        old_group = (
-            await db.execute(
-                select(AccessGroup).where(
-                    AccessGroup.company_domain == item.company_domain,
-                    func.lower(AccessGroup.name) == old_group_name.lower(),
-                )
-            )
-        ).scalar_one_or_none()
-        new_group = (
-            await db.execute(
-                select(AccessGroup).where(
-                    AccessGroup.company_domain == item.company_domain,
-                    func.lower(AccessGroup.name) == new_group_name.lower(),
-                )
-            )
-        ).scalar_one_or_none()
-        if old_group and new_group and old_group.id != new_group.id:
-            raise HTTPException(
-                status_code=409,
-                detail="The target department name already has an access group; consolidate that group before renaming",
-            )
         item.name = name
         # Department names are currently denormalized in content and user
         # records. Keep the rename atomic so access rules do not point at a
@@ -863,8 +1249,6 @@ async def update_department(
             .where(FeatureFlag.department == old_name)
             .values(department=name)
         )
-        if old_group:
-            old_group.name = new_group_name
     if payload.description is not None:
         item.description = payload.description.strip()
     if payload.active is not None:
@@ -882,7 +1266,6 @@ async def update_department(
         "description": item.description,
         "company_domain": item.company_domain,
         "active": item.active,
-        "kind": item.kind,
         "contact_email": item.contact_email,
     }
 
@@ -993,108 +1376,45 @@ async def delete_department(
     return {"id": department_id, "deleted": True}
 
 
-@router.post("/groups", status_code=status.HTTP_201_CREATED)
-async def create_access_group(
-    payload: AccessGroupInput,
+@router.put("/departments/{department_id}/members")
+async def replace_department_members(
+    department_id: uuid.UUID,
+    payload: DepartmentMembersInput,
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    company_domain = current_user.company_domain
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Access group name cannot be blank")
-    await lock_company_access_groups(db, company_domain)
-    exists = (
-        await db.execute(
-            select(AccessGroup).where(
-                AccessGroup.company_domain == company_domain,
-                func.lower(AccessGroup.name) == name.lower(),
-            )
-        )
-    ).scalar_one_or_none()
-    if exists:
-        raise HTTPException(
-            status_code=409, detail="An access group with this name already exists"
-        )
-    next_position = (
-        int(
-            (
-                await db.execute(
-                    select(
-                        func.coalesce(func.max(AccessGroup.bitmask_position), 0)
-                    ).where(AccessGroup.company_domain == company_domain)
-                )
-            ).scalar_one()
-        )
-        + 1
-    )
-    group = AccessGroup(
-        name=name, company_domain=company_domain, bitmask_position=next_position
-    )
-    created = await UserRepository(db).create_group(group)
-    await AuditRepository(db).record(
-        current_user.id, "group_create", "access_group", str(created.id)
-    )
-    return {
-        "id": created.id,
-        "name": created.name,
-        "company_domain": created.company_domain,
-        "bitmask_position": created.bitmask_position,
-    }
-
-
-@router.put("/groups/{group_id}/members")
-async def replace_access_group_members(
-    group_id: uuid.UUID,
-    payload: AccessGroupMembersInput,
-    current_user: Any = Depends(require_permission("user.manage")),
-    db: AsyncSession = Depends(get_db),
-) -> Any:
-    can_manage_globally = AuthorizationService.has_permission(
-        current_user, "user.manage", requested_scope="global"
-    )
-    group = await UserRepository(db).get_group_by_id(
-        group_id,
-        company_domain=None if can_manage_globally else current_user.company_domain,
-    )
-    if not group:
-        raise HTTPException(status_code=404, detail="Access group not found")
+    department = await _department_for_management(db, department_id, current_user)
+    unique_ids = list(set(payload.user_ids))
     users = await UserRepository(db).get_by_ids(
-        list(set(payload.user_ids)),
-        company_domain=group.company_domain,
+        unique_ids, company_domain=department.company_domain
     )
-    if len(users) != len(set(payload.user_ids)):
+    if len(users) != len(unique_ids):
         raise HTTPException(
-            status_code=422, detail="Every group member must be in the same company"
+            status_code=422, detail="Every department member must be in the same company"
         )
-    group.users = list(users)
+    await db.refresh(department, attribute_names=["members"])
+    department.members = list(users)
     await db.commit()
     await AuditRepository(db).record(
-        current_user.id, "group_members_update", "access_group", str(group.id)
+        current_user.id, "department_members_update", "department", str(department.id)
     )
-    return {"id": group.id, "member_ids": [str(user.id) for user in users]}
+    return {"id": department.id, "member_ids": [str(user.id) for user in users]}
 
 
-@router.get("/groups/{group_id}/members")
-async def list_access_group_members(
-    group_id: uuid.UUID,
+@router.get("/departments/{department_id}/members")
+async def list_department_members(
+    department_id: uuid.UUID,
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """Return the tenant-scoped members for the access-group admin surface."""
-    can_manage_globally = AuthorizationService.has_permission(
-        current_user, "user.manage", requested_scope="global"
-    )
-    group = await UserRepository(db).get_group_by_id(
-        group_id,
-        company_domain=None if can_manage_globally else current_user.company_domain,
-    )
-    if not group:
-        raise HTTPException(status_code=404, detail="Access group not found")
-    await db.refresh(group, attribute_names=["users"])
+    """Return the tenant-scoped members for the department admin surface."""
+    department = await _department_for_management(db, department_id, current_user)
+    await db.refresh(department, attribute_names=["members"])
     return [
         {"id": str(user.id), "name": user.name, "email": user.email, "active": user.active}
-        for user in sorted(group.users, key=lambda item: (item.name.lower(), item.email.lower()))
+        for user in sorted(
+            department.members, key=lambda item: (item.name.lower(), item.email.lower())
+        )
     ]
 
 
@@ -1109,6 +1429,14 @@ async def create_managed_user(
     if not can_manage_globally and domain != current_user.company_domain:
         raise HTTPException(
             status_code=403, detail="Users must be created inside your company"
+        )
+    if is_reset_operator(str(user_in.email).lower()):
+        # The most direct escalation of the three: this route sets the password itself,
+        # so creating the allowlisted address would hand over database-reset authority
+        # outright. Allowlist membership is granted in the API environment only.
+        raise HTTPException(
+            status_code=403,
+            detail="This address is reserved for database-reset operations and cannot be created here",
         )
     if not can_manage_globally and user_in.role in {"Admin", "CEO"}:
         raise HTTPException(
@@ -1380,6 +1708,16 @@ async def update_managed_user(
             raise HTTPException(
                 status_code=422,
                 detail="Changing a user's company domain is not supported; create a new account instead",
+            )
+        # The factory-reset allowlist is matched on email, and this route can change an
+        # email. Without this the allowlist is an escalation path rather than a
+        # restriction: anyone holding global user.manage renames an account they control
+        # to the allowlisted address and inherits the ability to erase the database.
+        # Membership must be granted in the API environment, never through this API.
+        if is_reset_operator(new_email) and not is_reset_operator(user.email):
+            raise HTTPException(
+                status_code=403,
+                detail="This address is reserved for database-reset operations and cannot be assigned here",
             )
         user.email = new_email
         user.company_domain = new_email.rsplit("@", 1)[-1]

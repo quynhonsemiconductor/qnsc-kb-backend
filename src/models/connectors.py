@@ -99,13 +99,36 @@ class ExternalAclPrincipal(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 
 class ExternalGroupMapping(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """An administrator's decision that one provider principal means one department.
+
+    Named for groups because groups were all it could hold: the sync path only ever
+    looked up ids drawn from ``group``/``siteGroup``, so a provider ``user``, ``link``,
+    ``domain`` or ``unknown`` principal had no mapping route at all and blocked approval
+    forever. The columns are therefore ``principal_*`` rather than ``external_group_*``;
+    the TABLE keeps its name because its RLS policy is referenced by name from several
+    migrations and renaming it buys nothing.
+
+    ``principal_type`` is what makes a row unambiguous. Without it a provider group and a
+    provider user that happen to share an id are one row, and the stored intent is
+    unrecoverable. Existing rows are all groups, which is why the column defaults to
+    ``group``.
+    """
+
     __tablename__ = "external_group_mappings"
-    __table_args__ = (UniqueConstraint("connector_id", "external_group_id", name="uq_external_group_mapping"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "connector_id",
+            "principal_type",
+            "principal_id",
+            name="uq_external_group_mapping",
+        ),
+    )
 
     connector_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False)
-    external_group_id: Mapped[str] = mapped_column(String(512), nullable=False)
-    external_group_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    access_group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("access_groups.id", ondelete="CASCADE"), nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(30), nullable=False, default="group", server_default="group")
+    principal_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    principal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    department_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("departments.id", ondelete="CASCADE"), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

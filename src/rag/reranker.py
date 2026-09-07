@@ -2,18 +2,96 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import NamedTuple, Sequence
+
+
+# Vietnamese is routinely typed without diacritics — "CTS la gi" for "CTS là gì" — and
+# every lexical comparison below has to survive that. Folding is done with a translation
+# table built once at import: one pass per string, no per-call NFD allocation, on a path
+# that runs for every candidate in the pool on every search.
+#
+# `đ`/`Đ` are handled explicitly because they are NOT decomposable — NFD leaves them
+# whole, so stripping combining marks alone would fold "được" to "đuoc" and never match
+# a user's "duoc". PostgreSQL's unaccent() maps them to `d`, which migration 58 wired
+# into both the FTS index and its query, so matching that behaviour here keeps the
+# lexical and reranking legs in agreement.
+def _build_fold_table() -> dict[int, str]:
+    table = {ord("đ"): "d", ord("Đ"): "d"}
+    for codepoint in range(0x00C0, 0x1EFA):
+        char = chr(codepoint)
+        decomposed = unicodedata.normalize("NFD", char)
+        stripped = "".join(
+            part for part in decomposed if unicodedata.category(part) != "Mn"
+        )
+        if stripped and stripped != char:
+            table[codepoint] = stripped.lower()
+    return table
+
+
+_FOLD_TABLE = _build_fold_table()
+
+
+def fold_diacritics(value: str) -> str:
+    """Lowercase and strip Vietnamese/Latin diacritics, as PostgreSQL unaccent() does."""
+    return (value or "").lower().translate(_FOLD_TABLE)
 
 
 # These words add little retrieval signal. Keeping them out of lexical
 # coverage prevents a query such as "What is CTS?" from ranking generic text
 # containing "what/is" above the passage containing the important term CTS.
-STOPWORDS = {
-    "a", "an", "and", "are", "be", "by", "can", "do", "for", "from", "how",
-    "i", "in", "is", "it", "of", "on", "or", "the", "to", "what", "when",
-    "where", "which", "who", "why", "with", "you", "your",
-    "là", "và", "có", "cho", "của", "để", "gì", "nào", "như", "về", "tôi",
+#
+# SPLIT INTO TWO SETS ON PURPOSE, and the split is load-bearing. Folding diacritics
+# collapses Vietnamese CONTENT syllables onto English stopwords:
+#
+#     tổ  (combination) -> "to"    số (number) -> "so"    căn (balance) -> "can"
+#
+# A single folded set therefore deleted the subject of the question. "Logic tổ hợp là gì"
+# retrieved on "logic hop" with `tổ` silently dropped, and answered "not found in the
+# Knowledge Base" — while "Combinatrial Logic", which contains no Vietnamese, answered
+# correctly from the same document. Measured against production.
+#
+# So English stopwords are matched against the RAW token only, and Vietnamese stopwords
+# against either form. A Vietnamese word typed without diacritics is still recognised;
+# an English stopword can no longer swallow a Vietnamese content word.
+ENGLISH_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do",
+    "does", "for", "from", "give", "how", "i", "in", "is", "it", "list", "me",
+    "my", "need", "of", "on", "or", "please", "provide", "show", "so", "some",
+    "tell", "that", "the", "them", "there", "these", "this", "those", "to",
+    "us", "use", "used", "using", "want", "we", "what", "when", "where",
+    "which", "who", "why", "will", "with", "would", "you", "your",
 }
+
+# Vietnamese. The list here used to hold eleven words and none of the ones a
+# person actually opens a request with, which is why a politely phrased question
+# scored five times lower than the same question typed as two keywords.
+VIETNAMESE_STOPWORDS = {
+    "à", "ạ", "ai", "bạn", "bằng", "các", "cách", "cần", "cho", "chúng", "có",
+    "của", "cung", "cấp", "danh", "dùng", "dụng", "gì", "giúp", "hãy", "khi",
+    "không", "là", "làm", "liệt", "kê", "một", "muốn", "nào", "này", "nêu",
+    "như", "những", "ở", "ra", "rằng", "sách", "sao", "sẽ", "sử", "thì",
+    "tôi", "trong", "và", "vậy", "về", "với", "được", "đó", "để", "đưa",
+}
+
+#: Kept for callers that want the whole vocabulary; not what matching uses.
+STOPWORDS = ENGLISH_STOPWORDS | VIETNAMESE_STOPWORDS
+
+#: Vietnamese only, in both forms. Derived rather than hand-listed: a second written-out
+#: list of unaccented spellings would drift from the accented one on the first edit.
+VIETNAMESE_STOPWORDS_FOLDED = frozenset(
+    fold_diacritics(word) for word in VIETNAMESE_STOPWORDS
+) | frozenset(VIETNAMESE_STOPWORDS)
+
+
+def is_stopword(raw: str, folded: str) -> bool:
+    """Whether a token carries no retrieval signal.
+
+    `raw` is the token as typed, `folded` its accent-stripped form. English stopwords are
+    tested against `raw` alone so that a folded Vietnamese content word — `tổ` -> "to" —
+    cannot be mistaken for one.
+    """
+    return raw in ENGLISH_STOPWORDS or folded in VIETNAMESE_STOPWORDS_FOLDED
 
 REFERENCE_MARKERS = (
     "references", "reference", "helpful documents", "sources", "bibliography",
@@ -25,13 +103,23 @@ DEFINITION_QUERY_MARKERS = (
     "là gì", "định nghĩa", "có nghĩa là", "giải thích", "khái niệm",
 )
 
+# Matched against folded text, so the markers must be folded too.
+REFERENCE_MARKERS_FOLDED = tuple(
+    fold_diacritics(marker) for marker in REFERENCE_MARKERS
+)
+DEFINITION_QUERY_MARKERS_FOLDED = tuple(
+    fold_diacritics(marker) for marker in DEFINITION_QUERY_MARKERS
+)
+
 DEFINITION_PATTERNS = (
     r"\b(?:is|are|means|refers to|defined as|describes)\b",
-    r"\b(?:là|được gọi là|có nghĩa là|dùng để chỉ|được định nghĩa là)\b",
+    r"\b(?:la|duoc goi la|co nghia la|dung de chi|duoc dinh nghia la)\b",
 )
 
 
 # Compiled once at import. These run against every candidate passage on every search.
+# The Vietnamese alternatives are written pre-folded because the passage they are
+# matched against has been folded.
 DEFINITION_PATTERNS_RE = tuple(
     re.compile(pattern, re.IGNORECASE) for pattern in DEFINITION_PATTERNS
 )
@@ -40,11 +128,22 @@ TOKEN_RE = re.compile(r"[\w'-]+")
 
 
 def normalize_query(query: str) -> str:
-    """Remove low-signal question words before keyword/vector retrieval."""
-    tokens = [
-        token for token in re.findall(r"[\w'-]+", (query or "").lower())
-        if len(token) > 1 and token not in STOPWORDS
-    ]
+    """Remove low-signal question words before keyword/vector retrieval.
+
+    Each token is judged on BOTH forms: the raw spelling decides English stopwords, the
+    folded spelling decides Vietnamese ones. Folding first and testing once against a
+    merged set deleted Vietnamese content words whose accent-stripped form happens to be
+    an English stopword — `tổ` -> "to", `số` -> "so" — so "Logic tổ hợp là gì" searched
+    for "logic hop" and found nothing.
+
+    The emitted tokens stay folded, because the passage side is folded too: that is what
+    lets a query typed without diacritics match accented source text.
+    """
+    tokens = []
+    for raw in TOKEN_RE.findall((query or "").lower()):
+        folded = fold_diacritics(raw)
+        if len(folded) > 1 and not is_stopword(raw, folded):
+            tokens.append(folded)
     # An all-stopword input has no retrieval signal. Returning the original
     # query here caused generic words such as "what is" to retrieve arbitrary
     # documents through vector similarity.
@@ -52,8 +151,26 @@ def normalize_query(query: str) -> str:
 
 
 def is_definition_query(query: str) -> bool:
-    normalized = " ".join((query or "").lower().split())
-    return any(marker in normalized for marker in DEFINITION_QUERY_MARKERS)
+    """Whether the user asked what something IS.
+
+    Folded, because "CTS la gi" is the same question as "CTS là gì" and used to miss the
+    marker list entirely — losing the definition bonus on exactly the queries it exists
+    to serve.
+    """
+    normalized = " ".join(fold_diacritics(query).split())
+    return any(marker in normalized for marker in DEFINITION_QUERY_MARKERS_FOLDED)
+
+
+def corpus_terms(passages: Sequence[str]) -> frozenset[str]:
+    """Every token that appears anywhere in a candidate pool.
+
+    Folded to the same form as the query terms it is intersected with; otherwise an
+    accented passage token could never cancel an unaccented query term.
+    """
+    found: set[str] = set()
+    for passage in passages:
+        found.update(TOKEN_RE.findall(fold_diacritics(passage)))
+    return frozenset(found)
 
 
 class PreparedQuery(NamedTuple):
@@ -70,13 +187,39 @@ class PreparedQuery(NamedTuple):
     is_definition: bool
 
 
-def prepare_query(query: str) -> PreparedQuery:
+def prepare_query(query: str, findable: frozenset[str] | None = None) -> PreparedQuery:
+    """Prepare the query side of a score.
+
+    `findable` is every token present somewhere in the candidate pool. Query terms that
+    appear in NO candidate are dropped from the scored set, because the score is
+    `matched / len(terms)` and those terms can only ever sit in the denominator.
+
+    That denominator was the whole query, so relevance shrank with the length of the
+    question rather than with anything about the passage. Against the same text:
+
+        "RTL Generator"                                    2 terms -> 1.350  answered
+        "Vậy cung cấp cho tôi các Tool dùng RTL Generator"  8 terms -> 0.250  refused
+
+    Both matched the same two terms. The second was refused for being politely phrased,
+    and the effect is far worse in Vietnamese, where a request opens with several words
+    that no English technical document will ever contain.
+
+    Ranking is unaffected -- the denominator is constant across candidates for one query
+    -- so this only changes the absolute value, which is what the confidence thresholds
+    read. If nothing at all is findable the full set is kept, so a query about content
+    that genuinely is not there still scores zero and is still refused.
+    """
     normalized = normalize_query(query)
+    # normalize_query already lower-cased and already split on this exact pattern,
+    # so its output re-tokenises to itself.
+    terms = frozenset(normalized.split())
+    if findable is not None:
+        scored_terms = terms & findable
+        if scored_terms:
+            terms = scored_terms
     return PreparedQuery(
         normalized=normalized,
-        # normalize_query already lower-cased and already split on this exact pattern,
-        # so its output re-tokenises to itself.
-        terms=frozenset(normalized.split()),
+        terms=terms,
         is_definition=is_definition_query(query),
     )
 
@@ -86,7 +229,9 @@ def score_prepared_text(
 ) -> float:
     """Score a passage against an already-prepared query."""
     terms = prepared.terms
-    passage = " ".join(str(value or "") for value in (text, title, section)).lower()
+    # Folded, not merely lower-cased: the query terms are folded, so an accented passage
+    # token would otherwise never match the unaccented term a user actually typed.
+    passage = fold_diacritics(" ".join(str(value or "") for value in (text, title, section)))
     text_tokens = TOKEN_RE.findall(passage)
     normalized_text = " ".join(text_tokens)
     # A whole-token set intersection. The old form ran one anchored regex per term over
@@ -101,13 +246,13 @@ def score_prepared_text(
     if prepared.is_definition:
         if any(pattern.search(passage) for pattern in DEFINITION_PATTERNS_RE):
             score += 0.75
-        if any(marker in passage for marker in REFERENCE_MARKERS):
+        if any(marker in passage for marker in REFERENCE_MARKERS_FOLDED):
             score -= 1.0
         # A passage dominated by URLs is reference material, even when it
         # repeats the subject name many times.
         if len(URL_RE.findall(passage)) >= 2:
             score -= 0.5
-    elif any(marker in passage for marker in REFERENCE_MARKERS):
+    elif any(marker in passage for marker in REFERENCE_MARKERS_FOLDED):
         score -= 0.25
     return score
 
@@ -137,11 +282,29 @@ def retrieval_score(query: str, chunk: object, prepared: PreparedQuery | None = 
     )
 
 
+def chunk_passage(chunk: object) -> str:
+    """The text a chunk is scored on. One definition, used by scoring and by the pool."""
+    parent = getattr(chunk, "parent_chunk", None)
+    return " ".join(
+        str(value or "")
+        for value in (
+            getattr(chunk, "chunk_text", "") or getattr(parent, "text", ""),
+            getattr(getattr(chunk, "article", None), "title", ""),
+            getattr(parent, "section_ref", "") if parent else "",
+        )
+    )
+
+
+def prepare_query_for_chunks(query: str, chunks: Sequence[object]) -> PreparedQuery:
+    """Prepare a query against the pool it will be scored over."""
+    return prepare_query(query, corpus_terms([chunk_passage(chunk) for chunk in chunks]))
+
+
 def rerank_chunks_with_scores(
     query: str, chunks: Sequence[object], limit: int = 5
 ) -> list[tuple[object, float]]:
     """Rerank and hand back the scores, so no caller has to recompute them."""
-    prepared = prepare_query(query)
+    prepared = prepare_query_for_chunks(query, chunks)
     scored: list[tuple[float, int, object]] = []
     for position, chunk in enumerate(chunks):
         scored.append((retrieval_score(query, chunk, prepared), -position, chunk))

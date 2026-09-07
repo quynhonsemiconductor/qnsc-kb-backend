@@ -4,7 +4,7 @@ from src.domain.cloud_sync import (
     _needs_content_ingest,
     _record_permission_change_audits,
     _save_permissions,
-    _sharepoint_acl_intersection,
+    _provider_acl_intersection,
     _upsert_document,
 )
 import asyncio
@@ -21,7 +21,7 @@ from src.domain.cloud_sync import (
     _handle_deleted_document,
     _needs_content_ingest,
     _save_permissions,
-    _sharepoint_acl_intersection,
+    _provider_acl_intersection,
 )
 from src.domain.connector_adapters import (
     ConnectorAdapter,
@@ -152,7 +152,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     from src.models.connectors import ExternalDocument, ExternalGroupMapping
 
     connector_id = uuid.uuid4()
-    access_group_id = uuid.uuid4()
+    department_id = uuid.uuid4()
     connector = Connector(id=connector_id, company_domain="acme.test")
     permissions = [
         {"principal_type": "group", "principal_id": "provider-group", "role": "read"},
@@ -167,7 +167,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
         acl_hash=_acl_hash(permissions),
         metadata_json={
             "sharepoint_acl_present": True,
-            "mapped_access_group_ids": [],
+            "mapped_department_ids": [],
             "unmapped_group_ids": ["provider-group"],
             "mapped_source_user_ids": [],
             "unmapped_source_user_ids": [],
@@ -175,8 +175,9 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     )
     mapping = ExternalGroupMapping(
         connector_id=connector_id,
-        external_group_id="provider-group",
-        access_group_id=access_group_id,
+        principal_type="group",
+        principal_id="provider-group",
+        department_id=department_id,
         active=True,
     )
 
@@ -197,7 +198,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
         async def execute(self, statement):
             self.statements.append(str(statement))
             if "external_group_mappings" in str(statement):
-                assert "access_groups.company_domain" in str(statement)
+                assert "departments.company_domain" in str(statement)
                 return Result([mapping])
             else:
                 assert "external_identities" in str(statement)
@@ -209,12 +210,89 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     changed = asyncio.run(_save_permissions(db, connector, document, permissions))
 
     assert changed is True
-    assert document.metadata_json["mapped_access_group_ids"] == [str(access_group_id)]
+    assert document.metadata_json["mapped_department_ids"] == [str(department_id)]
     assert document.metadata_json["unmapped_group_ids"] == []
 
 
-def test_sharepoint_acl_intersection_never_broadens_internal_policy():
-    result = _sharepoint_acl_intersection(
+def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval():
+    """An `unknown` principal used to be permanently unresolvable.
+
+    `_save_permissions` only ever looked up ids drawn from `group`/`siteGroup`, and
+    `unmapped_principal_ids` was computed without consulting the mapping table at all. So
+    a SharePoint `unknown`, `link`, `domain`, `application` or `device` principal — and a
+    provider `user` who had never signed in here — sat in the blocking set forever and
+    `approve_draft` refused the draft with `external_acl_mapping_required`, with no UI
+    control able to fix it.
+
+    Mapping such a principal now grants through its department like any other.
+    """
+    from src.models.connectors import ExternalDocument, ExternalGroupMapping
+
+    connector_id = uuid.uuid4()
+    department_id = uuid.uuid4()
+    connector = Connector(id=connector_id, company_domain="acme.test")
+    permissions = [
+        {"principal_type": "unknown", "principal_id": "opaque-guid", "role": "read"},
+        {"principal_type": "link", "principal_id": "link:organization", "role": "read"},
+    ]
+    document = ExternalDocument(
+        id=uuid.uuid4(),
+        connector_id=connector_id,
+        corpus_id="sharepoint",
+        external_id="file-1",
+        name="policy.md",
+        acl_hash=_acl_hash(permissions),
+    )
+    # The administrator resolved the opaque principal; the sharing link is left alone.
+    mapping = ExternalGroupMapping(
+        connector_id=connector_id,
+        principal_type="unknown",
+        principal_id="opaque-guid",
+        department_id=department_id,
+        active=True,
+    )
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalar_one_or_none(self):
+            return None
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class Db:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, statement):
+            if "external_group_mappings" in str(statement):
+                # Tenant scope must survive the widening.
+                assert "departments.company_domain" in str(statement)
+                return Result([mapping])
+            return Result([])
+
+        def add(self, item):
+            self.added.append(item)
+
+        async def flush(self):
+            return None
+
+    asyncio.run(_save_permissions(Db(), connector, document, permissions))
+
+    # The mapped principal now grants its department and has left the blocking set.
+    assert document.metadata_json["mapped_department_ids"] == [str(department_id)]
+    # The unmapped sharing link still blocks: fail-closed is not weakened by mapping a
+    # DIFFERENT principal.
+    assert document.metadata_json["unmapped_principal_ids"] == ["link:link:organization"]
+
+
+def test_provider_acl_intersection_never_broadens_internal_policy():
+    result = _provider_acl_intersection(
         internal_visibility="department",
         internal_group_ids={"g-internal"},
         internal_user_ids={"u-internal", "u-other"},
@@ -230,8 +308,8 @@ def test_sharepoint_acl_intersection_never_broadens_internal_policy():
     assert result["visibility"] == "department"
 
 
-def test_empty_or_unmapped_sharepoint_acl_fails_closed():
-    result = _sharepoint_acl_intersection(
+def test_empty_or_unmapped_provider_acl_fails_closed():
+    result = _provider_acl_intersection(
         internal_visibility="public",
         internal_group_ids=set(),
         internal_user_ids={"u-internal"},
@@ -322,6 +400,15 @@ def test_unsupported_provider_principal_is_persisted_as_unmapped():
         def scalar_one_or_none(self):
             return None
 
+        # Every observed principal is now looked up in external_group_mappings, not just
+        # group-kind ones, so a domain-only ACL reaches this query too. No mapping exists
+        # here, which is what keeps the principal in the blocking set below.
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
     class Db:
         def __init__(self):
             self.added = []
@@ -343,12 +430,16 @@ def test_unsupported_provider_principal_is_persisted_as_unmapped():
 def test_sharepoint_permission_tightening_is_applied_on_resync():
     from src.models.article import Article, ArticleUserPermission
     from src.models.connectors import ExternalDocument
-    from src.models.user import AccessGroup
+    from src.models.user import Department
 
     article_id = uuid.uuid4()
     internal_user_id = uuid.uuid4()
-    group = AccessGroup(
-        id=uuid.uuid4(), company_domain="acme.test", name="Security", bitmask_position=3
+    department = Department(
+        id=uuid.uuid4(),
+        company_domain="acme.test",
+        name="Security",
+        description="Security audience",
+        active=True,
     )
     internal_override = ArticleUserPermission(
         article_id=article_id, user_id=internal_user_id, effect="allow"
@@ -363,7 +454,7 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
         visibility="department",
         status="published",
         lifecycle_status="active",
-        access_groups=[group],
+        departments=[department],
         user_permissions=[internal_override],
     )
     document = ExternalDocument(
@@ -375,7 +466,7 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
         name="policy.md",
         metadata_json={
             "sharepoint_acl_present": True,
-            "mapped_access_group_ids": [str(group.id)],
+            "mapped_department_ids": [str(department.id)],
             "mapped_source_user_ids": [],
             "unmapped_group_ids": [],
             "unmapped_source_user_ids": [],
@@ -406,16 +497,20 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
             if self.calls == 1:
                 return FakeResult(one=article)
             if self.calls == 2 and document.metadata_json.get(
-                "mapped_access_group_ids"
+                "mapped_department_ids"
             ):
                 sql = str(_statement)
+                # Audience membership is department membership now: members are
+                # expanded through the user_departments association, never a
+                # separate group table.
+                assert "user_departments.department_id" in sql
                 assert "users.company_domain" in sql
                 assert "users.active" in sql
                 return FakeResult(rows=[internal_user_id])
             if self.calls == 3 and document.metadata_json.get(
-                "mapped_access_group_ids"
+                "mapped_department_ids"
             ):
-                return FakeResult(rows=[group])
+                return FakeResult(rows=[department])
             return FakeResult()
 
         def add(self, item):
@@ -427,11 +522,11 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
     db = FakeDb()
     asyncio.run(_apply_mapped_groups(db, object(), document))
     assert article.visibility == "department"
-    assert article.access_groups == [group]
+    assert article.departments == [department]
 
     document.metadata_json = {
         **document.metadata_json,
-        "mapped_access_group_ids": [],
+        "mapped_department_ids": [],
         "mapped_source_user_ids": [],
         "unmapped_group_ids": [],
         "unmapped_source_user_ids": ["provider-user-no-longer-mapped"],

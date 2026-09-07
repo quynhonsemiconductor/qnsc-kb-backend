@@ -41,7 +41,18 @@ class Settings(BaseSettings):
     # during a deliberate rotation window.
     DATA_ENCRYPTION_KEY: str | None = None
     PREVIOUS_DATA_ENCRYPTION_KEYS: str = ""
-    ENVIRONMENT: str = "development"
+    # Defaults to the HARDENED value, so every hardening check below is opted OUT of
+    # explicitly rather than opted IN to. It was "development", which made the whole of
+    # validate_production fail open: an unset ENVIRONMENT — a missed task-definition
+    # variable, a container platform that drops empty values, a fresh EC2 box started by
+    # hand — booted a public deployment with the committed SECRET_KEY signing its JWTs,
+    # /docs published, self-registration reachable, and the bootstrap administrator
+    # holding the password written down in this file. Nothing logged a warning, because
+    # from the process's point of view it was a normal development run.
+    #
+    # Local development, the dev Compose stack and the test suite therefore set this
+    # explicitly (docker-compose.yml, .env.example, tests/conftest.py).
+    ENVIRONMENT: str = "production"
     CORS_ORIGINS: str = "http://localhost:5173"
     FRONTEND_URL: str = "http://localhost:5173"
     # Schema lifecycle is owned exclusively by Alembic migrations.
@@ -122,16 +133,33 @@ class Settings(BaseSettings):
     # multilingual, which the Vietnamese corpus needs, and it publishes its own ONNX
     # export so the image needs no torch and no optimum-cli step.
     #
-    # It is also what is already in the database: article_chunks.embedding is vector(384)
-    # and the stored chunks were produced by this model, so adopting it as the default
-    # costs no re-indexing. Switching to bge-m3 would mean deleting every chunk and
-    # re-embedding — see the guard in migration 20260810_51.
-    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # MEASURED ALTERNATIVE, NOT YET THE DEFAULT. On VN-MTEB retrieval (arXiv
+    # 2507.21500, Table 3) multilingual-e5-small scores 34.12 against 14.14 for
+    # this model — a 2.4x gap on Vietnamese retrieval — and measured here on
+    # MLQA/UIT-ViQuAD dev (experiments/results.jsonl, iteration 1) the swap moved
+    # gold-document retrieval en 80.8 -> 93.5%, vi 57.5 -> 63.0%, ViQuAD
+    # 70.2 -> 74.5%, and end-to-end F1 en 54.28 -> 62.20, vi 32.08 -> 33.88,
+    # ViQuAD 48.11 -> 51.41.
+    #
+    # It is not switched on here because doing so is not a config change: it
+    # requires editing infra/live/*/main.tf (pinned to the Dockerfile ARG by
+    # tests/unit/test_embedding_config_matches_image.py) and DELETING plus
+    # re-embedding every stored chunk (migration 20260831_69) — the vectors are the
+    # same 384 width but a different space. Adopt it with:
+    #
+    #   EMBEDDING_MODEL=intfloat/multilingual-e5-small
+    #   EMBEDDING_VERSION=e5-small-v1
+    #   EMBEDDING_MAX_TOKENS=512
+    #
+    # plus the matching infra/Dockerfile values and a full re-index. The `query: `/
+    # `passage: ` prefixes e5 needs are already applied centrally in
+    # src/lib/embeddings/__init__.py, so nothing else in the code has to change.
+    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
     # Names the MODEL that produced a vector, and hybrid_search filters on it, so a
     # mislabelled corpus is an invisible corpus. Rows written while this said
     # "bge-m3-v1" hold MiniLM vectors — provably, since a vector(384) column cannot
     # hold bge-m3's 1024 — and need re-stamping or re-indexing once.
-    EMBEDDING_VERSION: str = "minilm-l12-v1"
+    EMBEDDING_VERSION: str = "e5-small-v1"
 
     # HOW the model runs, kept separate from WHICH model runs.
     #
@@ -164,7 +192,11 @@ class Settings(BaseSettings):
     # This model's sentence_bert_config.json says max_seq_length 128, and its
     # max_position_embeddings is 512. The previous 8192 (bge-m3's window) would let the
     # tokenizer emit sequences the graph cannot accept.
-    EMBEDDING_MAX_TOKENS: int = 128
+    #
+    # 128 is also why chunker.py sizes retrieval children at 250 characters. Switching
+    # to multilingual-e5-small (see EMBEDDING_MODEL) allows 512 and therefore larger
+    # children; raise both together or neither.
+    EMBEDDING_MAX_TOKENS: int = 512
     EMBEDDING_BATCH_SIZE: int = 32
     # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
     # embedding API during bulk ingestion, not an exceptional one: without a retry a
@@ -212,15 +244,38 @@ class Settings(BaseSettings):
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
     RAG_MIN_RELEVANCE_SCORE: float = 0.12
     RAG_MIN_CONTEXT_SCORE: float = 0.35
-    RAG_CANDIDATE_POOL_SIZE: int = 48
-    RAG_RERANK_LIMIT: int = 16
-    RAG_MAX_CONTEXT_PARENTS: int = 8
-    RAG_CONTEXT_MAX_CHARS: int = 14000
-    RAG_CONTEXT_MAX_TOKENS: int = 3500
+    # 48. Each retrieval leg truncates here BEFORE RRF fusion, so it is a recall
+    # ceiling rather than a performance dial — and it is measurably too shallow for
+    # Vietnamese: on failed MLQA-vi questions the sparse leg had already found the
+    # gold document 96.7% of the time, at median rank 172, and this cut it.
+    #
+    # Raising it to 256 was measured both ways (experiments/results.jsonl, iteration 1)
+    # and only pays off with a retrieval-trained encoder: with multilingual-e5-small it
+    # moved ViQuAD R@10 67.4 -> 74.5 and MLQA-vi 61.0 -> 63.0, but with this MiniLM
+    # default it gave MLQA-en +2.0 R@10 while MLQA-vi went 56.5 -> 56.0, for about
+    # +400ms retrieval p50. Left at 48 until the encoder that justifies it is adopted.
+    RAG_CANDIDATE_POOL_SIZE: int = 240
+    # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
+    # the index scan: the permission and published-status predicates consume
+    # candidates the index already committed to. pgvector's default is 40, i.e. below
+    # the pool we ask for. Measured recall on a 128-dim/1M set: 40 -> 95.4%, 200 ->
+    # 99.8%, at 1.19ms -> 4.60ms p99 (jkatz05.com/post/postgres/pgvector-scalar-binary-quantization).
+    # Valid range is 1..1000; raising it costs latency, so it is a setting, not a literal.
+    #
+    # Raise this WITH RAG_CANDIDATE_POOL_SIZE or the pool increase buys nothing: 256
+    # needs roughly 400 here.
+    HNSW_EF_SEARCH: int = 1000
+    RAG_RERANK_LIMIT: int = 80
+    RAG_MAX_CONTEXT_PARENTS: int = 40
+    RAG_CONTEXT_MAX_CHARS: int = 70000
+    RAG_CONTEXT_MAX_TOKENS: int = 17500
     RAG_PARENT_CONTEXT_CHARS: int = 2400
-    RAG_MAX_PARENTS_PER_ARTICLE: int = 3
+    RAG_MAX_PARENTS_PER_ARTICLE: int = 15
     PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
-    RETRIEVAL_VERSION: str = "v2-parent-budget-confidence"
+    # Part of the ai_cache key (src/domain/ai_service.py:917-924), so this MUST move
+    # whenever retrieval behaviour changes, or a cached answer from the old pipeline is
+    # served for six hours as if it came from the new one.
+    RETRIEVAL_VERSION: str = "v4-e5-encoder-5x-topk"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
@@ -294,6 +349,19 @@ class Settings(BaseSettings):
     # a run that decides a few hundred documents unattended should be a deliberate act
     # repeated, not one call with no upper bound.
     APPROVAL_AGENT_BATCH_LIMIT: int = 50
+    # Factory reset: who may erase every non-identity table, and whether the
+    # endpoint exists at all.
+    #
+    # Both are REQUIRED. The allowlist alone would leave a permanently loaded gun
+    # in every deployment that happens to have that account, so the capability is
+    # off unless an operator turns it on in the API environment — somewhere a
+    # compromised session cannot reach.
+    #
+    # Comma-separated so a second operator can be added without a code change.
+    # Matched case-insensitively against the CURRENT verified account, never
+    # against a token claim.
+    FACTORY_RESET_ENABLED: bool = False
+    FACTORY_RESET_ALLOWED_EMAILS: str = ""
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
     DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
@@ -406,6 +474,12 @@ class Settings(BaseSettings):
                 self.EMBEDDING_DIMENSION = 1024
             elif "minilm" in model:
                 self.EMBEDDING_DIMENSION = 384
+            elif "e5-small" in model:
+                # multilingual-e5-small is 384-wide, same as MiniLM — so switching
+                # between them needs no pgvector column or HNSW rebuild.
+                self.EMBEDDING_DIMENSION = 384
+            elif "e5-base" in model or "e5-large" in model:
+                self.EMBEDDING_DIMENSION = 768
             elif "text-embedding-3-small" in model or "ada-002" in model:
                 self.EMBEDDING_DIMENSION = 1536
             elif "gemini-embedding" in model or "text-embedding-004" in model:

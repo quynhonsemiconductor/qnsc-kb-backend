@@ -6,7 +6,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
 from src.models.article import Article
-from src.models.user import AccessGroup, Department, User
+from src.models.user import Department, User
 
 
 def test_metadata_restriction_is_display_only_and_does_not_dirty_relationships():
@@ -28,13 +28,13 @@ def test_metadata_restriction_is_display_only_and_does_not_dirty_relationships()
     assert not inspect(article).attrs.dept.history.has_changes()
 
 
-def test_access_group_allows_cross_department_read_without_org_membership():
-    audit = AccessGroup(id=uuid.uuid4(), name="Audit-IT", company_domain="local", bitmask_position=7)
+def test_shared_audience_department_allows_read_outside_primary_department():
+    audit = Department(id=uuid.uuid4(), company_domain="local", name="Audit", active=True)
     hr = Department(id=uuid.uuid4(), company_domain="local", name="HR", active=True)
-    user = User(id=uuid.uuid4(), role="Staff", company_domain="local", departments=[hr], groups=[audit])
+    user = User(id=uuid.uuid4(), role="Staff", company_domain="local", departments=[hr, audit])
     article = Article(
-        id=uuid.uuid4(), company_domain="local", dept="IT", departments=[],
-        access_groups=[audit], sensitivity="internal", status="published", lifecycle_status="active",
+        id=uuid.uuid4(), company_domain="local", dept="IT", departments=[audit],
+        sensitivity="internal", status="published", lifecycle_status="active",
     )
 
     assert PermissionService.can_view_article(user, article) is True

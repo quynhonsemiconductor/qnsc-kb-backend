@@ -12,22 +12,11 @@ from sqlalchemy import (
     DateTime,
     Text,
     JSON,
-    and_,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
-# Association table for User <-> AccessGroup (Many-to-Many)
-user_groups = Table(
-    "user_groups",
-    Base.metadata,
-    Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
-    Column(
-        "group_id", ForeignKey("access_groups.id", ondelete="CASCADE"), primary_key=True
-    ),
-)
-
-# User <-> Department membership. ``users.dept`` remains the primary/legacy
+# User <-> Department membership. ``users.dept`` remains the primary
 # department for compatibility with existing integrations; this relation is
 # the authoritative multi-department membership model.
 user_departments = Table(
@@ -42,30 +31,6 @@ user_departments = Table(
 )
 
 
-class AccessGroup(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    __tablename__ = "access_groups"
-    __table_args__ = (
-        Index("uq_access_groups_company_name", "company_domain", "name", unique=True),
-        Index(
-            "uq_access_groups_company_bit_position",
-            "company_domain",
-            "bitmask_position",
-            unique=True,
-        ),
-    )
-
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    company_domain: Mapped[str] = mapped_column(
-        String(255), nullable=False, default="local", index=True
-    )
-    # position of the bit in the bitmask (0, 1, 2, ... up to 63 for 64-bit integer, or higher if using numeric)
-    bitmask_position: Mapped[int] = mapped_column(Integer, nullable=False)
-
-    users: Mapped[list["User"]] = relationship(
-        "User", secondary=user_groups, back_populates="groups"
-    )
-
-
 class Department(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "departments"
     __table_args__ = (
@@ -74,7 +39,6 @@ class Department(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    kind: Mapped[str] = mapped_column(String(10), nullable=False, default="org", server_default="org")
     contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -134,9 +98,6 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # before a password or account-security change.
     auth_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    groups: Mapped[list[AccessGroup]] = relationship(
-        "AccessGroup", secondary=user_groups, back_populates="users"
-    )
     departments: Mapped[list[Department]] = relationship(
         "Department",
         secondary=user_departments,
@@ -188,14 +149,6 @@ class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("token_hash", name="uq_invitations_token_hash"),
         Index("ix_invitations_email_domain", "email", "company_domain"),
-    )
-    # Unified audience view. Legacy AccessGroup/user_groups remain writable
-    # during migration, while new authorization can read the single
-    # Department table for kind='access'.
-    access_audiences: Mapped[list[Department]] = relationship(
-        "Department", secondary=user_departments, viewonly=True,
-        primaryjoin=lambda: User.id == user_departments.c.user_id,
-        secondaryjoin=lambda: and_(Department.id == user_departments.c.department_id, Department.kind == "access"),
     )
 
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)

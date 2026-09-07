@@ -36,7 +36,6 @@ _MIGRATION_MANAGED_INDEXES = {
     "ix_ai_cache_expiry",
     "ix_ai_cache_article_ids_gin",
     "ix_ai_usage_logs_user_id",
-    "ix_article_access_group_id",
     "ix_article_chunks_article_id",
     "ix_article_chunks_embedding_hnsw",
     "ix_article_chunks_fts",
@@ -59,11 +58,8 @@ _MIGRATION_MANAGED_INDEXES = {
 
 # Check constraints created by SQL migrations rather than declared on the ORM model.
 # Same category as the indexes above: real, required, and invisible to metadata, so a
-# diff would propose dropping them forever. ck_departments_kind is what keeps a
-# department's kind to the org/access pair the permission model is built on.
-_MIGRATION_MANAGED_CONSTRAINTS = {
-    "ck_departments_kind",
-}
+# diff would propose dropping them forever.
+_MIGRATION_MANAGED_CONSTRAINTS: set[str] = set()
 
 
 def include_object(object_, name, type_, reflected, compare_to):

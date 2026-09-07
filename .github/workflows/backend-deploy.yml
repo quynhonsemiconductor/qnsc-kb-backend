@@ -1,5 +1,5 @@
 # =============================================================================
-# Backend · Deploy — thin caller of the shared reusable (qnsc-ci).
+# Backend · Deploy — thin caller of the shared reusable (ci).
 #
 # Triggers:
 #   develop → push to main (auto)
@@ -128,7 +128,49 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   # CI gate — a red main must not deploy.
   #
+  #   - push to main → wait for Backend · CI on this sha; `gh run watch --exit-status`
+  #     propagates its conclusion, so a failed CI blocks deploy.
+  #   - tag push → wait for the DEVELOP deploy of this sha instead. See below.
+  #
   # Fails CLOSED: with no CI run found for the sha, block rather than ship blind.
+  #
+  # WHY THE TAG BRANCH WAITS ON THE DEVELOP DEPLOY, AND NO LONGER EXITS 0.
+  # It used to `exit 0` on the grounds that Backend · CI does not run on tags and prod is
+  # gated by the production Environment reviewer. Both halves are true and neither is the
+  # precondition that matters: a prod deploy does not build, it PROMOTES the sha-<sha>
+  # image the develop deploy pushed. So the tag run's real precondition is "develop
+  # already built and deployed this sha" — exactly what the promote action's own failure
+  # message states ("The commit must be merged to main and deployed to develop before
+  # tagging a release"). And the Environment reviewer gates the DEPLOY job, which sits
+  # after promote, so it cannot protect promote from running too early.
+  #
+  # With no gate the two runs race. PORTED FROM RALLY, where prod lost that race on
+  # v0.7.13 (2026-08-31): a release merge fires both runs on the same commit, the tag run
+  # cleared this gate in 3 seconds while the main run sat here for 15m16s waiting on
+  # Backend · CI, and prod then exhausted the promote step's poll budget waiting for an
+  # image that did not exist yet — failing 21 seconds before that gate cleared. Nothing
+  # half-deployed (promote runs before the deploy job, and it is idempotent), but the
+  # release needed a manual re-run and the error named the symptom rather than the cause.
+  # qnsc-kb-backend shares the reusable workflow, the promote action and this gate
+  # verbatim, so it had the same defect and simply had not cut a release slow enough to
+  # expose it.
+  #
+  # Waiting on the whole develop RUN rather than only its build jobs is deliberate: it is
+  # the documented contract, it is one `gh run watch` instead of per-job polling, and it
+  # means prod can never ship an image develop itself failed to deploy.
+  #
+  # NOT-FOUND WARNS RATHER THAN BLOCKING, unlike the main branch below. This workflow's
+  # paths-ignore is only `**/*.md` and `docs/**`, so a release commit — which always
+  # changes package.json and the release manifest — cannot be skipped, and absence means
+  # something unusual: a hand-cut tag, or a deleted run. The promote step's ECR poll is
+  # still the backstop, and blocking would turn this gate into a new way to make a
+  # release un-shippable. Same warn-and-proceed shape as wait-for-infra above. A develop
+  # run that EXISTS and FAILED does block, which is the diagnostic this adds: prod now
+  # says "develop deploy failed" in seconds instead of "not found in ECR" after the full
+  # poll budget.
+  #
+  # `timeout-minutes: 45` below already covers awaiting a full develop deploy, so unlike
+  # the rally and opshub ports this needed no change.
   # ───────────────────────────────────────────────────────────────────────────
   wait-for-ci:
     name: Wait for Backend · CI
@@ -139,13 +181,11 @@ jobs:
       actions: read
     steps:
       - name: Wait for Backend · CI on this commit
+        if: github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "Tag deploy — Backend · CI does not run on tags, and prod is gated by the production Environment reviewer."; exit 0
-          fi
           # This job does not check out the repo, so gh cannot infer it from a remote.
           for _ in $(seq 1 12); do
             ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow backend-ci.yml \
@@ -162,6 +202,42 @@ jobs:
           gh run watch --repo "$GITHUB_REPOSITORY" "$ID" --exit-status
           echo "Backend · CI succeeded; deploy may proceed."
 
+      # Prod promotes the image the develop deploy pushed, so this is the tag run's real
+      # precondition. See the block comment above this job for the race it closes.
+      - name: Wait for the develop deploy of this commit
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # `--branch main` is what excludes THIS run: the develop deploy's headBranch is
+          # `main` while the tag run's is the tag ref, so the two never match each other
+          # despite sharing a workflow file and a commit. Without it this would find
+          # itself and wait forever.
+          #
+          # `|| ID=""` on the assignment, matching the gates above and for the same
+          # reason: runners use `set -e`, an assignment takes its command substitution's
+          # exit status, so a rate-limited `gh run list` would skip the retry loop.
+          for _ in $(seq 1 12); do
+            ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow backend-deploy.yml \
+                   --branch main --commit "$GITHUB_SHA" \
+                   --limit 1 --json databaseId --jq '.[0].databaseId // empty') || ID=""
+            [ -n "$ID" ] && break
+            sleep 10
+          done
+
+          if [ -z "${ID:-}" ]; then
+            echo "::warning::No develop Backend · Deploy run found for $GITHUB_SHA — proceeding, the promote step's ECR poll is the backstop."
+            exit 0
+          fi
+
+          echo "Waiting on develop Backend · Deploy run $ID …"
+          if ! gh run watch --repo "$GITHUB_REPOSITORY" "$ID" --exit-status; then
+            echo "::error::The develop deploy of $GITHUB_SHA did not succeed (run $ID). Prod promotes the image that run pushes, so there is nothing to promote. Fix develop, then re-run this deploy."
+            exit 1
+          fi
+          echo "Develop deployed this commit; the sha image exists and prod may promote it."
+
   deploy:
     needs: [wait-for-infra, wait-for-ci]
     # Must match the UNION of every inner job's own permissions in the reusable
@@ -175,13 +251,13 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-      packages: read # build-push-ecr pulls private @qnsc-vn/* from GitHub Packages
-    uses: QNSC-VN/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
+      packages: read # build-push-ecr pulls private @quynhonsemiconductor/* from GitHub Packages
+    uses: quynhonsemiconductor/ci/.github/workflows/backend-deploy.yml@v1
     with:
       product: qnsc-kb
       # ── No registry build cache ────────────────────────────────────────────
       # This repository's `:buildcache` tags total 10.4 GB — worker 5.35, api 4.28,
-      # migrator 0.77 — against rally's 0.98 GB. A GitHub-hosted runner sits outside AWS,
+      # migrator 0.77 — against rova's 0.98 GB. A GitHub-hosted runner sits outside AWS,
       # so every build pulls all of that back out of ECR across the internet, and the
       # matrix pulls the three legs in parallel.
       #

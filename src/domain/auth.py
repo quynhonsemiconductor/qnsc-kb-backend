@@ -6,6 +6,14 @@ from src.core.config import settings
 from src.models.user import User
 from src.repositories.user import UserRepository
 
+# One bcrypt comparison happens on every authentication attempt, including the ones where
+# no account exists. Returning 401 before hashing made the unknown-email path finish in
+# microseconds while a real address paid the full bcrypt cost, which is a remotely
+# measurable oracle for "does this address have an account here". The hash is computed
+# once at import so the equalizing comparison does not add a per-request key derivation.
+_ABSENT_ACCOUNT_PASSWORD_HASH = get_password_hash(uuid.uuid4().hex)
+
+
 class AuthService:
     def __init__(self, user_repo: UserRepository):
         self.user_repo = user_repo
@@ -13,6 +21,7 @@ class AuthService:
     async def authenticate_user(self, email: str, password: str) -> User:
         user = await self.user_repo.get_by_email(email)
         if not user:
+            verify_password(password, _ABSENT_ACCOUNT_PASSWORD_HASH)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
@@ -51,33 +60,15 @@ class AuthService:
             role=role if allow_privileged_role else "Staff"
         )
         
-        # Seed access group mapping
-        # Automatically assign every user to a "public" access group (index 0) if it exists,
-        # or create it if it doesn't exist yet (very useful for local bootstrapping!).
-        from src.models.user import AccessGroup
-        from src.domain.departments import lock_company_access_groups, normalize_department_name
+        # Audience membership is department membership. Public content is
+        # readable through `Article.sensitivity == "public"`, so there is no
+        # separate everyone-group to seed here.
+        from src.domain.departments import normalize_department_name
         dept = normalize_department_name(dept)
-        # Registration is also used by the public signup flow. Serialize both
-        # public-group creation and department-group bit allocation.
-        await lock_company_access_groups(self.user_repo.db, company_domain)
-        public_group = await self.user_repo.get_group_by_name("public", company_domain)
-        if not public_group:
-            public_group = AccessGroup(name="public", company_domain=company_domain, bitmask_position=0)
-            public_group = await self.user_repo.create_group(public_group, commit=False)
-            
-        user.groups.append(public_group)
-        
-        # If user is in a department, auto create/assign department group too (e.g. at bit position based on dept name length or random)
         if dept:
-            dept_group_name = f"dept_{dept.lower()}"
-            dept_group = await self.user_repo.get_group_by_name(dept_group_name, company_domain)
-            if not dept_group:
-                # Find max bitmask position and increment
-                all_groups = await self.user_repo.get_all_groups(company_domain)
-                max_pos = max([g.bitmask_position for g in all_groups]) if all_groups else 0
-                dept_group = AccessGroup(name=dept_group_name, company_domain=company_domain, bitmask_position=max_pos + 1)
-                dept_group = await self.user_repo.create_group(dept_group, commit=False)
-            user.groups.append(dept_group)
+            department = await self.user_repo.get_department_by_name(dept, company_domain)
+            if department:
+                user.departments.append(department)
 
         return await self.user_repo.create(user)
 

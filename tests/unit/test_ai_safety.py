@@ -19,7 +19,6 @@ def make_ai_user() -> User:
         company_domain="acme.test",
         role="Staff",
         active=True,
-        groups=[],
     )
     role = Role(name="Staff", company_domain="acme.test", active=True)
     role.permissions.append(
@@ -67,6 +66,9 @@ class FakeSearchService:
     def __init__(self, results):
         self.results = results
         self.authorized_ids = {str(item["chunk_id"]) for item in results}
+        # `ask` reads this to tell "the knowledge base has nothing" apart from "vector
+        # retrieval is broken", which the real service reports rather than swallowing.
+        self.vector_search_degraded = False
         self.chunk_repo = SimpleNamespace(
             authorized_chunk_ids=self.authorized_chunk_ids
         )

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import delete, insert, or_, select
+from sqlalchemy import delete, insert, select
 
 from src.api.deps import SessionLocal
 from src.core.security import get_password_hash
@@ -83,12 +83,15 @@ async def seed() -> None:
         await db.flush()
         await bootstrap_rbac(db)
 
+        # Company-scoped rows ONLY. bootstrap_rbac now creates an Admin role per domain
+        # alongside the global one, so including `company_domain IS NULL` here would put
+        # two rows under the key "Admin" and attach whichever the query returned last —
+        # half the time the global role, which bypasses tenant RLS. Seed identities are
+        # tenants; the global Admin role has one legitimate producer, admin_bootstrap.
         roles = {
             role.name: role
             for role in (await db.execute(
-                select(Role).where(
-                    or_(Role.company_domain == company_domain, Role.company_domain.is_(None))
-                )
+                select(Role).where(Role.company_domain == company_domain)
             )).scalars().all()
         }
         departments = {

@@ -22,8 +22,11 @@ just moves the 500 to the next statement in the same request.
 from __future__ import annotations
 
 import asyncio
+import uuid
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from src.models.governance import Gap
 from src.repositories.governance import GovernanceRepository
@@ -41,24 +44,44 @@ REPORTED_QUERY = (
 
 
 class _Result:
-    def scalar_one_or_none(self):
-        return None
+    def __init__(self, gap_id):
+        self._gap_id = gap_id
+
+    def scalar_one(self):
+        return self._gap_id
 
 
 class _DB:
+    """Records the single upsert statement and the row it would write.
+
+    `log_gap` is now one INSERT ... ON CONFLICT DO UPDATE rather than a select followed by
+    an increment or an insert, so what these tests inspect is the values bound to that
+    statement -- there is no ORM object handed to `add` any more.
+    """
+
     def __init__(self):
+        self.statements: list = []
         self.added: list = []
         self.commits = 0
         self.rollbacks = 0
+        self._gap_id = uuid.uuid4()
 
-    async def execute(self, _statement):
-        return _Result()
+    async def execute(self, statement):
+        self.statements.append(statement)
+        # `compile` resolves the bound values the upsert would insert. Reading them from
+        # the statement is the only way left to assert on the row.
+        compiled = statement.compile(dialect=postgresql.dialect())
+        self.added.append(SimpleNamespace(**compiled.params))
+        return _Result(self._gap_id)
 
     def add(self, obj):
         self.added.append(obj)
 
     async def commit(self):
         self.commits += 1
+
+    async def get(self, _model, gap_id):
+        return Gap(id=gap_id)
 
     async def refresh(self, _obj):
         return None

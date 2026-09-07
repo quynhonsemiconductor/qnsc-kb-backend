@@ -12,7 +12,10 @@
         Referrer-Policy "no-referrer"
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self';"
+        # frame-src/worker-src carry blob: because the source viewer renders a fetched
+        # document into an <iframe src="blob:…"> (frontend PdfViewer). Without them
+        # default-src 'self' blocked it, so this CSP broke the viewer as shipped.
+        Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data: blob:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:;"
     }
     handle /api/* {
         reverse_proxy api:8000

@@ -9,10 +9,12 @@ def test_migrations_have_one_current_head():
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     # Pinned on purpose: a new revision must be a deliberate act, and a second head
-    # means one was chained off the wrong parent. Bumped for 20260829_66, which records
-    # what the provider calls each ACL principal, so the mapping screen can show a name
-    # instead of a bare GUID.
-    assert script.get_heads() == ["20260829_66"]
+    # means one was chained off the wrong parent. Bumped for 20260901_72, which lets ANY
+    # provider ACL principal be mapped to a department — adding
+    # external_group_mappings.principal_type and renaming external_group_id/name to
+    # principal_id/name, so a provider user, link, domain or unknown principal is no
+    # longer permanently unresolvable and blocking approval.
+    assert script.get_heads() == ["20260901_72"]
 
 
 def test_production_compose_is_explicitly_hardened():

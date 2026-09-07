@@ -204,7 +204,7 @@ module "stack" {
   // it is a backstop AGAINST is AWS force-starting a stopped instance after 7 days — and
   // a force-start landing on a Monday then runs until the following Sunday.
   //
-  // Measured on rally-prod, which had the identical setting: 59 of 168 hours in a week
+  // Measured on rova-prod, which had the identical setting: 59 of 168 hours in a week
   // published CloudWatch datapoints. A "stopped" pre-launch database was running 35% of
   // the time, roughly $4/mo. Daily bounds that exposure at one day instead of seven.
   //
@@ -219,19 +219,20 @@ module "stack" {
   malware_scan_enabled = true
 
   // Must match develop, and must match the model the IMAGE carries — see the long note in
-  // infra/live/develop/main.tf. "BAAI/bge-m3" was never in any image: the Dockerfile bakes
-  // paraphrase-multilingual-MiniLM-L12-v2 (384) and the deploy pipeline has no build-args
-  // to override it, so EMBEDDING_DIMENSION resolved to 1024 against a 384-wide export and
-  // every embed raised. A different model between the two environments is just as bad —
-  // at the same width the spaces are unrelated, and the comparison returns nonsense
-  // rather than erroring.
-  embedding_model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  embedding_version = "minilm-l12-v1"
+  // The Dockerfile bakes intfloat/multilingual-e5-small (384) via ARG EMBEDDING_MODEL,
+  // and this must name the same model or EMBEDDING_DIMENSION resolves against the wrong
+  // export. e5-small is 384-wide like the previous MiniLM, so no pgvector column change;
+  // adopting it required a one-time re-embed migration. Both environments must run the
+  // same model -- at the same width the spaces are unrelated, so a mismatch returns
+  // nonsense rather than erroring.
+  embedding_model   = "intfloat/multilingual-e5-small"
+  embedding_version = "e5-small-v1"
 
-  alarm_emails          = var.alarm_emails
-  cloudflare_account_id = var.cloudflare_account_id
-  microsoft_client_id   = var.microsoft_client_id
-  google_client_id      = var.google_client_id
-  allowed_email_domains = var.allowed_email_domains
-  entra_admin_emails    = var.entra_admin_emails
+  alarm_emails           = var.alarm_emails
+  cloudflare_account_id  = var.cloudflare_account_id
+  microsoft_client_id    = var.microsoft_client_id
+  microsoft_graph_sender = var.microsoft_graph_sender
+  google_client_id       = var.google_client_id
+  allowed_email_domains  = var.allowed_email_domains
+  entra_admin_emails     = var.entra_admin_emails
 }

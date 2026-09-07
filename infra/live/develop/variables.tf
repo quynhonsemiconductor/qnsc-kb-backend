@@ -48,6 +48,22 @@ variable "microsoft_client_id" {
   description = "Entra application (client) ID for the Microsoft connector. A public identifier. Empty leaves that connector dormant."
 }
 
+variable "microsoft_graph_sender" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
+
+    Left EMPTY deliberately until the mailbox exists and the Entra app has Mail.Send
+    application permission with admin consent. While it is empty, outbound mail is dead:
+    ENVIRONMENT is pinned to "production", so the development FakeEmailSender is never
+    selected, and the Graph sender raises before any HTTP call. Invitations and resets will
+    queue and retry every 30 seconds without ever arriving.
+
+    Set this before relying on the invite or forgot-password flows.
+  EOT
+}
+
 variable "microsoft_tenant_id" {
   type        = string
   default     = "dc0f2078-ac28-4ff2-b21a-d4b28df32361"

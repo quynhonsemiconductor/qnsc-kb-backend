@@ -21,7 +21,7 @@ from src.models.article import (
     DocumentSource,
 )
 from src.models.interaction import ArticleFollower
-from src.models.user import User, AccessGroup, Department
+from src.models.user import User, Department
 from src.repositories.user import UserRepository
 from src.models.connectors import ExternalDocument, ExternalGroupMapping
 from src.models.ops import Connector, NotificationQueue
@@ -31,6 +31,7 @@ from src.repositories.article import ArticleRepository
 from src.domain.events import event_bus
 from src.domain.content_restructure import _fallback_text, restructure_document
 from src.domain.rbac import AuthorizationService
+from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.source_storage import delete_source
 from src.domain.departments import resolve_active_department, resolve_active_departments
 
@@ -131,6 +132,16 @@ class GovernanceService:
             and role.company_domain in {None, user.company_domain}
             for role in getattr(user, "roles", [])
         )
+
+    def may_publish_own_change(self, user: User) -> bool:
+        """Whether this identity can approve its own submission, so queueing is pointless.
+
+        Public because the article-edit path needs the same answer: an editor who may
+        approve their own draft gains nothing from being sent to a review screen to click
+        publish on their own change. Delegates to `_may_self_approve` rather than restating
+        the rule, so the two paths cannot drift into disagreeing about who may self-approve.
+        """
+        return self._may_self_approve(user)
 
     def _can_assign_approver(self, user: User, draft: PendingDraft) -> bool:
         # Assignment is optional. Any user who may review this draft may
@@ -719,7 +730,6 @@ class GovernanceService:
         update_article_id: uuid.UUID | None = None,
         treat_as_new: bool = False,
         sensitivity: str | None = None,
-        access_group_ids: list[uuid.UUID] | None = None,
         department_ids: list[uuid.UUID] | None = None,
         review_note: str | None = None,
         visibility: str | None = None,
@@ -769,17 +779,6 @@ class GovernanceService:
                     raise HTTPException(
                         status_code=422,
                         detail="The submitted explicit-deny selection is invalid",
-                    ) from exc
-            if access_group_ids is None:
-                try:
-                    access_group_ids = [
-                        uuid.UUID(str(group_id))
-                        for group_id in metadata.get("access_group_ids", [])
-                    ]
-                except (TypeError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=422,
-                        detail="The submitted access-group selection is invalid",
                     ) from exc
             if draft.status != "pending":
                 raise HTTPException(
@@ -940,41 +939,31 @@ class GovernanceService:
                     detail="Explicit-user visibility requires at least one user",
                 )
 
-            selected_groups: list[AccessGroup] = []
-            if access_group_ids:
-                selected_groups = list(
-                    await UserRepository(db).get_groups_by_ids(
-                        access_group_ids, draft.company_domain
-                    )
-                )
-                if len({group.id for group in selected_groups}) != len(
-                    set(access_group_ids)
-                ):
-                    raise HTTPException(
-                        status_code=422, detail="One or more access groups do not exist"
-                    )
             # New content is authorized by role/permission/department. If a
-            # legacy draft carries a non-public flag without a real ACL, make
+            # legacy draft carries a non-public flag without any audience, make
             # it compatible with the current resource-based model instead of
             # blocking publication on a removed UI control.
             if (
                 sensitivity != "public"
-                and not selected_groups
+                and not selected_departments
                 and not explicit_user_ids
                 and not draft.external_document_id
             ):
                 sensitivity = "public"
             external_source_user_ids: set[uuid.UUID] = set()
+            # None until a connector document proves otherwise; a manual draft has no
+            # provider and its permission rows must stay internal (source=None).
+            connector_source: str | None = None
             if external_document:
                 external_metadata = external_document.metadata_json or {}
-                mapped_ids = external_metadata.get("mapped_access_group_ids", [])
-                selected_groups = (
+                mapped_ids = external_metadata.get("mapped_department_ids", [])
+                selected_departments = (
                     list(
                         (
                             await db.execute(
-                                select(AccessGroup).where(
-                                    AccessGroup.id.in_(mapped_ids),
-                                    AccessGroup.company_domain == draft.company_domain,
+                                select(Department).where(
+                                    Department.id.in_(mapped_ids),
+                                    Department.company_domain == draft.company_domain,
                                 )
                             )
                         )
@@ -984,10 +973,10 @@ class GovernanceService:
                     if mapped_ids
                     else []
                 )
-                if len({group.id for group in selected_groups}) != len(set(mapped_ids)):
+                if len({item.id for item in selected_departments}) != len(set(mapped_ids)):
                     raise HTTPException(
                         status_code=422,
-                        detail="The connector ACL contains an invalid access group",
+                        detail="The connector ACL contains an invalid department",
                     )
                 try:
                     external_source_user_ids = {
@@ -1032,21 +1021,23 @@ class GovernanceService:
                 # A provider ACL is restrictive input, never a reason to make
                 # the Article public. Empty/unmapped ACLs remain closed by
                 # using a restricted Article with no effective grant.
-                if selected_groups:
-                    sensitivity = "restricted"
-                    visibility = "department"
-                elif external_source_user_ids:
-                    sensitivity = "restricted"
-                    visibility = "users"
-                else:
-                    sensitivity = "restricted"
-                    visibility = "department"
+                sensitivity = "restricted"
+                visibility = (
+                    "users"
+                    if external_source_user_ids and not selected_departments
+                    else "department"
+                )
                 connector = await db.get(Connector, external_document.connector_id)
                 if not connector or connector.company_domain != draft.company_domain:
                     raise HTTPException(
                         status_code=422,
                         detail="The connector document is outside this draft's company",
                     )
+                # Provenance is stamped with the ACTUAL provider so the source-ACL
+                # intersection in permissions.py/repositories/article.py recognises
+                # the row. Hardcoding "sharepoint" here would mislabel a OneDrive or
+                # Google Drive grant.
+                connector_source = connector.system
 
             update_target = None
             if update_article_id:
@@ -1150,12 +1141,6 @@ class GovernanceService:
                     str(created_article.visibility or "department"),
                     tuple(
                         sorted(
-                            str(group.id)
-                            for group in getattr(created_article, "access_groups", [])
-                        )
-                    ),
-                    tuple(
-                        sorted(
                             (str(item.user_id), str(item.effect))
                             for item in getattr(created_article, "user_permissions", [])
                         )
@@ -1191,11 +1176,13 @@ class GovernanceService:
                 )
                 if metadata.get("source_position"):
                     created_article.source_position = metadata.get("source_position")
-                created_article.access_groups = selected_groups
+                # Retain EVERY source-managed row, not just SharePoint's. Dropping
+                # another provider's row here would delete a provider ACL mirror and
+                # widen access on an ordinary content update.
                 connector_permissions = [
                     item
                     for item in getattr(created_article, "user_permissions", [])
-                    if item.source == "sharepoint"
+                    if item.source in SOURCE_ACL_PROVIDERS
                 ]
                 source_allow_ids = {
                     item.user_id
@@ -1204,7 +1191,9 @@ class GovernanceService:
                 }
                 connector_permissions.extend(
                     ArticleUserPermission(
-                        user_id=external_user_id, effect="allow", source="sharepoint"
+                        user_id=external_user_id,
+                        effect="allow",
+                        source=connector_source,
                     )
                     for external_user_id in external_source_user_ids
                     if external_user_id not in source_allow_ids
@@ -1230,7 +1219,6 @@ class GovernanceService:
                     ),
                     str(created_article.sensitivity or ""),
                     str(created_article.visibility or "department"),
-                    tuple(sorted(str(group.id) for group in selected_groups)),
                     tuple(
                         sorted(
                             [(str(user_id), "allow") for user_id in explicit_user_ids]
@@ -1281,14 +1269,13 @@ class GovernanceService:
                     last_reviewed=datetime.utcnow(),
                     related_article_ids=draft.related_article_ids,
                     source_position=metadata.get("source_position"),
-                    access_groups=selected_groups,
                     visibility=visibility,
                     user_permissions=[
                         ArticleUserPermission(
                             user_id=explicit_user_id,
                             effect="allow",
                             source=(
-                                "sharepoint"
+                                connector_source
                                 if explicit_user_id in external_source_user_ids
                                 else None
                             ),
@@ -1681,6 +1668,7 @@ class GovernanceService:
         user: User,
         limit: int = 100,
         *,
+        offset: int = 0,
         user_id: uuid.UUID | None = None,
         action: str | None = None,
         start_time: datetime | None = None,
@@ -1694,6 +1682,7 @@ class GovernanceService:
             )
         return await self.gov_repo.list_audits(
             limit=limit,
+            offset=offset,
             user_id=user_id,
             action=action,
             start_time=start_time,

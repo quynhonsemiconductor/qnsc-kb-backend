@@ -2,9 +2,10 @@ from contextlib import asynccontextmanager
 import asyncio
 import re
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -23,9 +24,16 @@ from src.api.routers import (
     llm,
     notifications,
 )
-from src.api.deps import SessionLocal, engine, init_db, set_database_context
+from src.api.deps import (
+    SessionLocal,
+    engine,
+    init_db,
+    require_permission,
+    set_database_context,
+)
 from src.domain.events import event_bus
 from src.models.article import Article
+from src.models import User
 from src.models.chunk import ArticleChunk
 from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
@@ -95,6 +103,76 @@ async def verify_embedding_column_width() -> None:
     )
 
 
+# Every policy the RLS migrations leave behind, as a fully-migrated database ends up: a
+# name a later revision re-created appears once, and `recipient_notifications` is absent
+# because 20260806_22 replaces it with the four per-command policies listed here.
+#
+# Checking ONE of them — which is what this did, `tenant_articles` alone — passes on a
+# database where an early revision ran with ENABLE_RLS set and every later one did not.
+# Articles would be isolated while audit logs, refresh sessions, AI conversations and the
+# whole connector tree were not, and startup would log success. Derived from the
+# `CREATE POLICY` statements under migrations/versions/; a new policy must be added here
+# or production will not know it is missing.
+EXPECTED_RLS_POLICIES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("articles", "tenant_articles"),
+        ("article_chunks", "tenant_article_chunks"),
+        ("parent_chunks", "tenant_parent_chunks"),
+        ("document_sources", "tenant_document_sources"),
+        ("article_versions", "tenant_article_versions"),
+        ("article_tags", "tenant_article_tags"),
+        ("article_departments", "tenant_article_departments"),
+        ("article_edit_requests", "tenant_article_edit_requests"),
+        ("comments", "tenant_comments"),
+        ("votes", "tenant_votes"),
+        ("bookmarks", "tenant_bookmarks"),
+        ("users", "tenant_users"),
+        ("user_departments", "tenant_user_departments"),
+        ("user_roles", "tenant_user_roles"),
+        ("roles", "tenant_roles"),
+        ("role_permissions", "tenant_role_permissions"),
+        ("refresh_sessions", "tenant_refresh_sessions"),
+        ("external_identities", "tenant_external_identities"),
+        ("invitations", "tenant_invitations"),
+        ("audit_logs", "tenant_audit_logs"),
+        ("departments", "tenant_departments"),
+        ("department_managers", "tenant_department_managers"),
+        ("pending_drafts", "tenant_pending_drafts"),
+        ("draft_transitions", "tenant_draft_transitions"),
+        ("approver_rules", "tenant_approver_rules"),
+        ("gaps", "tenant_gaps"),
+        ("ingestion_fingerprints", "tenant_ingestion_fingerprints"),
+        ("index_reprocess_jobs", "tenant_index_reprocess_jobs"),
+        ("tag_catalog", "tenant_tag_catalog"),
+        ("conflict_records", "tenant_conflict_records"),
+        ("eval_sets", "tenant_eval_sets"),
+        ("connectors", "tenant_connectors"),
+        ("connector_jobs", "tenant_connector_jobs"),
+        ("connector_notifications", "tenant_connector_notifications"),
+        ("sync_requests", "tenant_sync_requests"),
+        ("sync_cursors", "tenant_sync_cursors"),
+        ("sync_errors", "tenant_sync_errors"),
+        ("source_scopes", "tenant_source_scopes"),
+        ("external_documents", "tenant_external_documents"),
+        ("external_group_mappings", "tenant_external_group_mappings"),
+        ("external_acl_principals", "tenant_external_acl_principals"),
+        ("document_versions", "tenant_document_versions"),
+        ("permission_snapshots", "tenant_permission_snapshots"),
+        ("webhook_subscriptions", "tenant_webhook_subscriptions"),
+        ("notification_queue", "recipient_notifications_read"),
+        ("notification_queue", "recipient_notifications_update"),
+        ("notification_queue", "recipient_notifications_delete"),
+        ("notification_queue", "tenant_notification_delivery"),
+        ("ai_conversations", "owner_ai_conversations"),
+        ("ai_messages", "owner_ai_messages"),
+        ("ai_usage_logs", "owner_ai_usage_logs"),
+        ("ai_feedback", "owner_ai_feedback"),
+        ("ai_cache", "owner_ai_cache"),
+        ("search_logs", "owner_search_logs"),
+    }
+)
+
+
 async def verify_rls_policies() -> None:
     """Fail fast when production RLS policies are missing.
 
@@ -104,27 +182,38 @@ async def verify_rls_policies() -> None:
     re-running does nothing. The application-level SQL predicates still
     enforce isolation, but RLS is the second layer production relies on, so
     a production startup must refuse to serve without it.
+
+    Every expected policy is checked, not a representative one: the migrations that
+    create them are separate revisions reading ENABLE_RLS independently, so "some
+    policies exist" is a state a real deployment reaches.
     """
     if settings.ENVIRONMENT.lower() not in {"production", "prod"}:
         return
     async with SessionLocal() as db:
         await set_database_context(db, None, True)
-        count = (
-            await db.execute(
-                text(
-                    "SELECT count(*) FROM pg_policies "
-                    "WHERE schemaname = 'public' "
-                    "AND tablename = 'articles' AND policyname = 'tenant_articles'"
+        present = {
+            (table, policy)
+            for table, policy in (
+                await db.execute(
+                    text(
+                        "SELECT tablename, policyname FROM pg_policies "
+                        "WHERE schemaname = 'public'"
+                    )
                 )
-            )
-        ).scalar_one()
-    if count == 0:
+            ).all()
+        }
+    missing = sorted(
+        f"{table}.{policy}" for table, policy in EXPECTED_RLS_POLICIES - present
+    )
+    if missing:
         raise RuntimeError(
-            "Tenant RLS policies are missing. The RLS migrations only apply when "
-            "ENABLE_RLS=true is set in the environment when Alembic runs; the "
-            "revision was likely recorded without them. Re-run migrations with "
-            "ENABLE_RLS=true against a database where the RLS revisions have not "
-            "yet been applied, or restore from a properly migrated backup."
+            "Tenant RLS policies are missing: "
+            + ", ".join(missing)
+            + ". The RLS migrations only apply when ENABLE_RLS=true is set in the "
+            "environment when Alembic runs; the revisions were likely recorded "
+            "without them. Re-run migrations with ENABLE_RLS=true against a database "
+            "where the RLS revisions have not yet been applied, or restore from a "
+            "properly migrated backup."
         )
 
 
@@ -140,10 +229,29 @@ def _metric_path_for(request) -> str:
     return template if isinstance(template, str) else "/unmatched"
 
 
+#: A traceback is unbounded and this row is written on the request path, so the stored
+#: detail is capped. The innermost frames are the ones that name the actual fault.
+ERROR_DETAIL_MAX_CHARS = 4000
+
+
 async def record_request_metric(
-    request_id: str, method: str, path: str, status_code: int, duration_ms: float
+    request_id: str,
+    method: str,
+    path: str,
+    status_code: int,
+    duration_ms: float,
+    exc: BaseException | None = None,
 ) -> None:
     record_request(method, path, status_code, duration_ms)
+    error_type: str | None = None
+    error_detail: str | None = None
+    if exc is not None:
+        error_type = type(exc).__name__
+        # The message first, so it survives truncation even when the traceback is deep.
+        formatted = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        error_detail = f"{exc}\n\n{formatted}"[:ERROR_DETAIL_MAX_CHARS]
     try:
         async with SessionLocal() as db:
             db.add(
@@ -153,14 +261,18 @@ async def record_request_metric(
                     path=path,
                     status_code=status_code,
                     duration_ms=duration_ms,
+                    error_type=error_type,
+                    error_detail=error_detail,
                 )
             )
             await db.commit()
-    except Exception as exc:
+    except Exception as persist_error:
+        # Named distinctly from the `exc` parameter above: shadowing it here would mean a
+        # storage failure silently overwrote the exception we were trying to record.
         logger.warning(
             "Could not persist API request metric",
             request_id=request_id,
-            error=str(exc),
+            error=str(persist_error),
         )
 
 
@@ -301,6 +413,10 @@ async def _inline_connector_sync_dispatch_loop() -> None:
     from src.domain.sync_queue import enqueue_connector_sync
     from src.models.connectors import SourceScope, SyncCursor, SyncRequest
     from src.models.ops import Connector
+    from src.domain.connector_providers import (
+        REMOTE_PROVIDERS,
+        cursor_type as provider_cursor_type,
+    )
 
     while True:
         await asyncio.sleep(settings.CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS)
@@ -317,7 +433,7 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                 connectors = (
                     await db.execute(
                         select(Connector).where(
-                            Connector.system.in_(["sharepoint", "google_drive"]),
+                            Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                             Connector.status.in_(["active", "error"]),
                         )
                     )
@@ -346,7 +462,7 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                             cursor = SyncCursor(
                                 connector_id=connector.id,
                                 scope_id=scope.id,
-                                cursor_type="delta" if connector.system == "sharepoint" else "changes",
+                                cursor_type=provider_cursor_type(connector.system),
                             )
                             db.add(cursor)
                         cursor.full_sync_required = True
@@ -519,6 +635,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # `allow_headers` governs the REQUEST direction only. Without expose_headers the
+    # browser hides every non-safelisted RESPONSE header from JavaScript, so
+    # `response.headers.get("X-Request-ID")` returned null even though the server set it
+    # on every response. Measured against the live stack.
+    #
+    # That silently broke the whole point of the id: it is the key the operator pastes
+    # into /governance/request-failures?request_id=... to find the traceback for the
+    # failure a user just reported. A header the client cannot read cannot be reported.
+    expose_headers=["X-Request-ID", "Retry-After"],
 )
 
 
@@ -595,6 +720,7 @@ async def request_logging_middleware(request, call_next):
             _metric_path_for(request),
             500,
             round((time.perf_counter() - started) * 1000, 2),
+            exc,
         )
         raise
     finally:
@@ -645,7 +771,17 @@ async def health_live():
 
 
 @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
-async def metrics() -> PlainTextResponse:
+async def metrics(
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+) -> PlainTextResponse:
+    """Operational telemetry, behind the same permission as the governance dashboards.
+
+    It was unauthenticated. The body names every route template and, per route, the
+    request count, the accumulated latency and the status distribution — enough for
+    anyone who can reach the port to enumerate the private API surface and read traffic
+    volumes off it. A scraper authenticates like any other client; global scope matches
+    the fact that these counters are process-wide and not attributable to one tenant.
+    """
     return PlainTextResponse(prometheus_text(), media_type="text/plain; version=0.0.4")
 
 

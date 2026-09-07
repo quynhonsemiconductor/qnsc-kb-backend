@@ -1,5 +1,5 @@
 # =============================================================================
-# Infrastructure · Plan — thin caller of the shared reusable (qnsc-ci).
+# Infrastructure · Plan — thin caller of the shared reusable (ci).
 #
 # Dry-run on every PR touching infra: posts a plan comment per changed workspace and
 # gates on `tofu fmt`.
@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   plan:
-    uses: QNSC-VN/qnsc-ci/.github/workflows/infra-plan.yml@v1.10.0
+    uses: quynhonsemiconductor/ci/.github/workflows/infra-plan.yml@v1
     with:
       product: qnsc-kb
       # Mirror the apply-time non-secret TF_VARs, or the plan lies. The Cloudflare
@@ -47,6 +47,8 @@ jobs:
         }
     secrets:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      # Lets the reusable mint a RELEASE_BOT token to fetch the private tf-modules.
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
       # Secret half of the apply-time TF_VARs (masked inside the reusable).
       tf_secret_vars_json: |
         {

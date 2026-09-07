@@ -2,7 +2,7 @@
 # Used by the labeler workflow (.github/workflows/labeler.yml).
 #
 # Labels must already EXIST in the repo; the action applies them, it does not create
-# them. Paths mirror this repository's layout, not rally's monorepo — a copied config
+# them. Paths mirror this repository's layout, not rova's monorepo — a copied config
 # would silently label nothing, because "apps/api/**" matches no file here.
 
 area/api:

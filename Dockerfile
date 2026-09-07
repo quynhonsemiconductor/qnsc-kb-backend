@@ -3,7 +3,7 @@
 # One image definition, three targets: api, worker, migrator.
 #
 # It lives at the repo root and takes a target because the shared deploy pipeline
-# (QNSC-VN/qnsc-ci .github/workflows/backend-deploy.yml) builds each service by passing
+# (quynhonsemiconductor/ci .github/workflows/backend-deploy.yml) builds each service by passing
 # `build-target` against ONE Dockerfile and has no per-service dockerfile input.
 #
 # TWO RULES SHAPE THIS FILE, both learned the expensive way:
@@ -142,7 +142,7 @@ COPY --from=deps-ml /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml /usr/local/bin /usr/local/bin
 
 ARG BAKE_EMBEDDING_MODEL=true
-ARG EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ARG EMBEDDING_MODEL=intfloat/multilingual-e5-small
 ENV HF_HOME=/opt/huggingface
 ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
 

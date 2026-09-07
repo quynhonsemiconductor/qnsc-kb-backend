@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 import structlog
@@ -38,13 +39,23 @@ def _major_sections(title: str, markdown: str) -> list[dict[str, Any]]:
     for line in markdown.splitlines():
         is_major_boundary = re.match(r"^##(?!#)\s+\S", line.strip()) is not None
         if is_major_boundary and current and "\n".join(current).strip():
-            # Keep the document H1/preamble with its first department section
-            # so it cannot become an unrouted candidate of its own.
-            has_preamble_content = any(
-                value.strip() and not re.match(r"^#\s+\S", value.strip())
-                for value in current
+            # Is the buffer a SECTION, or just the document's front matter?
+            #
+            # A buffer that already contains a `##` line holds a finished section and
+            # must be emitted. A buffer that does not is preamble -- the H1, a version
+            # line, a document code -- and belongs with the first real section rather
+            # than becoming a candidate of its own that no department owns.
+            #
+            # This used to ask "does the preamble contain any non-H1 content?", which got
+            # the common case backwards: `# Handbook` alone was correctly held, but
+            # `# Handbook` + `Version 1.0` was emitted as a standalone unrouted candidate.
+            # Testing the buffer for a `##` rather than inspecting only its first line
+            # matters once the preamble has been merged into section one, because from
+            # then on the buffer always OPENS with the H1.
+            buffer_holds_section = any(
+                re.match(r"^##(?!#)\s+\S", value.strip()) for value in current
             )
-            if sections or has_preamble_content:
+            if buffer_holds_section:
                 sections.append("\n".join(current).strip())
                 current = []
         current.append(line)
@@ -169,6 +180,63 @@ def _assignment(
     }
 
 
+def _body_without_headings(body_md: str) -> str:
+    """Return a section body with its own heading lines removed."""
+    return "\n".join(
+        line
+        for line in (body_md or "").splitlines()
+        if not re.match(r"^#{1,6}\s+", line.strip())
+    ).strip()
+
+
+def _absorb_hollow_sections(routed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge sections that carry no content of their own into a neighbour.
+
+    ``_major_sections`` starts a new section at every ``##`` with no size condition, so
+    ``## Overview`` immediately followed by ``## Scope`` emits a candidate whose entire
+    body is the four characters ``## A``. That is not a reviewable article, and it is not
+    rare: a source over ``RESTRUCTURE_SECTION_CHARS`` is formatted in parts by separate
+    LLM calls that never see each other, then concatenated, so adjacent headings appear at
+    every seam.
+
+    Emptiness is judged on non-heading content rather than a character count. A short
+    section that says something real is a legitimate candidate; a heading with nothing
+    under it is not, at any length.
+
+    Runs BEFORE the department grouping on purpose. A hollow section has almost no tokens
+    to rank, so its routing is close to arbitrary, and leaving it in place would let a
+    spurious department assignment break a same-owner merge between its neighbours.
+    """
+    if len(routed) < 2:
+        return routed
+    merged: list[dict[str, Any]] = []
+    # A hollow section with nothing before it cannot merge backwards; carry it forward
+    # and prepend it to the next section that has content.
+    pending: dict[str, Any] | None = None
+    for item in routed:
+        current = dict(item)
+        if pending is not None:
+            current["body_md"] = f"{pending['body_md']}\n\n{current['body_md']}"
+            current["source_start"] = pending["source_start"]
+            if pending.get("heading"):
+                # The merged text opens with the held heading, so it is the identity a
+                # reviewer sees; `_major_sections` would have picked the same one.
+                current["heading"] = pending["heading"]
+                current["title"] = pending["title"]
+            pending = None
+        if _body_without_headings(current["body_md"]):
+            merged.append(current)
+        elif merged:
+            merged[-1]["body_md"] += "\n\n" + current["body_md"]
+            merged[-1]["source_end"] = current["source_end"]
+        else:
+            pending = current
+    if pending is not None:
+        # Every section was hollow: keep the document rather than dropping it.
+        merged.append(pending)
+    return merged
+
+
 def _finalize(
     title: str,
     markdown: str,
@@ -181,6 +249,7 @@ def _finalize(
     merge rule would be a second thing to keep in step, and the two would disagree the
     first time either changed.
     """
+    routed = _absorb_hollow_sections(routed)
     # If no section can be linked to an existing department, keep the document
     # intact and offer one reviewable new-department suggestion instead.
     if not any(item["department_ids"] for item in routed):
@@ -300,26 +369,58 @@ def _parse_assignments(
     return chosen
 
 
+#: Why the LLM contributed nothing to a routing decision. `off` and `not_applicable` are
+#: normal; `unavailable` and `unreadable` mean the model was asked and could not answer,
+#: and a provider that is permanently broken sits in one of those forever. They used to
+#: be the same empty dict as "the model declined", so nothing distinguished a working
+#: keyword fallback from a routing feature that had silently stopped existing.
+_ROUTING_OFF = "off"
+_ROUTING_NOT_APPLICABLE = "not_applicable"
+_ROUTING_UNAVAILABLE = "unavailable"
+_ROUTING_UNREADABLE = "unreadable"
+_ROUTING_ANSWERED = "answered"
+
+
+@dataclass(frozen=True)
+class _RoutingOutcome:
+    """What the LLM routing attempt produced, and why it produced that.
+
+    `assignments` maps 1-based section number to a Department. Empty is a valid answer --
+    the model can decline every section -- so `state` is what tells the two apart.
+    """
+
+    state: str
+    assignments: dict[int, Any]
+
+
 async def _llm_section_departments(
     title: str, sections: list[dict[str, Any]], departments: list[Any]
-) -> dict[int, Any]:
-    """Map 1-based section number to a Department, or {} when the LLM cannot be used.
+) -> _RoutingOutcome:
+    """Ask the LLM which department owns each section, and say what came back.
 
     Never raises. A routing suggestion is something a reviewer sees and can change; it
     must not be able to fail a document import, which this codebase has already paid
-    for once.
+    for once. Not raising is not the same as not reporting, though: an unavailable
+    provider is named in the outcome and logged at warning level, because "the model had
+    no opinion" and "the model could not be reached" look identical in the result and
+    only one of them is somebody's job to fix.
     """
     from src.core.config import settings
 
     if not settings.DEPARTMENT_ROUTING_LLM_ENABLED:
-        return {}
+        return _RoutingOutcome(_ROUTING_OFF, {})
     if not departments or not sections or len(sections) > _LLM_MAX_SECTIONS:
-        return {}
+        return _RoutingOutcome(_ROUTING_NOT_APPLICABLE, {})
     try:
         from src.domain.llm_client import complete, resolve_provider
 
         if resolve_provider() is None:
-            return {}
+            _logger.warning(
+                "LLM department routing unavailable: no provider configured; "
+                "using keyword ranking",
+                section_count=len(sections),
+            )
+            return _RoutingOutcome(_ROUTING_UNAVAILABLE, {})
         reply, _tokens, _model, _provider = await complete(
             [
                 {"role": "system", "content": _ROUTING_SYSTEM_PROMPT},
@@ -337,14 +438,17 @@ async def _llm_section_departments(
         _logger.warning(
             "LLM department routing unavailable; using keyword ranking", exc_info=True
         )
-        return {}
+        return _RoutingOutcome(_ROUTING_UNAVAILABLE, {})
 
     try:
         chosen = _parse_assignments(reply, len(sections), len(departments))
     except Exception:
         _logger.warning("LLM department routing returned unreadable JSON", exc_info=True)
-        return {}
-    return {section: departments[index - 1] for section, index in chosen.items()}
+        return _RoutingOutcome(_ROUTING_UNREADABLE, {})
+    return _RoutingOutcome(
+        _ROUTING_ANSWERED,
+        {section: departments[index - 1] for section, index in chosen.items()},
+    )
 
 
 async def route_document_candidates_llm(
@@ -362,7 +466,8 @@ async def route_document_candidates_llm(
         suggest_departments(section["title"], section["body_md"], department_list)
         for section in sections
     ]
-    chosen = await _llm_section_departments(title, sections, department_list)
+    outcome = await _llm_section_departments(title, sections, department_list)
+    chosen = outcome.assignments
 
     routed: list[dict[str, Any]] = []
     for index, section in enumerate(sections):

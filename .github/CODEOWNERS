@@ -1,10 +1,10 @@
 # Default owner for everything in this repo.
 # Enforced via the main-protection ruleset (require_code_owner_review).
-* @QNSC-VN/kb-maintainers
+* @quynhonsemiconductor/kb-maintainers
 
 # Infrastructure and the deploy pipeline change what runs in production, not just what
 # the code does — a wrong value here is applied by CI with no further review.
-/infra/           @QNSC-VN/kb-maintainers
-/.github/         @QNSC-VN/kb-maintainers
-/Dockerfile       @QNSC-VN/kb-maintainers
-/migrations/      @QNSC-VN/kb-maintainers
+/infra/           @quynhonsemiconductor/kb-maintainers
+/.github/         @quynhonsemiconductor/kb-maintainers
+/Dockerfile       @quynhonsemiconductor/kb-maintainers
+/migrations/      @quynhonsemiconductor/kb-maintainers
