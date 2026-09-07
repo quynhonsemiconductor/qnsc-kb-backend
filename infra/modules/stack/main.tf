@@ -52,6 +52,13 @@ locals {
   kms_key_arn        = data.terraform_remote_state.shared.outputs.kms_key_arn
   cloudflare_zone_id = try(data.terraform_remote_state.shared.outputs.cloudflare_zone_id, "")
 
+  // DKIM verifies the DOMAIN, not the mailbox, so this is the part after "@" — SES signs
+  // for any address at it, and the local part of mail_from_email can change later without
+  // a new identity. The regex has a fallback rather than failing plan outright: an
+  // environment with email_provider != "ses" can leave mail_from_email at its own
+  // default, which need not even look like an address.
+  mail_from_domain = var.email_provider == "ses" ? replace(var.mail_from_email, "/^[^@]*@/", "") : ""
+
   ecr_base         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
   ecr_api_url      = "${local.ecr_base}/${var.product}-api:${var.image_tag}"
   ecr_worker_url   = "${local.ecr_base}/${var.product}-worker:${var.image_tag}"
@@ -628,12 +635,45 @@ module "worker" {
   tags = local.tags
 }
 
+// DKIM verifies the whole domain, so mail_from_email's local part is free to change
+// without a new identity. Gated the same as the IAM grant below: only develop sets
+// email_provider = "ses" today, so only its state ever owns this identity — both
+// environments creating one for the same real-world "qnsc.vn" would fight over it.
+resource "aws_sesv2_email_identity" "mail_from_domain" {
+  count          = var.email_provider == "ses" && var.mail_from_email != "" ? 1 : 0
+  email_identity = local.mail_from_domain
+
+  dkim_signing_attributes {
+    next_signing_key_length = "RSA_2048_BIT"
+  }
+
+  tags = local.tags
+}
+
+// The three CNAME records SES's DKIM verification asks for, in the same Cloudflare zone
+// module.tunnel_api's DNS record already lives in. Unproxied: a proxied CNAME resolves
+// through Cloudflare's edge rather than to the literal target, which is what verification
+// and signing both need to see.
+module "dns_ses_dkim" {
+  count  = var.email_provider == "ses" && var.mail_from_email != "" ? 3 : 0
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/dns-record?ref=dns-record-v1.1.0"
+
+  enabled = local.cloudflare_zone_id != ""
+  zone_id = local.cloudflare_zone_id
+  name    = "${aws_sesv2_email_identity.mail_from_domain[0].dkim_signing_attributes[0].tokens[count.index]}._domainkey"
+  type    = "CNAME"
+  content = "${aws_sesv2_email_identity.mail_from_domain[0].dkim_signing_attributes[0].tokens[count.index]}.dkim.amazonses.com"
+  proxied = false
+  comment = "${local.name} SES DKIM verification for ${local.mail_from_domain}"
+}
+
 // Grants the worker task (the only caller of get_email_sender()) permission to send
 // through SES. Only created when email_provider is actually "ses" — the ecs-service
 // module exposes task_role_arn but not a role NAME output, so the role name is derived
-// from the ARN's final path segment. Resource is "*" rather than a specific identity
-// ARN because no SES identity is created by this stack; once mail_from_email's domain
-// or address identity is verified some other way, scope this down to its ARN.
+// from the ARN's final path segment. Scoped to the identity above when one exists;
+// mail_from_email set without it (email_provider == "ses" but the address left empty)
+// falls back to "*" rather than a zero-Resource policy statement, which Terraform
+// rejects outright.
 resource "aws_iam_role_policy" "worker_ses_send" {
   count = var.email_provider == "ses" ? 1 : 0
   name  = "ses-send"
@@ -645,7 +685,7 @@ resource "aws_iam_role_policy" "worker_ses_send" {
       Sid      = "SendApplicationEmail"
       Effect   = "Allow"
       Action   = ["ses:SendEmail", "ses:SendRawEmail"]
-      Resource = "*"
+      Resource = length(aws_sesv2_email_identity.mail_from_domain) > 0 ? aws_sesv2_email_identity.mail_from_domain[0].arn : "*"
     }]
   })
 }
