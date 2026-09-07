@@ -357,6 +357,45 @@ variable "microsoft_graph_sender" {
   EOT
 }
 
+variable "email_provider" {
+  type    = string
+  default = "graph"
+
+  description = <<-EOT
+    Selects get_email_sender()'s transport (src/services/email.py): "graph" (default)
+    keeps the Microsoft Graph path above; "ses" sends through AWS SES instead, so
+    outbound mail no longer depends on Entra admin consent. "fake" forces the in-memory
+    sender and is not expected to be used here.
+
+    Switching to "ses" also requires mail_from_email below, an SES-verified sender
+    identity for that address (or its domain) in this account/region, and — if the
+    account is still in the SES sandbox — either verifying every recipient or
+    requesting production access, or every send fails with MessageRejected.
+  EOT
+
+  validation {
+    condition     = contains(["graph", "ses", "fake"], var.email_provider)
+    error_message = "email_provider must be graph, ses, or fake."
+  }
+}
+
+variable "mail_from_email" {
+  type    = string
+  default = ""
+
+  description = <<-EOT
+    Required when email_provider is "ses"; SesEmailSender raises without it. Must be an
+    address SES has verified (directly, or via a verified domain identity), e.g.
+    "no-reply@qnsc.vn".
+  EOT
+}
+
+variable "mail_from_name" {
+  type        = string
+  default     = "QNSC Knowledge Base"
+  description = "Display name on outbound mail sent through EMAIL_PROVIDER=ses."
+}
+
 variable "google_client_id" {
   type        = string
   default     = ""

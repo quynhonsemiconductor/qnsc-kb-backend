@@ -206,6 +206,14 @@ locals {
     // thing that makes outbound mail work.
     { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
 
+    // Only the worker actually calls get_email_sender() (deliver_notification_queue),
+    // but this is stated in common_env rather than the worker-only block: api and worker
+    // must agree on config the way EMBEDDING_MODEL does above, and a future path that
+    // sends mail from the api would otherwise silently pick up a different transport.
+    { name = "EMAIL_PROVIDER", value = var.email_provider },
+    { name = "MAIL_FROM_EMAIL", value = var.mail_from_email },
+    { name = "MAIL_FROM_NAME", value = var.mail_from_name },
+
     // SSO sign-in, a DIFFERENT callback from the connector one above: that consents to
     // SharePoint content, this authenticates a person. Both must be registered on the
     // Entra app.
@@ -618,6 +626,28 @@ module "worker" {
   })])
 
   tags = local.tags
+}
+
+// Grants the worker task (the only caller of get_email_sender()) permission to send
+// through SES. Only created when email_provider is actually "ses" — the ecs-service
+// module exposes task_role_arn but not a role NAME output, so the role name is derived
+// from the ARN's final path segment. Resource is "*" rather than a specific identity
+// ARN because no SES identity is created by this stack; once mail_from_email's domain
+// or address identity is verified some other way, scope this down to its ARN.
+resource "aws_iam_role_policy" "worker_ses_send" {
+  count = var.email_provider == "ses" ? 1 : 0
+  name  = "ses-send"
+  role  = split("/", module.worker.task_role_arn)[1]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "SendApplicationEmail"
+      Effect   = "Allow"
+      Action   = ["ses:SendEmail", "ses:SendRawEmail"]
+      Resource = "*"
+    }]
+  })
 }
 
 // ── Migrator — one-shot task run by the deploy pipeline before rolling services ──

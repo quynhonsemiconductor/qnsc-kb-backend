@@ -77,6 +77,35 @@ variable "microsoft_tenant_id" {
   EOT
 }
 
+variable "email_provider" {
+  type    = string
+  default = "ses"
+
+  description = <<-EOT
+    Overrides the module default ("graph") for this environment: develop sends through
+    AWS SES rather than Microsoft Graph, so outbound mail does not wait on Entra admin
+    consent for Mail.Send. See infra/modules/stack/variables.tf for what switching this
+    requires (mail_from_email below, a verified SES identity, and sandbox/production
+    access for the recipients being invited).
+  EOT
+}
+
+variable "mail_from_email" {
+  type    = string
+  default = ""
+
+  description = <<-EOT
+    Mailbox that invitations and password resets are sent FROM under EMAIL_PROVIDER=ses,
+    e.g. "no-reply@qnsc.vn".
+
+    Left EMPTY deliberately until that address (or its domain) has a verified SES
+    identity. While empty, SesEmailSender raises "MAIL_FROM_EMAIL is not configured" on
+    every attempt and deliver_notification_queue retries every 30 seconds without ever
+    arriving — the same dead-mail shape microsoft_graph_sender has above, just under the
+    ses provider instead of graph.
+  EOT
+}
+
 variable "google_client_id" {
   type        = string
   default     = ""
