@@ -273,6 +273,34 @@ def verify_review_deadlines() -> None:
     sync_run(verify())
 
 
+async def _run_approval_agent_sweep() -> None:
+    """Apply active approval rules to every company's pending queue.
+
+    The agent (src/domain/approval_agent.py) and its API were reachable from day one, but
+    nothing ever called them except a human hitting POST /governance/approval-agent/run --
+    a correctly-scoped, authority-granted rule still left every new draft in the human
+    queue until somebody remembered to run it again. This is that missing trigger.
+    """
+    from src.domain import approval_agent
+    from src.models.governance import ApprovalRule
+    async with SessionLocal() as db:
+        await set_database_context(db, None, True)
+        domains = (
+            await db.execute(
+                select(ApprovalRule.company_domain)
+                .where(ApprovalRule.active.is_(True))
+                .distinct()
+            )
+        ).scalars().all()
+        for domain in domains:
+            await approval_agent.run(db, str(domain), dry_run=False)
+
+
+@celery_app.task(name="run_approval_agent")
+def run_approval_agent() -> None:
+    sync_run(_run_approval_agent_sweep())
+
+
 @celery_app.task(name="escalate_overdue_drafts")
 def escalate_overdue_drafts() -> None:
     """Escalate drafts past the approval SLA to their submitter and approver."""
