@@ -1,6 +1,7 @@
 """Email delivery boundary used by invitations and notification workers."""
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -67,7 +68,43 @@ class MicrosoftGraphEmailSender(EmailSender):
             response.raise_for_status()
 
 
+class SesEmailSender(EmailSender):
+    """Sends through AWS SES. Opt in with EMAIL_PROVIDER=ses; boto3 resolves AWS
+    credentials through its normal chain (env vars, ~/.aws, or an IAM role), same
+    as source_storage.py does for R2."""
+
+    async def send(self, *, to: str, subject: str, text: str, html: str | None = None) -> None:
+        sender = settings.MAIL_FROM_EMAIL
+        if not sender:
+            raise RuntimeError("MAIL_FROM_EMAIL is not configured")
+        try:
+            import boto3
+        except ImportError as exc:
+            raise RuntimeError("boto3 is required for EMAIL_PROVIDER=ses") from exc
+        from_address = f"{settings.MAIL_FROM_NAME} <{sender}>" if settings.MAIL_FROM_NAME else sender
+        body: dict[str, Any] = {"Subject": {"Data": subject}, "Body": {}}
+        if html:
+            body["Body"]["Html"] = {"Data": html}
+        else:
+            body["Body"]["Text"] = {"Data": text}
+        client = boto3.client("sesv2", region_name=settings.AWS_REGION)
+        # boto3 has no async client; keep the event loop unblocked for the HTTP call.
+        await asyncio.to_thread(
+            client.send_email,
+            FromEmailAddress=from_address,
+            Destination={"ToAddresses": [to]},
+            Content={"Simple": body},
+        )
+
+
 def get_email_sender() -> EmailSender:
+    provider = (settings.EMAIL_PROVIDER or "graph").strip().lower()
+    if provider == "fake":
+        return FakeEmailSender()
+    if provider == "ses":
+        return SesEmailSender()
+    if provider != "graph":
+        raise RuntimeError(f"Unknown EMAIL_PROVIDER '{provider}'; expected graph, ses, or fake")
     if settings.ENVIRONMENT.lower() in {"development", "dev", "local", "test"} and not settings.MICROSOFT_GRAPH_SENDER:
         return FakeEmailSender()
     return MicrosoftGraphEmailSender()

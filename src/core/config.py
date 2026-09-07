@@ -321,6 +321,16 @@ class Settings(BaseSettings):
     ENTRA_AUTO_PROVISION_DOMAIN: str = ""
     MICROSOFT_GRAPH_SENDER: str | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
+    # "graph" keeps the existing Microsoft Graph transport (and its development
+    # fallback to FakeEmailSender below). Set to "ses" to send through AWS SES
+    # instead — useful locally when you want invitations to actually arrive
+    # without an Entra app registration — or "fake" to force the in-memory
+    # sender regardless of environment. get_email_sender() in src/services/email.py
+    # is what reads this.
+    EMAIL_PROVIDER: str = "graph"
+    # Required when EMAIL_PROVIDER=ses; SesEmailSender raises without it.
+    MAIL_FROM_EMAIL: str | None = None
+    MAIL_FROM_NAME: str = "QNSC Knowledge Base"
     # ``delegated`` keeps the interactive OAuth flow. ``application`` uses the
     # tenant-approved client-credentials flow for unattended 24/7 ingestion.
     MICROSOFT_CONNECTOR_AUTH_MODE: str = "delegated"

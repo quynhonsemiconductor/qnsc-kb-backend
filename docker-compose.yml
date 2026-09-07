@@ -136,6 +136,17 @@ services:
       - CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS=${CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS:-30}
       - CONNECTOR_RECONCILE_INTERVAL_MINUTES=${CONNECTOR_RECONCILE_INTERVAL_MINUTES:-360}
       - CONNECTOR_AUTO_PUBLISH_MODE=${CONNECTOR_AUTO_PUBLISH_MODE:-governed}
+      # get_email_sender() (src/services/email.py) picks the transport from
+      # EMAIL_PROVIDER: "graph" (default) keeps the Microsoft Graph path with its
+      # in-memory fallback below; "ses" sends real mail through AWS SES for local
+      # testing, and needs MAIL_FROM_EMAIL plus AWS credentials in .env (boto3's
+      # normal chain -- AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY here, or ~/.aws).
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-graph}
+      - MAIL_FROM_EMAIL=${MAIL_FROM_EMAIL:-}
+      - MAIL_FROM_NAME=${MAIL_FROM_NAME:-QNSC Knowledge Base}
+      - AWS_REGION=${AWS_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - OMP_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - TOKENIZERS_PARALLELISM=false
