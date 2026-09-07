@@ -313,7 +313,7 @@ module "cache" {
   # `shared` destroys the dedicated node — that is where the saving is — and issues a
   # different endpoint, so it is a task-definition revision and a rolling deploy.
   count  = var.cache.enabled && !var.cache.shared ? 1 : 0
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cache?ref=cache-v1.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cache?ref=cache-v1.1.0"
 
   name              = "${local.name}-cache"
   subnet_ids        = data.terraform_remote_state.runtime.outputs.data_subnet_ids
