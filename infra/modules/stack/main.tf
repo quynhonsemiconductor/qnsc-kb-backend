@@ -995,7 +995,7 @@ resource "aws_scheduler_schedule" "ecs_scale_up" {
 // external health check, which belongs at go-live rather than against an environment
 // deliberately running zero tasks.
 module "observability" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/observability?ref=observability-v4.1.0"
+  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/observability?ref=observability-v4.2.1"
 
   name             = local.name
   region           = var.region
