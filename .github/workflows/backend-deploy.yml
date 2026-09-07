@@ -1,5 +1,5 @@
 # =============================================================================
-# Backend · Deploy — thin caller of the shared reusable (qnsc-ci).
+# Backend · Deploy — thin caller of the shared reusable (ci).
 #
 # Triggers:
 #   develop → push to main (auto)
@@ -175,13 +175,13 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-      packages: read # build-push-ecr pulls private @qnsc-vn/* from GitHub Packages
-    uses: QNSC-VN/qnsc-ci/.github/workflows/backend-deploy.yml@v1.10.0
+      packages: read # build-push-ecr pulls private @quynhonsemiconductor/* from GitHub Packages
+    uses: quynhonsemiconductor/ci/.github/workflows/backend-deploy.yml@v1
     with:
       product: qnsc-kb
       # ── No registry build cache ────────────────────────────────────────────
       # This repository's `:buildcache` tags total 10.4 GB — worker 5.35, api 4.28,
-      # migrator 0.77 — against rally's 0.98 GB. A GitHub-hosted runner sits outside AWS,
+      # migrator 0.77 — against rova's 0.98 GB. A GitHub-hosted runner sits outside AWS,
       # so every build pulls all of that back out of ECR across the internet, and the
       # matrix pulls the three legs in parallel.
       #

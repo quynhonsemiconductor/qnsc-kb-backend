@@ -71,7 +71,7 @@ updates:
       - dependency-name: "python"
         versions: ["3.14.x"]
 
-  # Shared Terraform modules from qnsc-tf-modules, pinned by git tag as
+  # Shared Terraform modules from tf-modules, pinned by git tag as
   # `?ref=<module>-vX.Y.Z`. WITHOUT THIS ECOSYSTEM every module bump is manual, and that
   # is exactly how the drift happened: ecs-cluster sat at v1.0.0 in both products while
   # v2.0.0 was released, and qnsc-infra-template — the repo new products are created from
