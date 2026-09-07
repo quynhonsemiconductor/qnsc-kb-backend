@@ -466,7 +466,7 @@ module "tunnel_api" {
 
 // ── API service ───────────────────────────────────────────────────────────────
 module "api" {
-  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
+  source = "git::https://github.com/QNSC-VN/qnsc-tf-modules.git//modules/ecs-service?ref=ecs-service-v2.3.2"
 
   service_name = "api"
   cluster_name = module.ecs_cluster.cluster_name
