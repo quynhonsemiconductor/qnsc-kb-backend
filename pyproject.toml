@@ -68,7 +68,7 @@ paddleocr = "^3.0.0"
 optional = true
 
 [tool.poetry.group.ml.dependencies]
-sentence-transformers = "^5.7.0"
+sentence-transformers = ">=5.7,<7.0"
 torch = { version = "^2.13.0", source = "pytorch-cpu" }
 # Pinned explicitly even though sentence-transformers pulls it in: that package still
 # accepts transformers 4.x, which carries remote-code-execution advisories (GHSA-29pf,
@@ -83,13 +83,13 @@ optional = true
 
 [tool.poetry.group.onnx.dependencies]
 onnxruntime = "^1.24.0"
-tokenizers = "^0.22.0"
+tokenizers = ">=0.22,<0.24"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.1.0"
 pytest-asyncio = "^1.4.0"
 black = "^26.0.0"
-mypy = "^1.10.0"
+mypy = ">=1.10,<3.0"
 
 [build-system]
 requires = ["poetry-core"]
