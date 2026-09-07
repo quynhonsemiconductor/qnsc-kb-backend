@@ -359,6 +359,11 @@ class Settings(BaseSettings):
     # a run that decides a few hundred documents unattended should be a deliberate act
     # repeated, not one call with no upper bound.
     APPROVAL_AGENT_BATCH_LIMIT: int = 50
+    # How often the beat schedule calls approval_agent.run() for every company that has
+    # an active rule. Without this the agent only ever ran when something called
+    # POST /governance/approval-agent/run by hand -- rules existed and were correctly
+    # scoped, but nothing applied them to a draft that arrived after the last manual run.
+    APPROVAL_AGENT_RUN_INTERVAL_SECONDS: int = 300
     # Factory reset: who may erase every non-identity table, and whether the
     # endpoint exists at all.
     #

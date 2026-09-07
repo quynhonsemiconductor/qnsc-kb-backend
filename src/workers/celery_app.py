@@ -115,6 +115,10 @@ celery_app.conf.update(
             "task": "verify_review_deadlines",
             "schedule": 86400.0,
         },
+        "run-approval-agent": {
+            "task": "run_approval_agent",
+            "schedule": float(settings.APPROVAL_AGENT_RUN_INTERVAL_SECONDS),
+        },
         "escalate-overdue-drafts": {
             "task": "escalate_overdue_drafts",
             "schedule": 21600.0,
