@@ -23,7 +23,7 @@ logger = structlog.get_logger()
 #:   article.owner              `owner_email` in the response
 #:   article.departments        AuthorizationService.can_access_article_departments
 #:   article.user_permissions   PermissionService._explicit_user_effect
-#:   article.sources            PermissionService._sharepoint_acl_allows
+#:   article.sources            PermissionService._source_acl_allows
 #:
 #: `sources` is the trap: permissions reads it as getattr(article, "sources", []), so it
 #: does not appear in a search for `.sources` and looks unused.

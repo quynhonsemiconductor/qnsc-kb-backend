@@ -28,7 +28,7 @@ Existing rows are all groups by construction, so `principal_type` backfills to
 `'group'` and every current mapping keeps its exact meaning.
 
 Fail-closed is unchanged: `unmapped_*` still forces `source_restricts` in
-`_sharepoint_acl_intersection`, and `internal_acl_snapshot` is still written once,
+`_provider_acl_intersection`, and `internal_acl_snapshot` is still written once,
 so a provider ACL can still only ever NARROW the internal policy. Mapping a
 principal is now an explicit, audited widening decision
 (`AuditLog(action="connector_permission_mapping")`) that requires the principal to

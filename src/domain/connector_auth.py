@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import settings
 from src.core.secrets import encrypt_secret
 from src.domain.connector_adapters import ConnectorProviderError, adapter_for
+from src.domain.connector_providers import is_microsoft_graph
 from src.models.ops import Connector
 
 # Refresh this far before the provider's stated expiry. A sync is a long walk; a token
@@ -20,11 +21,13 @@ _EXPIRY_SKEW = timedelta(minutes=5)
 def _auth_mode(connector: Connector) -> str:
     """Return the OAuth grant this connector renews with.
 
-    Only Microsoft offers an application (client-credentials) mode. Every other
-    provider is delegated: a refresh token obtained once by an admin.
+    Only Microsoft offers an application (client-credentials) mode, and it covers
+    every Graph provider — SharePoint and OneDrive share one Entra application
+    registration. Every other provider is delegated: a refresh token obtained
+    once by an admin.
     """
 
-    if connector.system != "sharepoint":
+    if not is_microsoft_graph(connector.system):
         return "delegated"
     mode = settings.microsoft_connector_auth_mode
     if mode not in {"delegated", "application"}:

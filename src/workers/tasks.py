@@ -16,6 +16,10 @@ from src.repositories.chunk import ChunkRepository
 from src.core.config import settings
 from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue, ConnectorJob, Connector
 from src.models.connectors import SyncRequest
+from src.domain.connector_providers import (
+    REMOTE_PROVIDERS,
+    cursor_type as provider_cursor_type,
+)
 from src.models.governance import PendingDraft
 from src.models.user import User
 from src.services.email import get_email_sender
@@ -857,7 +861,7 @@ def schedule_cloud_connector_syncs():
                 (
                     await db.execute(
                         select(Connector).where(
-                            Connector.system.in_(["sharepoint", "google_drive"]),
+                            Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                             Connector.status.in_(["active", "error"]),
                         )
                     )
@@ -927,7 +931,7 @@ def reconcile_cloud_connectors():
             connectors = (
                 await db.execute(
                     select(Connector).where(
-                        Connector.system.in_(["sharepoint", "google_drive"]),
+                        Connector.system.in_(sorted(REMOTE_PROVIDERS)),
                         Connector.status.in_(["active", "error"]),
                     )
                 )
@@ -954,7 +958,7 @@ def reconcile_cloud_connectors():
                         cursor = SyncCursor(
                             connector_id=connector.id,
                             scope_id=scope.id,
-                            cursor_type="delta" if connector.system == "sharepoint" else "changes",
+                            cursor_type=provider_cursor_type(connector.system),
                         )
                         db.add(cursor)
                     cursor.full_sync_required = True

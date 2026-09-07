@@ -11,6 +11,7 @@ from src.models.article import (
     DocumentSource,
 )
 from src.models.user import User, Department
+from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.rbac import AuthorizationService
 from src.domain.permissions import PermissionService
 
@@ -65,7 +66,7 @@ class ArticleRepository:
             and_(
                 ArticleUserPermission.user_id == user.id,
                 ArticleUserPermission.effect == "allow",
-                ArticleUserPermission.source == "sharepoint",
+                ArticleUserPermission.source.in_(SOURCE_ACL_PROVIDERS),
             )
         )
         # An explicit deny is evaluated before every role, department, group,
@@ -127,12 +128,14 @@ class ArticleRepository:
             # rows still win.
             filters.append(or_(Article.visibility != "users", explicit_allow))
 
-        # SharePoint ACLs are an intersection with the internal policy. Keep
-        # this predicate in every Article query so a global/company reader
-        # cannot bypass a mapped group, mapped direct user, or fail-closed
-        # provider ACL through the broad internal branch above.
+        # Provider ACLs are an intersection with the internal policy. Keep this
+        # predicate in every Article query so a global/company reader cannot
+        # bypass a mapped group, mapped direct user, or fail-closed provider ACL
+        # through the broad internal branch above. Every remote provider is
+        # covered: matching only `'sharepoint'` here let a OneDrive or Google
+        # Drive Article skip the intersection entirely in SQL.
         source_acl_article = Article.sources.any(
-            DocumentSource.source_system == "sharepoint"
+            DocumentSource.source_system.in_(SOURCE_ACL_PROVIDERS)
         )
         source_acl_allows: list[Any] = [source_explicit_allow]
         audience_ids = [department.id for department in getattr(user, "departments", [])]

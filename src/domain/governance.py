@@ -31,6 +31,7 @@ from src.repositories.article import ArticleRepository
 from src.domain.events import event_bus
 from src.domain.content_restructure import _fallback_text, restructure_document
 from src.domain.rbac import AuthorizationService
+from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.source_storage import delete_source
 from src.domain.departments import resolve_active_department, resolve_active_departments
 
@@ -950,6 +951,9 @@ class GovernanceService:
             ):
                 sensitivity = "public"
             external_source_user_ids: set[uuid.UUID] = set()
+            # None until a connector document proves otherwise; a manual draft has no
+            # provider and its permission rows must stay internal (source=None).
+            connector_source: str | None = None
             if external_document:
                 external_metadata = external_document.metadata_json or {}
                 mapped_ids = external_metadata.get("mapped_department_ids", [])
@@ -1029,6 +1033,11 @@ class GovernanceService:
                         status_code=422,
                         detail="The connector document is outside this draft's company",
                     )
+                # Provenance is stamped with the ACTUAL provider so the source-ACL
+                # intersection in permissions.py/repositories/article.py recognises
+                # the row. Hardcoding "sharepoint" here would mislabel a OneDrive or
+                # Google Drive grant.
+                connector_source = connector.system
 
             update_target = None
             if update_article_id:
@@ -1167,10 +1176,13 @@ class GovernanceService:
                 )
                 if metadata.get("source_position"):
                     created_article.source_position = metadata.get("source_position")
+                # Retain EVERY source-managed row, not just SharePoint's. Dropping
+                # another provider's row here would delete a provider ACL mirror and
+                # widen access on an ordinary content update.
                 connector_permissions = [
                     item
                     for item in getattr(created_article, "user_permissions", [])
-                    if item.source == "sharepoint"
+                    if item.source in SOURCE_ACL_PROVIDERS
                 ]
                 source_allow_ids = {
                     item.user_id
@@ -1179,7 +1191,9 @@ class GovernanceService:
                 }
                 connector_permissions.extend(
                     ArticleUserPermission(
-                        user_id=external_user_id, effect="allow", source="sharepoint"
+                        user_id=external_user_id,
+                        effect="allow",
+                        source=connector_source,
                     )
                     for external_user_id in external_source_user_ids
                     if external_user_id not in source_allow_ids
@@ -1261,7 +1275,7 @@ class GovernanceService:
                             user_id=explicit_user_id,
                             effect="allow",
                             source=(
-                                "sharepoint"
+                                connector_source
                                 if explicit_user_id in external_source_user_ids
                                 else None
                             ),

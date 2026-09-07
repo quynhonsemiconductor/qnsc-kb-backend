@@ -6,6 +6,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 from src.models.user import Department
 
+# Import-safe: connector_providers is a pure constants/predicate module with no
+# imports of its own, so a model may depend on it without an ORM import cycle.
+from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
+
 
 # One article may be visible in several departments. ``articles.dept`` is
 # retained as the primary/legacy department for synchronized integrations.
@@ -78,11 +82,13 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     @property
     def explicit_user_ids(self) -> list[uuid.UUID]:
-        return [item.user_id for item in self.user_permissions if item.effect == "allow" and item.source != "sharepoint"]
+        # Source-managed rows are provider ACL mirrors, not internal grants, so
+        # they are excluded from the internal allow/deny lists an editor sees.
+        return [item.user_id for item in self.user_permissions if item.effect == "allow" and item.source not in SOURCE_ACL_PROVIDERS]
 
     @property
     def explicit_denied_user_ids(self) -> list[uuid.UUID]:
-        return [item.user_id for item in self.user_permissions if item.effect == "deny" and item.source != "sharepoint"]
+        return [item.user_id for item in self.user_permissions if item.effect == "deny" and item.source not in SOURCE_ACL_PROVIDERS]
 
 class ArticleVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "article_versions"
