@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   reap:
-    uses: QNSC-VN/qnsc-ci/.github/workflows/deploy-reaper.yml@v1.10.0
+    uses: QNSC-VN/qnsc-ci/.github/workflows/deploy-reaper.yml@v1.13.2
     # A called workflow can only REDUCE the caller's token scope, so actions:write must
     # be granted here or the reusable cannot cancel anything.
     permissions:
