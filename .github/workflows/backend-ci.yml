@@ -483,3 +483,30 @@ jobs:
         uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@v1 # v1.10.0
         with:
           spec-path: openapi.json
+
+  # ── The aggregate gate ──────────────────────────────────────────────────────
+  # `Backend CI required` is THE required check for this workflow. It exists because GitHub counts a
+  # SKIPPED or CANCELLED required check as PASSING, so naming each job in the ruleset
+  # cannot catch a job that never ran — the failure mode behind opshub #110 (a title edit
+  # cancelled the real run; the replacement skipped every heavy job and went green) and
+  # rova #558-#590 (a base-branch filter skipped both CI workflows for stacked PRs, leaving
+  # five PRs on 5/5 green with no tests, build, E2E or security scan).
+  #
+  # `if: always()` is mandatory — without it the gate skips as soon as a dependency fails
+  # and inherits the very bug it closes. A cancelled WORKFLOW cancels the gate rather than
+  # failing it, so a run superseded by `cancel-in-progress` leaves no red check behind.
+  #
+  # `needs` MUST list every job that is expected to run. A job outside `needs` is a job
+  # outside the gate.
+  #
+  # `run-eval-live` is deliberately EXCLUDED: it is gated on workflow_dispatch,
+  ci-required:
+    name: Backend CI required
+    if: always()
+    needs: [quality, test, migrations, build, openapi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@v1
+        with:
+          results: ${{ join(needs.*.result, ',') }}
