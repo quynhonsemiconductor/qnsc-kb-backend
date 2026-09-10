@@ -8,7 +8,16 @@ name: Infrastructure · Plan
 
 on:
   pull_request:
-    branches: [main]
+    # NO `branches:` filter here, deliberately — see `push` above, which keeps one.
+    #
+    # On `pull_request` this filter matches the PR's BASE branch, which is a different
+    # question from `push`'s. Set to [main] it means "only run when this PR is aimed at
+    # main", so a PR aimed anywhere else — a stacked PR, aimed at the branch below it —
+    # got no CI at all, silently, while still reporting green. rova's eight-PR Phase 7
+    # stack sat in exactly that state: seven of eight ran nothing but PR-title and labeler.
+    #
+    # `main` is this repo's only long-lived branch, so the filter skipped nothing anyone
+    # wanted skipped. No upside, one silent failure mode.
     paths:
       - "infra/live/**"
       # modules/** matters too: `module "stack"` is a LOCAL path module, so editing it
