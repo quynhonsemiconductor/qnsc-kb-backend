@@ -9,6 +9,7 @@ from src.models.ai import AiUsageLog, AiCache, AiFeedback, PromptVersion, AiConv
 from src.models.ops import Connector, ConnectorJob, IndexReprocessJob, NotificationQueue, DeadLetterJob, OutboxEvent, SearchLog, ApiRequestMetric, FeatureFlag, LLMProviderConfig, EvalQuestion, EvalSet, EvalRun
 from src.models.sessions import RefreshSession, PasswordResetToken
 from src.models.connectors import SourceScope, SyncCursor, ExternalDocument, DocumentVersion, PermissionSnapshot, ExternalAclPrincipal, ExternalGroupMapping, WebhookSubscription, SyncError, ConnectorNotification, SyncRequest
+from src.models.graph import GraphEntity, GraphRelationship, ArticleEntityMention
 
 __all__ = [
     "Base",
@@ -76,4 +77,7 @@ __all__ = [
     "SyncError",
     "ConnectorNotification",
     "SyncRequest",
+    "GraphEntity",
+    "GraphRelationship",
+    "ArticleEntityMention",
 ]

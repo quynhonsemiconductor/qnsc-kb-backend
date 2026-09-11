@@ -23,6 +23,7 @@ from src.api.routers import (
     knowledge,
     llm,
     notifications,
+    graph,
 )
 from src.api.deps import (
     SessionLocal,
@@ -144,6 +145,9 @@ EXPECTED_RLS_POLICIES: frozenset[tuple[str, str]] = frozenset(
         ("ingestion_fingerprints", "tenant_ingestion_fingerprints"),
         ("index_reprocess_jobs", "tenant_index_reprocess_jobs"),
         ("tag_catalog", "tenant_tag_catalog"),
+        ("graph_entities", "tenant_graph_entities"),
+        ("graph_relationships", "tenant_graph_relationships"),
+        ("article_entity_mentions", "tenant_article_entity_mentions"),
         ("conflict_records", "tenant_conflict_records"),
         ("eval_sets", "tenant_eval_sets"),
         ("connectors", "tenant_connectors"),
@@ -758,6 +762,7 @@ app.include_router(
     prefix=f"{settings.API_V1_STR}/notifications",
     tags=["notifications"],
 )
+app.include_router(graph.router, prefix=f"{settings.API_V1_STR}/graph", tags=["graph"])
 
 
 @app.get("/")

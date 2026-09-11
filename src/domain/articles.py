@@ -1,6 +1,6 @@
 import uuid
 import structlog
-from datetime import datetime
+from datetime import date, datetime
 from typing import Sequence
 from fastapi import HTTPException, status
 from src.models.article import Article, ArticleVersion, ArticleTag
@@ -425,6 +425,19 @@ class ArticleService:
         if not PermissionService.can_delete_article(user, article):
             raise HTTPException(
                 status_code=403, detail="Not authorized to delete this article"
+            )
+        if article.legal_hold:
+            raise HTTPException(
+                status_code=409,
+                detail="This article is under legal hold and cannot be deleted.",
+            )
+        if article.retention_until and article.retention_until >= date.today():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This article must be retained until "
+                    f"{article.retention_until.isoformat()} and cannot be deleted yet."
+                ),
             )
 
         try:

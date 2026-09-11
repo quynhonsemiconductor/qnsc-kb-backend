@@ -196,6 +196,11 @@ MANAGED_FEATURE_FLAGS = {
         "description": "Restructure uploaded content into a lossless Markdown reading view before indexing.",
         "default_enabled": settings.RESTRUCTURE_ENABLED,
     },
+    "rag.cross_encoder_reranker": {
+        "label": "Cross-encoder reranker",
+        "description": "Rescore search results with a cross-encoder model after hybrid search, on top of the always-on keyword reranker. Requires the optional 'ml' dependency group and CROSS_ENCODER_RERANKER_ENABLED.",
+        "default_enabled": settings.CROSS_ENCODER_RERANKER_ENABLED,
+    },
 }
 
 

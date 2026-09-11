@@ -76,3 +76,44 @@ def strip_unknown_markers(answer: str, known: set[str]) -> str:
     # Collapse the gap a removed marker leaves behind, without touching newlines.
     stripped = re.sub(r"[ \t]{2,}", " ", stripped)
     return re.sub(r"[ \t]+([.,;:!?])", r"\1", stripped).strip()
+
+
+# Same intent as content_restructure.py's numeric-coverage check: a digit is the one
+# signal that survives translation, paraphrase, and Vietnamese/English mixing, so it is
+# what decides whether a sentence is worth an expensive entailment call. Names are
+# deliberately NOT matched here — capitalization marks the first word of every Vietnamese
+# sentence and common technical acronyms alike, so a capitalization-based heuristic would
+# flag most sentences and defeat the point of being selective about cost.
+_CHECKABLE_CLAIM_RE = re.compile(r"(?<!\d)\d+(?:[.,]\d+)*(?:\s?[%％])?(?!\d)")
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def has_checkable_claim(sentence: str) -> bool:
+    """Whether `sentence` carries a concrete, checkable fact (a number, a date, a %).
+
+    Used to decide which sentences are worth an entailment call in
+    `rag/llm_judge.py::judge_entailment` -- checking every sentence in an answer would
+    multiply the LLM cost of every question by however many sentences it has, for
+    sentences ("this policy covers the finance department") that rarely have a crisp
+    supported/unsupported answer anyway.
+
+    Citation markers are stripped first: `[C2]` contains a digit that is part of the
+    marker, not a fact in the sentence, and checking the raw sentence made a citation
+    marker alone enough to call a sentence "checkable" -- which is every sentence in a
+    grounded answer, defeating the entire point of being selective here.
+    """
+    return bool(_CHECKABLE_CLAIM_RE.search(_BRACKET.sub("", sentence or "")))
+
+
+def split_cited_sentences(answer: str) -> list[tuple[str, list[str]]]:
+    """Split `answer` into sentences, each paired with the citation IDs it carries.
+
+    A citation marker is attributed to the sentence it appears IN, matching how a reader
+    interprets `"The deadline is Friday [C1]."` -- the marker supports that sentence, not
+    the one before or after it. Sentences with no marker at all are still returned (with
+    an empty ID list) so a caller can tell "no claim was made here" apart from "a claim
+    was made but never checked".
+    """
+    sentences = [part for part in _SENTENCE_SPLIT_RE.split((answer or "").strip()) if part]
+    return [(sentence, extract_citation_ids(sentence)) for sentence in sentences]

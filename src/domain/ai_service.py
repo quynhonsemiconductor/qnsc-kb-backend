@@ -33,6 +33,7 @@ from src.rag.answer_sections import (
 from src.rag.compressor import compress_context
 from src.rag.prompt_fencing import fence_untrusted
 from src.rag.reranker import is_definition_query
+from src.rag.query_router import detect_ambiguous_departments
 from src.domain.llm_client import ProviderAuthError, ProviderRateLimitError, complete, resolve_provider
 from src.domain.article_edit_requests import create_article_edit_request
 from src.domain.articles import ArticleService
@@ -1090,6 +1091,32 @@ class AIService:
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
 
+        # Off by default -- see the setting's own comment in core/config.py. When on:
+        # a question whose best-scoring results split across departments with no clear
+        # winner is answered back as a clarifying question instead of picking one
+        # department's document to answer from, which is a guess the reader did not ask
+        # for. `clarification_options` lets the frontend render the choices as buttons
+        # (AskPage.tsx) rather than the reader having to retype the question.
+        if settings.CLARIFICATION_ON_AMBIGUOUS_DEPARTMENTS_ENABLED:
+            ambiguous_departments = detect_ambiguous_departments(retrieved_results)
+            if ambiguous_departments:
+                logger.info(
+                    "AI question answered as a clarification instead of a guess",
+                    question_hash=question_hash,
+                    departments=ambiguous_departments,
+                )
+                options_text = ", ".join(ambiguous_departments)
+                return _answer_payload(
+                    f"Câu hỏi này khớp với nội dung ở nhiều phòng ban ({options_text}). "
+                    "Bạn muốn hỏi về phòng ban nào?"
+                    if language == "vi" else
+                    f"This question matches content in more than one department ({options_text}). "
+                    "Which one did you mean?",
+                    prompt_version=settings.PROMPT_VERSION,
+                    retrieval_version=settings.RETRIEVAL_VERSION,
+                    clarification_options=ambiguous_departments,
+                )
+
         context_results = _select_context(retrieved_results)
         if not context_results:
             return _answer_payload(
@@ -1555,6 +1582,10 @@ class AIService:
             log_id=log_id,
             prompt_version=settings.PROMPT_VERSION,
             retrieval_version=settings.RETRIEVAL_VERSION,
+            # Above the refusal line (RAG_MIN_CONTEXT_SCORE) so an answer was generated,
+            # but not comfortably above it -- worth a visible "verify this" notice
+            # (AskPage.tsx) rather than presenting a shaky retrieval as a certain one.
+            confidence="low" if top_score < settings.RAG_LOW_CONFIDENCE_SCORE else "normal",
         )
 
     async def submit_feedback(
