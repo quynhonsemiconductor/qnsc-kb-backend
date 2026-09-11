@@ -130,5 +130,13 @@ celery_app.conf.update(
             "task": "recover_stale_index_reprocess_jobs",
             "schedule": 900.0,
         },
+        # Nightly, same cadence as the other corpus-wide maintenance sweeps above
+        # (prune-operational-metrics, cleanup-orphaned-source-objects): topical matches
+        # shift slowly as the corpus grows, so there is no value in running this more
+        # often, only cost.
+        "link-related-articles": {
+            "task": "link_related_articles",
+            "schedule": 86400.0,
+        },
     },
 )

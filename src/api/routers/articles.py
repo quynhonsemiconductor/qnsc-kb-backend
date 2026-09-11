@@ -5,7 +5,7 @@ import re
 import uuid
 import unicodedata
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Sequence
 from fastapi import (
     APIRouter,
@@ -238,6 +238,15 @@ class ArticleUpdate(BaseModel):
     visibility: str | None = Field(default=None, pattern="^(public|department)$")
     explicit_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
     denied_user_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+    # Reclassification, not routine editing: gated the same way as `visibility` below
+    # (permission.manage, company scope) because both control who can see the article.
+    type: str | None = Field(
+        default=None,
+        pattern="^(POLICY|SOP|DECISION|FAQ|RCA|HOWTO|PLAYBOOK|REFERENCE)$",
+    )
+    sensitivity: str | None = Field(
+        default=None, pattern="^(public|internal|confidential|restricted)$"
+    )
     # The article version the client loaded, for optimistic concurrency. Optional, so a
     # caller that does not send it keeps the previous last-write-wins behaviour; when it
     # is sent and no longer matches, the update is refused with 409 rather than silently
@@ -266,6 +275,28 @@ class ConfirmTagItem(BaseModel):
 
 class ConfirmTagsRequest(BaseModel):
     items: list[ConfirmTagItem] = Field(min_length=1, max_length=20)
+
+
+class BulkReclassifyItem(BaseModel):
+    article_id: uuid.UUID
+    type: str | None = Field(
+        default=None,
+        pattern="^(POLICY|SOP|DECISION|FAQ|RCA|HOWTO|PLAYBOOK|REFERENCE)$",
+    )
+    sensitivity: str | None = Field(
+        default=None, pattern="^(public|internal|confidential|restricted)$"
+    )
+
+
+class BulkReclassifyRequest(BaseModel):
+    items: list[BulkReclassifyItem] = Field(min_length=1, max_length=20)
+
+
+class StructuredMetadataUpdate(BaseModel):
+    document_number: str | None = Field(default=None, max_length=255)
+    issue_date: str | None = None
+    expiry_date: str | None = None
+    signed_by: str | None = Field(default=None, max_length=255)
 
 
 class TagResponse(BaseModel):
@@ -309,6 +340,9 @@ class ArticleResponse(BaseModel):
     owner: OwnerResponse | None = None
     status: str
     lifecycle_status: str = "active"
+    retention_until: date | None = None
+    legal_hold: bool = False
+    structured_metadata: dict[str, Any] | None = None
     related_article_ids: list[str] | None = None
     source_position: dict[str, Any] | None = None
     version: int
@@ -563,6 +597,142 @@ async def confirm_article_tags(
     for article_id in published_ids:
         await event_bus.publish("ArticleUpdated", {"article_id": str(article_id)})
     return {"confirmed": confirmed, "confirmed_count": len(confirmed)}
+
+
+@router.post("/bulk-reclassify")
+async def bulk_reclassify_articles(
+    request: BulkReclassifyRequest,
+    current_user: User = Depends(require_permission("permission.manage", scope="company")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Change type and/or sensitivity for many articles at once, directly.
+
+    Deliberately bypasses the PendingDraft/AI-restructure pipeline `update_article` uses
+    for content changes: nothing here touches `body_md`, so re-running restructuring and
+    similarity search per article would spend an LLM call per item on a change the model
+    never needs to see. Same direct-write-then-audit shape as `confirm_article_tags`
+    above -- validate the whole batch before the first write, so an unauthorized or
+    missing item never leaves an earlier one applied and a later one refused.
+
+    Gated on `permission.manage` at the route itself, the same permission `update_article`
+    requires to change a single article's sensitivity or type (see the comment there) --
+    a bulk form of a sensitive action is not a reason to check less.
+    """
+    unique_ids = list(dict.fromkeys(item.article_id for item in request.items))
+    if len(unique_ids) != len(request.items):
+        raise HTTPException(status_code=422, detail="Each article may appear only once")
+
+    article_repo = ArticleRepository(db)
+    pending: list[tuple[Article, BulkReclassifyItem, str, str]] = []
+    for item in request.items:
+        if item.type is None and item.sensitivity is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Article {item.article_id} has nothing to change",
+            )
+        article = await article_repo.get_by_id(item.article_id, user=current_user)
+        if not article or article.status == "deleted":
+            raise HTTPException(
+                status_code=404, detail=f"Article {item.article_id} not found"
+            )
+        if not PermissionService.can_edit_article(current_user, article):
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to reclassify one or more selected articles",
+            )
+        pending.append(
+            (
+                article,
+                item,
+                article.type,
+                article.sensitivity,
+            )
+        )
+
+    changed: list[dict[str, Any]] = []
+    permission_changed_ids: list[uuid.UUID] = []
+    for article, item, previous_type, previous_sensitivity in pending:
+        next_type = item.type if item.type is not None else previous_type
+        next_sensitivity = (
+            item.sensitivity if item.sensitivity is not None else previous_sensitivity
+        )
+        if next_type == previous_type and next_sensitivity == previous_sensitivity:
+            continue
+        article.type = next_type
+        article.sensitivity = next_sensitivity
+        article.updated_at = datetime.utcnow()
+        changed.append(
+            {
+                "article_id": str(article.id),
+                "type": next_type,
+                "sensitivity": next_sensitivity,
+            }
+        )
+        if next_sensitivity != previous_sensitivity:
+            permission_changed_ids.append(article.id)
+    await db.commit()
+    for record in changed:
+        article_id = record["article_id"]
+        await AuditRepository(db).record(
+            current_user.id, "reclassify", "article", article_id, outcome="success"
+        )
+    for article_id in permission_changed_ids:
+        await AuditRepository(db).record(
+            current_user.id,
+            "permission_change",
+            "article",
+            str(article_id),
+            outcome="success",
+        )
+    for record in changed:
+        await event_bus.publish(
+            "ArticleUpdated", {"article_id": record["article_id"]}
+        )
+    return {"changed": changed, "changed_count": len(changed)}
+
+
+@router.put("/{id}/structured-metadata")
+async def update_structured_metadata(
+    id: uuid.UUID,
+    request: StructuredMetadataUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Correct AI-extracted document identity fields directly, no draft cycle.
+
+    Same reasoning as `confirm_article_tags` above: a document number or a signed-by
+    name is low-stakes metadata, not content and not an access-control field, so a
+    direct write with an audit row is proportionate. Routing a one-field typo fix
+    through the PendingDraft/AI-restructure pipeline `update_article` uses for content
+    changes would spend an LLM call re-formatting a document to correct four short
+    strings.
+    """
+    article_repo = ArticleRepository(db)
+    article = await article_repo.get_by_id(id, user=current_user)
+    if not article or article.status == "deleted":
+        raise HTTPException(status_code=404, detail="Article not found")
+    if not PermissionService.can_edit_article(current_user, article):
+        raise HTTPException(
+            status_code=403, detail="Not authorized to edit this article"
+        )
+    for field_name in ("issue_date", "expiry_date"):
+        value = getattr(request, field_name)
+        if value and not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+            raise HTTPException(
+                status_code=422, detail=f"{field_name} must be in YYYY-MM-DD format"
+            )
+    article.structured_metadata = {
+        "document_number": (request.document_number or "").strip()[:255] or None,
+        "issue_date": request.issue_date or None,
+        "expiry_date": request.expiry_date or None,
+        "signed_by": (request.signed_by or "").strip()[:255] or None,
+    }
+    article.updated_at = datetime.utcnow()
+    await db.commit()
+    await AuditRepository(db).record(
+        current_user.id, "update", "article", str(article.id), outcome="success"
+    )
+    return article.structured_metadata
 
 
 @router.post("/upload-source", status_code=status.HTTP_201_CREATED)
@@ -1830,17 +2000,28 @@ async def update_article(
         if article_in.visibility is not None
         else (current.visibility or "department")
     )
+    category = article_in.type if article_in.type is not None else current.type
+    sensitivity_value = (
+        article_in.sensitivity
+        if article_in.sensitivity is not None
+        else current.sensitivity
+    )
     if (
         article_in.explicit_user_ids is not None
         or article_in.denied_user_ids is not None
         or article_in.visibility is not None
+        or article_in.type is not None
+        or article_in.sensitivity is not None
     ):
         if not AuthorizationService.has_permission(
             current_user, "permission.manage", requested_scope="company"
         ):
             raise HTTPException(
                 status_code=403,
-                detail="Only permission managers can change Article visibility",
+                detail=(
+                    "Only permission managers can change Article visibility, "
+                    "type, or sensitivity"
+                ),
             )
     explicit_user_ids = (
         article_in.explicit_user_ids
@@ -1871,8 +2052,11 @@ async def update_article(
             detail="Every explicit Article user must belong to the Article company",
         )
 
-    # Legacy domain/type/sensitivity values are preserved from the
-    # synchronized article. They are no longer editable through this API.
+    # `domain` is still carried forward unchanged: it is a connector-sync concept with no
+    # editor-facing input anywhere in this API. `type`/`sensitivity` are computed above
+    # (`category`, `sensitivity_value`) and flow into `content_metadata` below, so a
+    # reclassification goes through the same governed draft-and-approve cycle as any other
+    # edit rather than mutating the published Article directly.
     tags = (
         article_in.tags
         if article_in.tags is not None
@@ -1959,8 +2143,8 @@ async def update_article(
         content_metadata={
             "external_id": current.external_id,
             "domain": current.domain,
-            "type": current.type,
-            "sensitivity": current.sensitivity,
+            "type": category,
+            "sensitivity": sensitivity_value,
             "visibility": visibility,
             "explicit_user_ids": [str(user_id) for user_id in explicit_user_ids],
             "denied_user_ids": [str(user_id) for user_id in denied_user_ids],

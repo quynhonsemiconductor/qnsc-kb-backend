@@ -244,6 +244,33 @@ class Settings(BaseSettings):
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
     RAG_MIN_RELEVANCE_SCORE: float = 0.12
     RAG_MIN_CONTEXT_SCORE: float = 0.35
+    # Above RAG_MIN_CONTEXT_SCORE (the refusal line) but below this, an answer is
+    # generated normally yet marked `"confidence": "low"` in the response instead of
+    # presented as certain -- see ai_service.py. This is NOT self-consistency sampling
+    # (asking twice and comparing): `complete()` hardcodes temperature=0.0 at every call
+    # site in this file, deliberately, so the KB's answers are reproducible, and asking
+    # the same deterministic prompt twice would mostly return the same text and prove
+    # nothing. The retrieval score is a signal that already exists at zero extra LLM
+    # cost, so it is what this reads instead.
+    RAG_LOW_CONFIDENCE_SCORE: float = 0.5
+    # Off by default, deliberately: this is a new code path with no production traffic
+    # behind it yet. Flip it once it has been proven against a real corpus and the `ml`
+    # poetry group (sentence-transformers) is actually installed in the target image —
+    # same shape as RESTRUCTURE_ENABLED above, and the same reasoning as
+    # EMBEDDING_RUNTIME defaulting to onnx: the default must be satisfiable by what ships,
+    # not by what a developer happens to have installed locally.
+    CROSS_ENCODER_RERANKER_ENABLED: bool = False
+    CROSS_ENCODER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    # Off by default for the same reason: a change to what the reader sees on the live
+    # answer path, with no production traffic behind it yet to confirm the ambiguity
+    # heuristic (rag/query_router.py::detect_ambiguous_departments) actually fires on
+    # real questions rather than on ordinary ones with two loosely-relevant departments.
+    CLARIFICATION_ON_AMBIGUOUS_DEPARTMENTS_ENABLED: bool = False
+    # How many hybrid_search candidates are re-scored. A cross-encoder pays for every
+    # (query, passage) pair it scores, unlike a bi-encoder embedding computed once per
+    # passage at index time — so this is a cost/latency dial, not a recall ceiling like
+    # RAG_CANDIDATE_POOL_SIZE below.
+    CROSS_ENCODER_CANDIDATE_POOL: int = 30
     # 48. Each retrieval leg truncates here BEFORE RRF fusion, so it is a recall
     # ceiling rather than a performance dial — and it is measurably too shallow for
     # Vietnamese: on failed MLQA-vi questions the sparse leg had already found the
@@ -350,6 +377,18 @@ class Settings(BaseSettings):
     # Short on purpose. This runs inside document ingest, once per document, and a slow
     # provider must cost a suggestion rather than the import.
     DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # Builds the tenant knowledge graph (domain/entity_extraction.py, graph_service.py)
+    # from every published article. On by default, same reasoning as
+    # DEPARTMENT_ROUTING_LLM_ENABLED: it degrades to "no entities extracted this publish"
+    # whenever no provider is configured, never to a broken publish, so there is no
+    # unsatisfiable-dependency reason to default it off the way CROSS_ENCODER_RERANKER_
+    # ENABLED is (that one needs an extra dependency group actually installed).
+    GRAPH_EXTRACTION_ENABLED: bool = True
+    # Longer than DEPARTMENT_ROUTING_LLM_TIMEOUT: this runs once per publish rather than
+    # once per document import, and the prompt asks for a whole entity+relationship
+    # graph rather than one classification, so it is allowed more time before falling
+    # back to "no entities extracted this publish".
+    GRAPH_EXTRACTION_TIMEOUT_SECONDS: float = 45.0
     # The approval agent applies an administrator's written rule to pending drafts. It
     # is off unless a rule exists AND that rule was explicitly granted authority, so this
     # switch exists to stop it entirely without deleting anyone's rules.

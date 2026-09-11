@@ -14,11 +14,15 @@ from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
 from src.rag.reranker import (
+    chunk_passage,
     normalize_query,
     prepare_query_for_chunks,
     rerank_chunks_with_scores,
     retrieval_score,
 )
+from src.rag.cross_encoder import CrossEncoderUnavailable, reorder_by_cross_encoder
+from src.rag.cross_encoder import score as cross_encoder_score
+from src.rag.query_router import is_comparison_query, split_comparison_subjects
 from src.models.ops import SearchLog
 from src.repositories.feature_flags import FeatureFlagRepository
 
@@ -210,43 +214,123 @@ class SearchService:
             await self._record_gap(user, query)
             return []
 
-        # 1. Get embedding asynchronously
-        try:
-            embedding = await embed_query(retrieval_query)
-        except VectorSearchUnavailable as exc:
-            # Keyword retrieval still finds things, and abandoning the search entirely
-            # would take the product down for a recoverable model fault. But the caller
-            # is told, so an answer built on this pool can say what it is built on.
-            self.vector_search_degraded = True
-            embedding = None
-            logger.warning(
-                "Search degraded to keyword-only retrieval",
-                query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
-                reason=str(exc),
-                embedding_model=settings.EMBEDDING_MODEL,
-            )
-        
-        # 2. Query hybrid search
-        candidates = await self.chunk_repo.hybrid_search(
-            query=retrieval_query,
-            query_embedding=embedding,
-            user=user,
-            limit=limit,
-            filters=effective_filters
+        # A comparison question ("so sánh SOP-114 và SOP-118") retrieves worse as one
+        # query than as several: the single embedding sits between both topics instead
+        # of close to either. Detected on the ORIGINAL query, not `retrieval_query` --
+        # normalize_query already strips "và"/"vs" as stopwords, which are exactly the
+        # markers a comparison needs to split on.
+        comparison_subjects = (
+            split_comparison_subjects(query) if is_comparison_query(query) else []
         )
+        multi_subject_queries = (
+            [normalize_query(subject) for subject in comparison_subjects]
+            if len(comparison_subjects) > 1
+            else []
+        )
+        multi_subject_queries = [item for item in multi_subject_queries if item]
+
+        async def _embed_or_degrade(text: str) -> list[float] | None:
+            try:
+                return await embed_query(text)
+            except VectorSearchUnavailable as exc:
+                # Keyword retrieval still finds things, and abandoning the search
+                # entirely would take the product down for a recoverable model fault.
+                # But the caller is told, so an answer built on this pool can say what
+                # it is built on.
+                self.vector_search_degraded = True
+                logger.warning(
+                    "Search degraded to keyword-only retrieval",
+                    query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                    reason=str(exc),
+                    embedding_model=settings.EMBEDDING_MODEL,
+                )
+                return None
+
+        # 1. Get embedding asynchronously
+        embedding = await _embed_or_degrade(retrieval_query)
+
         reranking_enabled = not self.feature_flags or await self.feature_flags.is_enabled("rag.reranker", user)
+        # The cross-encoder REORDERS the pool the lexical scorer already ranked; it never
+        # runs on its own. Off entirely when the base reranker is off, so disabling
+        # "rag.reranker" still means "no reranking of any kind" as it always has.
+        cross_encoder_enabled = (
+            reranking_enabled
+            and settings.CROSS_ENCODER_RERANKER_ENABLED
+            and (
+                not self.feature_flags
+                or await self.feature_flags.is_enabled("rag.cross_encoder_reranker", user)
+            )
+        )
+        # A cross-encoder needs a wider pool than `limit` to have anything to reorder --
+        # hybrid_search itself is asked for `limit` rows otherwise, unchanged from before
+        # this feature existed. Requesting the wider pool only when the flag is actually
+        # on keeps every other search exactly as cheap as it was.
+        pool_limit = settings.CROSS_ENCODER_CANDIDATE_POOL if cross_encoder_enabled else limit
+
+        # 2. Query hybrid search -- once per comparison subject when the query was
+        # decomposed above, merged and de-duplicated by chunk id; a single call
+        # otherwise, exactly as before this feature existed.
+        if multi_subject_queries:
+            candidates = []
+            seen_chunk_ids: set = set()
+            for subject_query in multi_subject_queries:
+                subject_embedding = (
+                    embedding
+                    if subject_query == retrieval_query
+                    else await _embed_or_degrade(subject_query)
+                )
+                subject_candidates = await self.chunk_repo.hybrid_search(
+                    query=subject_query,
+                    query_embedding=subject_embedding,
+                    user=user,
+                    limit=pool_limit,
+                    filters=effective_filters,
+                )
+                for chunk in subject_candidates:
+                    if chunk.id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(chunk.id)
+                    candidates.append(chunk)
+        else:
+            candidates = await self.chunk_repo.hybrid_search(
+                query=retrieval_query,
+                query_embedding=embedding,
+                user=user,
+                limit=pool_limit,
+                filters=effective_filters
+            )
         # Scored ONCE, here. The threshold below and the score reported per result both
         # reuse these values rather than scoring the same passage again.
         if reranking_enabled:
-            ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=limit)
+            ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=pool_limit)
         else:
             # Prepared against the same pool the reranker would have used, so turning
             # the reranker off changes the ordering and not the calibration.
             prepared = prepare_query_for_chunks(retrieval_query, candidates)
             ranked = [
                 (chunk, retrieval_score(retrieval_query, chunk, prepared))
-                for chunk in candidates[:limit]
+                for chunk in candidates[:pool_limit]
             ]
+
+        if cross_encoder_enabled and len(ranked) > 1:
+            try:
+                cross_scores = await asyncio.to_thread(
+                    cross_encoder_score,
+                    retrieval_query,
+                    [chunk_passage(chunk) for chunk, _lexical_score in ranked],
+                )
+                # Order comes from the cross-encoder; the VALUE reported and thresholded
+                # below stays the lexical score. RAG_MIN_RELEVANCE_SCORE and every caller
+                # reading `score` were tuned against that scale, and mixing in a
+                # cross-encoder's own (unbounded, model-specific) scale here would shift
+                # every threshold decision with no warning.
+                ranked = reorder_by_cross_encoder(ranked, cross_scores)
+            except CrossEncoderUnavailable as exc:
+                logger.warning(
+                    "Cross-encoder reranking failed, falling back to lexical order",
+                    error=str(exc),
+                )
+        ranked = ranked[:limit]
         # Vector similarity alone is not enough: short or vague inputs can be
         # close to an unrelated document in embedding space. Keep a result only
         # when the reranked passage has at least one meaningful lexical signal.

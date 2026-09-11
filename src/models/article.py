@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
-from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, JSON, UniqueConstraint, Boolean, CheckConstraint, Index
+from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, Date, JSON, UniqueConstraint, Boolean, CheckConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 from src.models.user import Department
@@ -46,7 +46,18 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # draft, pending_review, published, archived
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
     lifecycle_status: Mapped[str] = mapped_column(String(30), default="active", nullable=False, index=True)
+    # Compliance metadata, independent of `lifecycle_status`: that field is what an editor
+    # WANTS (active/archived); these two are what governance REQUIRES regardless of editor
+    # intent. Enforced in domain/articles.py::soft_delete_article, which refuses a delete
+    # outright rather than merely warning about it.
+    retention_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     related_article_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Best-effort document identity fields (document_number, issue_date, expiry_date,
+    # signed_by) -- see domain/structured_metadata.py. Never required and never blocks
+    # publish; absent until the extraction has run, and may stay partially or fully null
+    # for a document that states none of these.
+    structured_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     source_position: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     last_reviewed: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -161,6 +172,9 @@ class TagCatalog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # SET NULL, not CASCADE: deprecating a parent tag must not delete every tag beneath
+    # it. A null parent means "root", the shape every tag had before this column existed.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tag_catalog.id", ondelete="SET NULL"), nullable=True)
 
 class DocumentSource(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "document_sources"

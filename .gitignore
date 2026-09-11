@@ -7,4 +7,5 @@ venv/
 .mypy_cache/
 storage/
 backups/
-celerybeat-schedule
+docker-compose.override.yml
+celerybeat-schedule*

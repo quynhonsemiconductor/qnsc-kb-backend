@@ -273,6 +273,55 @@ def verify_review_deadlines() -> None:
     sync_run(verify())
 
 
+@celery_app.task(name="link_related_articles")
+def link_related_articles_task() -> None:
+    """Merge topical matches (domain/article_linking.py) into recently changed articles.
+
+    Runs nightly rather than once at publish time: an article's best topical matches can
+    change as OTHER articles are added later, so a link computed only when an article
+    itself is created or edited goes stale as the corpus grows around it. Scoped to
+    articles touched in the last day so a large corpus does not mean an
+    every-article-against-every-other-article scan on every run.
+    """
+    async def link() -> None:
+        from src.domain.article_linking import find_topical_matches
+        from src.models.article import Article
+
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            articles = (
+                await db.execute(
+                    select(Article).where(
+                        Article.status == "published",
+                        Article.lifecycle_status == "active",
+                        Article.updated_at >= cutoff,
+                    )
+                )
+            ).scalars().all()
+            for article in articles:
+                try:
+                    matches = await find_topical_matches(db, article)
+                except Exception as exc:
+                    # One article's linking failure (a malformed embedding, a transient
+                    # DB error) must not abort the whole nightly run for every other
+                    # article that would otherwise have linked cleanly.
+                    logger.warning(
+                        "Topical linking failed for one article",
+                        article_id=str(article.id),
+                        error=str(exc),
+                    )
+                    continue
+                if not matches:
+                    continue
+                existing = set(article.related_article_ids or [])
+                merged = sorted(existing | set(matches))
+                if merged != sorted(existing):
+                    article.related_article_ids = merged
+            await db.commit()
+    sync_run(link())
+
+
 async def _run_approval_agent_sweep() -> None:
     """Apply active approval rules to every company's pending queue.
 
@@ -537,6 +586,37 @@ async def run_restructure_pending_draft(
                             **item,
                         )
                     )
+            # Same automatic treatment as department routing above: a reviewer who typed
+            # tags at upload time keeps them exactly as typed (never silently replaced),
+            # but a draft that arrives with none gets AI suggestions to review/edit
+            # instead of an empty field. Best-effort -- see domain/auto_tagging.py --
+            # so a failure here never touches the restructuring result already committed.
+            if not draft.tags:
+                from src.domain.auto_tagging import suggest_tags_for_document
+                from src.models.article import TagCatalog
+
+                # Same governance rule as the manual bulk endpoint (auto_tag_articles in
+                # articles.py): only suggest tags already in the tenant's approved
+                # vocabulary. An automatic, less-reviewed path is exactly where that
+                # matters MORE, not less.
+                catalogue = set(
+                    (
+                        await db.execute(
+                            select(TagCatalog.normalized_tag).where(
+                                TagCatalog.company_domain == draft.company_domain,
+                                TagCatalog.active.is_(True),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                draft.tags = await suggest_tags_for_document(
+                    draft.title,
+                    result.body_md,
+                    (draft.content_metadata or {}).get("type", ""),
+                    catalogue=catalogue,
+                )
             db.add(
                 AuditLog(
                     user_id=user.id if user else None,

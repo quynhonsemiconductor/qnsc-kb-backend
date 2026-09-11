@@ -3,6 +3,7 @@ import hashlib
 import uuid
 from datetime import datetime
 from typing import Sequence
+import structlog
 from fastapi import HTTPException
 from src.models.governance import (
     PendingDraft,
@@ -34,6 +35,8 @@ from src.domain.rbac import AuthorizationService
 from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.source_storage import delete_source
 from src.domain.departments import resolve_active_department, resolve_active_departments
+
+logger = structlog.get_logger()
 
 
 class GovernanceService:
@@ -1420,6 +1423,68 @@ class GovernanceService:
             "ArticleUpdated" if update_target else "ArticlePublished",
             {"article_id": str(published.id)},
         )
+        # Best-effort and strictly after the publish is durable: a contradiction check
+        # that failed, or found something, must never be why an otherwise-valid draft
+        # could not be approved. It only records a ConflictRecord for governance to
+        # review on the Coverage page -- see domain/contradiction_check.py for why this
+        # is deliberately non-blocking.
+        try:
+            from src.domain.contradiction_check import detect_contradictions_for_draft
+
+            await detect_contradictions_for_draft(
+                db, user, published.body_md, exclude_article_id=str(published.id)
+            )
+            await db.commit()
+        except Exception as exc:
+            logger.warning(
+                "Proactive contradiction check failed after publish",
+                article_id=str(published.id),
+                error=str(exc),
+            )
+            if hasattr(db, "rollback"):
+                await db.rollback()
+        # Same non-blocking shape, and only once per article: re-running an LLM call on
+        # every subsequent edit of an already-processed article would spend tokens on a
+        # result that mostly does not change, for identity fields (a document number, a
+        # signer) that almost never do.
+        if published.structured_metadata is None:
+            try:
+                from src.domain.structured_metadata import extract_structured_metadata
+
+                published.structured_metadata = await extract_structured_metadata(
+                    published.title, published.body_md
+                )
+                await db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "Structured metadata extraction failed after publish",
+                    article_id=str(published.id),
+                    error=str(exc),
+                )
+                if hasattr(db, "rollback"):
+                    await db.rollback()
+        # Same non-blocking shape as the two checks above. Builds the tenant knowledge
+        # graph (domain/graph_service.py) rather than a per-article field, so it runs on
+        # every publish -- including a re-edit -- since a document can mention a new
+        # entity or relationship on any revision, unlike structured_metadata's identity
+        # fields which are extracted once and rarely change.
+        try:
+            from src.domain.entity_extraction import extract_entities_and_relationships
+            from src.domain.graph_service import apply_extraction
+
+            extraction = await extract_entities_and_relationships(
+                published.title, published.body_md
+            )
+            await apply_extraction(db, published, extraction)
+            await db.commit()
+        except Exception as exc:
+            logger.warning(
+                "Entity/relationship extraction failed after publish",
+                article_id=str(published.id),
+                error=str(exc),
+            )
+            if hasattr(db, "rollback"):
+                await db.rollback()
         return published
 
     async def restructure_draft(
