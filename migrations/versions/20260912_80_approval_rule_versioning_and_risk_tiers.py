@@ -82,6 +82,16 @@ def upgrade() -> None:
             sa.ForeignKeyConstraint(["changed_by"], ["users.id"], ondelete="SET NULL"),
             sa.UniqueConstraint("rule_id", "version", name="uq_approval_rule_version"),
         )
+        # Two indexes, not one: the model maps `rule_id` with `index=True` (a plain
+        # single-column index SQLAlchemy names `ix_approval_rule_versions_rule_id` by its
+        # own convention) SEPARATELY from the explicit composite `(rule_id, version)`
+        # index declared in `__table_args__` -- `alembic check` compares the actual
+        # schema against model metadata and treats a missing single-column index as
+        # drift, the same as a missing column.
+        op.execute(
+            f"CREATE INDEX IF NOT EXISTS ix_approval_rule_versions_rule_id "
+            f"ON {VERSIONS_TABLE} (rule_id)"
+        )
         op.execute(
             f"CREATE INDEX IF NOT EXISTS ix_approval_rule_versions_rule "
             f"ON {VERSIONS_TABLE} (rule_id, version)"

@@ -11,6 +11,10 @@ Nullable and backfilled rather than a hard requirement: existing open conflicts 
 this column and still need to display correctly without it, and any future detection path
 that does not classify must still be able to write a valid ConflictRecord.
 
+Guarded the same way every column-add migration here is (20260910_74, 20260912_80,
+20260912_81): the baseline revision builds tables from model metadata, so a fresh
+database may already have this column.
+
 Revision ID: 20260912_79
 Revises: 20260912_78
 Create Date: 2026-09-12
@@ -18,12 +22,15 @@ Create Date: 2026-09-12
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
 revision = "20260912_79"
 down_revision = "20260912_78"
 branch_labels = None
 depends_on = None
+
+TABLE = "conflict_records"
 
 # Mirrors src/domain/ai_service.py::FACT_TAXONOMY. Kept as a literal here rather than
 # imported: a migration must keep working after the application code that inspired it
@@ -41,15 +48,20 @@ _FACT_TAXONOMY = {
 
 
 def upgrade() -> None:
-    op.add_column(
-        "conflict_records",
-        sa.Column("contradiction_type", sa.String(length=40), nullable=True),
-    )
+    inspector = inspect(op.get_bind())
+    if TABLE not in set(inspector.get_table_names()):
+        return
+    columns = {column["name"] for column in inspector.get_columns(TABLE)}
+    if "contradiction_type" not in columns:
+        op.add_column(
+            TABLE,
+            sa.Column("contradiction_type", sa.String(length=40), nullable=True),
+        )
     connection = op.get_bind()
     for fact_label, category in _FACT_TAXONOMY.items():
         connection.execute(
             sa.text(
-                "UPDATE conflict_records SET contradiction_type = :category "
+                f"UPDATE {TABLE} SET contradiction_type = :category "
                 "WHERE fact = :fact_label AND contradiction_type IS NULL"
             ),
             {"category": category, "fact_label": fact_label},
@@ -62,4 +74,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("conflict_records", "contradiction_type")
+    inspector = inspect(op.get_bind())
+    if TABLE not in set(inspector.get_table_names()):
+        return
+    columns = {column["name"] for column in inspector.get_columns(TABLE)}
+    if "contradiction_type" in columns:
+        op.drop_column(TABLE, "contradiction_type")
