@@ -56,6 +56,14 @@ class ArticleChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     heading: Mapped[str | None] = mapped_column(String(255), nullable=True)
     chunking_version: Mapped[str] = mapped_column(String(80), nullable=False, default="v1-fixed-character")
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: sha256 of this chunk's own `chunk_text` (the raw child text, NOT the
+    #: contextual-header-augmented string sent to the embedder -- see
+    #: src/rag/contextual_header.py). Lets a re-index (indexing.py) recognise a child
+    #: that has not actually changed and reuse its existing embedding instead of paying
+    #: for another embed call. Nullable: a chunk written before this column existed simply
+    #: never matches on re-index, degrading to "re-embed everything" -- the behavior
+    #: every article already had, not a new failure mode.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     article: Mapped["Article"] = relationship("Article")
     parent_chunk: Mapped[ParentChunk] = relationship("ParentChunk", back_populates="child_chunks")

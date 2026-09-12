@@ -267,7 +267,7 @@ async def owner_dashboard(current_user: User = Depends(require_permission("gover
 @router.get("/conflicts")
 async def list_conflicts(current_user: User = Depends(require_permission("governance.read")), db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     rows = (await db.execute(select(ConflictRecord).where(ConflictRecord.company_domain == current_user.company_domain, ConflictRecord.status == "open").order_by(ConflictRecord.created_at.desc()).limit(200))).scalars().all()
-    return [{"id": str(item.id), "fact": item.fact, "article_ids": item.article_ids, "evidence": item.evidence or [], "status": item.status, "created_at": item.created_at} for item in rows]
+    return [{"id": str(item.id), "fact": item.fact, "contradiction_type": item.contradiction_type, "article_ids": item.article_ids, "evidence": item.evidence or [], "status": item.status, "created_at": item.created_at} for item in rows]
 
 
 @router.post("/conflicts/{conflict_id}/resolve")

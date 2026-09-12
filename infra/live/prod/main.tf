@@ -126,11 +126,13 @@ module "stack" {
     // is up to 12 GB of duplicated signature database — the point at which one clamd
     // behind Service Connect becomes the cheaper shape.
     // The embedding model is local and the API loads it to embed the search query, so the
-    // api container needs room for it on top of clamd's 2048. This was sized for
-    // BAAI/bge-m3 (~2.27 GB of fp32 weights), which no image has ever actually carried —
-    // see the note beside embedding_model below. Against MiniLM-L12-v2 it is now
-    // generous rather than tight, and it is left alone deliberately: shrinking it is a
-    // sizing decision to make against measured usage, not a side effect of a bug fix.
+    // api container needs room for it on top of clamd's 2048. This was originally sized
+    // for BAAI/bge-m3 (~2.27 GB of fp32 weights), which no image ever actually carried —
+    // it then ran e5-small/MiniLM (both far smaller), making this headroom generous
+    // rather than tight. multilingual-e5-large-instruct (see embedding_model below) is
+    // back in bge-m3's weight class (~2.24 GB fp32), so this sizing is right-sized again,
+    // not just generous — measure actual task memory after the swap before assuming
+    // there is still slack to shrink it.
     cpu                = 1024
     memory             = 6144
     min_count          = 0
@@ -219,14 +221,15 @@ module "stack" {
   malware_scan_enabled = true
 
   // Must match develop, and must match the model the IMAGE carries — see the long note in
-  // The Dockerfile bakes intfloat/multilingual-e5-small (384) via ARG EMBEDDING_MODEL,
-  // and this must name the same model or EMBEDDING_DIMENSION resolves against the wrong
-  // export. e5-small is 384-wide like the previous MiniLM, so no pgvector column change;
-  // adopting it required a one-time re-embed migration. Both environments must run the
-  // same model -- at the same width the spaces are unrelated, so a mismatch returns
-  // nonsense rather than erroring.
-  embedding_model   = "intfloat/multilingual-e5-small"
-  embedding_version = "e5-small-v1"
+  // develop/main.tf beside this same setting for the VN-MTEB numbers behind this choice.
+  // The Dockerfile bakes intfloat/multilingual-e5-large-instruct (1024) via ARG
+  // EMBEDDING_MODEL, and this must name the same model or EMBEDDING_DIMENSION resolves
+  // against the wrong export. This is a WIDTH change from the previous e5-small (384 ->
+  // 1024) -- a real pgvector column/HNSW migration, not a same-width re-embed. Both
+  // environments must run the same model -- at the same width the spaces are unrelated,
+  // so a mismatch returns nonsense rather than erroring.
+  embedding_model   = "intfloat/multilingual-e5-large-instruct"
+  embedding_version = "e5-large-instruct-v1"
 
   alarm_emails           = var.alarm_emails
   cloudflare_account_id  = var.cloudflare_account_id

@@ -35,7 +35,17 @@ markdown code fence: {"tags": ["tag1", "tag2"]}
 
 Use 3 to 8 specific tags, lowercase, using only letters, numbers, spaces, or hyphens. Do
 not invent tags unrelated to the document's actual content.
+
+If a list of EXISTING TAGS is provided, prefer reusing one of them whenever it genuinely
+fits the document -- only suggest a new tag when nothing in that list applies. This keeps
+the tenant's tag vocabulary from fragmenting into near-duplicates.
 """
+
+# Cap on how many catalogue tags get listed in the prompt. This is steering, not
+# enforcement -- `catalogue` (the normalized set) still filters the result afterward --
+# so an oversized tenant vocabulary degrades to "the model sees a partial list" rather
+# than a token-budget failure.
+MAX_CATALOGUE_EXAMPLES = 200
 
 
 def _clean_tag(raw: object) -> str | None:
@@ -66,6 +76,7 @@ async def suggest_tags_for_document(
     doc_type: str = "",
     *,
     catalogue: set[str] | None = None,
+    catalogue_examples: list[str] | None = None,
 ) -> list[str]:
     """Best-effort tag suggestions for one document. Returns [] rather than raising.
 
@@ -80,6 +91,13 @@ async def suggest_tags_for_document(
     the tenant's tags from unreviewed AI output. `None` means "no catalogue enforcement",
     used by callers (or tests) that have not loaded one; a real caller in production
     always has a set, even if it is empty.
+
+    `catalogue_examples` is the display-cased vocabulary (`TagCatalog.tag`, not the
+    accent-folded `normalized_tag` `catalogue` filters against) shown to the model so it
+    is steered toward reusing existing tags instead of inventing near-duplicates that
+    `catalogue` then silently drops. Purely a prompt hint -- `catalogue` remains the sole
+    enforcement mechanism, so a stale or truncated example list only costs suggestion
+    quality, never correctness.
     """
     # Imported here, not at module load, so a test can monkeypatch
     # `src.domain.llm_client.complete`/`resolve_provider` the same way every other
@@ -91,6 +109,11 @@ async def suggest_tags_for_document(
     if not provider:
         return []
 
+    examples_block = ""
+    if catalogue_examples:
+        shown = sorted(catalogue_examples)[:MAX_CATALOGUE_EXAMPLES]
+        examples_block = "EXISTING TAGS (prefer reusing these when they fit):\n" + ", ".join(shown) + "\n\n"
+
     try:
         answer, _tokens, _model, _provider_name = await complete(
             [
@@ -99,6 +122,7 @@ async def suggest_tags_for_document(
                     "role": "user",
                     "content": (
                         f"TITLE: {title}\nTYPE: {doc_type or '(unspecified)'}\n\n"
+                        f"{examples_block}"
                         f"CONTENT:\n{body_md[:5000]}"
                     ),
                 },

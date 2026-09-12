@@ -1,5 +1,21 @@
-from src.domain.ai_service import _conflict_answer, _detect_explicit_conflicts, _select_context
+from src.domain.ai_service import _conflict_answer, _detect_explicit_conflicts, _select_context, classify_fact_type
 from src.rag.citations import extract_citation_ids
+
+
+def test_classify_fact_type_covers_every_label_the_detector_regex_produces():
+    from src.domain.ai_service import _EXPLICIT_FACT_RE
+
+    # The taxonomy is a lookup over the SAME closed label set the regex's first capture
+    # group can produce -- this pins that every label the regex names has a bucket,
+    # rather than silently falling back to "other" for one nobody noticed was missing.
+    labelled_group = _EXPLICIT_FACT_RE.pattern.split("(", 2)[-1].split(")", 1)[0]
+    labels = labelled_group.split("|")
+    for label in labels:
+        assert classify_fact_type(label) != "other", label
+
+
+def test_classify_fact_type_falls_back_to_other_for_an_unknown_label():
+    assert classify_fact_type("something new") == "other"
 
 
 def test_context_selection_deduplicates_children_and_assigns_stable_source_ids(monkeypatch):

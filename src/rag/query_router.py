@@ -102,6 +102,36 @@ def detect_ambiguous_departments(results: list[dict], *, top_n: int = 5) -> list
     return departments if len(departments) > 1 else None
 
 
+#: A query asking about more than one distinct thing needs at least this many question
+#: marks to say so cheaply and reliably -- one open-ended factual question ("what is the
+#: leave policy?") is the common case this must NOT flag, since the whole point is to
+#: spend the heavier (opt-in) path only where it is actually likely to pay for itself.
+MIN_QUESTION_MARKS_FOR_DEEP_RETRIEVAL = 2
+
+
+def needs_deep_retrieval(query: str) -> bool:
+    """Whether `query` is complex enough to be worth the heavier, opt-in reranking path
+    (the cross-encoder -- see search_service.py), when that path is enabled at all.
+
+    Deliberately narrow, same posture as `is_comparison_query`: a false negative just
+    means an ordinary query gets the ordinary (already-good) lexical reranking it always
+    got; a false positive spends 6x retrieval latency (measured, commit 6d27e93) on a
+    query that did not need it. Two signals, both cheap and conservative:
+    - comparison intent (reuses `is_comparison_query` -- a comparison question is the one
+      shape already known in this codebase to need more than a single retrieval pass);
+    - multiple distinct questions asked at once (2+ question marks), which the single
+      embedding for the whole message represents no better than a comparison does.
+
+    This does not widen the retrieval pool itself (`RAG_CANDIDATE_POOL_SIZE` stays a
+    global setting, not query-dependent) -- it only decides whether a query is allowed to
+    use the cross-encoder when an operator has that feature turned on. When it is not
+    turned on, this changes nothing.
+    """
+    if is_comparison_query(query):
+        return True
+    return (query or "").count("?") >= MIN_QUESTION_MARKS_FOR_DEEP_RETRIEVAL
+
+
 def split_comparison_subjects(query: str) -> list[str]:
     """Split a comparison query into its distinct subjects, best-effort.
 

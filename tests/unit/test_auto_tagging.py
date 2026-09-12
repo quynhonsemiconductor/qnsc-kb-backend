@@ -123,3 +123,38 @@ def test_catalogue_match_is_accent_insensitive(llm):
     llm["reply"] = '{"tags": ["an toàn"]}'
     result = asyncio.run(suggest_tags_for_document("Doc", "content", catalogue={"an toan"}))
     assert result == ["an toàn"]
+
+
+# --- catalogue_examples: steers the prompt, never enforces -----------------------------
+
+
+def test_catalogue_examples_are_listed_in_the_prompt(llm):
+    asyncio.run(
+        suggest_tags_for_document(
+            "Doc", "content", catalogue_examples=["database", "backup"]
+        )
+    )
+    user_message = llm["messages"][1]["content"]
+    assert "EXISTING TAGS" in user_message
+    assert "database" in user_message
+    assert "backup" in user_message
+
+
+def test_no_catalogue_examples_omits_the_examples_block(llm):
+    asyncio.run(suggest_tags_for_document("Doc", "content"))
+    assert "EXISTING TAGS" not in llm["messages"][1]["content"]
+
+
+def test_catalogue_examples_do_not_bypass_catalogue_enforcement(llm):
+    """A tag merely listed as an example is still dropped if it fails the (normalized)
+    catalogue filter -- catalogue_examples is a hint, not a second allowlist."""
+    llm["reply"] = '{"tags": ["unapproved-tag"]}'
+    result = asyncio.run(
+        suggest_tags_for_document(
+            "Doc",
+            "content",
+            catalogue={"database"},
+            catalogue_examples=["unapproved-tag"],
+        )
+    )
+    assert result == []

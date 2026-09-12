@@ -10,6 +10,7 @@ import pytest
 from src.rag.query_router import (
     detect_ambiguous_departments,
     is_comparison_query,
+    needs_deep_retrieval,
     split_comparison_subjects,
 )
 
@@ -119,3 +120,26 @@ def test_only_the_top_n_results_are_considered():
     # near-top comparison against Finance.
     results = [_result("Finance", 0.9)] + [_result("Other", 0.1)] * 5 + [_result("HR", 0.89)]
     assert detect_ambiguous_departments(results, top_n=5) is None
+
+
+# --- needs_deep_retrieval: gates the (opt-in) cross-encoder, never the base pipeline ---
+
+
+def test_a_comparison_question_needs_deep_retrieval():
+    assert needs_deep_retrieval("So sánh SOP-114 và SOP-118")
+
+
+def test_a_plain_factual_question_does_not_need_deep_retrieval():
+    assert not needs_deep_retrieval("What is CTS?")
+
+
+def test_a_single_question_mark_does_not_need_deep_retrieval():
+    assert not needs_deep_retrieval("How do I request access?")
+
+
+def test_two_distinct_questions_need_deep_retrieval():
+    assert needs_deep_retrieval("What is the leave policy? How do I submit a request?")
+
+
+def test_empty_query_does_not_need_deep_retrieval():
+    assert not needs_deep_retrieval("")

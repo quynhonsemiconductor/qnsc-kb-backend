@@ -22,7 +22,8 @@ from src.rag.reranker import (
 )
 from src.rag.cross_encoder import CrossEncoderUnavailable, reorder_by_cross_encoder
 from src.rag.cross_encoder import score as cross_encoder_score
-from src.rag.query_router import is_comparison_query, split_comparison_subjects
+from src.rag.query_router import is_comparison_query, needs_deep_retrieval, split_comparison_subjects
+from src.rag.multi_query import generate_followup_query, generate_subqueries
 from src.models.ops import SearchLog
 from src.repositories.feature_flags import FeatureFlagRepository
 
@@ -54,6 +55,31 @@ def _query_embedding_key(text: str) -> tuple[str, str]:
 def reset_query_embedding_cache() -> None:
     """Drop the cache. For tests, and for a deliberate model/version switch."""
     _QUERY_EMBEDDING_CACHE.clear()
+
+
+def _dedup_preserve_order(items: list[str]) -> list[str]:
+    """First occurrence of each item, in the order given. Plain string equality --
+    the callers already normalize/fold text before this runs."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def _merge_candidates(existing: list, new: list, seen_ids: set) -> list:
+    """`existing` plus any of `new` not already seen, by `.id`. `seen_ids` is mutated
+    in place so a caller can keep merging further batches against the same set."""
+    merged = list(existing)
+    for chunk in new:
+        if chunk.id in seen_ids:
+            continue
+        seen_ids.add(chunk.id)
+        merged.append(chunk)
+    return merged
 
 
 class VectorSearchUnavailable(RuntimeError):
@@ -229,6 +255,27 @@ class SearchService:
         )
         multi_subject_queries = [item for item in multi_subject_queries if item]
 
+        # Agentic/adaptive multi-query retrieval (off by default -- see
+        # MULTI_QUERY_RETRIEVAL_ENABLED in core/config.py). Only for the ordinary,
+        # non-comparison case: a comparison query already got its decomposition above,
+        # and doing both would mean an LLM call AND a second retrieval pass over the
+        # same query for no added coverage. `multi_subject_queries` is reused rather
+        # than given a new name because everything below this point already treats "one
+        # or several retrieval queries to run and merge" as the same shape regardless of
+        # which mechanism produced the list.
+        multi_query_enabled = settings.MULTI_QUERY_RETRIEVAL_ENABLED and (
+            not self.feature_flags
+            or await self.feature_flags.is_enabled("rag.multi_query_retrieval", user)
+        )
+        if not multi_subject_queries and multi_query_enabled:
+            generated_subqueries = await generate_subqueries(query)
+            if generated_subqueries:
+                multi_subject_queries = _dedup_preserve_order(
+                    [retrieval_query]
+                    + [normalize_query(item) for item in generated_subqueries]
+                )
+                multi_subject_queries = [item for item in multi_subject_queries if item]
+
         async def _embed_or_degrade(text: str) -> list[float] | None:
             try:
                 return await embed_query(text)
@@ -253,9 +300,17 @@ class SearchService:
         # The cross-encoder REORDERS the pool the lexical scorer already ranked; it never
         # runs on its own. Off entirely when the base reranker is off, so disabling
         # "rag.reranker" still means "no reranking of any kind" as it always has.
+        #
+        # Additionally gated on query complexity (`needs_deep_retrieval`, checked on the
+        # ORIGINAL query for the same reason `is_comparison_query` is): this NARROWS when
+        # the cross-encoder can fire, it never widens it -- an operator with the feature
+        # off sees no change at all. The point is that when it IS on, its measured 6x
+        # retrieval-latency cost (commit 6d27e93) is spent only on queries actually likely
+        # to need the extra ranking precision, not on every ordinary factual lookup.
         cross_encoder_enabled = (
             reranking_enabled
             and settings.CROSS_ENCODER_RERANKER_ENABLED
+            and needs_deep_retrieval(query)
             and (
                 not self.feature_flags
                 or await self.feature_flags.is_enabled("rag.cross_encoder_reranker", user)
@@ -267,30 +322,36 @@ class SearchService:
         # on keeps every other search exactly as cheap as it was.
         pool_limit = settings.CROSS_ENCODER_CANDIDATE_POOL if cross_encoder_enabled else limit
 
-        # 2. Query hybrid search -- once per comparison subject when the query was
-        # decomposed above, merged and de-duplicated by chunk id; a single call
-        # otherwise, exactly as before this feature existed.
+        # 2. Query hybrid search -- once per comparison subject / generated sub-query
+        # when the query was expanded above, run concurrently and merged and
+        # de-duplicated by chunk id; a single call otherwise, exactly as before either
+        # feature existed.
         if multi_subject_queries:
-            candidates = []
-            seen_chunk_ids: set = set()
-            for subject_query in multi_subject_queries:
+            async def _search_subject(subject_query: str) -> list:
                 subject_embedding = (
                     embedding
                     if subject_query == retrieval_query
                     else await _embed_or_degrade(subject_query)
                 )
-                subject_candidates = await self.chunk_repo.hybrid_search(
+                return await self.chunk_repo.hybrid_search(
                     query=subject_query,
                     query_embedding=subject_embedding,
                     user=user,
                     limit=pool_limit,
                     filters=effective_filters,
                 )
-                for chunk in subject_candidates:
-                    if chunk.id in seen_chunk_ids:
-                        continue
-                    seen_chunk_ids.add(chunk.id)
-                    candidates.append(chunk)
+
+            # Concurrent, not sequential: each subject's embed+search is independent of
+            # every other's, and asyncio.gather preserves result order to match
+            # `multi_subject_queries`, so the merge below stays deterministic --
+            # identical to running the loop sequentially, just not serialized on I/O.
+            results_per_subject = await asyncio.gather(
+                *(_search_subject(subject_query) for subject_query in multi_subject_queries)
+            )
+            candidates: list = []
+            seen_chunk_ids: set = set()
+            for subject_candidates in results_per_subject:
+                candidates = _merge_candidates(candidates, subject_candidates, seen_chunk_ids)
         else:
             candidates = await self.chunk_repo.hybrid_search(
                 query=retrieval_query,
@@ -299,37 +360,96 @@ class SearchService:
                 limit=pool_limit,
                 filters=effective_filters
             )
-        # Scored ONCE, here. The threshold below and the score reported per result both
-        # reuse these values rather than scoring the same passage again.
-        if reranking_enabled:
-            ranked = rerank_chunks_with_scores(retrieval_query, candidates, limit=pool_limit)
-        else:
-            # Prepared against the same pool the reranker would have used, so turning
-            # the reranker off changes the ordering and not the calibration.
-            prepared = prepare_query_for_chunks(retrieval_query, candidates)
-            ranked = [
-                (chunk, retrieval_score(retrieval_query, chunk, prepared))
-                for chunk in candidates[:pool_limit]
-            ]
 
-        if cross_encoder_enabled and len(ranked) > 1:
-            try:
-                cross_scores = await asyncio.to_thread(
-                    cross_encoder_score,
-                    retrieval_query,
-                    [chunk_passage(chunk) for chunk, _lexical_score in ranked],
+        # Scored here, and again below only if an adaptive follow-up round (also part of
+        # MULTI_QUERY_RETRIEVAL_ENABLED) adds candidates to the pool. The threshold below
+        # and the score reported per result both reuse whichever of these runs last,
+        # rather than scoring the same passage again.
+        async def _rerank(pool: list) -> list[tuple]:
+            if reranking_enabled:
+                result = rerank_chunks_with_scores(retrieval_query, pool, limit=pool_limit)
+            else:
+                # Prepared against the same pool the reranker would have used, so
+                # turning the reranker off changes the ordering and not the calibration.
+                prepared = prepare_query_for_chunks(retrieval_query, pool)
+                result = [
+                    (chunk, retrieval_score(retrieval_query, chunk, prepared))
+                    for chunk in pool[:pool_limit]
+                ]
+            if cross_encoder_enabled and len(result) > 1:
+                try:
+                    cross_scores = await asyncio.to_thread(
+                        cross_encoder_score,
+                        retrieval_query,
+                        [chunk_passage(chunk) for chunk, _lexical_score in result],
+                    )
+                    # Order comes from the cross-encoder; the VALUE reported and
+                    # thresholded below stays the lexical score. RAG_MIN_RELEVANCE_SCORE
+                    # and every caller reading `score` were tuned against that scale, and
+                    # mixing in a cross-encoder's own (unbounded, model-specific) scale
+                    # here would shift every threshold decision with no warning.
+                    result = reorder_by_cross_encoder(result, cross_scores)
+                except CrossEncoderUnavailable as exc:
+                    logger.warning(
+                        "Cross-encoder reranking failed, falling back to lexical order",
+                        error=str(exc),
+                    )
+            return result
+
+        ranked = await _rerank(candidates)
+
+        # Adaptive follow-up (also gated on MULTI_QUERY_RETRIEVAL_ENABLED): when the best
+        # the pool has to offer is still below the same line ai_service.py uses to decide
+        # "not enough to answer confidently" (RAG_MIN_CONTEXT_SCORE), try one more,
+        # LLM-proposed query aimed at whatever the searches so far likely missed, merge
+        # it in, and re-score. Bounded by MULTI_QUERY_MAX_FOLLOWUPS -- an adaptive loop
+        # still needs a worst-case cost, the same reason graph traversal is bounded by
+        # MAX_NEIGHBOR_DEPTH -- so this can never become an unbounded retry loop.
+        if multi_query_enabled and settings.MULTI_QUERY_MAX_FOLLOWUPS > 0:
+            tried_queries = list(multi_subject_queries) or [retrieval_query]
+            seen_chunk_ids = {chunk.id for chunk in candidates}
+            followups_used = 0
+            while (
+                followups_used < settings.MULTI_QUERY_MAX_FOLLOWUPS
+                and ranked
+                and ranked[0][1] < settings.RAG_MIN_CONTEXT_SCORE
+            ):
+                weak_titles = [
+                    getattr(getattr(chunk, "article", None), "title", None)
+                    for chunk, _score in ranked[:5]
+                ]
+                followup_query = await generate_followup_query(
+                    query, tried_queries, [title for title in weak_titles if title]
                 )
-                # Order comes from the cross-encoder; the VALUE reported and thresholded
-                # below stays the lexical score. RAG_MIN_RELEVANCE_SCORE and every caller
-                # reading `score` were tuned against that scale, and mixing in a
-                # cross-encoder's own (unbounded, model-specific) scale here would shift
-                # every threshold decision with no warning.
-                ranked = reorder_by_cross_encoder(ranked, cross_scores)
-            except CrossEncoderUnavailable as exc:
-                logger.warning(
-                    "Cross-encoder reranking failed, falling back to lexical order",
-                    error=str(exc),
+                followups_used += 1
+                if not followup_query:
+                    break
+                normalized_followup = normalize_query(followup_query)
+                if not normalized_followup or normalized_followup in tried_queries:
+                    break
+                tried_queries.append(normalized_followup)
+                followup_embedding = await _embed_or_degrade(normalized_followup)
+                followup_candidates = await self.chunk_repo.hybrid_search(
+                    query=normalized_followup,
+                    query_embedding=followup_embedding,
+                    user=user,
+                    limit=pool_limit,
+                    filters=effective_filters,
                 )
+                merged = _merge_candidates(candidates, followup_candidates, seen_chunk_ids)
+                if len(merged) == len(candidates):
+                    # Every follow-up hit was already in the pool -- nothing new to
+                    # re-score, and another round would just ask the same question again.
+                    break
+                candidates = merged
+                ranked = await _rerank(candidates)
+                logger.info(
+                    "AI multi-query follow-up search added candidates",
+                    query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                    followup_query_length=len(normalized_followup),
+                    pool_size=len(candidates),
+                )
+
         ranked = ranked[:limit]
         # Vector similarity alone is not enough: short or vague inputs can be
         # close to an unrelated document in embedding space. Keep a result only

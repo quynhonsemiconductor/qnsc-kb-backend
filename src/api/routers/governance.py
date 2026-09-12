@@ -3,7 +3,7 @@ import json
 import time
 from datetime import datetime, timedelta
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 from fastapi import APIRouter, Depends, Query, status, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from src.models.user import Department
 from src.models.governance import (
     AuditLog,
     ApprovalRule,
+    ApprovalRuleVersion,
     ApproverRule,
     DraftTransition,
     DraftCandidate,
@@ -1599,6 +1600,11 @@ class ApprovalRuleRequest(BaseModel):
     dept: str | None = Field(default=None, max_length=100)
     file_extensions: list[str] | None = Field(default=None, max_length=25)
     max_similarity_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # None (the default) means "any", same convention as every other scoping field here.
+    # Validated against the agent's own closed vocabulary rather than an open list of
+    # strings, so a typo in a risk tier fails the request instead of silently scoping a
+    # rule to a tier no draft can ever be classified into.
+    risk_tiers: list[Literal["standard", "high"]] | None = Field(default=None, max_length=2)
     # Both default to False here as well as in the model and the database: a rule created
     # by a client that omits them must not acquire authority by omission.
     can_approve: bool = False
@@ -1623,12 +1629,39 @@ def _approval_rule_payload(rule: ApprovalRule) -> dict[str, Any]:
         "dept": rule.dept,
         "file_extensions": rule.file_extensions,
         "max_similarity_score": rule.max_similarity_score,
+        "risk_tiers": rule.risk_tiers,
         "can_approve": rule.can_approve,
         "can_reject": rule.can_reject,
         "created_by": str(rule.created_by) if rule.created_by else None,
         "created_at": rule.created_at,
         "updated_at": rule.updated_at,
+        "version": rule.version,
     }
+
+
+def _snapshot_rule_version(rule: ApprovalRule, changed_by: uuid.UUID) -> ApprovalRuleVersion:
+    """A full snapshot of `rule`'s current fields, at its CURRENT `version` number.
+
+    Called after the caller has already set rule.version to the value this snapshot
+    should be filed under -- see create_approval_rule/update_approval_rule, both of which
+    write one of these in the same transaction as the rule change itself.
+    """
+    return ApprovalRuleVersion(
+        rule_id=rule.id,
+        version=rule.version,
+        name=rule.name,
+        instruction=rule.instruction,
+        active=rule.active,
+        priority=rule.priority,
+        connector_id=rule.connector_id,
+        dept=rule.dept,
+        file_extensions=rule.file_extensions,
+        max_similarity_score=rule.max_similarity_score,
+        risk_tiers=rule.risk_tiers,
+        can_approve=rule.can_approve,
+        can_reject=rule.can_reject,
+        changed_by=changed_by,
+    )
 
 
 def _normalise_extensions(values: list[str] | None) -> list[str] | None:
@@ -1674,6 +1707,7 @@ async def create_approval_rule(
         dept=payload.dept.strip() if payload.dept else None,
         file_extensions=_normalise_extensions(payload.file_extensions),
         max_similarity_score=payload.max_similarity_score,
+        risk_tiers=payload.risk_tiers,
         can_approve=payload.can_approve,
         can_reject=payload.can_reject,
         # The agent runs as this person. A rule outlives the session that created it, so
@@ -1682,6 +1716,7 @@ async def create_approval_rule(
     )
     db.add(rule)
     await db.flush()
+    db.add(_snapshot_rule_version(rule, current_user.id))
     db.add(
         AuditLog(
             user_id=current_user.id,
@@ -1689,7 +1724,7 @@ async def create_approval_rule(
             target_type="approval_rule",
             target_id=str(rule.id),
             outcome="success",
-            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject},
+            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject, "version": rule.version},
         )
     )
     await db.commit()
@@ -1714,8 +1749,14 @@ async def update_approval_rule(
     rule.dept = payload.dept.strip() if payload.dept else None
     rule.file_extensions = _normalise_extensions(payload.file_extensions)
     rule.max_similarity_score = payload.max_similarity_score
+    rule.risk_tiers = payload.risk_tiers
     rule.can_approve = payload.can_approve
     rule.can_reject = payload.can_reject
+    # Every edit is a new version, snapshotted below -- a decision an earlier version
+    # made must stay attributable to the wording/scope/authority that was actually in
+    # effect when it fired, not whatever the rule reads as after this edit.
+    rule.version += 1
+    db.add(_snapshot_rule_version(rule, current_user.id))
     db.add(
         AuditLog(
             user_id=current_user.id,
@@ -1723,7 +1764,7 @@ async def update_approval_rule(
             target_type="approval_rule",
             target_id=str(rule.id),
             outcome="success",
-            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject},
+            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject, "version": rule.version},
         )
     )
     await db.commit()

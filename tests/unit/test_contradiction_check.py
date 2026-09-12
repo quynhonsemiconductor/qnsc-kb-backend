@@ -107,7 +107,18 @@ def test_a_real_conflict_is_detected_and_recorded(monkeypatch):
     record = db.added[0]
     assert record.company_domain == "qnsc.vn"
     assert record.fact == "deadline"
+    assert record.contradiction_type == "date"
     assert set(record.article_ids) == {"draft", str(other.id)}
+
+
+def test_an_ownership_conflict_is_classified_correctly(monkeypatch):
+    other = _Article(uuid.uuid4(), "Other SOP", "Owner: Finance team.")
+    db = _FakeDB({str(other.id): other})
+    matches = [{"article_id": str(other.id), "score": 0.5}]
+
+    _run(db, matches, "Owner: HR team.", monkeypatch=monkeypatch)
+
+    assert db.added[0].contradiction_type == "ownership"
 
 
 def test_no_shared_labelled_fact_means_no_conflict(monkeypatch):

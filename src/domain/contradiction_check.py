@@ -57,7 +57,7 @@ async def detect_contradictions_for_draft(
     same way the reactive path already is. Swallows its own failures and logs them --
     see the module docstring for why a broken check must not touch approval at all.
     """
-    from src.domain.ai_service import _detect_explicit_conflicts
+    from src.domain.ai_service import _detect_explicit_conflicts, classify_fact_type
 
     try:
         matches = await find_similar_documents(db, user, draft_body_md)
@@ -124,6 +124,7 @@ async def detect_contradictions_for_draft(
             ConflictRecord(
                 company_domain=user.company_domain,
                 fact=str(conflict["fact"])[:255],
+                contradiction_type=classify_fact_type(str(conflict["fact"])),
                 article_ids=article_ids,
                 evidence=[
                     {

@@ -85,7 +85,7 @@ def warm_up() -> None:
     resolve_provider().warm_up()
 
 
-# Models trained with an asymmetric instruction prefix. e5 is explicit about it:
+# Models trained with an asymmetric instruction prefix. Base e5 is explicit about it:
 # "Each input text should start with 'query: ' or 'passage: ', even for
 # non-English texts", and omitting the prefix costs recall SILENTLY -- the
 # vectors are still unit-norm and still retrieve something, just worse. bge-m3
@@ -95,11 +95,25 @@ _INSTRUCTION_PREFIXES = {
     "passage": "passage: ",
 }
 
+# The instruct-tuned e5 variants (multilingual-e5-large-instruct, e5-mistral-7b-instruct,
+# gte-Qwen2-*-instruct, ...) use a DIFFERENT convention than base e5, not the same one at
+# a bigger size: the query gets a full natural-language task instruction, and the PASSAGE
+# gets no prefix at all -- not "passage: ", nothing. Model card: `f"Instruct: {task}\n
+# Query: {query}"` for queries, raw text for passages. Applying the base-e5 prefix table
+# to an instruct model instead would still produce valid, unit-norm vectors -- just ones
+# the model was not tuned to place well, the same silent-degradation failure mode this
+# whole prefix seam exists to avoid.
+_RETRIEVAL_INSTRUCTION = "Given a search query, retrieve relevant passages that answer the query"
+
 
 def _needs_instruction_prefix() -> bool:
     model = settings.EMBEDDING_MODEL.lower()
     # bge-m3 dropped instructions entirely; only the e5 family needs them here.
     return "e5-" in model
+
+
+def _is_instruct_tuned() -> bool:
+    return "instruct" in settings.EMBEDDING_MODEL.lower()
 
 
 def _decorate(texts: list[str], task: str) -> list[str]:
@@ -112,6 +126,10 @@ def _decorate(texts: list[str], task: str) -> list[str]:
     """
     if not _needs_instruction_prefix():
         return texts
+    if _is_instruct_tuned():
+        if task == "RETRIEVAL_QUERY":
+            return [f"Instruct: {_RETRIEVAL_INSTRUCTION}\nQuery: {text}" for text in texts]
+        return list(texts)
     key = "query" if task == "RETRIEVAL_QUERY" else "passage"
     prefix = _INSTRUCTION_PREFIXES[key]
     return [f"{prefix}{text}" for text in texts]

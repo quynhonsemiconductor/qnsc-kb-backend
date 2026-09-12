@@ -111,7 +111,6 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-flash-lite-latest"
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
-    GEMINI_MAX_OUTPUT_TOKENS: int = 8192
     LLM_TIMEOUT_SECONDS: float = 90.0
     # Local, in-process, and deliberately so: no embedding text leaves the deployment and
     # no third-party key gates indexing or search.
@@ -127,39 +126,37 @@ class Settings(BaseSettings):
     # HNSW index AT MIGRATION TIME. Changing it later needs a migration and a full
     # re-embed: a query and a chunk embedded by different models are points in unrelated
     # spaces, and their distance is meaningless rather than merely wrong.
-    # paraphrase-multilingual-MiniLM-L12-v2, chosen for a CPU-only deployment: 12 layers
-    # and 384 dimensions against bge-m3's 24 layers and 1024, which is the difference
-    # between embedding a query in milliseconds and in seconds without a GPU. It is
-    # multilingual, which the Vietnamese corpus needs, and it publishes its own ONNX
-    # export so the image needs no torch and no optimum-cli step.
     #
-    # MEASURED ALTERNATIVE, NOT YET THE DEFAULT. On VN-MTEB retrieval (arXiv
-    # 2507.21500, Table 3) multilingual-e5-small scores 34.12 against 14.14 for
-    # this model — a 2.4x gap on Vietnamese retrieval — and measured here on
-    # MLQA/UIT-ViQuAD dev (experiments/results.jsonl, iteration 1) the swap moved
-    # gold-document retrieval en 80.8 -> 93.5%, vi 57.5 -> 63.0%, ViQuAD
-    # 70.2 -> 74.5%, and end-to-end F1 en 54.28 -> 62.20, vi 32.08 -> 33.88,
-    # ViQuAD 48.11 -> 51.41.
+    # HISTORY (superseded, kept for the reasoning trail):
+    # - paraphrase-multilingual-MiniLM-L12-v2 shipped first: 12 layers/384-dim, the
+    #   fastest CPU-only option, multilingual, own ONNX export.
+    # - intfloat/multilingual-e5-small replaced it (see EMBEDDING_VERSION history below):
+    #   MiniLM is a symmetric paraphrase/STS model, wrong training objective for
+    #   question->passage retrieval. VN-MTEB (arXiv 2507.21500, Table 3): e5-small scores
+    #   34.12 retrieval against MiniLM's 14.14. Measured here on MLQA/UIT-ViQuAD dev
+    #   (retrieval-only R@10): MiniLM 80.5/56.5/68.8 (en/vi/ViQuAD-vi) vs e5-small
+    #   91.0/61.0/67.4; end-to-end F1 en 54.28->62.20, vi 32.08->33.88, ViQuAD 48.11->51.41.
+    #   Same 384 width, so no pgvector column change -- delete+re-embed only.
     #
-    # It is not switched on here because doing so is not a config change: it
-    # requires editing infra/live/*/main.tf (pinned to the Dockerfile ARG by
-    # tests/unit/test_embedding_config_matches_image.py) and DELETING plus
-    # re-embedding every stored chunk (migration 20260831_69) — the vectors are the
-    # same 384 width but a different space. Adopt it with:
-    #
-    #   EMBEDDING_MODEL=intfloat/multilingual-e5-small
-    #   EMBEDDING_VERSION=e5-small-v1
-    #   EMBEDDING_MAX_TOKENS=512
-    #
-    # plus the matching infra/Dockerfile values and a full re-index. The `query: `/
-    # `passage: ` prefixes e5 needs are already applied centrally in
-    # src/lib/embeddings/__init__.py, so nothing else in the code has to change.
-    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-small"
+    # CURRENT: intfloat/multilingual-e5-large-instruct, 24 layers/1024-dim. On the same
+    # VN-MTEB benchmark it scores 40.88 retrieval (vs e5-small's 34.12) and the highest
+    # overall average of all 18 models the paper measured — ahead of every 7B model
+    # tested, including gte-Qwen2-7B-instruct and e5-Mistral-7B-instruct. e5-base was
+    # measured too and rejected: 34.50 retrieval, barely above e5-small, not worth its own
+    # cost. Unlike the same-width e5-small swap, this DOES change EMBEDDING_DIMENSION
+    # (384->1024) and needs: a real pgvector/HNSW migration (ALTER COLUMN + index rebuild,
+    # not delete+re-embed — see migrations/versions/202608*_*_realign_embedding_dimension.py
+    # for the template), a fresh ONNX export (verify EMBEDDING_ONNX_POOLING against this
+    # model's own 1_Pooling/config.json rather than assuming "mean" carries over), and a
+    # torch/ONNX parity check (tests/unit/test_embedding_backends.py) before flipping any
+    # environment. Infra (infra/live/*/main.tf, Dockerfile ARG) must move in lockstep —
+    # tests/unit/test_embedding_config_matches_image.py enforces that.
+    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large-instruct"
     # Names the MODEL that produced a vector, and hybrid_search filters on it, so a
     # mislabelled corpus is an invisible corpus. Rows written while this said
     # "bge-m3-v1" hold MiniLM vectors — provably, since a vector(384) column cannot
     # hold bge-m3's 1024 — and need re-stamping or re-indexing once.
-    EMBEDDING_VERSION: str = "e5-small-v1"
+    EMBEDDING_VERSION: str = "e5-large-instruct-v1"
 
     # HOW the model runs, kept separate from WHICH model runs.
     #
@@ -175,10 +172,13 @@ class Settings(BaseSettings):
     EMBEDDING_RUNTIME: str = "onnx"
     EMBEDDING_ONNX_DIR: str = "/opt/embedding-onnx"
     # PER MODEL, and not inferable from the export: an ONNX graph does not carry the
-    # pooling config sentence-transformers reads. This model's own 1_Pooling/config.json
-    # sets pooling_mode_mean_tokens=true and pooling_mode_cls_token=false, so "mean" is
-    # correct here. The previous default of "cls" (right for bge-*) would have produced
-    # perfectly valid vectors in the wrong space, degrading retrieval with no error.
+    # pooling config sentence-transformers reads. Every e5 model to date (small, base,
+    # large, and large-instruct) publishes pooling_mode_mean_tokens=true in its
+    # 1_Pooling/config.json, so "mean" carries over unchanged across those swaps — but
+    # CONFIRM this against multilingual-e5-large-instruct's own config.json before
+    # shipping rather than assuming the family convention holds; the wrong choice (e.g.
+    # "cls", right for bge-*) produces perfectly valid vectors in the wrong space,
+    # degrading retrieval with no error.
     EMBEDDING_ONNX_POOLING: str = "mean"
     # 2, matched to the worker's 2048 CPU units. This was 1, justified by a comment in
     # local_onnx.py about "a 0.5 vCPU task" — a sizing the worker has not had for some
@@ -189,13 +189,15 @@ class Settings(BaseSettings):
     # spends the difference on scheduling, which is what the original comment was right
     # about. Raise this and the `cpu` in infra/live/*/main.tf together or not at all.
     EMBEDDING_ONNX_THREADS: int = 2
-    # This model's sentence_bert_config.json says max_seq_length 128, and its
-    # max_position_embeddings is 512. The previous 8192 (bge-m3's window) would let the
-    # tokenizer emit sequences the graph cannot accept.
+    # multilingual-e5-large-instruct shares e5-small/e5-base's XLM-R tokenizer window:
+    # sentence_bert_config.json max_seq_length 512. Unchanged from the e5-small default,
+    # so this value does NOT need to move for the large-instruct swap — but still confirm
+    # against the model's own sentence_bert_config.json before shipping (the 8192 value
+    # would be bge-m3's window; the tokenizer silently truncates rather than erroring on
+    # a mismatch, so a wrong number here degrades long inputs with nothing to notice).
     #
-    # 128 is also why chunker.py sizes retrieval children at 250 characters. Switching
-    # to multilingual-e5-small (see EMBEDDING_MODEL) allows 512 and therefore larger
-    # children; raise both together or neither.
+    # This is also why chunker.py sizes retrieval children at up to 250 characters —
+    # raise both together or neither.
     EMBEDDING_MAX_TOKENS: int = 512
     EMBEDDING_BATCH_SIZE: int = 32
     # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
@@ -205,7 +207,14 @@ class Settings(BaseSettings):
     EMBEDDING_HTTP_MAX_ATTEMPTS: int = 4
     EMBEDDING_HTTP_BACKOFF_SECONDS: float = 1.0
 
-    CHUNKING_VERSION: str = "v2-structure-aware"
+    # Stamped per chunk (indexing.py), not read back anywhere to trigger anything
+    # automatically -- a version bump alone does not re-index existing content. Forcing
+    # already-published articles onto the new version needs its own migration that
+    # re-queues them (see 20260828_64/20260912_77 for the same pattern on
+    # EMBEDDING_VERSION). Bumped for contextual chunk headers (src/rag/contextual_header.py):
+    # the embedding INPUT changed (a section-level header is now prepended before a child
+    # is embedded), even though chunk boundaries and stored chunk_text did not.
+    CHUNKING_VERSION: str = "v3-contextual-headers"
     EMBEDDING_DIMENSION: int | None = None
     LLM_MODEL: str = "gemma-4-26b-a4b-it"
     RESTRUCTURE_ENABLED: bool = True
@@ -253,6 +262,15 @@ class Settings(BaseSettings):
     # nothing. The retrieval score is a signal that already exists at zero extra LLM
     # cost, so it is what this reads instead.
     RAG_LOW_CONFIDENCE_SCORE: float = 0.5
+    # Off by default, same posture as CROSS_ENCODER_RERANKER_ENABLED/GRAPH_RETRIEVAL_ENABLED
+    # above: a new code path with no production traffic behind it yet, and this one adds a
+    # real LLM call (rag/llm_judge.py::judge_entailment, per flagged sentence) to the live
+    # /ai/ask latency, unlike those two which are pure retrieval-side additions. Flip once
+    # measured against real answers.
+    CLAIM_VERIFICATION_ENABLED: bool = False
+    # Bounds the worst case: a long, heavily-cited answer must not turn into an unbounded
+    # number of judge calls before the response can return.
+    CLAIM_VERIFICATION_MAX_SENTENCES: int = 5
     # Off by default, deliberately: this is a new code path with no production traffic
     # behind it yet. Flip it once it has been proven against a real corpus and the `ml`
     # poetry group (sentence-transformers) is actually installed in the target image —
@@ -271,6 +289,36 @@ class Settings(BaseSettings):
     # passage at index time — so this is a cost/latency dial, not a recall ceiling like
     # RAG_CANDIDATE_POOL_SIZE below.
     CROSS_ENCODER_CANDIDATE_POOL: int = 30
+    # Off by default, same posture as CROSS_ENCODER_RERANKER_ENABLED above: a new
+    # retrieval leg with no production traffic behind it yet. It adds a third
+    # candidate list to hybrid_search's existing RRF fusion (src/repositories/chunk.py) --
+    # chunks from articles whose entity-graph mentions overlap with entities named in the
+    # query, one hop out (see ChunkRepository._graph_augmented_candidates). Flip once
+    # measured against a real corpus with a populated graph, same discipline as every
+    # other retrieval change in this file.
+    GRAPH_RETRIEVAL_ENABLED: bool = False
+    # Article-level, not chunk-level (ArticleEntityMention records "this article mentions
+    # this entity", not which chunk), so this leg is coarser than the vector/keyword legs
+    # by construction -- kept smaller than RAG_CANDIDATE_POOL_SIZE so a broad entity match
+    # cannot dominate the fused pool.
+    GRAPH_RETRIEVAL_POOL_SIZE: int = 30
+    # Off by default, same posture as CROSS_ENCODER_RERANKER_ENABLED/GRAPH_RETRIEVAL_ENABLED
+    # above: a new code path with no production traffic behind it yet, and this one adds a
+    # real LLM call (rag/multi_query.py) to the live search path. When on: a non-comparison
+    # query (a comparison already gets its own free, deterministic decomposition just above
+    # -- this does not layer on top of that one) is expanded into up to
+    # MULTI_QUERY_MAX_SUBQUERIES additional targeted search queries, run in parallel with
+    # the original and merged the same way comparison subjects already are. Flip once
+    # measured against real traffic, same discipline as every other retrieval change here.
+    MULTI_QUERY_RETRIEVAL_ENABLED: bool = False
+    MULTI_QUERY_MAX_SUBQUERIES: int = 3
+    # When the reranked pool's top score is still below RAG_MIN_CONTEXT_SCORE -- the same
+    # line ai_service.py uses to decide "not enough to answer confidently" -- one further,
+    # LLM-proposed query is tried and merged in before that decision is made. Bounded (not
+    # a while-true) for the same reason MAX_NEIGHBOR_DEPTH bounds graph traversal: an
+    # adaptive loop must still have a worst-case cost. 0 disables the follow-up round
+    # without disabling the sub-query expansion above.
+    MULTI_QUERY_MAX_FOLLOWUPS: int = 1
     # 48. Each retrieval leg truncates here BEFORE RRF fusion, so it is a recall
     # ceiling rather than a performance dial — and it is measurably too shallow for
     # Vietnamese: on failed MLQA-vi questions the sparse leg had already found the
@@ -301,11 +349,17 @@ class Settings(BaseSettings):
     PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
     # Part of the ai_cache key (src/domain/ai_service.py:917-924), so this MUST move
     # whenever retrieval behaviour changes, or a cached answer from the old pipeline is
-    # served for six hours as if it came from the new one.
-    RETRIEVAL_VERSION: str = "v4-e5-encoder-5x-topk"
+    # served for six hours as if it came from the new one. Bumped for the
+    # e5-large-instruct encoder swap (see EMBEDDING_MODEL) -- a cached answer keyed to
+    # v4's e5-small-derived retrieval must not be served once the vector space changes.
+    RETRIEVAL_VERSION: str = "v5-e5-large-instruct"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
+    # False by default: an intentional product choice, not an oversight, so changing it
+    # is a product decision for whoever owns that tradeoff -- not something to flip here
+    # as a side effect of one local bug report. See docker-compose.yml (dev override) for
+    # what turning it on actually does and why it was tried there instead.
     RAG_ALLOW_EXTENDED_ON_REFUSAL: bool = False
     # Character budget for conversation history injected into the prompt.
     # Bounds total prompt size (history + RAG context + system prompt) so long
@@ -327,11 +381,13 @@ class Settings(BaseSettings):
     # when it ends — and it is now much smaller still, because the reasoning tokens that
     # were consuming the budget are disabled on this path.
     #
-    # Set an integer to put the bound back; the value is passed straight through. Two
-    # things to know if you do. Gemini is never uncapped: its branch falls back to
-    # GEMINI_MAX_OUTPUT_TOKENS when this is None. And a very long answer becomes part of
-    # the next turn's history, which RAG_HISTORY_MAX_CHARS trims at 9,000 characters, so
-    # a rambling reply crowds out the conversation before it costs anything else.
+    # Set an integer to put the bound back; the value is passed straight through to
+    # every provider, Gemini included — its branch now omits `maxOutputTokens` on None
+    # the same way the OpenAI-compatible branch omits `max_tokens`, so there is no
+    # separate Gemini-only ceiling to also change. One thing to know if you do set it: a
+    # very long answer becomes part of the next turn's history, which RAG_HISTORY_MAX_CHARS
+    # trims at 9,000 characters, so a rambling reply crowds out the conversation before it
+    # costs anything else.
     RAG_MAX_ANSWER_TOKENS: int | None = None
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
@@ -398,6 +454,13 @@ class Settings(BaseSettings):
     # a run that decides a few hundred documents unattended should be a deliberate act
     # repeated, not one call with no upper bound.
     APPROVAL_AGENT_BATCH_LIMIT: int = 50
+    # Comma-separated, same convention as CORS_ORIGINS (see cors_origin_list below) --
+    # departments an operator has explicitly decided count as "high risk" for approval
+    # scoping (ApprovalRule.risk_tiers). Empty by default: this is a hook an operator
+    # opts into, not a judgment the code makes on their behalf about which departments
+    # are sensitive. A draft's risk tier is otherwise "standard" (see
+    # approval_agent.compute_draft_risk_tier), so an empty list changes nothing.
+    APPROVAL_AGENT_HIGH_RISK_DEPARTMENTS: str = ""
     # How often the beat schedule calls approval_agent.run() for every company that has
     # an active rule. Without this the agent only ever ran when something called
     # POST /governance/approval-agent/run by hand -- rules existed and were correctly
@@ -532,8 +595,14 @@ class Settings(BaseSettings):
                 # multilingual-e5-small is 384-wide, same as MiniLM — so switching
                 # between them needs no pgvector column or HNSW rebuild.
                 self.EMBEDDING_DIMENSION = 384
-            elif "e5-base" in model or "e5-large" in model:
+            elif "e5-base" in model:
                 self.EMBEDDING_DIMENSION = 768
+            elif "e5-large" in model:
+                # multilingual-e5-large(-instruct) is XLM-R-large-based, 1024-wide —
+                # NOT 768 like e5-base. Collapsing the two here previously produced a
+                # silently-wrong derived width for e5-large; base.py's finalise() width
+                # check would catch the mismatch at runtime, but don't rely on that.
+                self.EMBEDDING_DIMENSION = 1024
             elif "text-embedding-3-small" in model or "ada-002" in model:
                 self.EMBEDDING_DIMENSION = 1536
             elif "gemini-embedding" in model or "text-embedding-004" in model:
@@ -552,6 +621,14 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [
             origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
+        ]
+
+    @property
+    def approval_agent_high_risk_department_list(self) -> list[str]:
+        return [
+            dept.strip().lower()
+            for dept in self.APPROVAL_AGENT_HIGH_RISK_DEPARTMENTS.split(",")
+            if dept.strip()
         ]
 
     @property

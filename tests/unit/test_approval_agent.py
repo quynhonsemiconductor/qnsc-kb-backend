@@ -45,6 +45,8 @@ class _Rule:
         self.dept = kwargs.pop("dept", None)
         self.file_extensions = kwargs.pop("file_extensions", None)
         self.max_similarity_score = kwargs.pop("max_similarity_score", None)
+        self.risk_tiers = kwargs.pop("risk_tiers", None)
+        self.version = kwargs.pop("version", 1)
         self.instruction = kwargs.pop("instruction", "Approve lecture material.")
         self.can_approve = kwargs.pop("can_approve", True)
         self.can_reject = kwargs.pop("can_reject", True)
@@ -63,6 +65,7 @@ class _Draft:
         self.restructured_body_md = kwargs.pop("restructured_body_md", None)
         self.similarity_matches = kwargs.pop("similarity_matches", None)
         self.external_document_id = kwargs.pop("external_document_id", None)
+        self.content_metadata = kwargs.pop("content_metadata", None)
         assert not kwargs, kwargs
 
 
@@ -144,6 +147,55 @@ def test_unmeasured_similarity_is_not_treated_as_low():
 
 def test_the_highest_similarity_counts_not_the_first():
     assert top_similarity(_Draft(similarity_matches=[{"score": 0.1}, {"score": 0.8}])) == 0.8
+
+
+# --- risk-tiered scoping: deterministic, same posture as every other filter above -----
+
+
+def test_compute_draft_risk_tier_defaults_to_standard():
+    from src.domain.approval_agent import STANDARD_RISK, compute_draft_risk_tier
+
+    assert compute_draft_risk_tier(_Draft()) == STANDARD_RISK
+
+
+def test_compute_draft_risk_tier_is_high_for_restricted_metadata():
+    from src.domain.approval_agent import HIGH_RISK, compute_draft_risk_tier
+
+    assert compute_draft_risk_tier(_Draft(content_metadata={"sensitivity": "restricted"})) == HIGH_RISK
+    assert compute_draft_risk_tier(_Draft(content_metadata={"sensitivity": "Confidential"})) == HIGH_RISK
+
+
+def test_compute_draft_risk_tier_is_high_for_a_configured_department(monkeypatch):
+    from src.domain.approval_agent import HIGH_RISK, compute_draft_risk_tier
+
+    monkeypatch.setattr(settings, "APPROVAL_AGENT_HIGH_RISK_DEPARTMENTS", "Legal, Finance")
+    assert compute_draft_risk_tier(_Draft(dept="finance")) == HIGH_RISK
+    assert compute_draft_risk_tier(_Draft(dept="Engineering")) != HIGH_RISK
+
+
+def test_compute_draft_risk_tier_department_check_is_opt_in():
+    """Empty (the default) means this half of the check never fires -- a fresh
+    deployment sees every draft as standard until an operator configures otherwise."""
+    from src.domain.approval_agent import STANDARD_RISK, compute_draft_risk_tier
+
+    assert compute_draft_risk_tier(_Draft(dept="Finance")) == STANDARD_RISK
+
+
+def test_an_unset_risk_tiers_filter_matches_anything():
+    assert rule_applies(_Rule(risk_tiers=None), _Draft())
+
+
+def test_a_risk_tiers_filter_excludes_a_draft_outside_it(monkeypatch):
+    monkeypatch.setattr(settings, "APPROVAL_AGENT_HIGH_RISK_DEPARTMENTS", "")
+    rule = _Rule(risk_tiers=["high"])
+    assert not rule_applies(rule, _Draft())  # standard by default
+    assert rule_applies(rule, _Draft(content_metadata={"sensitivity": "restricted"}))
+
+
+def test_a_successful_verdict_carries_the_rule_version_that_fired(llm):
+    llm["reply"] = '{"decision": "approve", "reason": "names its course"}'
+    verdict = _decide(rules=[_Rule(version=3)])
+    assert verdict.rule_version == 3
 
 
 def test_the_lowest_priority_number_governs():

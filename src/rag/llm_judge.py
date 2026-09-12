@@ -13,6 +13,15 @@ Call these from a scheduled job or an on-demand dashboard action. Never from the
 an LLM outage should surface as `JudgeUnavailable`, the same way `VectorSearchUnavailable`
 surfaces an embedding outage in `domain/search_service.py`, rather than as a fabricated
 number that makes a real quality regression invisible on the dashboard.
+
+`find_unverified_claims` below is the one exception to "never from the live path", and it
+earns that exception by construction rather than by relaxing the rule: it is feature-
+flagged off by default (CLAIM_VERIFICATION_ENABLED), bounded to a handful of judge calls
+per answer (CLAIM_VERIFICATION_MAX_SENTENCES), purely ADDITIVE metadata that never edits
+or blocks the answer it is checking, and a `JudgeUnavailable` from any individual call is
+swallowed as "not checked" rather than surfaced -- an outage degrades this feature to
+finding nothing, never to breaking or slowing down an answer users are waiting on beyond
+the bounded number of calls already spent.
 """
 from __future__ import annotations
 
@@ -182,3 +191,47 @@ async def judge_entailment(claim: str, passage: str) -> bool:
     if normalized.startswith("no"):
         return False
     raise JudgeUnavailable(f"entailment judge returned neither yes nor no: {text!r}")
+
+
+async def find_unverified_claims(
+    answer: str,
+    context_by_source_id: dict[str, str],
+    *,
+    max_sentences: int = 5,
+) -> list[dict[str, str]]:
+    """Cited sentences in `answer` that the entailment judge says are NOT actually
+    supported by the source they cite -- the live-/ai/ask use of `judge_entailment`.
+
+    Only sentences worth the cost are checked: `has_checkable_claim` must flag one (a
+    number, a date, a %) AND it must cite exactly one source -- a vague sentence or one
+    citing several passages at once rarely has a crisp yes/no answer, and checking every
+    sentence would multiply the LLM cost of every answer by however many sentences it
+    has. Capped at `max_sentences` so one long, heavily-cited answer cannot turn into an
+    unbounded number of judge calls before the response can return.
+
+    Never raises. A `JudgeUnavailable` from any one call is NOT evidence that sentence is
+    wrong -- it means the claim was never actually checked, so it is silently skipped
+    rather than reported as unverified. See the module docstring for why this is the one
+    function here meant to be called from the live answer path.
+    """
+    from src.rag.citations import has_checkable_claim, split_cited_sentences
+
+    checked = 0
+    unverified: list[dict[str, str]] = []
+    for sentence, citation_ids in split_cited_sentences(answer):
+        if checked >= max_sentences:
+            break
+        if len(citation_ids) != 1 or not has_checkable_claim(sentence):
+            continue
+        source_id = citation_ids[0]
+        passage = context_by_source_id.get(source_id)
+        if not passage:
+            continue
+        checked += 1
+        try:
+            supported = await judge_entailment(sentence, passage)
+        except JudgeUnavailable:
+            continue
+        if not supported:
+            unverified.append({"sentence": sentence, "source_id": source_id})
+    return unverified
