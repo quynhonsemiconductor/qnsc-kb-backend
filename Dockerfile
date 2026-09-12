@@ -58,10 +58,11 @@ RUN pip install --no-cache-dir poetry && \
 # ---------------------------------------------------------------------------
 # deps-ml — the same, plus ONNX Runtime and Transformers. api and worker.
 #
-# Not optional in practice: EMBEDDING_MODEL defaults to BAAI/bge-m3, and
-# src/lib/embeddings.py loads it in-process. Without this group the api answers /health
-# and then raises on the first search, because the failure is a lazy import inside the
-# model singleton rather than anything visible at startup.
+# Not optional in practice: EMBEDDING_MODEL defaults to intfloat/multilingual-e5-small
+# (src/core/config.py), and src/lib/embeddings/__init__.py loads it in-process. Without
+# this group the api answers /health and then raises on the first search, because the
+# failure is a lazy import inside the model singleton rather than anything visible at
+# startup.
 # ---------------------------------------------------------------------------
 FROM deps AS deps-ml
 
@@ -142,7 +143,7 @@ COPY --from=deps-ml /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml /usr/local/bin /usr/local/bin
 
 ARG BAKE_EMBEDDING_MODEL=true
-ARG EMBEDDING_MODEL=intfloat/multilingual-e5-small
+ARG EMBEDDING_MODEL=intfloat/multilingual-e5-large-instruct
 ENV HF_HOME=/opt/huggingface
 ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
 
@@ -153,20 +154,71 @@ ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
 # logged "Error generating local BGE embedding; continuing with keyword search".
 #
 # The model publishes its own ONNX export, so no optimum-cli step and no torch is needed
-# anywhere — the build downloads two files.
+# anywhere — the build downloads two (sometimes three, see below) files.
 #
 # fp32 (`onnx/model.onnx`), NOT one of the qint8 variants, even though those are smaller
 # and faster on CPU. Quantisation moves the vectors: this repo's own parity gate measured
 # int8 at cosine 0.972-0.987 against the reference, and a query embedded slightly off the
 # space its documents were embedded in degrades retrieval silently. Consistency wins.
-RUN mkdir -p "$HF_HOME" "$EMBEDDING_ONNX_DIR" && \
+#
+# `onnx/model.onnx_data`: fetched ONLY IF `list_repo_files` says the repo actually has
+# it. A model whose fp32 ONNX graph exceeds protobuf's 2GB limit — true for
+# multilingual-e5-large-instruct, NOT true for the smaller e5-small this previously baked
+# — splits its weights into this sibling file, which onnxruntime loads automatically as
+# long as it sits next to model.onnx under the same name. Missing it is not a load-time
+# error you would immediately connect to this cause: onnxruntime fails deep inside
+# InferenceSession() with a path error naming the missing external-data file, not
+# anything mentioning the Dockerfile or the bake step.
+#
+# NOTE for anyone editing this RUN line: `python -c` collapses every backslash-continued
+# line here into ONE logical line before Python ever parses it, so only constructs valid
+# as a single line survive -- a list comprehension (as both statements below use, the
+# second with an `if` FILTER clause standing in for a conditional) works; `try/except` or
+# an `if:` block does not, because Python's grammar will not let a compound statement
+# follow a `;`-separated simple statement on the same logical line. An earlier version of
+# this line used try/except and failed the build with a SyntaxError only once
+# BAKE_EMBEDDING_MODEL actually ran a model through it.
+# Two speed levers on top of the download itself, neither of which touches WHAT gets
+# downloaded or WHEN this layer reruns (that is a build-cache question -- see this repo's
+# CI, which sidesteps the whole bake with BAKE_EMBEDDING_MODEL=false and caches everything
+# else via `type=gha`; the deploy pipeline's own cache policy is decided in the shared
+# `quynhonsemiconductor/ci` reusable workflow, not here):
+#
+# - `HF_XET_HIGH_PERFORMANCE=1`: huggingface_hub 1.x already transfers through Xet (the
+#   `hf_xet` package below is pulled in as its own dependency, no install step needed) --
+#   this flag turns on Xet's more aggressive concurrency/chunking rather than switching on
+#   acceleration that was otherwise off. `HF_HUB_ENABLE_HF_TRANSFER` -- the older lever,
+#   worth knowing about only so nobody re-adds it -- is a no-op on this version: it warns
+#   "hf_transfer is not used anymore" and does nothing, because Xet replaced it.
+#
+# - `HF_TOKEN` via a build secret, not an ARG or ENV: a secret mount exists only for this
+#   RUN's own execution and is never written to a layer or `docker history`; an ARG is
+#   baked into image metadata forever. `required=false` so a build with nothing passed
+#   (every local build, and CI's BAKE_EMBEDDING_MODEL=false build) still succeeds exactly
+#   as before -- anonymous download of a public model.
+#
+#   Measured in this repo (a real build, not a claim from documentation): anonymous, no
+#   HF_TOKEN, no HF_XET_HIGH_PERFORMANCE — 61s for the 2.2 GB export. The Hub's own
+#   download warning states unauthenticated requests get lower rate limits AND SLOWER
+#   TRANSFER under Xet specifically (unlike the old CDN-blob path, where a public repo's
+#   bytes were not gated behind auth at all) -- so unlike a stale assumption carried over
+#   from that older mechanism, a token is worth passing here for real, not just as
+#   rate-limit insurance. To use it: `docker build --secret id=hf_token,env=HF_TOKEN ...`
+#   locally, or a `secrets:` entry on whatever `docker/build-push-action` step actually
+#   builds the deploy image (that step lives in `quynhonsemiconductor/ci`, not this repo).
+RUN --mount=type=secret,id=hf_token,required=false \
+    mkdir -p "$HF_HOME" "$EMBEDDING_ONNX_DIR" && \
     if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
+        export HF_XET_HIGH_PERFORMANCE=1 && \
+        if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi && \
         python -c "\
-from huggingface_hub import hf_hub_download; \
+from huggingface_hub import hf_hub_download, list_repo_files; \
 import shutil, os; \
 target = os.environ['EMBEDDING_ONNX_DIR']; \
 [shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', name), os.path.join(target, os.path.basename(name))) \
- for name in ('onnx/model.onnx', 'tokenizer.json')]"; \
+ for name in ('onnx/model.onnx', 'tokenizer.json')]; \
+[shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', 'onnx/model.onnx_data'), os.path.join(target, 'model.onnx_data')) \
+ for _ in [0] if 'onnx/model.onnx_data' in list_repo_files('${EMBEDDING_MODEL}')]"; \
     fi && \
     chown -R appuser:appuser "$HF_HOME" "$EMBEDDING_ONNX_DIR"
 

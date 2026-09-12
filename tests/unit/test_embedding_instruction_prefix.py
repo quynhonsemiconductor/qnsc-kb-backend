@@ -54,3 +54,32 @@ def test_e5_small_keeps_the_384_wide_column() -> None:
 
 def test_e5_base_is_768_wide() -> None:
     assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-base").EMBEDDING_DIMENSION == 768
+
+
+def test_e5_large_is_1024_wide() -> None:
+    # Regression guard: this used to collapse into the same 768 branch as e5-base, which
+    # is wrong -- multilingual-e5-large(-instruct) is XLM-R-large-based, 1024-dim.
+    assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-large").EMBEDDING_DIMENSION == 1024
+    assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-large-instruct").EMBEDDING_DIMENSION == 1024
+
+
+# --- instruct-tuned e5: a different prefix convention, not just a bigger base-e5 -------
+
+
+def test_instruct_query_gets_the_full_instruction_format(as_model) -> None:
+    as_model("intfloat/multilingual-e5-large-instruct")
+    assert _decorate(["thủ đô"], "RETRIEVAL_QUERY") == [
+        "Instruct: Given a search query, retrieve relevant passages that answer the query\n"
+        "Query: thủ đô"
+    ]
+
+
+def test_instruct_passage_gets_no_prefix_at_all(as_model) -> None:
+    # Unlike base e5, the instruct-tuned variants take a bare passage -- not "passage: ".
+    as_model("intfloat/multilingual-e5-large-instruct")
+    assert _decorate(["thủ đô"], "RETRIEVAL_DOCUMENT") == ["thủ đô"]
+
+
+def test_instruct_variant_still_reports_needing_a_prefix(as_model) -> None:
+    as_model("intfloat/multilingual-e5-large-instruct")
+    assert _needs_instruction_prefix()

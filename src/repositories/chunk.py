@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.chunk import ParentChunk, ArticleChunk, ChunkMetadata
 from src.models.article import Article, ArticleTag, ArticleUserPermission
+from src.models.graph import ArticleEntityMention, GraphEntity, GraphRelationship
 from src.models.user import Department
 from src.core.config import settings
 from src.repositories.article import ArticleRepository
@@ -112,6 +113,116 @@ class ChunkRepository:
             )
         )
         await self.db.commit()
+
+    #: A tenant's deduplicated entity vocabulary (see graph_service.py -- entities
+    #: accumulate ACROSS every published article, not per document) is a few thousand
+    #: rows at most. A defensive cap, not a tuned limit: this leg is off by default
+    #: pending its own measurement against a real corpus.
+    _GRAPH_ENTITY_SCAN_LIMIT = 5000
+
+    async def _matched_graph_entity_ids(
+        self, company_domain: str, folded_query: str
+    ) -> list[uuid.UUID]:
+        """Entities the query is plausibly ABOUT, expanded one hop via known
+        relationships -- the "local" half of graph-augmented retrieval (LightRAG's
+        term), deliberately not the broader "global" traversal graph_service.py's
+        deeper depths also support, which would trade precision for a wider net this
+        first cut does not attempt.
+
+        Matching is substring-in-query, done in Python rather than a reversed SQL LIKE
+        (checking whether a fixed query STRING contains each entity name COLUMN, not the
+        usual column-contains-value direction `.ilike()` expresses): a full scan of a
+        tenant's entity table is cheap at this scale and avoids a fragile
+        wildcard-escaping query for a feature that ships off pending its own measurement.
+        """
+        rows = (
+            await self.db.execute(
+                select(GraphEntity.id, GraphEntity.normalized_name)
+                .where(GraphEntity.company_domain == company_domain)
+                .limit(self._GRAPH_ENTITY_SCAN_LIMIT)
+            )
+        ).all()
+        matched_ids = {
+            entity_id
+            for entity_id, normalized_name in rows
+            if normalized_name and normalized_name in folded_query
+        }
+        if not matched_ids:
+            return []
+
+        neighbor_edges = (
+            await self.db.execute(
+                select(
+                    GraphRelationship.source_entity_id, GraphRelationship.target_entity_id
+                ).where(
+                    GraphRelationship.company_domain == company_domain,
+                    or_(
+                        GraphRelationship.source_entity_id.in_(matched_ids),
+                        GraphRelationship.target_entity_id.in_(matched_ids),
+                    ),
+                )
+            )
+        ).all()
+        expanded_ids = set(matched_ids)
+        for source_id, target_id in neighbor_edges:
+            expanded_ids.add(source_id)
+            expanded_ids.add(target_id)
+        return list(expanded_ids)
+
+    async def _graph_augmented_candidates(
+        self,
+        company_domain: str | None,
+        folded_query: str,
+        where_clauses: list,
+        limit: int,
+    ) -> list[ArticleChunk]:
+        """A third RRF candidate leg: chunks from articles whose entity graph overlaps
+        with entities named in the query (or their 1-hop neighbors).
+
+        Article-level, not chunk-level: `ArticleEntityMention` records "this article
+        mentions this entity", not which chunk, so this leg contributes every chunk of a
+        qualifying article rather than scoring chunks individually -- coarser than the
+        vector/keyword legs by construction. RRF's rank-based fusion still lets a
+        genuinely relevant article move up without this leg needing chunk-precise
+        scoring of its own.
+
+        Returns [] (never raises) if there is no company_domain to scope by or no
+        entities match -- the caller folds this into RRF alongside the other legs, and a
+        leg that finds nothing must look identical to a leg that was never asked.
+        """
+        if not company_domain:
+            return []
+        entity_ids = await self._matched_graph_entity_ids(company_domain, folded_query)
+        if not entity_ids:
+            return []
+
+        target = max(settings.GRAPH_RETRIEVAL_POOL_SIZE, limit)
+        stmt = (
+            select(ArticleChunk)
+            .join(Article, Article.id == ArticleChunk.article_id)
+            .join(ArticleEntityMention, ArticleEntityMention.article_id == Article.id)
+            .join(GraphEntity, GraphEntity.id == ArticleEntityMention.entity_id)
+            .where(and_(*where_clauses, ArticleEntityMention.entity_id.in_(entity_ids)))
+            .order_by(GraphEntity.mention_count.desc(), ArticleChunk.chunk_index.asc())
+            # No SQL DISTINCT: an article mentioning several matched entities joins once
+            # per entity, so the same chunk can recur -- deduped below in Python instead,
+            # since Postgres requires an ORDER BY expression to appear in the SELECT list
+            # under DISTINCT, and GraphEntity.mention_count is not part of what this
+            # selects. Over-fetched 3x so dedup does not starve `target` unique chunks.
+            .limit(target * 3)
+            .options(*RETRIEVAL_LOAD_OPTIONS)
+        )
+        result = await self.db.execute(stmt)
+        seen: set = set()
+        deduped: list[ArticleChunk] = []
+        for chunk in result.scalars().all():
+            if chunk.id in seen:
+                continue
+            seen.add(chunk.id)
+            deduped.append(chunk)
+            if len(deduped) >= target:
+                break
+        return deduped
 
     async def hybrid_search(
         self,
@@ -368,9 +479,29 @@ class ChunkRepository:
             keyword_result_count=len(keyword_results),
         )
 
-        # 3. Merge results using Reciprocal Rank Fusion (RRF)
+        # 3. Graph-augmented candidates: articles whose entity graph overlaps with
+        # entities named in the query. Off by default (GRAPH_RETRIEVAL_ENABLED) pending
+        # measurement against a real corpus, and never allowed to break retrieval if the
+        # graph tables are empty, unpopulated for this tenant, or something in the join
+        # goes wrong -- a third leg finding nothing must look identical to a leg that was
+        # never asked.
+        graph_results: Sequence[ArticleChunk] = []
+        if settings.GRAPH_RETRIEVAL_ENABLED:
+            try:
+                graph_results = await self._graph_augmented_candidates(
+                    getattr(user, "company_domain", None), folded_query, where_clauses, limit
+                )
+            except Exception as exc:
+                logger.warning("Graph-augmented retrieval failed; continuing without it", error=str(exc))
+            logger.info(
+                "Search graph candidates loaded",
+                query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                graph_result_count=len(graph_results),
+            )
+
+        # 4. Merge results using Reciprocal Rank Fusion (RRF)
         rrf_scores = {}
-        
+
         def add_rrf_scores(results_list):
             for rank, chunk in enumerate(results_list):
                 # RRF formula: score = 1 / (60 + rank)
@@ -381,6 +512,7 @@ class ChunkRepository:
 
         add_rrf_scores(vector_results)
         add_rrf_scores(keyword_results)
+        add_rrf_scores(graph_results)
 
         # Sort by score descending
         sorted_results = sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)

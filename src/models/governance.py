@@ -255,6 +255,12 @@ class ConflictRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     fact: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Derived from `fact` at write time (src/domain/ai_service.py::classify_fact_type),
+    # not from free-text: `fact` is already one of a fixed, small label set the detection
+    # regex produces, so this is a lookup, not a classifier. Nullable because it is a
+    # triage aid layered onto an existing detection path, not a new invariant -- existing
+    # rows and any future detector that does not classify still write a valid record.
+    contradiction_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     article_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     evidence: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="open", server_default="open", nullable=False)
@@ -324,6 +330,12 @@ class ApprovalRule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: Skip anything this similar to existing content; a near-duplicate is a decision
     #: about which article wins, which is not the agent's to make.
     max_similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: Which risk tiers (src/domain/approval_agent.py::compute_draft_risk_tier -- today
+    #: "standard" or "high", derived deterministically, never by the model) this rule may
+    #: act on. None means "any", the same "unset filter matches everything" convention
+    #: every other scoping column here already uses -- a rule written before this column
+    #: existed keeps its old scope exactly.
+    risk_tiers: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     # --- what to do with them ---
     instruction: Mapped[str] = mapped_column(Text, nullable=False)
@@ -332,4 +344,48 @@ class ApprovalRule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: Incremented on every create/edit (src/api/routers/governance.py). Written into
+    #: ApprovalRuleVersion below at the same time, so an AuditLog decision can name which
+    #: VERSION of a rule fired, not just which rule id -- a rule that is edited after
+    #: firing must not silently rewrite the history of what it decided under.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
+
+class ApprovalRuleVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """One immutable snapshot of an ApprovalRule at the moment it was created or edited.
+
+    Rules mutate in place (see ApprovalRule above) -- there was no way to answer "what did
+    this rule actually say when it approved that document last month?" once someone had
+    since edited it. This is the history that answers that, written alongside every
+    create/update, never edited or deleted itself.
+    """
+
+    __tablename__ = "approval_rule_versions"
+    __table_args__ = (
+        UniqueConstraint("rule_id", "version", name="uq_approval_rule_version"),
+        Index("ix_approval_rule_versions_rule", "rule_id", "version"),
+    )
+
+    rule_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("approval_rules.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # A full snapshot of the rule's scoping + authority + instruction at this version,
+    # rather than a column-by-column diff -- simpler to read back on the audit trail, and
+    # the row count here (one per edit, not per field) is not something that needs to be
+    # kept small.
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    connector_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    dept: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    file_extensions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    max_similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk_tiers: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    can_approve: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    can_reject: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    changed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

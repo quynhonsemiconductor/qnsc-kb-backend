@@ -75,6 +75,11 @@ class Verdict:
     reason: str
     rule_id: str | None = None
     rule_name: str | None = None
+    #: The rule's `version` AT THE MOMENT it decided this, not whatever it is now -- a
+    #: rule edited after firing must not silently rewrite what it decided under. Paired
+    #: with `rule_id` in the audit trail so a reviewer can look up the exact
+    #: ApprovalRuleVersion snapshot that produced a given decision.
+    rule_version: int | None = None
 
     @property
     def acted(self) -> bool:
@@ -87,6 +92,7 @@ def _abstain(reason: str, rule: Any | None = None) -> Verdict:
         reason,
         str(rule.id) if rule is not None else None,
         getattr(rule, "name", None) if rule is not None else None,
+        getattr(rule, "version", None) if rule is not None else None,
     )
 
 
@@ -94,6 +100,41 @@ def _extension(filename: str | None) -> str | None:
     if not filename or "." not in filename:
         return None
     return f".{filename.rsplit('.', 1)[-1].lower()}"
+
+
+#: The only two tiers this computes today. Kept small and closed rather than an open
+#: scale: a rule's `risk_tiers` filter is only as trustworthy as the values it can name,
+#: and a fabricated finer-grained taxonomy with no signal behind it would be worse than
+#: this simple, honest split.
+STANDARD_RISK = "standard"
+HIGH_RISK = "high"
+
+
+def compute_draft_risk_tier(draft: Any) -> str:
+    """Deterministic, never the model's call -- same principle as `rule_applies`:
+    scoping decides what a rule looks at, judgement decides what to do with it.
+
+    HIGH_RISK when either is true:
+    - the draft's own submitted metadata explicitly marks it restricted/confidential
+      (`content_metadata.sensitivity`, the same vocabulary Article.sensitivity uses);
+    - its department is one an operator has explicitly opted into
+      `APPROVAL_AGENT_HIGH_RISK_DEPARTMENTS` -- an empty list (the default) means this
+      half of the check never fires, so a fresh deployment sees every draft as STANDARD
+      until an operator configures otherwise.
+
+    Otherwise STANDARD. Never raises: a draft with no metadata at all is STANDARD, not an
+    error -- this is a scoping input, and an unmeasurable one must not block scoping the
+    way `rule_applies`'s own None-is-not-a-match handling does for measured signals.
+    """
+    from src.core.config import settings
+
+    metadata = getattr(draft, "content_metadata", None) or {}
+    if str(metadata.get("sensitivity") or "").strip().lower() in ("restricted", "confidential"):
+        return HIGH_RISK
+    dept = (getattr(draft, "dept", None) or "").strip().lower()
+    if dept and dept in settings.approval_agent_high_risk_department_list:
+        return HIGH_RISK
+    return STANDARD_RISK
 
 
 def top_similarity(draft: Any) -> float | None:
@@ -134,6 +175,9 @@ def rule_applies(rule: Any, draft: Any, connector_id: Any | None = None) -> bool
         # Unmeasured is not "low". A near-duplicate is a decision about which article
         # wins, and that is not the agent's to make.
         if score is None or score > rule.max_similarity_score:
+            return False
+    if getattr(rule, "risk_tiers", None):
+        if compute_draft_risk_tier(draft) not in rule.risk_tiers:
             return False
     return True
 
@@ -243,7 +287,7 @@ async def decide(draft: Any, rules: Sequence[Any], connector_id: Any | None = No
         return _abstain(f"Rule '{rule.name}' may not reject. Model said: {reason}", rule)
     if decision == "unsure":
         return _abstain(reason, rule)
-    return Verdict(decision, reason, str(rule.id), rule.name)
+    return Verdict(decision, reason, str(rule.id), rule.name, getattr(rule, "version", None))
 
 
 async def _connector_for_draft(db: Any, draft: Any) -> Any | None:
@@ -385,6 +429,7 @@ async def run(
                     "dry_run": dry_run,
                     "rule_id": verdict.rule_id,
                     "rule_name": verdict.rule_name,
+                    "rule_version": verdict.rule_version,
                     "reason": detail[:500],
                 },
             )

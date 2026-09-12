@@ -110,10 +110,15 @@ def _run_guard(monkeypatch, column_width, capsys):
 
 
 def test_a_mismatched_column_is_reported_at_startup(monkeypatch, capsys):
-    text = _run_guard(monkeypatch, 1024, capsys)
+    # Deliberately NOT a hardcoded literal (e.g. 1024): whatever that literal is, a future
+    # EMBEDDING_MODEL swap can make it equal settings.EMBEDDING_DIMENSION again, at which
+    # point this stops testing a mismatch at all -- exactly what happened here once
+    # already when the default moved from e5-small (384) to e5-large-instruct (1024).
+    mismatched_width = settings.EMBEDDING_DIMENSION + 1
+    text = _run_guard(monkeypatch, mismatched_width, capsys)
     assert "Embedding column width does not match" in text
     # Both numbers must be present or the line does not save anyone a debugging round.
-    assert "1024" in text
+    assert str(mismatched_width) in text
     assert str(settings.EMBEDDING_DIMENSION) in text
 
 

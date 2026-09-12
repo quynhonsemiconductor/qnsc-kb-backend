@@ -82,7 +82,13 @@ def test_the_version_stamp_tracks_the_model():
 
 
 @pytest.mark.parametrize("environment", LIVE_ENVIRONMENTS)
-def test_the_derived_dimension_is_384(environment):
-    """EMBEDDING_DIMENSION is derived, never configured, and is what base.py enforces."""
+def test_the_derived_dimension_is_1024(environment):
+    """EMBEDDING_DIMENSION is derived, never configured, and is what base.py enforces.
+
+    1024, not 384: multilingual-e5-large-instruct (XLM-R-large-based) is a wider model
+    than the e5-small/MiniLM generation this repo shipped before it -- the pgvector
+    column and HNSW index this pins to are correspondingly wider (see the
+    ALTER-COLUMN-style migration, not the same-width delete+re-embed one).
+    """
     settings = Settings(EMBEDDING_MODEL=_infra_value(environment, "embedding_model"))
-    assert settings.EMBEDDING_DIMENSION == 384
+    assert settings.EMBEDDING_DIMENSION == 1024

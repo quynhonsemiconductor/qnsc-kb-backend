@@ -24,7 +24,12 @@ stage) rather than downloading at boot:
     optimum-cli onnxruntime quantize --onnx_model /tmp/onnx-fp32 --avx2 \
         -o /opt/embedding-onnx
 
-`$EMBEDDING_ONNX_DIR` must hold `model.onnx` and `tokenizer.json`. fp32 on purpose:
+`$EMBEDDING_ONNX_DIR` must hold `model.onnx` and `tokenizer.json`, plus `model.onnx_data`
+if the export is split (true for multilingual-e5-large-instruct's fp32 graph, which
+exceeds protobuf's 2GB single-file limit — onnxruntime loads it automatically as long as
+it sits beside model.onnx under that exact name; this loader does not check for it
+explicitly, so a missing one surfaces as an onnxruntime path error, not one of the
+messages below). fp32 on purpose:
 both int8 dynamic-quantisation recipes were measured against this gate and lost
 (cosine 0.972-0.987 per-tensor and per-channel, with long inputs worse), while fp32
 measures 1.000000. The weights stay ~2.3 GB, but torch and its ~700 MB of

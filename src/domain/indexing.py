@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 import re
 
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.rag.chunker import create_parent_child_chunks
+from src.rag.contextual_header import apply_header, generate_section_context
 from src.lib.locking import article_lock
 
 logger = structlog.get_logger()
@@ -21,6 +23,30 @@ logger = structlog.get_logger()
 
 def _normalized_tokens(value: str) -> list[str]:
     return re.findall(r"[\w'-]+", (value or "").lower())
+
+
+def _partition_for_reuse(
+    content_hashes: list[str], reusable_by_hash: dict[str, list[float]]
+) -> tuple[list[list[float] | None], list[int]]:
+    """Which children can reuse an existing embedding, and which still need one.
+
+    Pure and DB-free on purpose: `reusable_by_hash` is already scoped to the current
+    EMBEDDING_VERSION by the caller (a hash match under a different encoder is a vector
+    in an unrelated space, not something to reuse), so this only has to do the lookup.
+
+    Returns a slot per child (the cached vector, or None where one still needs
+    embedding) alongside the indices still needing one, in original order -- the caller
+    zips the fresh embed call's results back into those same positions.
+    """
+    embeddings: list[list[float] | None] = [None] * len(content_hashes)
+    to_embed_indices: list[int] = []
+    for index, content_hash in enumerate(content_hashes):
+        cached = reusable_by_hash.get(content_hash)
+        if cached is not None:
+            embeddings[index] = cached
+        else:
+            to_embed_indices.append(index)
+    return embeddings, to_embed_indices
 
 
 def _prepare_source_pages(
@@ -150,6 +176,21 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 )
                 return False
 
+            # Read BEFORE the wipe below: a child whose own text (content_hash) has not
+            # changed since the last successful index can reuse its existing embedding
+            # instead of paying for another embed call. Only a hash match under the
+            # CURRENT embedding model/version is reusable -- a hash computed the same way
+            # under a different encoder is a vector in an unrelated space, and reusing it
+            # would silently plant a stale-model vector under the new EMBEDDING_VERSION
+            # stamp (exactly the "rows say e5 but hold MiniLM vectors" failure mode
+            # EMBEDDING_VERSION exists to make impossible).
+            reusable_by_hash: dict[str, list[float]] = {
+                chunk.content_hash: chunk.embedding
+                for chunk in await chunk_repo.get_by_article_id(article_id)
+                if chunk.content_hash
+                and chunk.embedding is not None
+                and chunk.embedding_version == settings.EMBEDDING_VERSION
+            }
             await chunk_repo.delete_by_article_id(article_id)
             source_result = await db.execute(
                 select(DocumentSource)
@@ -213,7 +254,8 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 indexable, sections
             ):
                 child_chunks = []
-                pending_children: list[tuple[str, int | None, uuid.UUID, str, str | None]] = []
+                # + content_hash, appended below as each child is built.
+                pending_children: list[tuple[str, int | None, uuid.UUID, str, str | None, str]] = []
                 for parent_spec in create_parent_child_chunks(section_text, heading=section_heading):
                     parent_text = str(parent_spec["parent_text"])
                     parent_page_number = page_number or _match_source_page(parent_text, prepared_pages)
@@ -231,18 +273,55 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                     for child_text in parent_spec["children"]:
                         clean_text = str(child_text).strip()
                         child_page_number = page_number or _match_source_page(clean_text, prepared_pages) or parent_page_number
-                        pending_children.append((clean_text, child_page_number, parent.id, parent_chunk_type, parent_heading))
+                        content_hash = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()
+                        pending_children.append(
+                            (clean_text, child_page_number, parent.id, parent_chunk_type, parent_heading, content_hash)
+                        )
 
-                embeddings = await get_text_embeddings([item[0] for item in pending_children])
-                if embeddings is None or len(embeddings) != len(pending_children):
-                    embedding_failures.extend({"section": section_ref, "chunk_index": index} for index in range(len(pending_children)))
+                # Reuse a cached vector for any child whose own text has not changed since
+                # the last successful index (see reusable_by_hash above); only the
+                # children that are new or actually changed need embedding at all.
+                embeddings, to_embed_indices = _partition_for_reuse(
+                    [item[5] for item in pending_children], reusable_by_hash
+                )
+
+                if to_embed_indices:
+                    # One context header per SECTION, not per child: it exists to
+                    # disambiguate which document/section a short child snippet came
+                    # from, not to add per-sentence nuance, and generating one per child
+                    # would multiply LLM calls by the child count for no proportional
+                    # gain. Skipped entirely when nothing in this section actually needs
+                    # embedding -- the header exists only to feed the embedder. Embedding
+                    # input only -- see contextual_header.py's docstring for why this
+                    # never touches stored chunk_text (BM25, citations, and UI highlights
+                    # all read it).
+                    section_header = await generate_section_context(
+                        article.title, section_heading, section_text
+                    )
+                    fresh = await get_text_embeddings(
+                        [apply_header(section_header, pending_children[index][0]) for index in to_embed_indices]
+                    )
+                    if fresh is None or len(fresh) != len(to_embed_indices):
+                        embedding_failures.extend(
+                            {"section": section_ref, "chunk_index": index} for index in to_embed_indices
+                        )
+                        embeddings = None
+                    else:
+                        for position, index in enumerate(to_embed_indices):
+                            embeddings[index] = fresh[position]
+
+                if embeddings is None:
+                    pass
                 else:
-                    for child_index, ((clean_text, child_page_number, parent_id, chunk_type, heading), embedding) in enumerate(zip(pending_children, embeddings)):
+                    for child_index, ((clean_text, child_page_number, parent_id, chunk_type, heading, content_hash), embedding) in enumerate(
+                        zip(pending_children, embeddings)
+                    ):
                         child_chunks.append(
                             ArticleChunk(
                                 article_id=article_id,
                                 parent_chunk_id=parent_id,
                                 chunk_text=clean_text,
+                                content_hash=content_hash,
                                 embedding=embedding,
                                 embedding_model=settings.EMBEDDING_MODEL,
                                 embedding_version=settings.EMBEDDING_VERSION,

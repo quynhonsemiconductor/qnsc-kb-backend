@@ -119,18 +119,21 @@ def _payload(
 ) -> dict[str, Any]:
     if provider.native_gemini:
         system_instruction, contents = _gemini_contents(messages)
-        payload: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": (
-                    max_tokens
-                    if max_tokens is not None
-                    else settings.GEMINI_MAX_OUTPUT_TOKENS
-                ),
-                "thinkingConfig": {"thinkingLevel": settings.GEMINI_THINKING_LEVEL},
-            },
+        generation_config: dict[str, Any] = {
+            "temperature": temperature,
+            "thinkingConfig": {"thinkingLevel": settings.GEMINI_THINKING_LEVEL},
         }
+        # Omitted entirely when the caller passes None, same as every other provider
+        # below: `maxOutputTokens` is optional in Gemini's own API, and a caller that
+        # explicitly asked for no cap (e.g. RAG_MAX_ANSWER_TOKENS=None) should get the
+        # model's own maximum, not a second, Gemini-only ceiling nothing else in this
+        # file has. The runaway-generation risk a cap like this usually guards against
+        # is thinking tokens silently eating the budget -- already addressed here by
+        # GEMINI_THINKING_LEVEL="minimal" above, the same fix GLM needed for the same
+        # failure mode (see the `thinking` flag below).
+        if max_tokens is not None:
+            generation_config["maxOutputTokens"] = max_tokens
+        payload: dict[str, Any] = {"contents": contents, "generationConfig": generation_config}
         if system_instruction:
             payload["systemInstruction"] = system_instruction
         return payload

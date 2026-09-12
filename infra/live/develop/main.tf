@@ -265,18 +265,23 @@ module "stack" {
   // it (src/core/config.py). Name a different model and the two disagree, so every embed
   // dies in src/lib/embeddings/base.py:
   //
-  //   embedding backend returned 384 dimensions, but EMBEDDING_DIMENSION is 1024
+  //   embedding backend returned 1024 dimensions, but EMBEDDING_DIMENSION is 768
   //
-  // The Dockerfile bakes intfloat/multilingual-e5-small (384) via ARG EMBEDDING_MODEL,
-  // and this must name the same model or EMBEDDING_DIMENSION resolves against the wrong
-  // export. e5-small is retrieval-trained (query:/passage: prefixes applied in
-  // src/lib/embeddings) and measured substantially better on Vietnamese retrieval.
+  // The Dockerfile bakes intfloat/multilingual-e5-large-instruct (1024) via ARG
+  // EMBEDDING_MODEL, and this must name the same model or EMBEDDING_DIMENSION resolves
+  // against the wrong export. Measured on VN-MTEB (arXiv 2507.21500, Table 3): retrieval
+  // 40.88 vs the previous e5-small's 34.12, and the highest overall average of all 18
+  // models the paper benchmarked -- ahead of every 7B model tested.
   //
-  // Fixes EMBEDDING_DIMENSION at 384, same as the previous MiniLM, so the pgvector
-  // column and HNSW index are unchanged; adopting it required a one-time re-embed
-  // migration because the 384-wide vector space is different.
-  embedding_model   = "intfloat/multilingual-e5-small"
-  embedding_version = "e5-small-v1"
+  // UNLIKE the MiniLM->e5-small swap, this changes EMBEDDING_DIMENSION: 384 -> 1024.
+  // That is a real pgvector column width change and HNSW index rebuild (ALTER-COLUMN
+  // migration, not a same-width delete+re-embed), not merely a re-embed. Deploy only
+  // after: (1) the ONNX parity gate passes for this model
+  // (tests/unit/test_embedding_backends.py), and (2) p50/p95 embedding latency has been
+  // measured against this task's actual CPU allocation -- 24 layers/1024-dim is real
+  // added compute over the previous 12-layer/384-dim model, on every query's hot path.
+  embedding_model   = "intfloat/multilingual-e5-large-instruct"
+  embedding_version = "e5-large-instruct-v1"
   // Parity-gated ONNX flip (cosine 1.000000 vs torch, tests/unit/test_embedding_backends.py).
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"

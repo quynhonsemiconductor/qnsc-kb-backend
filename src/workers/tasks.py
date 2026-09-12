@@ -599,23 +599,21 @@ async def run_restructure_pending_draft(
                 # articles.py): only suggest tags already in the tenant's approved
                 # vocabulary. An automatic, less-reviewed path is exactly where that
                 # matters MORE, not less.
-                catalogue = set(
-                    (
-                        await db.execute(
-                            select(TagCatalog.normalized_tag).where(
-                                TagCatalog.company_domain == draft.company_domain,
-                                TagCatalog.active.is_(True),
-                            )
+                catalogue_rows = (
+                    await db.execute(
+                        select(TagCatalog.tag, TagCatalog.normalized_tag).where(
+                            TagCatalog.company_domain == draft.company_domain,
+                            TagCatalog.active.is_(True),
                         )
                     )
-                    .scalars()
-                    .all()
-                )
+                ).all()
+                catalogue = {normalized for _tag, normalized in catalogue_rows}
                 draft.tags = await suggest_tags_for_document(
                     draft.title,
                     result.body_md,
                     (draft.content_metadata or {}).get("type", ""),
                     catalogue=catalogue,
+                    catalogue_examples=[tag for tag, _normalized in catalogue_rows],
                 )
             db.add(
                 AuditLog(

@@ -55,6 +55,11 @@ services:
         # silently degrades to keyword-only. It is two files, cached as a build layer,
         # and it is the same artifact production runs.
         BAKE_EMBEDDING_MODEL: "true"
+      # See the top-level `secrets:` block -- optional, and only used by the Dockerfile's
+      # bake step for a public model's Hub API rate limit / transfer, never for auth to
+      # anything this app itself calls at runtime.
+      secrets:
+        - hf_token
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -82,6 +87,18 @@ services:
       # manual "Sync now" ran the whole provider walk inside the API process instead of on
       # the worker. Production sets this on both services; dev did not.
       - JOB_MODE=celery
+      # Dev-only override, not the shipped default (see the note beside the setting in
+      # config.py) -- a grounded refusal ("Not found in the Knowledge Base") on a corpus
+      # this small and narrow was otherwise pairing with a genuinely unhelpful reply:
+      # nothing but the refusal line, or a raw unverified passage from the "possibly
+      # related" fallback below it. True lets the model's own EXTENDED answer (general
+      # knowledge, never cited, never claiming anything organization-specific -- see
+      # RAG_SYSTEM_PROMPT's Section 2 rules) through instead of discarding it. The
+      # grounded refusal line is unaffected either way, so "this is not documented here"
+      # still always comes through. Whether this becomes the real default is a product
+      # call for whoever owns that tradeoff, not something to decide as a side effect of
+      # local testing.
+      - RAG_ALLOW_EXTENDED_ON_REFUSAL=true
     depends_on:
       db:
         condition: service_healthy
@@ -103,6 +120,8 @@ services:
       target: worker
       args:
         BAKE_EMBEDDING_MODEL: "true"
+      secrets:
+        - hf_token
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
@@ -164,6 +183,8 @@ services:
       target: worker
       args:
         BAKE_EMBEDDING_MODEL: "true"
+      secrets:
+        - hf_token
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
@@ -224,6 +245,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+# Optional: only read if a build actually references it (`secrets:` on the api/worker/
+# beat build blocks below) AND the host has HF_TOKEN set -- an unset env var here is not
+# an error, Compose just passes nothing and the Dockerfile's `required=false` mount
+# builds anonymously exactly as before. Never put the token literal in this file; it
+# would then be committed to git. `export HF_TOKEN=hf_...` in the shell before
+# `docker compose build`/`up --build` instead.
+secrets:
+  hf_token:
+    environment: HF_TOKEN
 
 volumes:
   pgdata:
