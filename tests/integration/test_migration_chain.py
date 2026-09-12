@@ -9,12 +9,13 @@ def test_migrations_have_one_current_head():
     config = Config(str(root / "migrations" / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     # Pinned on purpose: a new revision must be a deliberate act, and a second head
-    # means one was chained off the wrong parent. Bumped for 20260911_76, the last of
-    # four migrations chained in sequence off 20260901_72: retention_until/legal_hold on
-    # articles (73), a hierarchical tag_catalog.parent_id (74), articles.structured_metadata
-    # (75), and the tenant knowledge graph -- graph_entities, graph_relationships,
-    # article_entity_mentions (76).
-    assert script.get_heads() == ["20260911_76"]
+    # means one was chained off the wrong parent. Bumped for 20260912_81, the last of
+    # five migrations chained in sequence off 20260911_76 (the tenant knowledge graph):
+    # the pgvector column realigned to 1024 for multilingual-e5-large-instruct (77), a
+    # re-index after adding contextual chunk headers (78), conflict_records.contradiction_type
+    # (79), approval_rules.risk_tiers/version plus the approval_rule_versions history
+    # table (80), and article_chunks.content_hash for skip-if-unchanged re-embedding (81).
+    assert script.get_heads() == ["20260912_81"]
 
 
 def test_production_compose_is_explicitly_hardened():
