@@ -297,3 +297,20 @@ module "stack" {
   allowed_email_domains  = var.allowed_email_domains
   entra_admin_emails     = var.entra_admin_emails
 }
+
+// State drift, not a real change: this SES identity for qnsc.vn already exists in AWS
+// (created when #143 first added SES support here) but was never recorded in this
+// stack's Terraform state, so every apply since has tried to CREATE it and AWS has
+// correctly rejected the duplicate with AlreadyExistsException -- failing apply-develop
+// on every subsequent PR, unrelated to what any of them actually changed.
+//
+// A declarative import (OpenTofu >= 1.7, and this stack already requires >= 1.9) fixes
+// it through the same apply pipeline that already has AWS credentials via OIDC, instead
+// of someone needing local AWS/Terraform access to run `tofu import` by hand. It is a
+// no-op once the resource is in state, so leaving this block in costs nothing on future
+// applies -- but remove it once the next apply-develop run succeeds, so a future reader
+// does not have to work out whether it is still doing something.
+import {
+  to = module.stack.aws_sesv2_email_identity.mail_from_domain[0]
+  id = "qnsc.vn"
+}
