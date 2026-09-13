@@ -788,6 +788,13 @@ check "tunnel_needs_cloudflare_account" {
 }
 
 check "cache_required_for_jobs" {
+  # SUPERSEDED 2026-09-12 — the assertion moved to a `validation` on var.cache in
+  # variables.tf, because a `check` does not enforce: a violated assert emits
+  # `Warning: Check block assertion failed` and the plan exits 0, so this block permitted
+  # exactly the state it describes. Kept as a marker only; the condition below is now
+  # redundant with the validation, which is deliberate — it fails at plan time instead.
+  #
+  # Safe to delete on the next edit to this file.
   assert {
     condition     = var.cache.enabled || (var.api.min_count == 0 && var.worker.min_count == 0)
     error_message = "The cache is the Celery broker: with it disabled no ingestion, connector sync or outbox relay runs at all. Scale both services to zero, or enable the cache."

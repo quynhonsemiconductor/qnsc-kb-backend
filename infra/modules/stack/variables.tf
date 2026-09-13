@@ -198,7 +198,10 @@ variable "cache" {
     `db_index` selects the Valkey database, NOT a key prefix: a prefix has to be honoured
     by every library touching the connection, while an index is enforced by the server.
     Cluster mode is disabled on the shared node, so all 16 databases exist and SELECT
-    works. Allocated centrally — 0 is rova, 1 is qnsc-kb.
+    works. Allocated centrally in qnsc-infra `allocations.json`, key
+    `cache_db_index_allocations` — the registry lives in one place rather than being copied
+    into each product's stack module, which is how it drifted into three different states
+    before 2026-09-12.
 
     THIS PRODUCT IS THE REASON THE EVICTION POLICY MATTERS. Celery's broker keys carry no
     TTL, so evicting one loses a QUEUED TASK rather than missing a cache. The shared node
@@ -210,6 +213,24 @@ variable "cache" {
     Production, when it exists, keeps its own node: a shared cache is a shared blast
     radius.
   EOT
+
+  # PROMOTED FROM A `check` BLOCK 2026-09-12. This condition previously lived in
+  # `check "cache_required_for_jobs"` in main.tf, which did NOT enforce it: a violated
+  # check emits `Warning: Check block assertion failed` and the plan exits 0 — measured on
+  # OpenTofu 1.12.3 and recorded in rova's copy of this variable — so the forbidden
+  # combination applied cleanly behind a warning nobody reads in CI output. A
+  # cross-variable `validation` exits 1.
+  #
+  # rova and opshub already expressed this as a validation; this module was the last of the
+  # three still relying on the inert form, which is the kind of divergence that survives
+  # precisely because all three copies look reasonable in isolation.
+  #
+  # The stakes are higher here than in the other two products, which is why it is worth
+  # fixing rather than noting: the error message below is not about a cache miss.
+  validation {
+    condition     = var.cache.enabled || (var.api.min_count == 0 && var.worker.min_count == 0)
+    error_message = "cache.enabled = false requires min_count = 0 on BOTH services. The cache is the Celery broker: with it disabled no ingestion, connector sync or outbox relay runs at all, while health checks still answer 200. Scale both services to zero, or enable the cache."
+  }
 
   validation {
     condition     = !var.cache.shared || var.cache.enabled
