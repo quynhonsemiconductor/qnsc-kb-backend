@@ -14,10 +14,21 @@ reason.
 
 Existing vectors CANNOT be converted: a 1024-dimension vector is not an extension of the
 384-dimension one, it is a point in a different space. So this refuses to run if any
-embeddings are present rather than silently discarding them:
+embeddings are present rather than silently discarding them.
 
-    DELETE FROM article_chunks;
-    -- then re-run this migration and let the API's startup sweep re-index
+Discarding them is nonetheless the only way forward, so it is an explicit opt-in:
+
+    EMBEDDING_REALIGN_DISCARD_VECTORS=true alembic upgrade head
+
+With that set, this revision deletes the chunks itself -- in the same transaction as the
+ALTER, so a failure rolls the wipe back -- and requeues every published article for the
+API's startup sweep to re-embed at the new width.
+
+Previously the guard's message told the operator to run `DELETE FROM article_chunks` by
+hand and re-run. That advice was both unreviewable (ad-hoc SQL against a live database,
+outside migration history) and incomplete: it left every row in `parent_chunks` orphaned,
+because nothing else deletes them. The opt-in path removes both, as the application's own
+re-index does.
 
 Revision ID: 20260912_77
 Revises: 20260911_76
@@ -60,14 +71,29 @@ def upgrade() -> None:
     populated = connection.execute(
         sa.text("SELECT count(*) FROM article_chunks WHERE embedding IS NOT NULL")
     ).scalar()
-    if populated:
+    if populated and not settings.EMBEDDING_REALIGN_DISCARD_VECTORS:
         raise RuntimeError(
             f"article_chunks.embedding is vector({current}) but EMBEDDING_DIMENSION is "
             f"{target}, and {populated} chunk(s) already carry embeddings. Vectors of "
             "different widths are not comparable, so this cannot be converted in place. "
-            "Delete the chunks and re-index every article at the new width, then re-run "
-            "this migration."
+            "Re-run with EMBEDDING_REALIGN_DISCARD_VECTORS=true to discard them and "
+            "re-index every published article at the new width; the migration performs "
+            "the wipe itself, in this transaction, and requeues the articles."
         )
+
+    if populated:
+        # The opt-in path. Deleting parent_chunks is enough on its own --
+        # article_chunks.parent_chunk_id is ON DELETE CASCADE -- but both are stated
+        # because the cascade is the only thing making the second delete redundant, and a
+        # future schema change to that FK should not quietly turn this into an orphan
+        # factory. This mirrors ChunkRepository.delete_by_article_id, which likewise
+        # removes parents and children together.
+        #
+        # This runs inside the migration's transaction, alongside the ALTER below, so a
+        # failure rolls the wipe back rather than leaving a database with no embeddings
+        # and the old column width.
+        op.execute("DELETE FROM parent_chunks")
+        op.execute("DELETE FROM article_chunks")
 
     # HNSW indexes are bound to the column width and block the ALTER.
     op.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX}")
