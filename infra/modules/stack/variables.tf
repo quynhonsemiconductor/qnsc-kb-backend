@@ -175,7 +175,14 @@ variable "cache" {
     shared = optional(bool, false)
 
     # Which Valkey database this product uses on the shared node. Ignored when
-    # `shared = false`. Allocated centrally: 0 = rova, 1 = qnsc-kb.
+    # `shared = false`.
+    #
+    # THE REGISTRY LIVES IN ONE PLACE: qnsc-infra `allocations.json`, key
+    # `cache_db_index_allocations`. Do not copy the table here. The inline version that
+    # used to sit on this line read "0 = rova, 1 = qnsc-kb" and silently omitted opshub
+    # after it took index 2 — which is exactly how the same table drifted into three
+    # different states across the three product stack modules. A registry with three
+    # copies is not a registry.
     db_index = optional(number, 0)
   })
   default = {}
