@@ -335,13 +335,20 @@ variable "embedding_realign_discard_vectors" {
     src/core/config.py grew EMBEDDING_REALIGN_DISCARD_VECTORS so that step could be
     explicit, reviewable and logged instead of an ad-hoc DELETE typed against a live
     database. Nothing carried it to the migrator, though, so the sanctioned way past the
-    guard was unreachable in a deployed environment: develop sat with a full e5-small
-    corpus behind a 1024-wide config, the migration could not run, every revision behind
-    it could not run either, and each article failed to index with
+    guard did not exist in a deployed environment at all:
 
-        asyncpg.exceptions.DataError: expected 384 dimensions, not 1024
+        git grep EMBEDDING_REALIGN_DISCARD_VECTORS -- infra/   # nothing
 
-    surfacing in the UI only as "Search index: failed". This variable is what closes that.
+    A blocked deploy therefore still had to be rescued by hand, which is what happened on
+    develop on 2026-09-13: the chunks were cleared manually, the guard then saw zero
+    populated rows, and 20260912_77 went through. This variable is the difference between
+    that being a documented deploy input and being a DELETE typed against a live database.
+
+    NOT NEEDED BY AN ENVIRONMENT AT THE CORRECT WIDTH. The guard only fires when the
+    column width disagrees with the width derived from embedding_model AND embeddings are
+    present, because there is no in-place conversion between widths — a 1024-dimension
+    vector is not an extension of a 384-dimension one. Refusing is the right default; the
+    alternative is a migration that silently destroys every embedding.
 
     SET IT ONLY FOR THE DEPLOY THAT PERFORMS THE REALIGN, then set it back. It is not a
     standing configuration: leaving it true means the next model change silently discards
