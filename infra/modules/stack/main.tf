@@ -328,7 +328,7 @@ module "cache" {
   # `shared` destroys the dedicated node — that is where the saving is — and issues a
   # different endpoint, so it is a task-definition revision and a rolling deploy.
   count  = var.cache.enabled && !var.cache.shared ? 1 : 0
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cache?ref=cache-v1.0.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cache?ref=cache-v1.1.0"
 
   name              = "${local.name}-cache"
   subnet_ids        = data.terraform_remote_state.runtime.outputs.data_subnet_ids
@@ -359,7 +359,7 @@ module "ecs_cluster" {
 // of this stack must be able to apply before Cloudflare is wired up.
 module "tunnel" {
   count  = var.tunnel_enabled && var.cloudflare_account_id != "" ? 1 : 0
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cf-tunnel?ref=cf-tunnel-v0.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/cf-tunnel?ref=cf-tunnel-v0.2.1"
 
   account_id = var.cloudflare_account_id
   // One tunnel per product per environment. Sharing one across environments would let a
@@ -369,6 +369,11 @@ module "tunnel" {
 
   // Without these the connector runs, reports healthy, and answers 503 to everything —
   // "No ingress rules were defined". v0.1.1 is the first version that creates them.
+  //
+  // v0.2.0 made routing OPTIONAL so an existing tunnel could be adopted, so this now
+  // depends on `config_src` keeping its default of "cloudflare". Setting it to "local"
+  // hands routing to a config file on the connector, and this hostname/service pair
+  // stops being applied — back to 503s, with nothing here changed to explain it.
   //
   // localhost is correct: under ECS awsvpc every container in a task shares one network
   // namespace, so cloudflared reaches the api without any port being exposed.
@@ -481,7 +486,7 @@ module "tunnel_api" {
 
 // ── API service ───────────────────────────────────────────────────────────────
 module "api" {
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-service?ref=ecs-service-v2.3.2"
 
   service_name = "api"
   cluster_name = module.ecs_cluster.cluster_name
@@ -564,7 +569,7 @@ module "api" {
 //           which is why var.worker caps max_count at 1.
 //   clamav  the malware scanner the worker and api talk to over localhost
 module "worker" {
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-service?ref=ecs-service-v2.1.1"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecs-service?ref=ecs-service-v2.3.2"
 
   service_name = "worker"
   cluster_name = module.ecs_cluster.cluster_name
@@ -1072,7 +1077,7 @@ resource "aws_scheduler_schedule" "ecs_scale_up" {
 // external health check, which belongs at go-live rather than against an environment
 // deliberately running zero tasks.
 module "observability" {
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/observability?ref=observability-v4.1.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/observability?ref=observability-v4.3.0"
 
   name             = local.name
   region           = var.region
@@ -1085,6 +1090,23 @@ module "observability" {
   ]
 
   rds_instance_id = module.rds.identifier
+
+  // Node mode only, and only a node THIS product owns. qnsc-kb shares the runtime
+  // layer's Valkey (cache.shared = true, db_index 1), and a shared node's alarms belong
+  // to whoever creates it — otherwise every product borrowing an index would duplicate
+  // alarms on the same cluster.
+  //
+  // Computed rather than left to the module defaults (false / "") so that flipping this
+  // product to a dedicated node starts alarming it automatically. Hardcoding false would
+  // hand the next person a node with no CPU, eviction or memory alarms and nothing saying
+  // why. Mirrors rova and opshub, which compute the same two expressions.
+  //
+  // enable_cache_alarms is deliberately a SEPARATE condition from cache_cluster_id's
+  // value: on a from-scratch environment the node's cluster_id is unknown until apply,
+  // and gating a count on that directly is a hard OpenTofu error rather than a deferred
+  // plan. This form is known at plan time regardless.
+  enable_cache_alarms = var.cache.enabled && !var.cache.shared && var.cache.mode == "node"
+  cache_cluster_id    = var.cache.enabled && !var.cache.shared && var.cache.mode == "node" ? module.cache[0].cluster_id : ""
 
   environment_idle = var.api.min_count == 0 && var.worker.min_count == 0
 
