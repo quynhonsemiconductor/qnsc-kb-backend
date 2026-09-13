@@ -58,6 +58,32 @@ def test_the_realign_refuses_to_discard_existing_vectors():
     assert "raise RuntimeError" in newest
 
 
+def test_the_refusal_is_scoped_to_current_version_vectors():
+    """The guard must stop on current-space data, NOT on any data at all.
+
+    Refusing whenever any embedding existed made this unrunnable in exactly the situation
+    it was written for: an environment holding a full corpus from the previous model. The
+    migration could not run, the revisions behind it could not run, and indexing failed on
+    every article -- with no symptom naming this file. The documented way out was to
+    hand-delete the corpus on a live database.
+
+    A stale-stamped vector is unusable on two independent grounds (wrong width, and
+    filtered out of hybrid_search by its stamp) and both chunk tables are DERIVED from
+    articles.content, so clearing them costs re-indexing time and no source content. A
+    CURRENT-stamped vector at the wrong width should not be possible, so that one still
+    stops and asks for a human.
+    """
+    newest = _realign_revisions()[-1].read_text(encoding="utf-8")
+    assert "embedding_version = :version" in newest, (
+        "the refusal must be scoped by embedding_version; an unscoped count blocks the "
+        "migration on the stale corpus it exists to replace"
+    )
+    # It must actually clear the stale rows, or narrowing the guard just moves the failure
+    # to the ALTER, which cannot rewrite 384-wide vectors as 1024.
+    assert "DELETE FROM article_chunks" in newest
+    assert "DELETE FROM parent_chunks" in newest
+
+
 def test_the_realign_requeues_published_articles():
     """Nothing retries a failed index on its own, so a resize that leaves every article
     'failed' fixes the column and none of the symptoms."""

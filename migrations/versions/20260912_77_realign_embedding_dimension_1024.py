@@ -13,11 +13,31 @@ column already matches, so this is harmless on a database already at 1024 for so
 reason.
 
 Existing vectors CANNOT be converted: a 1024-dimension vector is not an extension of the
-384-dimension one, it is a point in a different space. So this refuses to run if any
-embeddings are present rather than silently discarding them:
+384-dimension one, it is a point in a different space.
 
-    DELETE FROM article_chunks;
-    -- then re-run this migration and let the API's startup sweep re-index
+WHAT THIS REFUSES ON, AND WHAT IT NO LONGER REFUSES ON. As first written this raised
+whenever ANY embedding was present, which deadlocked every environment it was supposed to
+fix: develop held a full corpus of e5-small vectors, so the migration could not run, so
+revisions 78-82 behind it could not run either, and indexing failed on every article with
+either
+
+    asyncpg.exceptions.DataError: expected 384 dimensions, not 1024
+
+or -- once the chain had fallen far enough behind -- a missing column from one of the
+revisions stuck behind this one. Neither symptom names this migration, and the operator's
+only documented way out was to hand-delete the corpus on a live database.
+
+So the refusal is now narrowed to the case it was actually protecting: vectors stamped
+with the CURRENT EMBEDDING_VERSION, which would mean genuinely current-space data that
+someone should look at before it goes. Vectors stamped with a superseded model are cleared
+instead, because they are unusable on two independent grounds -- wrong width by
+construction, and already filtered out of hybrid_search by their stamp -- and because
+article_chunks/parent_chunks are DERIVED tables, rebuilt from articles.content by the
+indexing sweep this migration re-queues. No source document is touched.
+
+That is the same reasoning 20260831_69 (e5-small encoder swap) and 20260912_78 (contextual
+chunk headers) already apply for same-width re-embeds; both delete outright with no guard
+at all. This keeps a guard, and points it at the one case where a human should decide.
 
 Revision ID: 20260912_77
 Revises: 20260911_76
@@ -57,17 +77,36 @@ def upgrade() -> None:
     if current is None or current == target:
         return
 
-    populated = connection.execute(
-        sa.text("SELECT count(*) FROM article_chunks WHERE embedding IS NOT NULL")
+    # Only vectors stamped with the CURRENT version are grounds to stop: those would be
+    # current-space data, and losing them should be somebody's decision rather than a side
+    # effect of running migrations. A stamp naming a superseded model cannot be
+    # current-space by construction -- and note this branch only runs when the column
+    # width already disagrees with EMBEDDING_DIMENSION, so any vector in here is the wrong
+    # width for the configured model no matter what it is stamped.
+    current_space = connection.execute(
+        sa.text(
+            "SELECT count(*) FROM article_chunks "
+            "WHERE embedding IS NOT NULL AND embedding_version = :version"
+        ),
+        {"version": settings.EMBEDDING_VERSION},
     ).scalar()
-    if populated:
+    if current_space:
         raise RuntimeError(
             f"article_chunks.embedding is vector({current}) but EMBEDDING_DIMENSION is "
-            f"{target}, and {populated} chunk(s) already carry embeddings. Vectors of "
-            "different widths are not comparable, so this cannot be converted in place. "
-            "Delete the chunks and re-index every article at the new width, then re-run "
-            "this migration."
+            f"{target}, and {current_space} chunk(s) are stamped with the current "
+            f"EMBEDDING_VERSION ({settings.EMBEDDING_VERSION}). That combination should be "
+            "impossible -- a current-version vector of the wrong width -- so it is not "
+            "cleared automatically. Inspect the corpus before re-running."
         )
+
+    # Stale-space vectors, cleared rather than refused on. Unusable twice over: wrong width
+    # for the configured model, and excluded from hybrid_search by their stamp. Both tables
+    # are rebuilt from articles.content by the sweep this migration re-queues below, so
+    # this costs re-indexing time and loses no source content. Children go first:
+    # article_chunks.parent_chunk_id references parent_chunks.id, so the reverse order
+    # would fail the FK. Same order as 20260831_69 and 20260912_78, for the same reason.
+    op.execute("DELETE FROM article_chunks")
+    op.execute("DELETE FROM parent_chunks")
 
     # HNSW indexes are bound to the column width and block the ALTER.
     op.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX}")
