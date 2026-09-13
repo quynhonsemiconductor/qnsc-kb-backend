@@ -136,8 +136,14 @@ variable "entra_admin_emails" {
 }
 
 variable "alarm_emails" {
-  type    = list(string)
-  default = []
+  type = list(string)
+  # devops@qnsc.vn is an M365 SHARED MAILBOX, deliberately, not an alias on a person.
+  # Recipients are managed in the admin centre rather than here, and the address survives
+  # any individual leaving.
+  #
+  # ARMED 2026-09-12. This was `[]`, and `qnsc-kb-develop-alarms` existed in AWS with ZERO
+  # subscriptions.
+  default = ["devops@qnsc.vn"]
 
   description = <<-EOT
     Addresses subscribed to the alarm SNS topic. Each subscription must be confirmed
