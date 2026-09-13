@@ -286,6 +286,23 @@ module "stack" {
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"
 
+  // TEMPORARY, AND SET BACK TO false ONCE THE REALIGN HAS RUN ONCE.
+  //
+  // develop's article_chunks.embedding is still vector(384) holding e5-small vectors, so
+  // 20260912_77 refuses to widen it and every revision behind it (78-82) is stuck too.
+  // Indexing therefore fails on every article -- "Search index: failed" in the UI, and
+  //
+  //     asyncpg.exceptions.DataError: expected 384 dimensions, not 1024
+  //
+  // in the worker log. This lets that one migration clear the stale vectors, ALTER to
+  // 1024, rebuild the HNSW index and re-queue every published article for the API's
+  // startup sweep.
+  //
+  // Leaving it true is the hazard: the NEXT model change would then discard the corpus
+  // without stopping to ask, which is exactly the guard this flag opts out of. Flip it
+  // back in the same PR that follows the deploy, or in the deploy after it.
+  embedding_realign_discard_vectors = true
+
   alarm_emails           = var.alarm_emails
   cloudflare_account_id  = var.cloudflare_account_id
   microsoft_client_id    = var.microsoft_client_id

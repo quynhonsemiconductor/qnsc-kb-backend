@@ -728,6 +728,13 @@ module "migrator" {
     // task that shapes the column and the tasks that fill it must agree.
     EMBEDDING_MODEL   = var.embedding_model
     EMBEDDING_VERSION = var.embedding_version
+
+    // The realign migrations' opt-in, and the migrator is the ONLY task that reads it —
+    // it is the task that runs them. src/core/config.py grew the setting so the wipe
+    // could be an explicit, reviewable step instead of an ad-hoc DELETE against a live
+    // database, but nothing passed it here, so the sanctioned path past the guard did not
+    // exist in a deployed environment. See variables.tf for what happened on develop.
+    EMBEDDING_REALIGN_DISCARD_VECTORS = tostring(var.embedding_realign_discard_vectors)
   }
 
   secrets = {

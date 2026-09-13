@@ -319,6 +319,39 @@ variable "embedding_version" {
   description = "Stamped on every chunk, so a re-embed can be identified after the fact. Change it whenever embedding_model or the dimension changes."
 }
 
+variable "embedding_realign_discard_vectors" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Lets the realign migrations (20260810_51 / 20260828_64 / 20260912_77) rebuild the
+    pgvector column when the stored vectors are at the old width.
+
+    Those revisions refuse to run when the column width disagrees with the width derived
+    from embedding_model AND embeddings are present, because there is no in-place
+    conversion between widths — a 1024-dimension vector is not an extension of a
+    384-dimension one. Refusing is the right default; the alternative is a migration that
+    silently destroys every embedding.
+
+    src/core/config.py grew EMBEDDING_REALIGN_DISCARD_VECTORS so that step could be
+    explicit, reviewable and logged instead of an ad-hoc DELETE typed against a live
+    database. Nothing carried it to the migrator, though, so the sanctioned way past the
+    guard was unreachable in a deployed environment: develop sat with a full e5-small
+    corpus behind a 1024-wide config, the migration could not run, every revision behind
+    it could not run either, and each article failed to index with
+
+        asyncpg.exceptions.DataError: expected 384 dimensions, not 1024
+
+    surfacing in the UI only as "Search index: failed". This variable is what closes that.
+
+    SET IT ONLY FOR THE DEPLOY THAT PERFORMS THE REALIGN, then set it back. It is not a
+    standing configuration: leaving it true means the next model change silently discards
+    the corpus instead of stopping to ask. The wipe covers article_chunks/parent_chunks
+    only — both DERIVED from articles.content — and the migration re-queues every published
+    article for the API's startup sweep, so the cost is re-indexing time and degraded
+    search until it drains, not lost source content.
+  EOT
+}
+
 variable "embedding_runtime" {
   type        = string
   default     = "onnx"
