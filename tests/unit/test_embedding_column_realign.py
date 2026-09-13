@@ -58,6 +58,46 @@ def test_the_realign_refuses_to_discard_existing_vectors():
     assert "raise RuntimeError" in newest
 
 
+def test_the_refusal_is_conditional_on_the_opt_in_flag():
+    """The guard must remain the DEFAULT, not the only outcome.
+
+    Refusing unconditionally left no supported recovery path: the operator's only option
+    was ad-hoc SQL against a live database, outside migration history and outside review.
+    """
+    newest = _realign_revisions()[-1].read_text(encoding="utf-8")
+    assert "EMBEDDING_REALIGN_DISCARD_VECTORS" in newest, (
+        "the realign offers no sanctioned way past the guard; a blocked deploy has to be "
+        "rescued with hand-typed DELETEs"
+    )
+    assert "not settings.EMBEDDING_REALIGN_DISCARD_VECTORS" in newest, (
+        "the refusal must be conditional on the flag, so the guard still fires by default"
+    )
+
+
+def test_the_opt_in_defaults_to_off():
+    """A flag that discards every embedding in the database must never default to on."""
+    assert settings.EMBEDDING_REALIGN_DISCARD_VECTORS is False
+
+
+def test_the_guard_message_names_the_flag_rather_than_manual_sql():
+    """The error is the only place an operator looks, so it has to carry the way out."""
+    newest = _realign_revisions()[-1].read_text(encoding="utf-8")
+    # Bounded to the raise's own argument list -- the closing paren at that indentation --
+    # not the first ")" in the text, which falls inside the f-string's "vector({current})".
+    message = newest.split("raise RuntimeError", 1)[1].split("\n        )", 1)[0]
+    assert "EMBEDDING_REALIGN_DISCARD_VECTORS" in message, (
+        "the guard tells the operator what is wrong but not how to proceed"
+    )
+
+
+def test_the_opt_in_path_clears_parent_chunks_too():
+    """`article_chunks.parent_chunk_id` is ON DELETE CASCADE, so deleting parents is what
+    actually clears both. Deleting only children would strand every parent row -- nothing
+    else removes them, and the application's own re-index deletes both together."""
+    newest = _realign_revisions()[-1].read_text(encoding="utf-8")
+    assert "DELETE FROM parent_chunks" in newest
+
+
 def test_the_realign_requeues_published_articles():
     """Nothing retries a failed index on its own, so a resize that leaves every article
     'failed' fixes the column and none of the symptoms."""

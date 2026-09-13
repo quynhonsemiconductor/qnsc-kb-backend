@@ -216,6 +216,24 @@ class Settings(BaseSettings):
     # is embedded), even though chunk boundaries and stored chunk_text did not.
     CHUNKING_VERSION: str = "v3-contextual-headers"
     EMBEDDING_DIMENSION: int | None = None
+    # Opt-in for the realign migrations (20260810_51 / 20260828_64 / 20260912_77).
+    #
+    # Those revisions refuse to run when the pgvector column is at the wrong width AND
+    # embeddings are present, because vectors of different widths are not comparable --
+    # a 1024-dimension vector is not an extension of a 384-dimension one, so there is no
+    # in-place conversion, only a rebuild. Refusing is the right default: the alternative
+    # is a migration that silently destroys every embedding in the database.
+    #
+    # The refusal left no supported way forward, though. The docstring said to delete the
+    # chunks by hand and re-run, which means the recovery path for a blocked deploy was an
+    # ad-hoc DELETE typed against a live database, outside migration history and outside
+    # review. This flag makes that step explicit, reviewable and logged instead: set it and
+    # the migration does the wipe itself, in the same transaction as the ALTER, then requeues
+    # every published article so the API's startup sweep re-embeds at the new width.
+    #
+    # It stays False by default, so nothing changes for anyone who does not set it. The
+    # guard still fires, and its message names this flag rather than prescribing manual SQL.
+    EMBEDDING_REALIGN_DISCARD_VECTORS: bool = False
     LLM_MODEL: str = "gemma-4-26b-a4b-it"
     RESTRUCTURE_ENABLED: bool = True
     RESTRUCTURE_MODEL: str | None = None
