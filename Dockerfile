@@ -301,7 +301,29 @@ COPY --chown=appuser:appuser . .
 
 USER appuser
 
+# --concurrency=1 because each prefork child loads its OWN embedding session, and the
+# task is sized for exactly one. Celery defaults this to os.cpu_count(), which on Fargate
+# reports the host's CPUs rather than the task's, so the count is neither 1 nor reliably
+# related to what the task was given -- develop came up at 2.
+#
+# The e5-large-instruct ONNX session is ~1.5 GB resident. clamav and beat carry hard
+# container limits of 2048 and 256 MB out of a 4096 MB task, leaving the worker ~1.8 GB,
+# and infra/live/*/main.tf sizes that against ONE session plus a per-file PaddleOCR spike.
+# Two children embedding at once do not fit: on develop, six articles picked up between
+# 15:25:50 and 15:26:34 all died with
+#
+#     billiard.exceptions.WorkerLostError: Worker exited prematurely: signal 9 (SIGKILL)
+#
+# and SIGKILL raises nothing in Python, so index_article's except never ran and each row
+# stayed at index_status="processing" forever -- the UI shows those articles as still
+# indexing when nothing is working on them. This was latent under e5-small (384 dims, a
+# much smaller session) and only started biting when develop moved to e5-large-instruct.
+#
+# Serial is also no throughput loss here: max_count is 1 on this service (beat is a
+# singleton in the same task), so ingestion was never parallel across tasks either.
+# Raising this means re-sizing the task memory for N sessions first, not just the flag.
 CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
+     "--concurrency=1", \
      "-Q", "celery,ingestion,connectors,permissions"]
 
 # ---------------------------------------------------------------------------
