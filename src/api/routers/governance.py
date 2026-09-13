@@ -252,92 +252,193 @@ async def verify_review_deadlines(
     return {"overdue_article_ids": overdue_ids, "count": len(overdue_ids)}
 
 
+def _draft_list_row(
+    draft, *, can_view_content: bool, candidate_count: int = 0
+) -> dict[str, Any]:
+    """One row of the review queue: what a LIST needs, and nothing a list does not.
+
+    Deliberately excludes `summary`, `restructured_body_md`, `restructure_candidate_md`
+    and `restructure_report`. Those are whole document bodies and a report derived from
+    them; the response used to carry all of it for every draft, so the payload scaled
+    with total pending document text rather than with the page size. The reviewer reads
+    one document at a time -- the detail endpoint serves that.
+
+    `restructure_chunk_count` is gone from here for a sharper reason: producing it called
+    `build_restructure_report()` and `split_into_chunks()` per draft per request, a full
+    chunking pass over every pending document every time anyone opened the queue.
+    """
+    return {
+        "id": str(draft.id),
+        "title": draft.title,
+        "company_domain": draft.company_domain,
+        "dept": draft.dept,
+        "source_ref": draft.source_ref,
+        "source_hash": draft.source_hash,
+        # Whether the body EXISTS is a list-level fact (the UI marks drafts that have an
+        # AI reading view); the body itself is not. Booleans, not text.
+        "has_reading_view": bool(can_view_content and draft.restructured_body_md),
+        "has_restructure_candidate": bool(
+            can_view_content and draft.restructure_candidate_md
+        ),
+        "restructure_decision": draft.restructure_decision,
+        "restructure_status": draft.restructure_status,
+        "restructure_model": draft.restructure_model,
+        "restructure_error": draft.restructure_error,
+        "status": draft.status,
+        "created_by": str(draft.created_by) if draft.created_by else None,
+        "assigned_approver_id": (
+            str(draft.assigned_approver_id) if draft.assigned_approver_id else None
+        ),
+        "assigned_by": str(draft.assigned_by) if draft.assigned_by else None,
+        "assigned_at": draft.assigned_at,
+        "review_due_at": (
+            draft.assigned_at + timedelta(days=settings.REVIEW_SLA_DAYS)
+            if draft.assigned_at
+            else None
+        ),
+        "review_overdue": bool(
+            draft.assigned_at
+            and draft.assigned_at
+            < datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)
+        ),
+        "reviewed_by": str(draft.reviewed_by) if draft.reviewed_by else None,
+        "reviewed_at": draft.reviewed_at,
+        "created_at": draft.created_at,
+        "similarity_level": draft.similarity_level,
+        # The row shows "N% similar to <title>" for the STRONGEST match only. The full
+        # `similarity_matches` array is unbounded -- one entry per related article -- so
+        # the detail view carries that; the list carries the one match it renders.
+        "top_similarity_match": (
+            (draft.similarity_matches or [None])[0]
+            if isinstance(draft.similarity_matches, list) and draft.similarity_matches
+            else None
+        ),
+        "requires_update_confirmation": draft.requires_update_confirmation,
+        "candidate_count": candidate_count,
+        # A short enum the row renders as a badge, lifted out so the row does not need
+        # the whole `content_metadata` blob (which holds AI extraction output).
+        "submission_kind": (draft.content_metadata or {}).get("submission_kind")
+        if can_view_content
+        else None,
+        "tags": draft.tags or [],
+        "external_document_id": (
+            str(draft.external_document_id) if draft.external_document_id else None
+        ),
+    }
+
+
 @router.get("/pending-drafts")
 async def list_pending_drafts(
     status: str | None = Query(None),
+    search: str | None = Query(
+        None,
+        max_length=200,
+        description="Accent-insensitive match on title and source reference.",
+    ),
+    limit: int = Query(
+        GovernanceRepository.MAX_DRAFT_PAGE_SIZE,
+        ge=1,
+        le=GovernanceRepository.MAX_DRAFT_PAGE_SIZE,
+    ),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(require_permission("governance.read")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    """One page of the review queue, with the total so the client can page.
+
+    Filtering happens in SQL, not in the browser. The page previously fetched up to 500
+    drafts and filtered them client-side, so a reviewer searching for anything older than
+    the 500 most recent got silence -- and no indication that the queue had been
+    truncated rather than searched.
+    """
     gov_repo = GovernanceRepository(db)
     art_repo = ArticleRepository(db)
     service = GovernanceService(gov_repo, art_repo)
-    drafts = await service.list_drafts(current_user, status)
-    response = []
-    for draft in drafts:
-        can_view_content = (
-            draft.assigned_approver_id == current_user.id
-            or service._can_review_draft(current_user, draft)
-        )
-        visible_body = draft.restructured_body_md if can_view_content else None
-        report_body = draft.restructure_candidate_md or visible_body
-        report = (
-            build_restructure_report(draft.summary or "", report_body)
-            if can_view_content and report_body
-            else None
-        )
-        response.append(
-            {
-                "id": str(draft.id),
-                "title": draft.title,
-                "company_domain": draft.company_domain,
-                "dept": draft.dept,
-                "source_ref": draft.source_ref,
-                "source_hash": draft.source_hash,
-                # Any reviewer/publisher authorized for this draft may use and
-                # inspect the AI reading view and review unassigned drafts.
-                "summary": draft.summary if can_view_content else None,
-                "restructured_body_md": visible_body,
-                "restructure_candidate_md": (
-                    draft.restructure_candidate_md if can_view_content else None
-                ),
-                "restructure_decision": draft.restructure_decision,
-                "restructure_status": draft.restructure_status,
-                "restructure_model": draft.restructure_model,
-                "restructure_error": draft.restructure_error,
-                "restructure_report": asdict(report) if report else None,
-                "restructure_chunk_count": (
-                    len(split_into_chunks(report_body)) if report_body else 0
-                ),
-                "status": draft.status,
-                "created_by": str(draft.created_by) if draft.created_by else None,
-                "assigned_approver_id": (
-                    str(draft.assigned_approver_id)
-                    if draft.assigned_approver_id
-                    else None
-                ),
-                "assigned_by": str(draft.assigned_by) if draft.assigned_by else None,
-                "assigned_at": draft.assigned_at,
-                "review_due_at": draft.assigned_at + timedelta(days=settings.REVIEW_SLA_DAYS) if draft.assigned_at else None,
-                "review_overdue": bool(draft.assigned_at and draft.assigned_at < datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)),
-                "reviewed_by": str(draft.reviewed_by) if draft.reviewed_by else None,
-                "reviewed_at": draft.reviewed_at,
-                "created_at": draft.created_at,
-                "similarity_level": draft.similarity_level,
-                "similarity_matches": draft.similarity_matches or [],
-                "requires_update_confirmation": draft.requires_update_confirmation,
-                "related_article_ids": draft.related_article_ids or [],
-                "tags": draft.tags or [],
-                "content_metadata": (
-                    draft.content_metadata
-                    if draft.assigned_approver_id == current_user.id
+    # Candidate bodies are not read by any list row, and `PendingDraft.candidates` is
+    # `lazy="selectin"`, so loading them here would pull every pending document's full
+    # text to render titles.
+    drafts = await service.list_drafts(
+        current_user, status, search=search, limit=limit, offset=offset,
+        load_candidates=False,
+    )
+    total = await service.count_drafts(current_user, status, search=search)
+    # One GROUP BY for the whole page, rather than one count per row.
+    candidate_counts = await gov_repo.count_active_candidates([d.id for d in drafts])
+    return {
+        "items": [
+            _draft_list_row(
+                draft,
+                can_view_content=(
+                    draft.assigned_approver_id == current_user.id
                     or service._can_review_draft(current_user, draft)
-                    else None
                 ),
-                "external_document_id": (
-                    str(draft.external_document_id)
-                    if draft.external_document_id
-                    else None
-                ),
-                "candidate_count": len(
-                    [
-                        item
-                        for item in (getattr(draft, "candidates", []) or [])
-                        if item.status == "candidate"
-                    ]
-                ),
-            }
-        )
-    return response
+                candidate_count=candidate_counts.get(draft.id, 0),
+            )
+            for draft in drafts
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/pending-drafts/{id}/detail")
+async def get_pending_draft_detail(
+    id: uuid.UUID,
+    current_user: User = Depends(require_permission("governance.read")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Everything about ONE draft, including the bodies the list no longer carries.
+
+    The path is `/detail` rather than a bare `/{id}` on purpose: `{id}` at that position
+    would also match the literal `bulk-decide` segment and shadow that route, which
+    `tests/unit/test_bulk_draft_decisions.py` asserts against explicitly.
+    """
+    gov_repo = GovernanceRepository(db)
+    art_repo = ArticleRepository(db)
+    service = GovernanceService(gov_repo, art_repo)
+    draft = await gov_repo.get_draft_for_user(id, current_user)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    can_view_content = (
+        draft.assigned_approver_id == current_user.id
+        or service._can_review_draft(current_user, draft)
+    )
+    visible_body = draft.restructured_body_md if can_view_content else None
+    report_body = draft.restructure_candidate_md or visible_body
+    report = (
+        build_restructure_report(draft.summary or "", report_body)
+        if can_view_content and report_body
+        else None
+    )
+    # A count, not `len(draft.candidates)`: the candidate BODIES are served by
+    # `GET /pending-drafts/{id}/candidates` for the batch review screen. This response
+    # only reports how many there are, so it should not pay to load them.
+    candidate_counts = await gov_repo.count_active_candidates([draft.id])
+    row = _draft_list_row(
+        draft,
+        can_view_content=can_view_content,
+        candidate_count=candidate_counts.get(draft.id, 0),
+    )
+    row.update(
+        {
+            # Any reviewer/publisher authorized for this draft may use and
+            # inspect the AI reading view and review unassigned drafts.
+            "summary": draft.summary if can_view_content else None,
+            "restructured_body_md": visible_body,
+            "restructure_candidate_md": (
+                draft.restructure_candidate_md if can_view_content else None
+            ),
+            "restructure_report": asdict(report) if report else None,
+            "restructure_chunk_count": (
+                len(split_into_chunks(report_body)) if report_body else 0
+            ),
+            "similarity_matches": draft.similarity_matches or [],
+            "related_article_ids": draft.related_article_ids or [],
+            "content_metadata": draft.content_metadata if can_view_content else None,
+        }
+    )
+    return row
 
 
 @router.post("/pending-drafts/{id}/assign-approver")

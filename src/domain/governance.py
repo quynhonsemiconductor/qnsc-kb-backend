@@ -196,42 +196,70 @@ class GovernanceService:
             user, "article.publish", requested_scope="global"
         )
 
-    async def list_drafts(
-        self, user: User, status: str | None = None
-    ) -> Sequence[PendingDraft]:
+    def _draft_queue_scope(self, user: User) -> dict[str, object]:
+        """The repository filters this actor's queue is confined to.
+
+        Extracted so the page query and the total count are scoped by ONE definition.
+        When these were inline at each `list_drafts` call, adding a count meant writing
+        the same three-branch permission logic a second time -- and a count computed over
+        a wider scope than the rows would tell a reviewer about drafts they cannot see.
+
+        Raises rather than returning an empty scope for an unauthorized actor: "no
+        permission" and "nothing pending" must not look alike to the caller.
+        """
         if self._is_global_publisher(user):
-            return await self.gov_repo.list_drafts(status, assigned_approver_id=user.id)
+            return {"assigned_approver_id": user.id}
         can_company_review = any(
             AuthorizationService.has_permission(user, key, requested_scope="company")
             for key in ("article.review", "article.publish", "governance.read")
         )
-        if can_company_review:
-            # Admin/CEO see all unassigned company drafts. Other reviewers
-            # are scoped to departments they belong to, even when their
-            # legacy role is granted a company-scoped review permission.
-            if self._is_company_governance_lead(user):
-                return await self.gov_repo.list_drafts(
-                    status, user.company_domain, assigned_approver_id=user.id
-                )
-            member_departments = AuthorizationService.member_department_names(user)
-            if user.dept:
-                member_departments.add(user.dept)
-            member_department_ids = {
-                str(department.id)
-                for department in getattr(user, "departments", [])
-                if getattr(department, "active", True)
-                and getattr(department, "company_domain", user.company_domain)
-                == user.company_domain
-            }
-            return await self.gov_repo.list_drafts(
-                status,
-                user.company_domain,
-                depts=sorted(member_departments),
-                assigned_approver_id=user.id,
+        if not can_company_review:
+            raise HTTPException(
+                status_code=403, detail="Not authorized to view the approval queue"
             )
-        raise HTTPException(
-            status_code=403, detail="Not authorized to view the approval queue"
+        # Admin/CEO see all unassigned company drafts. Other reviewers are scoped to
+        # departments they belong to, even when their legacy role is granted a
+        # company-scoped review permission.
+        if self._is_company_governance_lead(user):
+            return {
+                "company_domain": user.company_domain,
+                "assigned_approver_id": user.id,
+            }
+        member_departments = AuthorizationService.member_department_names(user)
+        if user.dept:
+            member_departments.add(user.dept)
+        return {
+            "company_domain": user.company_domain,
+            "depts": sorted(member_departments),
+            "assigned_approver_id": user.id,
+        }
+
+    async def list_drafts(
+        self,
+        user: User,
+        status: str | None = None,
+        *,
+        search: str | None = None,
+        limit: int = GovernanceRepository.MAX_DRAFT_PAGE_SIZE,
+        offset: int = 0,
+        load_candidates: bool = True,
+    ) -> Sequence[PendingDraft]:
+        scope = self._draft_queue_scope(user)
+        return await self.gov_repo.list_drafts(
+            status,
+            search=search,
+            limit=limit,
+            offset=offset,
+            load_candidates=load_candidates,
+            **scope,
         )
+
+    async def count_drafts(
+        self, user: User, status: str | None = None, *, search: str | None = None
+    ) -> int:
+        """Total matching drafts for the same actor and filters, ignoring the page."""
+        scope = self._draft_queue_scope(user)
+        return await self.gov_repo.count_drafts(status, search=search, **scope)
 
     async def submit_draft(
         self, user: User, draft_id: uuid.UUID, reason: str | None = None
