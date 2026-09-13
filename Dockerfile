@@ -90,6 +90,21 @@ RUN poetry install --no-root --only main,ml,ocr
 # Kept in step with the deps stage above, including its 3.13 ceiling.
 FROM python:3.13-slim AS runtime
 
+# Debian security updates for the base image's own packages, applied in the stage every
+# scanned stage derives from (api, worker, migrator).
+#
+# Trivy's CRITICAL gate blocks on base-image CVEs, not just ours: run 34751584705 failed
+# on three perl-base advisories (CVE-2026-13221, CVE-2026-8376, CVE-2026-42496) fixed in
+# 5.40.1-6+deb13u1, with zero findings in our Python dependencies. python:3.13-slim ships
+# whatever Debian had at ITS build time, so this recurs whenever an advisory lands before
+# the upstream tag is rebuilt — a base image bump cannot be the fix.
+#
+# `upgrade`, not `dist-upgrade`: security patches within the pinned Debian release only,
+# never a release upgrade that could swap out the interpreter this stage is built around.
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
