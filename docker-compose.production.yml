@@ -10,7 +10,7 @@ services:
   edge:
     logging: *default-logging
     mem_limit: 256m
-    image: caddy:2.8-alpine
+    image: caddy:2.11-alpine
     restart: unless-stopped
     ports:
       - "80:80"
