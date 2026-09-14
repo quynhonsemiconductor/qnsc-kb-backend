@@ -12,15 +12,34 @@ being embedded as nothing at all — in a corpus that is largely Vietnamese.
 The ratio below is a deliberately CONSERVATIVE estimate, not a measurement: the point is
 to keep a margin against the worst-case language in this corpus, and to fail loudly if
 someone raises the chunk size without also moving to a model with a longer window.
+
+TWO BOUNDS, NOT ONE. The upper bound catches silent truncation. The LOWER bound catches
+the opposite failure, which is just as silent: after the move to e5-large-instruct the
+window went from 128 to 512 tokens and the chunker kept asking for 250 characters, so
+three quarters of a window we pay for on every single embed went unused, and children
+were shorter than they needed to be to carry a whole thought. Nothing failed, nothing
+logged, and retrieval was quietly worse than the model allowed. A window change should
+break a test, in whichever direction it moves.
+
+The upper bound is measured against what the EMBEDDER actually receives, which is not
+the child: indexing.py prepends a per-section context header, up to MAX_HEADER_CHARS,
+before embedding. A test that checked the bare child would pass while the real input
+overflowed.
 """
 from __future__ import annotations
 
 from src.core.config import settings
 from src.rag.chunker import create_parent_child_chunks, sliding_chunks
+from src.rag.contextual_header import MAX_HEADER_CHARS, apply_header
 
 #: Characters per token, worst case. Vietnamese under a multilingual (XLM-R style)
 #: tokenizer runs denser than English; 2.5 leaves margin under either.
 CONSERVATIVE_CHARS_PER_TOKEN = 2.5
+
+#: How much of the window the child itself is allowed to leave unused before this is a
+#: bug rather than a margin. 0.6 passes at the current 802-of-1204 characters and fails
+#: if someone widens the window again without revisiting the chunker.
+MIN_WINDOW_UTILISATION = 0.6
 
 
 def _child_size_limit() -> int:
@@ -31,13 +50,44 @@ def _child_size_limit() -> int:
     return max(len(child) for child in children)
 
 
-def test_a_child_chunk_fits_the_model_window():
-    """The regression: at 500 characters this exceeded 128 tokens and truncated."""
-    worst_case_tokens = _child_size_limit() / CONSERVATIVE_CHARS_PER_TOKEN
+def _embedder_input_limit() -> int:
+    """What the EMBEDDER receives at worst: a full-length header plus the largest child.
+
+    indexing.py embeds `apply_header(section_header, child)`, never the bare child, and
+    generate_section_context truncates its result to MAX_HEADER_CHARS. So the worst case
+    is a header at exactly that cap joined to the largest child the chunker emits.
+    """
+    return len(apply_header("h" * MAX_HEADER_CHARS, "c" * _child_size_limit()))
+
+
+def test_the_embedder_input_fits_the_model_window():
+    """The regression: at 500 characters this exceeded 128 tokens and truncated.
+
+    Measured on header + child, because that is what gets tokenised.
+    """
+    worst_case_tokens = _embedder_input_limit() / CONSERVATIVE_CHARS_PER_TOKEN
     assert worst_case_tokens <= settings.EMBEDDING_MAX_TOKENS, (
-        f"child chunks reach {_child_size_limit()} chars, about "
+        f"header + child reaches {_embedder_input_limit()} chars, about "
         f"{worst_case_tokens:.0f} tokens, over EMBEDDING_MAX_TOKENS="
-        f"{settings.EMBEDDING_MAX_TOKENS} — the tail is silently truncated"
+        f"{settings.EMBEDDING_MAX_TOKENS} — the tail is silently truncated. Either lower "
+        f"the child size in chunker.py or lower MAX_HEADER_CHARS ({MAX_HEADER_CHARS})"
+    )
+
+
+def test_children_actually_use_the_window_they_are_given():
+    """The other half of the bound: a child must not waste the window we pay for.
+
+    This is the failure that followed the e5-large-instruct move — the window tripled to
+    512 tokens and the chunker still asked for 250 characters, so most of every embed was
+    padding. Silent, like truncation, but in the opposite direction.
+    """
+    budget_chars = settings.EMBEDDING_MAX_TOKENS * CONSERVATIVE_CHARS_PER_TOKEN
+    used = _embedder_input_limit() / budget_chars
+    assert used >= MIN_WINDOW_UTILISATION, (
+        f"header + child reaches only {_embedder_input_limit()} of about "
+        f"{budget_chars:.0f} usable characters ({used:.0%} of the window). "
+        f"EMBEDDING_MAX_TOKENS is {settings.EMBEDDING_MAX_TOKENS}; raise the child size "
+        f"in chunker.py to match the model actually in use"
     )
 
 
