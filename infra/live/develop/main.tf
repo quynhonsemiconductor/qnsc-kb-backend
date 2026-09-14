@@ -141,8 +141,23 @@ module "stack" {
   }
 
   rds = {
-    engine_version           = "16" // matches the pgvector/pgvector:pg16 image used in development
-    instance_class           = "db.t4g.micro"
+    engine_version = "16" // matches the pgvector/pgvector:pg16 image used in development
+    // RAISED 2026-09-14 from db.t4g.micro. Measured over three days:
+    //
+    //   FreeableMemory     102-178 MB   on a 1 GB instance
+    //   CPUCreditBalance   29-34        of a 288 ceiling
+    //   CPUUtilization     4-8%
+    //
+    // Memory was the problem, not CPU. pgvector wants its index in cache and ~100 MB free
+    // means it reads from disk instead, so embedding search pays for every query. The credit
+    // balance is the second signal: a t4g.micro earns 12/hour to a ceiling of 288, so sitting
+    // at ~32 means it has been spending above its 10% baseline continuously and never
+    // rebuilding a buffer. At zero the instance throttles hard, and that failure presents as
+    // the application hanging rather than as anything database-shaped.
+    //
+    // db.t4g.small doubles memory to 2 GB and doubles the credit earn rate. Develop's
+    // database is stopped outside working hours, so this is roughly +$5.50/month.
+    instance_class           = "db.t4g.small"
     allocated_storage_gb     = 20
     max_allocated_storage_gb = 100
     multi_az                 = false
