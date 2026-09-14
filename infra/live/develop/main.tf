@@ -96,8 +96,13 @@ module "stack" {
     // task, and the api scans uploads synchronously, so it needs one in ITS task —
     // the worker's is in a different network namespace. The remaining 768/2048 is
     // what the api and the tunnel had before this changed.
-    cpu                = 1024
-    memory             = 4096
+    // RAISED 2026-09-14 from 1024/4096. Memory sat at a steady 68% — not critical, but
+    // clamd (2048 MB) and cloudflared (512 MB) leave the api about 1536 MB, and it loads
+    // the same embedding model the worker does. CPU peaked at 100% against a 3.8% average:
+    // uploads are scanned synchronously, so those peaks are user-visible latency, not
+    // background noise.
+    cpu                = 2048
+    memory             = 8192
     min_count          = 0
     max_count          = 2
     enable_autoscaling = false
@@ -121,8 +126,14 @@ module "stack" {
   // max_count is 1 and cannot be raised while beat lives here — two beat containers
   // double every scheduled job. The stack module enforces that with a validation.
   worker = {
-    cpu                = 2048
-    memory             = 4096
+    // RAISED 2026-09-14 from 2048/4096. MemoryUtilization was averaging 96.6% and
+    // peaking at 98.0% over three days — sustained, not spiky, and with no headroom for
+    // a large document. Nothing had OOM-killed yet, which is luck rather than design:
+    // clamd reserves 2048 MB and beat 256 MB of the task, so the Celery worker itself was
+    // living in roughly 1792 MB while holding an ONNX runtime and the e5 embedding model
+    // in-process. CPU also hit 100% peaks against a 32% average.
+    cpu                = 4096
+    memory             = 8192
     min_count          = 0
     max_count          = 1
     enable_autoscaling = false
