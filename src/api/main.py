@@ -775,7 +775,7 @@ async def health_live():
     return {"status": "alive"}
 
 
-@app.get("/livez", tags=["system"])
+@app.get("/livez", tags=["system"], include_in_schema=False)
 async def livez():
     """Kubernetes liveness probe. Process only — never a dependency.
 
