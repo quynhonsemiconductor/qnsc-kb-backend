@@ -134,16 +134,16 @@ jobs:
           # Cloudflare resources.
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
-      # Short-lived installation token from the RELEASE_BOT App, so no long-lived PAT is
+      # Short-lived installation token from the qnsc-automation App, so no long-lived PAT is
       # needed. Requires "Variables: read and write" on BOTH qnsc-kb repos — the
       # frontend's Pages project name is an output of THIS stack.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: app-token
-        if: ${{ vars.RELEASE_BOT_APP_ID != '' }}
+        if: ${{ vars.QNSC_AUTOMATION_APP_ID != '' }}
         continue-on-error: true
         with:
-          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          app-id: ${{ vars.QNSC_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: |
             qnsc-kb-backend
@@ -247,11 +247,11 @@ jobs:
 
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: app-token
-        if: ${{ vars.RELEASE_BOT_APP_ID != '' }}
+        if: ${{ vars.QNSC_AUTOMATION_APP_ID != '' }}
         continue-on-error: true
         with:
-          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          app-id: ${{ vars.QNSC_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: |
             qnsc-kb-backend
