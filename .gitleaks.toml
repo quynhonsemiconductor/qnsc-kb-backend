@@ -1,0 +1,33 @@
+# Extends the built-in ruleset — it does NOT replace it.
+#
+# `[extend] useDefault = true` is the load-bearing line. gitleaks 8 treats this
+# file as THE config, so a config without it leaves the scanner with nothing to
+# detect: it scans, finds nothing, exits 0, and the required check goes green.
+# rova, opshub and qnsc-landing each shipped exactly that and had no secret
+# scanning at all for the life of the file. `ci`'s scan-secrets action plants a
+# canary and fails if it is not detected, precisely so this cannot happen again —
+# so if this allowlist is ever widened too far, CI says so.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+  [rules.allowlist]
+  # ONE pattern: two ADJACENT env assignments whose values are both empty.
+  #
+  # `generic-api-key` matches across a newline, so in .env.example
+  #
+  #     OPENAI_API_KEY=""
+  #     GROQ_API_KEY=""
+  #
+  # it reads the text between the first and third quote as a secret — the
+  # "secret" it reports is the literal string `GROQ_API_KEY=`. There is no value
+  # on either line; that is the whole point of an example file.
+  #
+  # Scoped to the MATCH rather than the path, deliberately. An allowlist on
+  # `.env.example` would stop scanning the one file people most often paste a real
+  # key into by accident; this one only forgives a match that contains no value.
+  regexTarget = "match"
+  regexes = ['''[A-Z0-9_]+=""\n[A-Z0-9_]+="''']

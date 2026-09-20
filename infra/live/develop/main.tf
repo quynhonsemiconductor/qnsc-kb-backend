@@ -96,8 +96,13 @@ module "stack" {
     // task, and the api scans uploads synchronously, so it needs one in ITS task —
     // the worker's is in a different network namespace. The remaining 768/2048 is
     // what the api and the tunnel had before this changed.
-    cpu                = 1024
-    memory             = 4096
+    // RAISED 2026-09-14 from 1024/4096. Memory sat at a steady 68% — not critical, but
+    // clamd (2048 MB) and cloudflared (512 MB) leave the api about 1536 MB, and it loads
+    // the same embedding model the worker does. CPU peaked at 100% against a 3.8% average:
+    // uploads are scanned synchronously, so those peaks are user-visible latency, not
+    // background noise.
+    cpu                = 2048
+    memory             = 8192
     min_count          = 0
     max_count          = 2
     enable_autoscaling = false
@@ -121,8 +126,14 @@ module "stack" {
   // max_count is 1 and cannot be raised while beat lives here — two beat containers
   // double every scheduled job. The stack module enforces that with a validation.
   worker = {
-    cpu                = 2048
-    memory             = 4096
+    // RAISED 2026-09-14 from 2048/4096. MemoryUtilization was averaging 96.6% and
+    // peaking at 98.0% over three days — sustained, not spiky, and with no headroom for
+    // a large document. Nothing had OOM-killed yet, which is luck rather than design:
+    // clamd reserves 2048 MB and beat 256 MB of the task, so the Celery worker itself was
+    // living in roughly 1792 MB while holding an ONNX runtime and the e5 embedding model
+    // in-process. CPU also hit 100% peaks against a 32% average.
+    cpu                = 4096
+    memory             = 8192
     min_count          = 0
     max_count          = 1
     enable_autoscaling = false
@@ -130,8 +141,23 @@ module "stack" {
   }
 
   rds = {
-    engine_version           = "16" // matches the pgvector/pgvector:pg16 image used in development
-    instance_class           = "db.t4g.micro"
+    engine_version = "16" // matches the pgvector/pgvector:pg16 image used in development
+    // RAISED 2026-09-14 from db.t4g.micro. Measured over three days:
+    //
+    //   FreeableMemory     102-178 MB   on a 1 GB instance
+    //   CPUCreditBalance   29-34        of a 288 ceiling
+    //   CPUUtilization     4-8%
+    //
+    // Memory was the problem, not CPU. pgvector wants its index in cache and ~100 MB free
+    // means it reads from disk instead, so embedding search pays for every query. The credit
+    // balance is the second signal: a t4g.micro earns 12/hour to a ceiling of 288, so sitting
+    // at ~32 means it has been spending above its 10% baseline continuously and never
+    // rebuilding a buffer. At zero the instance throttles hard, and that failure presents as
+    // the application hanging rather than as anything database-shaped.
+    //
+    // db.t4g.small doubles memory to 2 GB and doubles the credit earn rate. Develop's
+    // database is stopped outside working hours, so this is roughly +$5.50/month.
+    instance_class           = "db.t4g.small"
     allocated_storage_gb     = 20
     max_allocated_storage_gb = 100
     multi_az                 = false

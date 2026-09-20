@@ -59,9 +59,13 @@ data "terraform_remote_state" "platform" {
 # migrator. `beat` is deliberately absent — Celery beat runs as a second container
 # off the WORKER image with its own command, so it needs no image of its own.
 module "ecr" {
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.0.0"
+  # ecr-v2.1.0 (task 0.7, §13). This bump is also a CORRECTNESS fix, not only a policy
+  # change: `release_retention_days` below did not exist as a variable until v2.1.0, so
+  # this call pinned to v2.0.0 was passing an UNKNOWN variable and would have failed
+  # `tofu validate`/plan. The tag exists (release-please cut it), so the bump resolves today.
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.1.0"
 
-  # Lower than the module defaults (30 releases / 20 builds), but for a narrower reason
+  # keep_build_count is lower than the module default (20), for a narrower reason
   # than "the images are big".
   #
   # These images ARE big — the api and worker carry ONNX Runtime, paddle and the baked bge-m3
@@ -80,13 +84,24 @@ module "ecr" {
   # both runtimes, onnx-only — and the torch-era tags age out of these counts on their
   # own within a few more builds.)
   #
-  # Re-run `aws ecr start-lifecycle-policy-preview` (a dry run) before changing these; it
-  # is the only way to see what a policy will delete.
-  keep_release_count = 10
-  keep_build_count   = 5
+  # Run the estate preview (infra/scripts/ecr_lifecycle_preview.py — task 0.7, a dry run)
+  # before changing these; it is the only way to see what a policy will delete. Unlike the
+  # module default (`keep_release_count` was 10, a COUNT), the release rule is now a TIME
+  # window: a count is a duration only if the promotion rate is known, and it shortens
+  # silently as promotion gets more frequent. 180 days is generous because ECR storage is
+  # not where the money is.
+  release_retention_days = 180
+  keep_build_count       = 5
 
-  repository_names     = ["qnsc-kb-api", "qnsc-kb-worker", "qnsc-kb-migrator"]
-  image_tag_mutability = "MUTABLE" # allows re-tagging :latest
+  repository_names = ["qnsc-kb-api", "qnsc-kb-worker", "qnsc-kb-migrator"]
+
+  # IMMUTABLE (task 0.8, §11): a rewritable tag underneath a running workload is not
+  # pinned, and :latest already put a develop build into prod (../prod/main.tf:104).
+  # Flipped only after the CI `:latest` push was removed
+  # (ci/.github/workflows/backend-deploy.yml — 0.8 step a); IMMUTABLE rejects a second push
+  # of an existing tag, so flipping first breaks the pipeline. qnsc-kb deploys with
+  # `cache_backend: none`, so no `:buildcache` overwrite depends on mutability either.
+  image_tag_mutability = "IMMUTABLE"
   kms_key_arn          = data.terraform_remote_state.platform.outputs.kms_key_arn
   tags                 = { Layer = "shared" }
 }

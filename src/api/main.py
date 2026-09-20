@@ -775,6 +775,40 @@ async def health_live():
     return {"status": "alive"}
 
 
+@app.get("/livez", tags=["system"], include_in_schema=False)
+async def livez():
+    """Kubernetes liveness probe. Process only — never a dependency.
+
+    SAME BODY AS `/health/live`, DIFFERENT PATH, AND THE PATH IS THE POINT.
+    `gitops/charts/qnsc-service` hardcodes the liveness path and does not expose it
+    as a per-service value (deliberately, per §9j), and
+    `gitops/platform/policy/admission.yaml` is a ValidatingAdmissionPolicy that
+    DENIES any Deployment whose liveness path is not exactly `/livez`. So this is
+    not a nicer alias — without it the probe 404s, the kubelet restarts the
+    container, and the pod sits in CrashLoopBackOff; with a prefixed path instead,
+    the manifest is rejected at admission.
+
+    It DUPLICATES `/health/live` rather than replacing it because that path is
+    load-bearing on the ECS path — the Dockerfile HEALTHCHECK points at it
+    (Dockerfile:290) — and §17b runs both platforms at once during the migration.
+    The two collapse into one at Phase 5, when the ECS path goes.
+
+    rova and opshub carry the same addition for the same reason; all three
+    products now answer `/livez` identically, which is the consistency the chart
+    was already assuming.
+
+    ⚠ IT MUST NEVER TOUCH A DEPENDENCY. §9j: "if liveness checks the database and
+    the database slows down, Kubernetes kills every replica of every service at
+    once, and a slowdown becomes an outage." `/health/ready` is where the database
+    and Redis checks belong — a failing readiness probe removes ONE pod from its
+    Service instead of restarting all of them. That matters more here than
+    elsewhere: this API deliberately does not block readiness on the multi-second
+    ONNX session load (see the note at line 364), so the two probes already have
+    genuinely different jobs.
+    """
+    return {"status": "alive"}
+
+
 @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
 async def metrics(
     current_user: User = Depends(require_permission("governance.read", scope="global")),
