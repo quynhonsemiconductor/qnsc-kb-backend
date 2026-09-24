@@ -48,11 +48,34 @@ class FakeGovernanceRepository:
         self.audits.append(audit)
         return audit
 
-    async def list_drafts(self, status=None, company_domain=None, dept=None, depts=None, assigned_approver_id=None):
+    async def list_drafts(
+        self,
+        status=None,
+        company_domain=None,
+        dept=None,
+        depts=None,
+        assigned_approver_id=None,
+        *,
+        search=None,
+        limit=100,
+        offset=0,
+        load_candidates=True,
+    ):
         drafts = [self.draft]
         if assigned_approver_id:
             drafts = [item for item in drafts if item.assigned_approver_id in {None, assigned_approver_id}]
-        return drafts
+        # The real repository filters and pages in SQL. This fake mirrors the shape of
+        # that contract -- title/source_ref matching, then slice -- so a test asserting
+        # on scope is not silently exercising an unpaged, unfiltered list.
+        if search:
+            needle = search.strip().lower()
+            drafts = [
+                item
+                for item in drafts
+                if needle in (item.title or "").lower()
+                or needle in (item.source_ref or "").lower()
+            ]
+        return drafts[offset : offset + limit]
 
 
 class FakeArticleRepository:

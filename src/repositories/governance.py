@@ -4,7 +4,7 @@ from typing import Sequence
 from sqlalchemy import case, select, delete, and_, or_, func, update, false
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import noload, selectinload
 from src.models.governance import PendingDraft, DraftTransition, DraftCandidate, ApproverRule, Gap, AuditLog
 from src.models.article import Article
 from src.models.interaction import Vote
@@ -67,25 +67,150 @@ class GovernanceRepository:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_drafts(self, status: str | None = None, company_domain: str | None = None, dept: str | None = None, depts: Sequence[str] | None = None, assigned_approver_id: uuid.UUID | None = None) -> Sequence[PendingDraft]:
-        stmt = select(PendingDraft)
+    #: Hard ceiling on one page of the review queue. A caller asking for more gets this
+    #: many: an unbounded `limit` is the same unbounded response this replaced, just
+    #: requested politely.
+    MAX_DRAFT_PAGE_SIZE = 100
+
+    def _draft_scope_conditions(
+        self,
+        status: str | None,
+        company_domain: str | None,
+        dept: str | None,
+        depts: Sequence[str] | None,
+        assigned_approver_id: uuid.UUID | None,
+        search: str | None,
+    ) -> list:
+        """Every WHERE clause for the queue, built once.
+
+        The page query and the total count MUST apply identical conditions or the
+        pagination lies -- a total computed over a wider scope than the rows shows the
+        reviewer pages that do not exist, and a narrower one hides drafts. Returning a
+        list of conditions rather than a statement is what makes that sharing possible:
+        `count()` and `select()` need different SELECT shapes but the same filters.
+        """
+        conditions: list = []
         if status:
-            stmt = stmt.where(PendingDraft.status == status)
+            conditions.append(PendingDraft.status == status)
         if company_domain:
-            stmt = stmt.where(PendingDraft.company_domain == company_domain)
+            conditions.append(PendingDraft.company_domain == company_domain)
         if depts:
-            stmt = stmt.where(PendingDraft.dept.in_(list(depts)))
+            conditions.append(PendingDraft.dept.in_(list(depts)))
         elif dept:
-            stmt = stmt.where(PendingDraft.dept == dept)
+            conditions.append(PendingDraft.dept == dept)
         if assigned_approver_id:
-            assignment_scope = (PendingDraft.assigned_approver_id.is_(None)) | (PendingDraft.assigned_approver_id == assigned_approver_id)
+            assignment_scope = (PendingDraft.assigned_approver_id.is_(None)) | (
+                PendingDraft.assigned_approver_id == assigned_approver_id
+            )
             if depts:
                 assignment_scope = assignment_scope | PendingDraft.dept.in_(list(depts))
-            stmt = stmt.where(assignment_scope)
+            conditions.append(assignment_scope)
+        if search and search.strip():
+            # Accent-insensitive on BOTH sides, via the immutable_unaccent wrapper
+            # migration 58 defined: a reviewer typing "quy trinh" must find "quy trình",
+            # and one typing the diacritics must find it too. Reusing that exact function
+            # is load-bearing -- PostgreSQL matches an expression index by expression
+            # equality, so calling plain `unaccent()` here would silently skip the
+            # trigram indexes migration 82 adds for these two columns.
+            #
+            # Title and source_ref only -- deliberately NOT the document body. Body
+            # search belongs to the retrieval pipeline, which is indexed for it; an
+            # ILIKE over every pending document's text would scan the largest columns
+            # in the table.
+            needle = f"%{search.strip()}%"
+            conditions.append(
+                or_(
+                    func.immutable_unaccent(PendingDraft.title).ilike(
+                        func.immutable_unaccent(needle)
+                    ),
+                    func.immutable_unaccent(func.coalesce(PendingDraft.source_ref, "")).ilike(
+                        func.immutable_unaccent(needle)
+                    ),
+                )
+            )
+        return conditions
+
+    async def count_drafts(
+        self,
+        status: str | None = None,
+        company_domain: str | None = None,
+        dept: str | None = None,
+        depts: Sequence[str] | None = None,
+        assigned_approver_id: uuid.UUID | None = None,
+        search: str | None = None,
+    ) -> int:
+        """How many drafts the same filters match, ignoring pagination.
+
+        A SQL count, not `len()` of a fetch: the whole point of paginating was to stop
+        loading every row, and counting in Python would load them all again.
+        """
+        conditions = self._draft_scope_conditions(
+            status, company_domain, dept, depts, assigned_approver_id, search
+        )
+        stmt = select(func.count(PendingDraft.id))
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+        result = await self.db.execute(stmt)
+        return int(result.scalar_one() or 0)
+
+    async def list_drafts(
+        self,
+        status: str | None = None,
+        company_domain: str | None = None,
+        dept: str | None = None,
+        depts: Sequence[str] | None = None,
+        assigned_approver_id: uuid.UUID | None = None,
+        search: str | None = None,
+        limit: int = MAX_DRAFT_PAGE_SIZE,
+        offset: int = 0,
+        load_candidates: bool = True,
+    ) -> Sequence[PendingDraft]:
+        conditions = self._draft_scope_conditions(
+            status, company_domain, dept, depts, assigned_approver_id, search
+        )
+        stmt = select(PendingDraft)
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+        if not load_candidates:
+            # `PendingDraft.candidates` is `lazy="selectin"`, so merely listing the queue
+            # otherwise loads every candidate's `body_md` -- the full text of every
+            # pending document -- to render a list of titles. `noload` overrides that
+            # for this query only; a caller that needs candidate bodies (the detail
+            # view) simply does not pass this.
+            stmt = stmt.options(noload(PendingDraft.candidates))
+        # `id` breaks ties on identical `created_at`. Without it, two drafts created in
+        # the same transaction have no defined order between pages, so one can appear on
+        # both page 1 and page 2 while another appears on neither.
         result = await self.db.execute(
-            stmt.order_by(PendingDraft.created_at.desc()).limit(500)
+            stmt.order_by(PendingDraft.created_at.desc(), PendingDraft.id.desc())
+            .limit(max(1, min(limit, self.MAX_DRAFT_PAGE_SIZE)))
+            .offset(max(0, offset))
         )
         return result.scalars().all()
+
+    async def count_active_candidates(
+        self, draft_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, int]:
+        """How many candidates still await review, per draft, as a GROUP BY.
+
+        The queue row needs this number to show the "N split candidates" badge and the
+        Batch review button. Reading it from `draft.candidates` would load every
+        candidate's `body_md` -- the entire text of every pending document -- to produce
+        one integer each, which is exactly the cost `noload` was added to avoid.
+
+        Absent ids are simply missing from the mapping; callers should default to 0.
+        """
+        if not draft_ids:
+            return {}
+        result = await self.db.execute(
+            select(DraftCandidate.draft_id, func.count(DraftCandidate.id))
+            .where(
+                DraftCandidate.draft_id.in_(list(draft_ids)),
+                DraftCandidate.status == "candidate",
+            )
+            .group_by(DraftCandidate.draft_id)
+        )
+        return {row[0]: int(row[1]) for row in result.all()}
 
     async def count_pending_for_user(self, user: User) -> int:
         """Count only review items that are actually awaiting this actor.
