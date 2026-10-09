@@ -56,8 +56,9 @@ jobs:
         }
     secrets:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      # Lets the reusable mint a qnsc-automation token to fetch tf-modules.
-      QNSC_AUTOMATION_PRIVATE_KEY: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}
+      # Read-only qnsc-repo-reader key: the reusable mints a contents:read token for tf-modules.
+      # This workflow runs on pull requests, so it never receives a write-capable key.
+      QNSC_REPO_READER_PRIVATE_KEY: ${{ secrets.QNSC_REPO_READER_PRIVATE_KEY }}
       # Secret half of the apply-time TF_VARs (masked inside the reusable).
       tf_secret_vars_json: |
         {
