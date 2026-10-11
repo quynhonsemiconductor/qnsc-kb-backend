@@ -267,6 +267,32 @@ class Settings(BaseSettings):
     # space for long documents while retaining a finite cost/time safeguard.
     RESTRUCTURE_MAX_OUTPUT_TOKENS: int = 65536
     RESTRUCTURE_NUMERIC_COVERAGE_THRESHOLD: float = 0.90
+    # Skip the LLM entirely when the extracted Markdown ALREADY has the structure the
+    # model was being asked to produce. Restructuring regenerates the whole document,
+    # so it costs roughly the document in prompt tokens plus the document again in
+    # output tokens, and minutes of wall clock (a 26,633-character upload measured
+    # 304 s). The only thing downstream consumes from it is Markdown structure:
+    # `split_into_chunks` splits on ##/### headings, and the reviewer reads the headings
+    # and tables.
+    #
+    # With PyMuPDF4LLM supplying headings for PDFs (see PYMUPDF4LLM_ENABLED) and
+    # MarkItDown supplying them for Office formats, a well-structured document arrives
+    # with that work already done. Paying a model to redo it buys nothing and risks the
+    # preservation checks rejecting its output anyway.
+    #
+    # A document is "already structured" when it has at least this many ## / ###
+    # chunk-boundary headings per 10,000 characters AND at least
+    # RESTRUCTURE_SKIP_MIN_HEADINGS of them overall. Both conditions matter: the ratio
+    # alone passes a 200-character note with one heading, and the count alone passes a
+    # 100-page document whose only headings are on page 1.
+    #
+    # 2.0 per 10k is deliberately conservative — roughly a heading every 5,000
+    # characters, which is far below the density of a real specification (the 12-section
+    # benchmark PDF yields 49 headings in 10,963 characters, about 45 per 10k) but above
+    # what a flat document produces by accident.
+    RESTRUCTURE_SKIP_WHEN_STRUCTURED: bool = True
+    RESTRUCTURE_SKIP_HEADINGS_PER_10K: float = 2.0
+    RESTRUCTURE_SKIP_MIN_HEADINGS: int = 3
     AI_RATE_LIMIT_PER_MINUTE: int = 30
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
     RAG_MIN_RELEVANCE_SCORE: float = 0.12
@@ -520,6 +546,22 @@ class Settings(BaseSettings):
     BOOTSTRAP_ADMIN_PASSWORD: str = DEVELOPMENT_DEFAULT_PASSWORD
     PADDLEOCR_LANG: str = "en"
     MARKITDOWN_ENABLED: bool = True
+    # MarkItDown reads a PDF through pdfminer, which returns a flat text stream: on a
+    # structured 12-section specification it produced 72 table rows and ZERO headings.
+    # `split_into_chunks` splits on ##/### boundaries, so for PDFs — the dominant upload
+    # format — there was no structure to split on and the LLM restructuring pass was the
+    # only thing that could create any. That is why conversion cost a whole document's
+    # tokens and minutes of wall clock for work a library can do.
+    #
+    # PyMuPDF4LLM reads the same file through PyMuPDF's layout model, which knows font
+    # size and weight, so it emits real `#`/`##` headings AND Markdown tables: 49
+    # headings and the same 72 table rows on that document, in 1.85 s against ~300 s for
+    # the model. PyMuPDF is already a dependency (it is the PDF rasterizer for OCR), so
+    # this adds a thin wrapper over a library that is already in the image.
+    #
+    # PDF only. MarkItDown stays authoritative for Office formats, where it reads the
+    # document's own heading styles and already yields headings, tables and lists.
+    PYMUPDF4LLM_ENABLED: bool = True
     SOURCE_STORAGE_PATH: str = "/app/storage/sources"
     # MVP-1 stores originals in a private Cloudflare R2 bucket.  There is no
     # local-disk fallback because a local fallback would make deployment

@@ -4304,6 +4304,25 @@ files = [
 ]
 
 [[package]]
+name = "pymupdf4llm"
+version = "0.2.9"
+description = "PyMuPDF Utilities for LLM/RAG"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pymupdf4llm-0.2.9-py3-none-any.whl", hash = "sha256:ea9eb3b72765e1970374a37ba7bdc6b1117b0e3ceea5d48b530f49654d8adc94"},
+    {file = "pymupdf4llm-0.2.9.tar.gz", hash = "sha256:6a3e156d1f5724353ae44c18b86b4c5eefcc0d8599eb73a0e92f8137fcbce012"},
+]
+
+[package.dependencies]
+pymupdf = ">=1.26.6"
+tabulate = "*"
+
+[package.extras]
+layout = ["pymupdf-layout (>=1.26.6)"]
+
+[[package]]
 name = "pypdf"
 version = "6.20.0"
 description = "A pure-python PDF library capable of splitting, merging, cropping, and transforming PDF files"
@@ -5500,6 +5519,21 @@ mpmath = ">=1.1.0,<1.4"
 dev = ["hypothesis (>=6.70.0)", "pytest (>=7.1.0)"]
 
 [[package]]
+name = "tabulate"
+version = "0.10.0"
+description = "Pretty-print tabular data"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "tabulate-0.10.0-py3-none-any.whl", hash = "sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3"},
+    {file = "tabulate-0.10.0.tar.gz", hash = "sha256:e2cfde8f79420f6deeffdeda9aaec3b6bc5abce947655d17ac662b126e48a60d"},
+]
+
+[package.extras]
+widechars = ["wcwidth"]
+
+[[package]]
 name = "threadpoolctl"
 version = "3.6.0"
 description = "threadpoolctl"
@@ -6372,4 +6406,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "c21a3cdc427830ab666208637ae7740dba149ef7bc4b016a4ce8685c4916e20b"
+content-hash = "682bac6004f6b433ceeb9727345e9a1366e3b1993a2f748420749e5c549219f9"

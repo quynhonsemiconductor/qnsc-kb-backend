@@ -173,6 +173,78 @@ def _markitdown() -> Any:
         return None
 
 
+def _strip_heading_emphasis(markdown: str) -> str:
+    """Unwrap ``## **Section**`` into ``## Section``.
+
+    PyMuPDF4LLM detects a heading by its font being larger AND bolder, and reports both
+    facts: the ``##`` for the size and a ``**...**`` wrapper for the weight. The bold is
+    redundant inside a heading, and the asterisks are not cosmetic here —
+    ``department_routing._major_sections`` reads the heading text as a section TITLE and
+    shows it to the reviewer, so they would surface as ``**2. Equipment**`` in the
+    review UI and in every routed candidate.
+
+    Only the wrapper around a whole heading line is removed. Emphasis inside body text
+    is content and is left exactly as found.
+    """
+    return re.sub(
+        r"^(#{1,6}\s+)\*\*\s*(.+?)\s*\*\*\s*$",
+        r"\1\2",
+        markdown,
+        flags=re.MULTILINE,
+    )
+
+
+def _convert_pdf_with_pymupdf4llm(data: bytes) -> str:
+    """Convert a PDF to Markdown using PyMuPDF's layout model.
+
+    MarkItDown reads PDFs through pdfminer, which returns a flat text stream with no
+    heading information at all. PyMuPDF knows each span's font size and weight, so it
+    can tell a heading from body text and emit `#`/`##` plus real Markdown tables.
+
+    That difference decides whether the LLM pass is needed: ``split_into_chunks``
+    splits on ##/### boundaries, so a PDF with no headings had no structure until a
+    model generated some.
+
+    Returns "" on any failure, like every other converter here — this is an
+    enhancement layer and the page extractor remains the floor.
+    """
+    if not settings.PYMUPDF4LLM_ENABLED:
+        return ""
+    try:
+        import pymupdf
+        import pymupdf4llm
+    except Exception as exc:
+        logger.warning(
+            "PyMuPDF4LLM is not importable; PDF Markdown structure falls back to MarkItDown",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return ""
+    document = None
+    try:
+        document = pymupdf.open(stream=data, filetype="pdf")
+        _reject_oversized_pdf(document.page_count)
+        return _strip_heading_emphasis(
+            _clean(str(pymupdf4llm.to_markdown(document, show_progress=False)))
+        )
+    except SourceExtractionError:
+        # The page ceiling is a real rejection, not a converter fault: let it out.
+        raise
+    except Exception as exc:
+        logger.warning(
+            "PyMuPDF4LLM conversion failed; trying MarkItDown",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return ""
+    finally:
+        if document is not None:
+            try:
+                document.close()
+            except Exception:
+                pass
+
+
 def _convert_with_markitdown(filename: str, data: bytes) -> str:
     if not settings.MARKITDOWN_ENABLED:
         return ""
@@ -495,29 +567,49 @@ def extract_source_markdown(
 ) -> str:
     """Convert a source to Markdown without weakening page-aware extraction.
 
-    MarkItDown supplies document structure (headings, lists, tables and links).
-    ``pages`` remains the authoritative page-indexed OCR/text representation
-    used for citations and original-source review. If MarkItDown returns an
-    incomplete result, the page extraction is used instead.
+    Two converters supply document structure (headings, lists, tables and links):
+    PyMuPDF4LLM for PDFs, MarkItDown for everything else. ``pages`` remains the
+    authoritative page-indexed OCR/text representation used for citations and
+    original-source review. If both converters return an incomplete result, the page
+    extraction is used instead.
+
+    The log lines name the converter that produced the output, because "conversion
+    used the page extractor" previously covered three different situations and a
+    systematically dead converter looked the same as one awkward document.
     """
     fallback = _clean("\n\n".join(str(item["text"]) for item in (pages or extract_source_pages(filename, data))))
-    converted = _convert_with_markitdown(filename, data)
+    converted = ""
+    converter_used = "markitdown"
+    if Path(filename).suffix.lower() == ".pdf":
+        # PDFs go to PyMuPDF4LLM first because MarkItDown's pdfminer path emits no
+        # headings, and headings are what decide whether the LLM pass is needed at all.
+        converted = _convert_pdf_with_pymupdf4llm(data)
+        if converted:
+            converter_used = "pymupdf4llm"
     if not converted:
-        logger.info("Source Markdown conversion used page extractor", filename=filename, reason="markitdown_unavailable_or_failed")
+        converted = _convert_with_markitdown(filename, data)
+    if not converted:
+        logger.info(
+            "Source Markdown conversion used page extractor",
+            filename=filename,
+            reason="every_converter_unavailable_or_failed",
+        )
         return fallback
     coverage = _token_coverage(fallback, converted)
     if len(converted) < max(80, int(len(fallback) * 0.30)) or coverage < 0.80:
         logger.warning(
-            "MarkItDown output rejected; using page extractor",
+            "Markdown conversion output rejected; using page extractor",
             filename=filename,
+            converter=converter_used,
             fallback_characters=len(fallback),
             markdown_characters=len(converted),
             token_coverage=round(coverage, 3),
         )
         return fallback
     logger.info(
-        "Source converted to Markdown with MarkItDown",
+        "Source converted to Markdown",
         filename=filename,
+        converter=converter_used,
         page_extractor_characters=len(fallback),
         markdown_characters=len(converted),
         token_coverage=round(coverage, 3),
