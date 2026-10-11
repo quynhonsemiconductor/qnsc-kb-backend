@@ -1,0 +1,122 @@
+# =============================================================================
+# Trivy scan configuration.
+#
+# WHY THIS FILE EXISTS AT ALL — it is the only lever this repo has.
+#
+# Every Trivy invocation that scans this repo's images lives in the SHARED
+# `quynhonsemiconductor/ci` reusable workflows, not here:
+#
+#   • .github/workflows/backend-deploy.yml@v1, job `build`, step "Scan <svc> image"
+#     — scans the pushed ECR image by tag. THIS is the step that was failing.
+#   • .github/workflows/security.yml@v1, job `trivy`, two steps (CRITICAL + HIGH SARIF)
+#     — scans a locally built `qnsc-kb-api:scan`.
+#
+# Neither passes a `timeout`, `skip-files` or `scanners` input, and this repo cannot
+# add one without editing the shared `ci` repo. But Trivy defaults `--config` to
+# `trivy.yaml` in its working directory, and the action runs from the checkout root
+# (its entrypoint sources `./trivy_envs.txt` there), so a file at this path is picked
+# up automatically by all three steps. Config is ALSO the lowest-precedence source
+# — flags beat env beats config — so nothing here can override what those workflows
+# already set deliberately (severity: CRITICAL, exit-code: 1, ignore-unfixed, format,
+# TRIVY_PLATFORM). This file only fills in what they leave unset.
+#
+# THE FAILURE THIS FIXES (deploy run, sha-5be9ffd3, 6m12s):
+#
+#   FATAL  run error: image scan error: ... failed to analyze layer (sha256:6def1391...):
+#   walk error: failed to process the file: failed to analyze file:
+#   failed to analyze opt/embedding-onnx/model.onnx_data:
+#   semaphore acquire: context deadline exceeded
+#
+# Not a CVE finding and not a flake: the scan ran out of its own clock. Trivy's
+# global `--timeout` defaults to 5m (pkg/flag/global_flags.go), and the walk spent
+# it on one file — the ~2.2 GB external-weights blob the Dockerfile bakes for
+# intfloat/multilingual-e5-large-instruct. `context deadline exceeded` surfacing at
+# `semaphore acquire` is the deadline firing while a worker waited for an analysis
+# slot, so the named file is where the budget ran out, not necessarily the only
+# expensive one.
+#
+# Secret scanning is what walks it. The vulnerability scanner only cares about
+# package metadata, but the secret analyzer's Required() (pkg/fanal/analyzer/secret)
+# admits any file over 10 bytes unless its extension is on a hardcoded skip list —
+# .jpg, .pdf, .zip, .gz and friends. `.onnx_data` is not on that list and never will
+# be, so the analyzer opens the blob and reads it just to let utils.IsBinary tell it
+# "binary, not an allowed binary" and discard the result. Trivy's own log in that run
+# recommended `--scanners vuln` for exactly this reason.
+#
+# WHY SKIP-FILES AND NOT `scanners: [vuln]`: turning secret scanning off image-wide
+# to dodge two files would also stop it looking at our application code, which is
+# the part where a committed credential could plausibly reach an image. Gitleaks
+# covers the source tree in security.yml, but it scans the REPO — it cannot see a
+# secret introduced by a build step. Skipping the weights by path keeps that intact.
+#
+# Nothing is lost on the CVE side either: these are model weights, not packages.
+# They carry no metadata any analyzer reads, so skipping them cannot hide a finding.
+# The CRITICAL gate is unchanged — this makes it able to finish, which a timing-out
+# scan was not. A scan that FATALs is not a strict gate, it is an unavailable one.
+# =============================================================================
+
+# Headroom, not the fix — `scan.skip-files` below is. Left raised deliberately:
+# a cold ECR pull of a multi-GB image plus the remaining layer walk has no business
+# sharing a 5m budget with the rest of the scan, and the next large asset anyone
+# bakes should show up as a slow gate rather than a red one.
+#
+# 10m, not more, because this must stay well inside the JOBS that wrap it. The
+# tightest is security.yml's `trivy` job at `timeout-minutes: 20`, which builds an
+# image and then runs TWO scan steps; a per-step timeout much past this could eat
+# the whole job and report as a job-level kill with no Trivy error to read.
+# backend-deploy.yml's `build` job allows 45m.
+timeout: 10m
+
+scan:
+  skip-files:
+    # The baked ONNX export, read by src/lib/embeddings/local_onnx.py from
+    # EMBEDDING_ONNX_DIR (/opt/embedding-onnx — see the Dockerfile's runtime-ml stage).
+    # Both entries are needed: model.onnx is the graph, model.onnx_data the external
+    # weights it is split across because the fp32 graph exceeds protobuf's 2GB limit.
+    # model.onnx_data is the one that blew the budget; model.onnx is listed because it
+    # is the same kind of object and the split is a property of the model, not a
+    # guarantee about which file is large.
+    - opt/embedding-onnx/model.onnx
+    - opt/embedding-onnx/model.onnx_data
+
+    # The OTHER copies of those same weights, and the reason skipping only
+    # /opt/embedding-onnx would not have been enough.
+    #
+    # The bake calls hf_hub_download (which populates the HF cache under HF_HOME,
+    # /opt/huggingface) and then shutil.copyfile's the result into EMBEDDING_ONNX_DIR.
+    # Copy, not move and not a link — so the finished image carries the weights twice,
+    # once in the cache and once where the loader reads it. Skipping one copy would
+    # have left the walk to spend the same minutes on the other and fail the same way,
+    # one path further down the log.
+    #
+    # THE WHOLE TREE, not `**/blobs/**`, and that distinction is load-bearing. There
+    # are up to THREE large copies under here, not two:
+    #
+    #   hub/models--<org>--<model>/blobs/<sha>  the downloaded file itself
+    #   xet/...                                 hf_xet's transfer chunk cache
+    #
+    # The Xet cache is the one a blobs-only pattern misses. HF_XET_CACHE defaults to
+    # $HF_HOME/xet (huggingface_hub 1.27.0 constants.py:349), so it lands INSIDE
+    # /opt/huggingface but nowhere near a blobs/ directory — and the bake turns Xet
+    # on deliberately via HF_XET_HIGH_PERFORMANCE=1. docs/embedding-runtime-onnx.md
+    # records this repo measuring that exact cache as a surprise ~2 GB "second copy"
+    # of the weights once before, under bge-m3.
+    #
+    # Skipping the tree wholesale is safe because an HF cache holds no packages: it is
+    # content-hashed blobs, refs, symlinked snapshots and Xet chunks. Nothing any
+    # analyzer reads for CVEs lives here — installed Python distributions are in
+    # /usr/local/lib/python3.13/site-packages, which is NOT skipped.
+    #
+    # Pattern rather than a literal path because every filename under it is a content
+    # hash. `**` is doublestar-matched against the layer-relative path by
+    # pkg/fanal/utils.SkipPath, and is checked per regular file in the layer tar
+    # (pkg/fanal/walker/tar.go:71) — so unlike skip-dirs, which depends on the archive
+    # carrying an explicit directory entry first, this matches regardless of entry order.
+    - opt/huggingface/**
+
+    # Worth fixing at the source rather than scanning around forever: the duplicate
+    # above is pure image weight (~2.2 GB) on every api and worker task, and the
+    # Dockerfile's own header notes ECR storage has been a real cost here. Passing
+    # HF_HUB_CACHE at a path that is discarded, or materialising the download straight
+    # into EMBEDDING_ONNX_DIR, would drop one copy. That is a separate change with its
+    # own build to prove, and this file does not depend on it either way.
