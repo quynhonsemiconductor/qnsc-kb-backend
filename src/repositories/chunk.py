@@ -34,6 +34,7 @@ RETRIEVAL_LOAD_OPTIONS = (
     selectinload(ArticleChunk.article).selectinload(Article.departments),
     selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
     selectinload(ArticleChunk.article).selectinload(Article.sources),
+    selectinload(ArticleChunk.evidence),
 )
 
 

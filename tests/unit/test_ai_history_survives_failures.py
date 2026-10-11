@@ -100,6 +100,39 @@ def test_an_uncited_answer_with_no_provenance_still_fails_closed(monkeypatch):
     assert response[0]["answer_grounded"] == ""
 
 
+def test_revoked_cited_answer_scrubs_analytics_metadata(monkeypatch):
+    """Calculated values reveal a source too, so they must follow citation revocation."""
+    chunk_id = uuid.uuid4()
+
+    async def revoked_citations(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(ai_router, "_hydrate_citations", revoked_citations)
+    response = _load(
+        monkeypatch,
+        _history(
+            content="Revenue was 150 [C1].",
+            grounded_content="Revenue was 150 [C1].",
+            citations=f'[{ {"source_id": "C1", "chunk_id": str(chunk_id)}!r}]'.replace("'", '"'),
+            action_data={
+                "analytics_results": [
+                    {
+                        "source_id": "C1",
+                        "evidence_id": "e1",
+                        "operation": "average",
+                        "result": "150",
+                    }
+                ],
+                "evidence_status": {"stage": "answering"},
+            },
+        ),
+    )
+
+    assert response[0]["content"].startswith("This historical answer is no longer")
+    assert response[0]["citations"] == []
+    assert response[0]["action_data"] is None
+
+
 def test_provenance_records_why_an_answer_has_no_citations():
     assert ai_router._answer_provenance({"citations": []}) == {"grounding": "uncited"}
     assert ai_router._answer_provenance({}) == {"grounding": "uncited"}

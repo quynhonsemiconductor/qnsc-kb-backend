@@ -86,6 +86,9 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     tags: Mapped[list["ArticleTag"]] = relationship(
         "ArticleTag", back_populates="article", cascade="all, delete-orphan"
     )
+    evidence: Mapped[list["DocumentEvidence"]] = relationship(
+        "DocumentEvidence", back_populates="article", cascade="all, delete-orphan"
+    )
 
     @property
     def source_available(self) -> bool:
@@ -190,3 +193,6 @@ class DocumentSource(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     ingested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     article: Mapped[Article | None] = relationship("Article", back_populates="sources")
+    evidence: Mapped[list["DocumentEvidence"]] = relationship(
+        "DocumentEvidence", back_populates="document_source", cascade="all, delete-orphan"
+    )

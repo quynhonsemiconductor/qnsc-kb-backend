@@ -27,8 +27,14 @@ class ParentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     chunk_type: Mapped[str] = mapped_column(String(40), nullable=False, default="section")
     heading: Mapped[str | None] = mapped_column(String(255), nullable=True)
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("document_evidence.id", ondelete="CASCADE"), nullable=True, index=True
+    )
 
     article: Mapped["Article"] = relationship("Article")
+    evidence: Mapped["DocumentEvidence | None"] = relationship(
+        "DocumentEvidence", back_populates="parent_chunks"
+    )
     child_chunks: Mapped[list["ArticleChunk"]] = relationship(
         "ArticleChunk", back_populates="parent_chunk", cascade="all, delete-orphan",
         order_by="ArticleChunk.chunk_index",
@@ -64,8 +70,14 @@ class ArticleChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: never matches on re-index, degrading to "re-embed everything" -- the behavior
     #: every article already had, not a new failure mode.
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("document_evidence.id", ondelete="CASCADE"), nullable=True, index=True
+    )
 
     article: Mapped["Article"] = relationship("Article")
+    evidence: Mapped["DocumentEvidence | None"] = relationship(
+        "DocumentEvidence", back_populates="child_chunks"
+    )
     parent_chunk: Mapped[ParentChunk] = relationship("ParentChunk", back_populates="child_chunks")
     metadata_fields: Mapped[list["ChunkMetadata"]] = relationship(
         "ChunkMetadata", back_populates="chunk", cascade="all, delete-orphan"

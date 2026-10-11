@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import uuid
 import re
@@ -11,7 +12,10 @@ from src.domain.text_noise import detect_boilerplate, strip_noise
 from src.models.chunk import ArticleChunk, ParentChunk
 from src.models.ops import DeadLetterJob
 from src.models.article import DocumentSource
-from sqlalchemy import select
+from src.models.evidence import DocumentEvidence
+from src.domain.evidence_extraction import extract_document_evidence
+from src.domain.source_storage import load_source
+from sqlalchemy import delete, select
 from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.rag.chunker import create_parent_child_chunks
@@ -198,6 +202,26 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 .order_by(DocumentSource.ingested_at.desc())
             )
             source = source_result.scalars().first()
+            evidence_specs: list[dict] = []
+            if source and source.storage_key and settings.EVIDENCE_EXTRACTION_ENABLED:
+                try:
+                    source_bytes = await asyncio.to_thread(load_source, source.storage_key)
+                    evidence_specs = await asyncio.to_thread(
+                        extract_document_evidence,
+                        source.original_filename or article.title,
+                        source_bytes,
+                    )
+                except Exception as exc:
+                    # Evidence is an enhancement. Ordinary text retrieval must remain
+                    # available when one parser or one source object is unavailable.
+                    logger.warning(
+                        "Document evidence extraction failed; indexing text only",
+                        article_id=str(article_id),
+                        error=str(exc),
+                    )
+            await db.execute(
+                delete(DocumentEvidence).where(DocumentEvidence.article_id == article_id)
+            )
             source_pages = []
             if source and source.page_texts:
                 source_pages = [
@@ -205,6 +229,14 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                     for index, item in enumerate(source.page_texts, start=1)
                     if item.get("text")
                 ]
+            page_text_by_number = {number: text for number, text in source_pages}
+            for spec in evidence_specs:
+                if spec.get("kind") == "page_visual":
+                    page_text = page_text_by_number.get(int(spec.get("page_number") or 1), "")
+                    if page_text and page_text not in str(spec.get("search_text") or ""):
+                        spec["search_text"] = (
+                            f"{spec.get('label') or 'Visual evidence'}\n{page_text}"
+                        )[: settings.EVIDENCE_MAX_SEARCH_TEXT_CHARS]
             # Tokenised once here, then reused by every _match_source_page call below.
             prepared_pages = _prepare_source_pages(source_pages)
             # Uploaded sources keep their original page text on DocumentSource
@@ -340,7 +372,107 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                     await chunk_repo.create_child_chunks(child_chunks)
                     chunk_count += len(child_chunks)
 
-            logger.info("Article indexing completed", article_id=str(article_id), chunk_count=chunk_count)
+            if source:
+                for spec in evidence_specs:
+                    search_text = str(spec.get("search_text") or "").strip()
+                    if not search_text:
+                        continue
+                    evidence = DocumentEvidence(
+                        article_id=article_id,
+                        document_source_id=source.id,
+                        kind=str(spec["kind"]),
+                        page_number=int(spec.get("page_number") or 1),
+                        bounding_box=spec.get("bounding_box"),
+                        page_width=spec.get("page_width"),
+                        page_height=spec.get("page_height"),
+                        label=str(spec.get("label") or "Evidence")[:255],
+                        search_text=search_text,
+                        structured_data=spec.get("structured_data"),
+                        content_hash=str(spec["content_hash"]),
+                        extraction_version=str(spec["extraction_version"]),
+                    )
+                    db.add(evidence)
+                    await db.flush()
+                    pending_evidence_children: list[
+                        tuple[str, uuid.UUID, int]
+                    ] = []
+                    for parent_spec in create_parent_child_chunks(
+                        search_text, heading=evidence.label
+                    ):
+                        parent = await chunk_repo.create_parent_chunk(
+                            ParentChunk(
+                                article_id=article_id,
+                                evidence_id=evidence.id,
+                                text=str(parent_spec["parent_text"]),
+                                section_ref=evidence.label,
+                                chunk_type=f"evidence_{evidence.kind}",
+                                heading=evidence.label,
+                                page_number=evidence.page_number,
+                            )
+                        )
+                        pending_evidence_children.extend(
+                            (clean_text, parent.id, child_index)
+                            for child_index, child_text in enumerate(parent_spec["children"])
+                            if (clean_text := str(child_text).strip())
+                        )
+                    fresh = await get_text_embeddings(
+                        [
+                            apply_header(evidence.label, child_text)
+                            for child_text, _parent_id, _child_index
+                            in pending_evidence_children
+                        ]
+                    )
+                    if fresh is None or len(fresh) != len(pending_evidence_children):
+                        # Evidence is enhancement-only. Its embedding must not roll back the
+                        # complete ordinary-text rebuild that already succeeded above. Drop
+                        # this artifact and all its empty parents in the current transaction;
+                        # the FK-backed rows can be regenerated on the next reindex.
+                        await db.execute(
+                            delete(ParentChunk).where(
+                                ParentChunk.evidence_id == evidence.id
+                            )
+                        )
+                        await db.delete(evidence)
+                        logger.warning(
+                            "Evidence embedding unavailable; keeping text index",
+                            article_id=str(article_id),
+                            evidence_label=evidence.label,
+                        )
+                        continue
+                    evidence_chunks = [
+                        ArticleChunk(
+                            article_id=article_id,
+                            parent_chunk_id=parent_id,
+                            evidence_id=evidence.id,
+                            chunk_text=child_text,
+                            content_hash=hashlib.sha256(
+                                child_text.encode("utf-8")
+                            ).hexdigest(),
+                            embedding=embedding,
+                            embedding_model=settings.EMBEDDING_MODEL,
+                            embedding_version=settings.EMBEDDING_VERSION,
+                            chunk_type=f"evidence_{evidence.kind}",
+                            heading=evidence.label,
+                            chunking_version=settings.CHUNKING_VERSION,
+                            department_id=article.dept,
+                            sensitivity=article.sensitivity,
+                            visibility=article.visibility,
+                            chunk_index=child_index,
+                            page_number=evidence.page_number,
+                        )
+                        for (child_text, parent_id, child_index), embedding in zip(
+                            pending_evidence_children, fresh
+                        )
+                    ]
+                    await chunk_repo.create_child_chunks(evidence_chunks)
+                    chunk_count += len(evidence_chunks)
+
+            logger.info(
+                "Article indexing completed",
+                article_id=str(article_id),
+                chunk_count=chunk_count,
+                evidence_count=len(evidence_specs),
+            )
             if embedding_failures:
                 # Discard the rebuild BEFORE recording the failure. The wipe and every chunk
                 # written above are still uncommitted, so this restores the previous chunk
