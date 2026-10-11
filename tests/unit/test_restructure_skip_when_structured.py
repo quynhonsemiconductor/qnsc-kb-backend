@@ -163,6 +163,22 @@ def test_a_short_note_with_one_heading_is_not_enough():
     assert not content_restructure.is_already_structured(source)
 
 
+def test_bold_label_lines_are_not_mistaken_for_structure():
+    """The false positive to guard: a form or slide deck whose every line is short and
+    bold.
+
+    PyMuPDF4LLM requires a span to be larger AND bolder than body text before it emits
+    a `##`, so a document of uniformly bold labels converts to `**Label:**` lines and
+    yields zero chunk headings — verified against a generated 42-label form (0 headings
+    in 996 characters). Such a document genuinely needs the model, and counting bold as
+    structure would skip the one pass that could help it.
+    """
+    source = "\n\n".join(f"**Truong du lieu {index}:**" for index in range(42))
+
+    assert content_restructure._chunk_heading_count(source) == 0
+    assert not content_restructure.is_already_structured(source)
+
+
 def test_headings_inside_fenced_code_do_not_count():
     source = (
         "```markdown\n## Not a heading\n## Nor this\n## Nor this one\n```\n\n"
