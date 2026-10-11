@@ -228,6 +228,48 @@ def split_into_chunks(markdown: str) -> list[str]:
     return chunks
 
 
+def _chunk_heading_count(markdown: str) -> int:
+    """Count ``##``/``###`` headings outside fenced code blocks.
+
+    These are the CHUNK BOUNDARIES — the ones ``split_into_chunks`` acts on — not
+    every heading. A single ``#`` document title creates no boundary, so counting it
+    would call a one-title document structured when it still splits into one chunk.
+    """
+    count = 0
+    in_fence = False
+    for line in markdown.splitlines():
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+            continue
+        if not in_fence and _CHUNK_HEADING_PATTERN.match(line):
+            count += 1
+    return count
+
+
+def is_already_structured(markdown: str) -> bool:
+    """True when extraction already produced the structure the LLM would generate.
+
+    The restructuring prompt asks for headings, tables and split paragraphs. When the
+    deterministic converter has already supplied them, running the model regenerates
+    the entire document — the document in prompt tokens, the document again in output
+    tokens, minutes of wall clock — to arrive at what is already there.
+
+    Requires BOTH a heading density and an absolute count: the ratio alone accepts a
+    200-character note with one heading, and the count alone accepts a 100-page
+    document whose only headings sit on the first page.
+    """
+    if not settings.RESTRUCTURE_SKIP_WHEN_STRUCTURED:
+        return False
+    body = markdown.strip()
+    if not body:
+        return False
+    headings = _chunk_heading_count(body)
+    if headings < settings.RESTRUCTURE_SKIP_MIN_HEADINGS:
+        return False
+    density = headings / (len(body) / 10_000)
+    return density >= settings.RESTRUCTURE_SKIP_HEADINGS_PER_10K
+
+
 def _report(original: str, formatted: str) -> RestructureReport:
     """Build diagnostics without another model call."""
     return RestructureReport(
@@ -452,6 +494,24 @@ async def restructure_document(
     fallback = _fallback_text(source_text)
     if enabled is False or (enabled is None and not settings.RESTRUCTURE_ENABLED):
         return _result(source_text, fallback, "disabled", "none")
+
+    # The extracted Markdown already carries headings and tables, so the model has
+    # nothing left to add. Return the source UNCHANGED rather than through
+    # _fallback_text(), which rewrites layout markers it does not need to touch and
+    # would flatten real Markdown tables it was never designed to see.
+    if is_already_structured(source_text):
+        logger.info(
+            "Skipped LLM restructuring; extraction already produced Markdown structure",
+            title=title,
+            source_characters=len(source_text),
+            chunk_heading_count=_chunk_heading_count(source_text),
+        )
+        return _result(
+            source_text,
+            source_text.strip(),
+            "already_structured",
+            "none",
+        )
 
     requested_model = settings.RESTRUCTURE_MODEL if settings.RESTRUCTURE_MODEL else None
     provider_config = resolve_provider(requested_model)

@@ -152,6 +152,12 @@ def test_long_documents_are_split_into_bounded_ai_requests(monkeypatch):
     # all. Splitting only at MAX_CHARS meant nothing real was ever split, and the one
     # path that did split ran sequentially.
     monkeypatch.setattr(settings, "RESTRUCTURE_SECTION_CHARS", len(source) // 2)
+    # This source is three '##' sections in ~700 characters, which is exactly what
+    # RESTRUCTURE_SKIP_WHEN_STRUCTURED now declines to send to the model
+    # (see test_restructure_skip_when_structured.py). This test is about how a document
+    # that IS sent gets split and reassembled, so opt out of the skip rather than
+    # weaken the fixture — a flat source would not exercise section boundaries.
+    monkeypatch.setattr(settings, "RESTRUCTURE_SKIP_WHEN_STRUCTURED", False)
 
     result = _run(
         content_restructure.restructure_document("Manual", source, enabled=True)

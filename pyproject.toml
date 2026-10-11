@@ -44,6 +44,18 @@ openpyxl = "^3.1.5"
 python-pptx = "^1.0.2"
 pillow = "^12.0.0"
 pymupdf = "^1.25.3"
+# Markdown structure for PDFs, over the pymupdf above rather than a new engine: it
+# reads PyMuPDF's layout model, so it emits real headings where MarkItDown's pdfminer
+# path emits none. Headings are what ``split_into_chunks`` splits on and what decides
+# whether the LLM restructuring pass is needed, so this is the difference between
+# paying a model for structure and reading it off the document.
+#
+# Held in the 0.2.x line deliberately. From 1.x onward the package tracks PyMuPDF's
+# own version numbers and exact-pins them (`pymupdf==1.28.2`), which would hand this
+# project's pymupdf range to a transitive dependency and drag in pymupdf_layout. 0.2.9
+# asks only for `pymupdf>=1.26.6`, runs against the installed 1.28.2, and measured
+# faster than 1.28.2 on the same file (0.29 s vs 1.85 s) for identical structure yield.
+pymupdf4llm = "^0.2.9"
 # The 0.0.2 pin existed only for the numpy 1.x ceiling above; current releases
 # ride numpy 2.
 markitdown = "^0.1.7"
