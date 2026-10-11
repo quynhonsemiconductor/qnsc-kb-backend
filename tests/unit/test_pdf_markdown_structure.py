@@ -105,6 +105,35 @@ def test_a_pdf_converter_failure_falls_back_to_markitdown(monkeypatch):
     assert "Flat but complete" in output
 
 
+def test_a_scanned_pdf_keeps_its_ocr_text_verbatim():
+    """A scan has NO text layer, so the OCR'd pages are the only copy of the content.
+
+    Both converters read the PDF's text layer and return "" for an image-only page
+    (verified against a generated scan: 0 characters from each). That is the safe
+    answer, and this pins the consequence — the OCR text must come back byte-identical
+    rather than replaced by an empty conversion.
+    """
+    ocr_text = "Dong van ban scan: nguong 2.5% va do day 725 um. " * 12
+
+    output = source_extraction.extract_source_markdown(
+        "scanned.pdf",
+        b"%PDF-1.4",
+        pages=[{"page_number": 1, "text": ocr_text}],
+    )
+
+    assert output == ocr_text.strip()
+
+
+def test_a_scanned_pdf_is_not_mistaken_for_a_structured_one():
+    """OCR output carries no font metadata, so it yields no headings and must still be
+    sent to the model — the skip must not strand a scan with no reading view."""
+    from src.domain.content_restructure import is_already_structured
+
+    ocr_text = "Dong van ban scan: nguong 2.5% va do day 725 um. " * 12
+
+    assert not is_already_structured(ocr_text)
+
+
 def test_both_converters_failing_still_returns_the_page_text(monkeypatch):
     """The floor: an upload never fails because an enhancement layer did."""
     monkeypatch.setattr(
