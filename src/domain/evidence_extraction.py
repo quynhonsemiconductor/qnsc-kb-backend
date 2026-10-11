@@ -35,8 +35,17 @@ def _table_spec(
     cleaned = [row for row in cleaned if any(row)]
     if not cleaned:
         return None
-    width = max(len(row) for row in cleaned)
-    cleaned = [row + [""] * (width - len(row)) for row in cleaned]
+    # openpyxl may yield every column up to `max_col` even when a sheet uses only the
+    # first few, while other versions stop at the worksheet's actual dimension. Trim the
+    # common empty tail so extraction is stable across versions and does not serialize
+    # dozens of phantom columns into each row.
+    width = max(
+        max((index + 1 for index, value in enumerate(row) if value), default=0)
+        for row in cleaned
+    )
+    if width == 0:
+        return None
+    cleaned = [row[:width] + [""] * max(0, width - len(row)) for row in cleaned]
     first = cleaned[0]
     columns = [value or f"Column {index + 1}" for index, value in enumerate(first)]
     data_rows = cleaned[1:]
