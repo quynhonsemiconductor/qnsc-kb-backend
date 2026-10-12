@@ -17,6 +17,10 @@ on:
     paths: ['.github/workflows/bench-inference.yml', 'scripts/bench_inference.py']
   workflow_dispatch:
     inputs:
+      articles:
+        description: 'Wikipedia articles in the quality/pipeline corpus (each is ~10-20 chunks; embedding them dominates the run time)'
+        type: string
+        default: '60'
       cross_encoder:
         description: 'Also measure the optional cross-encoder (installs torch, downloads 2.2 GB more)'
         type: boolean
@@ -107,6 +111,7 @@ jobs:
       - name: Benchmark, one process per thread/CPU layout
         env:
           WITH_CROSS: ${{ inputs.cross_encoder || 'true' }}
+          ARTICLES: ${{ inputs.articles || '20' }}
         run: |
           set -euo pipefail
           mkdir -p .bench/out
@@ -116,7 +121,7 @@ jobs:
             local name="$1" cpus="$2" threads="$3"; shift 3
             echo "::group::$name  (taskset -c $cpus, threads=$threads)"
             taskset -c "$cpus" poetry run python scripts/bench_inference.py \
-              --onnx-dir "$EMBEDDING_ONNX_DIR" --threads "$threads" --out ".bench/out/$name.json" "$@"
+              --onnx-dir "$EMBEDDING_ONNX_DIR" --threads "$threads" --articles "${ARTICLES:-60}" --out ".bench/out/$name.json" "$@"
             echo "::endgroup::"
           }
           cross=(); if [ "$WITH_CROSS" != false ]; then cross=(--cross-encoder); fi
