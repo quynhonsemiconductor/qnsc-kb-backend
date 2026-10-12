@@ -210,20 +210,29 @@ class GovernanceService:
     async def list_drafts(
         self, user: User, status: str | None = None
     ) -> Sequence[PendingDraft]:
+        # No assignment filter for identities that `_can_approve_draft` lets decide ANY
+        # draft. Filtering them to "unassigned or mine" hid a pending draft from everyone
+        # who could act on it: `submit_draft` applies the department's `approver_rules`
+        # automatically, so an upload could be assigned on the way in and then appear in
+        # no queue view at all -- not awaiting approval, not approved, not rejected, while
+        # the row was still `pending`. A reviewer scoped to the department still saw it
+        # through the dept clause below, so the identity with MORE authority saw less.
         if self._is_global_publisher(user):
-            return await self.gov_repo.list_drafts(status, assigned_approver_id=user.id)
+            return await self.gov_repo.list_drafts(status)
         can_company_review = any(
             AuthorizationService.has_permission(user, key, requested_scope="company")
             for key in ("article.review", "article.publish", "governance.read")
         )
         if can_company_review:
-            # Admin/CEO see all unassigned company drafts. Other reviewers
-            # are scoped to departments they belong to, even when their
-            # legacy role is granted a company-scoped review permission.
+            # Admin/CEO see every draft in their own company. Other reviewers are scoped
+            # to departments they belong to, even when their legacy role is granted a
+            # company-scoped review permission.
+            #
+            # Same reasoning as the global branch above: an Admin/CEO may approve any
+            # draft in their company, so an assignment made by an approver rule must not
+            # remove one from their queue. Scoped to the tenant, never across it.
             if self._is_company_governance_lead(user):
-                return await self.gov_repo.list_drafts(
-                    status, user.company_domain, assigned_approver_id=user.id
-                )
+                return await self.gov_repo.list_drafts(status, user.company_domain)
             member_departments = AuthorizationService.member_department_names(user)
             if user.dept:
                 member_departments.add(user.dept)
