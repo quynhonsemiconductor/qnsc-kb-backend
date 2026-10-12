@@ -80,7 +80,9 @@ def test_glm_uses_streaming_events_to_collect_content(monkeypatch):
             assert kwargs["headers"]["Host"] == "example.test"
             assert kwargs["extensions"]["sni_hostname"] == "example.test"
             assert kwargs["json"]["stream"] is True
-            assert kwargs["json"]["thinking"] == {"type": "disabled"}
+            # `level`, never `{"type": "disabled"}`: newer GLM models reject that with
+            # HTTP 400 code 1210 ("always engages in thinking and cannot be disabled").
+            assert kwargs["json"]["thinking"] == {"level": "low"}
             return Response()
 
     monkeypatch.setattr(llm_client.httpx, "AsyncClient", Client)
