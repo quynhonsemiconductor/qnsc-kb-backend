@@ -324,7 +324,7 @@ USER appuser
 # Raising this means re-sizing the task memory for N sessions first, not just the flag.
 CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
      "--concurrency=1", \
-     "-Q", "celery,ingestion,connectors,permissions"]
+     "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
 
 # ---------------------------------------------------------------------------
 # migrator — one-shot: ensure the least-privilege app role exists, then migrate.

@@ -132,6 +132,29 @@ def test_fallback_always_populates_report():
     assert result.chunks
 
 
+def test_missing_provider_is_a_successful_lossless_result(monkeypatch):
+    source = "Flat extracted text with value 12."
+    called = False
+
+    async def fake_complete(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("No provider means no LLM request")
+
+    monkeypatch.setattr(content_restructure, "resolve_provider", lambda _model: None)
+    monkeypatch.setattr(content_restructure, "complete", fake_complete)
+
+    result = _run(
+        content_restructure.restructure_document("Guide", source, enabled=True)
+    )
+
+    assert result.status == "lossless_ready"
+    assert result.model == "lossless-markdown"
+    assert result.error is None
+    assert result.body_md
+    assert called is False
+
+
 def test_long_documents_are_split_into_bounded_ai_requests(monkeypatch):
     source = "\n\n".join(
         f"## Section {index}\n" + (f"Content {index}. " * 20) for index in range(1, 4)

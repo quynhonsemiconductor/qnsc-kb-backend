@@ -188,7 +188,7 @@ services:
       dockerfile: Dockerfile
       target: worker
     restart: unless-stopped
-    command: ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "-Q", "celery,ingestion,connectors,permissions"]
+    command: ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
     environment:
       ENVIRONMENT: production
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}

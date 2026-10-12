@@ -566,12 +566,14 @@ async def restructure_document(
         )
 
     if provider_config is None:
+        # No provider is a supported operating mode, not a failed AI request. The local
+        # formatter produced the intended safe reading view, so expose a settled success
+        # state instead of grouping it with provider exceptions and preservation failures.
         return _result(
             source_text,
             fallback,
-            "fallback_formatting",
+            "lossless_ready",
             "lossless-markdown",
-            "No LLM provider is configured; a lossless reading view was generated.",
         )
     # Use the resolved administrator-configured model even when the request
     # later fails, so fallback results retain accurate provider metadata.

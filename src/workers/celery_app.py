@@ -56,14 +56,15 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
     task_time_limit=_TASK_HARD_TIME_LIMIT,
-    # The worker consumes celery,ingestion,connectors,permissions (Dockerfile), but a task
-    # goes to the default queue unless it is routed. Without this map three of those four
-    # queues were permanently empty and every job — a 300 s restructure next to a 30 s
-    # outbox replay — contended for the same slots on `celery`.
+    # The worker consumes every named queue listed in the image command. Document
+    # preparation has its own queue so one retry does not sit behind an arbitrarily long
+    # FIFO backlog of embedding/OCR work on ``ingestion``. Concurrency stays one because
+    # the task is sized for one embedding session; separate queues provide fair pickup,
+    # not unsafe parallelism.
     task_routes={
         "generate_embeddings_task": {"queue": "ingestion"},
         "reprocess_index_job_task": {"queue": "ingestion"},
-        "restructure_pending_draft_task": {"queue": "ingestion"},
+        "restructure_pending_draft_task": {"queue": "document-preparation"},
         "delete_article_chunks_task": {"queue": "ingestion"},
         "recover_stale_index_reprocess_jobs": {"queue": "ingestion"},
         "sync_cloud_connector_task": {"queue": "connectors"},

@@ -70,6 +70,21 @@ def _visible_restructure_state(draft: PendingDraft, now: datetime | None = None)
     return draft.restructure_status, draft.restructure_error
 
 
+def _queue_draft_restructure(
+    draft: PendingDraft, now: datetime | None = None
+) -> None:
+    """Start a new queue generation, including a heartbeat when status was already queued."""
+
+    draft.restructure_status = "queued"
+    draft.restructure_error = None
+    draft.restructure_candidate_md = None
+    draft.restructure_decision = "not_reviewed"
+    # A stalled job is still persisted as ``queued``. Without an explicit heartbeat,
+    # retrying queued -> queued leaves the ORM row clean, so no UPDATE runs and the next
+    # GET immediately derives ``stalled`` again from the old timestamp.
+    draft.updated_at = now or datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def _draft_response(
     draft: PendingDraft,
     service: GovernanceService,
@@ -1026,14 +1041,22 @@ async def restructure_draft(
     # Retry is deliberately asynchronous. A slow provider must not hold the
     # review request open until its HTTP timeout; the Pending Draft poller will
     # show queued -> processing -> completed/fallback.
-    draft.restructure_status = "queued"
-    draft.restructure_error = None
-    draft.restructure_candidate_md = None
-    draft.restructure_decision = "not_reviewed"
+    _queue_draft_restructure(draft)
     draft = await gov_repo.update_draft(draft)
-    from src.workers.tasks import dispatch_restructure_pending_draft
+    from src.workers.tasks import (
+        dispatch_restructure_pending_draft,
+        run_restructure_pending_draft,
+    )
 
-    if not dispatch_restructure_pending_draft(
+    if resolve_provider() is None:
+        # With no provider there is no remote or model work to queue. Run the same worker
+        # pipeline now so keyword routing, tags, audit and the lossless reading view keep
+        # identical semantics without waiting behind embeddings/OCR on the ingestion queue.
+        await run_restructure_pending_draft(
+            str(draft.id), current_user.company_domain, str(current_user.id)
+        )
+        await db.refresh(draft)
+    elif not dispatch_restructure_pending_draft(
         str(draft.id), current_user.company_domain, str(current_user.id)
     ):
         draft.restructure_status = "fallback_formatting"
