@@ -1,0 +1,150 @@
+# Measure the CPU inference paths of the api (model load, query embedding, rerankers, a search without
+# the database, pgvector on synthetic vectors) on the REAL model, pinned to N cores.
+#
+# Manual: it downloads ~4.5 GB of models and runs for a good while, so it is a measurement tool and not
+# a gate. See scripts/bench_inference.py for what it does and does not measure, and
+# docs/performance-develop.md for the numbers it produced and what was decided from them.
+#
+# Why a GitHub runner is a fair stand-in for the Fargate task, and where it is not: both are x86-64 with
+# AVX2, a vCPU is a hardware thread on each, and `taskset` pins the process to as many threads as the
+# task has. It is NOT the same silicon (Fargate Spot picks from a mixed fleet), the neighbours differ, and
+# clamd's CPU use inside the task is not reproduced here: read the absolute numbers as "about this
+# on a 2-vCPU x86 box", not as a prediction.
+name: Bench · inference (CPU)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cross_encoder:
+        description: 'Also measure the optional cross-encoder (installs torch, downloads 2.2 GB more)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-inference-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: Bench · inference
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHON_VERSION: '3.13' # the Dockerfile's python:3.13-slim
+      EMBEDDING_ONNX_DIR: ${{ github.workspace }}/.bench/onnx
+      BENCH_CACHE: ${{ github.workspace }}/.bench/corpus.json
+      PYTHONPATH: .
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bench
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies (main + onnx, and ml for the cross-encoder)
+        env:
+          WITH_CROSS: ${{ inputs.cross_encoder }}
+        run: |
+          set -euo pipefail
+          groups=main,onnx
+          if [ "$WITH_CROSS" != false ]; then groups=main,onnx,ml; fi
+          poetry install --no-interaction --no-root --only "$groups"
+          poetry run pip install --quiet psycopg2-binary
+
+      # The same files the Dockerfile bakes into /opt/embedding-onnx: the model's own published fp32 export.
+      - name: Download the embedding model (as the image bakes it)
+        run: |
+          set -euo pipefail
+          mkdir -p "$EMBEDDING_ONNX_DIR"
+          export HF_XET_HIGH_PERFORMANCE=1
+          poetry run python - <<'PY'
+          import os, shutil
+          from huggingface_hub import hf_hub_download, list_repo_files
+          repo = "intfloat/multilingual-e5-large-instruct"
+          target = os.environ["EMBEDDING_ONNX_DIR"]
+          names = ["onnx/model.onnx", "tokenizer.json"]
+          if "onnx/model.onnx_data" in list_repo_files(repo):
+              names.append("onnx/model.onnx_data")
+          for name in names:
+              shutil.copyfile(hf_hub_download(repo, name), os.path.join(target, os.path.basename(name)))
+          print(sorted(os.listdir(target)))
+          PY
+
+      - name: The machine
+        run: |
+          lscpu | grep -E 'Model name|Thread|Core|Socket|^CPU\(s\)' || true
+          lscpu | grep -o -E 'avx512[a-z_]*|avx2' | sort -u | tr '\n' ' '; echo
+          echo "--- topology"
+          for c in 0 1 2 3; do printf 'cpu%s core=%s siblings=%s\n' "$c" "$(cat /sys/devices/system/cpu/cpu$c/topology/core_id)" "$(cat /sys/devices/system/cpu/cpu$c/topology/thread_siblings_list)"; done
+          free -m | head -2
+
+      # One process per configuration (the ONNX session is a process-wide singleton), each pinned with
+      # taskset to exactly the CPUs it is allowed. 2 vCPU on Fargate is two hardware threads; here that is
+      # the two siblings of one core, and the run also tries two threads left free to spread over four.
+      - name: Benchmark, one process per thread/CPU layout
+        env:
+          WITH_CROSS: ${{ inputs.cross_encoder }}
+        run: |
+          set -euo pipefail
+          mkdir -p .bench/out
+          sib0="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list)"
+          sib0="${sib0/-/,}"
+          run() { # name cpus threads extra...
+            local name="$1" cpus="$2" threads="$3"; shift 3
+            echo "::group::$name  (taskset -c $cpus, threads=$threads)"
+            taskset -c "$cpus" poetry run python scripts/bench_inference.py \
+              --onnx-dir "$EMBEDDING_ONNX_DIR" --threads "$threads" --out ".bench/out/$name.json" "$@"
+            echo "::endgroup::"
+          }
+          cross=(); if [ "$WITH_CROSS" != false ]; then cross=(--cross-encoder); fi
+          run t1-cpu0       0        1
+          run t2-siblings   "$sib0"  2 ${cross[@]+"${cross[@]}"}
+          run t2-of-four    0,1,2,3  2
+          run t3            0,1,2    3
+          run t4-db         0,1,2,3  4 --db-dsn postgresql://postgres:postgres@localhost:5432/bench ${cross[@]+"${cross[@]}"}
+
+      - name: Summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json, os
+          rows = [(os.path.basename(p)[:-5], json.load(open(p))) for p in sorted(glob.glob(".bench/out/*.json"))]
+          if rows:
+              print("CPU:", rows[0][1]["environment"]["cpu_model"], "\n")
+          print("| run | threads | load s | RSS MB | query embed p50 / p95 ms | first call ms | lexical 240 p50 ms | cross-enc 30 p50 ms | search (no db) p50 / p95 ms |")
+          print("|---|---|---|---|---|---|---|---|---|")
+          for name, d in rows:
+              q = d.get("query_embedding", {}); ld = d.get("model_load", {}); lx = d.get("lexical_rerank", {}).get("240", {})
+              ce = d.get("cross_encoder", {}).get("pool_30", {}); p = d.get("pipeline_no_db", {}).get("total", {})
+              first = (q.get("first_calls_ms") or ["-"])[0]
+              print(f"| {name} | {d['threads']} | {ld.get('load_seconds')} | {ld.get('rss_after_mb')} | {q.get('p50_ms')} / {q.get('p95_ms')} | {first} | {lx.get('p50_ms')} | {ce.get('p50_ms', '-')} | {p.get('p50_ms')} / {p.get('p95_ms')} |")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: bench-inference
+          path: .bench/out/*.json
+          retention-days: 30
+          if-no-files-found: warn
