@@ -225,7 +225,9 @@ def test_the_endpoint_is_registered_before_the_id_scoped_routes_can_shadow_it():
 
     assert paths, "the route inventory must not be empty, or this checks nothing"
     assert "/api/v1/governance/pending-drafts/bulk-decide" in paths
-    # No bare /pending-drafts/{id} route exists, so the literal cannot be captured by one.
+    assert "/api/v1/governance/pending-drafts/{id}/detail" in paths
+    # Detail deliberately has a trailing literal segment. A bare /{id} route would
+    # capture "bulk-decide" before UUID validation and turn this endpoint into a 422.
     assert "/api/v1/governance/pending-drafts/{id}" not in paths
 
 

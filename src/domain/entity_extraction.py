@@ -200,7 +200,7 @@ async def extract_entities_and_relationships(title: str, body_md: str) -> Extrac
     from src.domain.llm_client import complete, resolve_provider
 
     empty = ExtractionResult(entities=[], relationships=[])
-    if not settings.GRAPH_EXTRACTION_ENABLED:
+    if not settings.KNOWLEDGE_GRAPH_ENABLED or not settings.GRAPH_EXTRACTION_ENABLED:
         return empty
     provider = resolve_provider()
     if not provider:

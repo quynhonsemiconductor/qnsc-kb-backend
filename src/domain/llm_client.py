@@ -10,14 +10,17 @@ import base64
 import json
 import re
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
 
 from src.core.config import settings
 from src.core.retry import with_exponential_retry
-from src.domain.llm_config import get_runtime_config
+from src.domain.llm_config import DEFAULT_BASE_URLS, get_runtime_config
+from src.domain.llm_endpoint_security import validate_public_endpoint_resolution
 from src.rag.answer_sections import GROUNDED_SENTINEL
 
 logger = structlog.get_logger()
@@ -43,8 +46,10 @@ class ProviderAuthError(RuntimeError):
 _RETRY_AFTER_IN_MESSAGE = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
 
 
-def _retry_after_seconds(response: httpx.Response) -> int | None:
-    """Seconds the provider says to wait, from the header or from its message."""
+def _retry_after_seconds(
+    response: httpx.Response, *, include_message: bool = True
+) -> int | None:
+    """Seconds the provider says to wait, from the header or a trusted message."""
 
     header = response.headers.get("retry-after")
     if header:
@@ -52,6 +57,8 @@ def _retry_after_seconds(response: httpx.Response) -> int | None:
             return max(1, int(float(header)))
         except ValueError:
             pass
+    if not include_message:
+        return None
     # Groq puts the wait only in the error body: "Please try again in 27.17s".
     match = _RETRY_AFTER_IN_MESSAGE.search(response.text[:1000])
     return max(1, int(float(match.group(1)))) if match else None
@@ -64,6 +71,7 @@ class Provider:
     url: str
     api_key: str
     native_gemini: bool = False
+    custom_endpoint: bool = False
 
 
 def resolve_provider(model_override: str | None = None) -> Provider | None:
@@ -80,7 +88,103 @@ def resolve_provider(model_override: str | None = None) -> Provider | None:
         config.base_url,
         config.api_key,
         native_gemini=config.provider == "gemini",
+        custom_endpoint=(
+            config.provider == "custom"
+            or config.base_url != DEFAULT_BASE_URLS.get(config.provider)
+        ),
     )
+
+
+async def _guarded_request_target(
+    provider: Provider, url: str
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Pin a custom endpoint to the public IP we validated, preserving TLS identity."""
+
+    if not provider.custom_endpoint:
+        return url, {}, {}
+    resolved = await validate_public_endpoint_resolution(provider.url)
+    parsed = urlsplit(url)
+    if (parsed.hostname or "").lower().rstrip(".") != resolved.hostname:
+        raise RuntimeError("The provider request host changed after endpoint validation")
+    address = f"[{resolved.address}]" if ":" in resolved.address else resolved.address
+    pinned_url = urlunsplit((parsed.scheme, address, parsed.path, parsed.query, ""))
+    return (
+        pinned_url,
+        {"Host": resolved.hostname},
+        {"sni_hostname": resolved.hostname},
+    )
+
+
+async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
+    """Test one exact candidate without changing the active runtime configuration."""
+    url = _gemini_url(provider, streaming=False) if provider.native_gemini else provider.url
+    request_url, host_headers, extensions = await _guarded_request_target(
+        provider, url
+    )
+    payload = _payload(
+        provider,
+        [
+            {"role": "system", "content": "Reply with exactly: OK"},
+            {"role": "user", "content": "Connection test"},
+        ],
+        0.0,
+        max_tokens=8,
+    )
+    started = perf_counter()
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=not provider.custom_endpoint,
+        ) as client:
+            async with client.stream(
+                "POST",
+                request_url,
+                headers={**_headers(provider), **host_headers},
+                json=payload,
+                extensions=extensions,
+            ) as response:
+                latency_ms = max(1, round((perf_counter() - started) * 1000))
+                if getattr(response, "is_redirect", False):
+                    raise RuntimeError(
+                        "The provider redirected the request; use its final HTTPS Chat Completions endpoint"
+                    )
+                if response.status_code in (401, 403):
+                    raise ProviderAuthError("The provider rejected the configured API key")
+                if response.status_code == 429:
+                    raise ProviderRateLimitError(
+                        "The provider rate limited the connection test"
+                    )
+                if response.is_error:
+                    raise RuntimeError(
+                        f"The provider returned HTTP {response.status_code}"
+                    )
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 262_144:
+                        raise RuntimeError("The provider response was unexpectedly large")
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(
+            "The provider did not respond before the connection test timed out"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError("The provider could not be reached") from exc
+    try:
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise TypeError
+        answer = (
+            _extract_gemini_text(data)
+            if provider.native_gemini
+            else _extract_openai_text(data)
+        )
+    except (AttributeError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError("The provider did not return a valid Chat Completions response") from exc
+    if not answer.strip():
+        raise RuntimeError("The provider response did not contain assistant text")
+    return latency_ms
+
 
 
 def _gemini_contents(
@@ -241,9 +345,16 @@ async def complete(
     if provider is None:
         raise RuntimeError("No LLM provider is configured.")
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=not provider.custom_endpoint,
+    ) as client:
         if provider.native_gemini and on_token:
             url = _gemini_url(provider, streaming=True)
+            request_url, host_headers, extensions = await _guarded_request_target(
+                provider, url
+            )
             answer = ""
             # Bound before the loop, because the loop may never assign it: a stream
             # that yields no parseable `data:` line leaves it unset. This used to be
@@ -252,11 +363,12 @@ async def complete(
             tokens = 0
             async with client.stream(
                 "POST",
-                url,
-                headers=_headers(provider),
+                request_url,
+                headers={**_headers(provider), **host_headers},
                 json=_payload(
                     provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens
                 ),
+                extensions=extensions,
             ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
@@ -286,6 +398,9 @@ async def complete(
                 provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens
             )
             payload["stream"] = True
+            request_url, host_headers, extensions = await _guarded_request_target(
+                provider, provider.url
+            )
 
             async def request_stream() -> tuple[str, int]:
                 answer = ""
@@ -298,11 +413,38 @@ async def complete(
                 tokens = 0
                 async with client.stream(
                     "POST",
-                    provider.url,
-                    headers={**_headers(provider), "Accept": "text/event-stream"},
+                    request_url,
+                    headers={
+                        **_headers(provider),
+                        **host_headers,
+                        "Accept": "text/event-stream",
+                    },
                     json=payload,
+                    extensions=extensions,
                 ) as response:
+                    if getattr(response, "is_redirect", False):
+                        raise RuntimeError(
+                            "The provider redirected the request; configure its final HTTPS endpoint"
+                        )
                     if response.is_error:
+                        # A guarded endpoint is administrator-controlled and its response
+                        # is untrusted. Do not read or echo its body: besides leaking a
+                        # provider diagnostic, ``aread`` could buffer an unbounded body.
+                        if provider.custom_endpoint:
+                            if response.status_code in (401, 403):
+                                raise ProviderAuthError(
+                                    "The provider rejected the configured API key"
+                                )
+                            if response.status_code == 429:
+                                raise ProviderRateLimitError(
+                                    "The provider rate limit was reached",
+                                    retry_after=_retry_after_seconds(
+                                        response, include_message=False
+                                    ),
+                                )
+                            raise RuntimeError(
+                                f"The provider returned HTTP {response.status_code}"
+                            )
                         detail = (
                             (await response.aread())
                             .decode(errors="replace")[:500]
@@ -379,9 +521,21 @@ async def complete(
         payload = _payload(
             provider, messages, 0.0, thinking=thinking, max_tokens=max_tokens
         )
+        request_url, host_headers, extensions = await _guarded_request_target(
+            provider, url
+        )
 
         async def request_completion() -> httpx.Response:
-            response = await client.post(url, headers=_headers(provider), json=payload)
+            response = await client.post(
+                request_url,
+                headers={**_headers(provider), **host_headers},
+                json=payload,
+                extensions=extensions,
+            )
+            if getattr(response, "is_redirect", False):
+                raise RuntimeError(
+                    "The provider redirected the request; configure its final HTTPS endpoint"
+                )
             if response.status_code == 429:
                 # Distinct from any other provider failure: nothing is wrong with the
                 # request, the tenant is simply over its quota for the moment. Reported
@@ -399,6 +553,10 @@ async def complete(
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
+                if provider.custom_endpoint:
+                    raise RuntimeError(
+                        f"The provider returned HTTP {response.status_code}"
+                    ) from exc
                 detail = response.text[:500].replace("\n", " ")
                 raise RuntimeError(
                     f"{provider.name} request failed with HTTP {response.status_code}: {detail}"
@@ -489,8 +647,24 @@ async def complete_multimodal(
             payload["max_tokens"] = max_tokens
         url = provider.url
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(url, headers=_headers(provider), json=payload)
+    request_url, host_headers, extensions = await _guarded_request_target(
+        provider, url
+    )
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=not provider.custom_endpoint,
+    ) as client:
+        response = await client.post(
+            request_url,
+            headers={**_headers(provider), **host_headers},
+            json=payload,
+            extensions=extensions,
+        )
+        if getattr(response, "is_redirect", False):
+            raise RuntimeError(
+                "The provider redirected the request; configure its final HTTPS endpoint"
+            )
         if response.status_code in (400, 404, 415, 422):
             raise RuntimeError("The configured provider does not support evidence images")
         if response.status_code in (401, 403):

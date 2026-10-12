@@ -763,7 +763,10 @@ app.include_router(
     prefix=f"{settings.API_V1_STR}/notifications",
     tags=["notifications"],
 )
-app.include_router(graph.router, prefix=f"{settings.API_V1_STR}/graph", tags=["graph"])
+if settings.KNOWLEDGE_GRAPH_ENABLED:
+    app.include_router(
+        graph.router, prefix=f"{settings.API_V1_STR}/graph", tags=["graph"]
+    )
 
 
 @app.get("/")

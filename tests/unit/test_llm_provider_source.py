@@ -8,6 +8,7 @@ from src.domain.llm_config import (
     public_config,
     set_runtime_config,
 )
+from src.domain.llm_endpoint_security import ResolvedLLMEndpoint
 
 
 def teardown_function() -> None:
@@ -75,11 +76,19 @@ def test_glm_uses_streaming_events_to_collect_content(monkeypatch):
 
         def stream(self, method, url, **kwargs):
             assert method == "POST"
+            assert url == "https://93.184.216.34/chat"
+            assert kwargs["headers"]["Host"] == "example.test"
+            assert kwargs["extensions"]["sni_hostname"] == "example.test"
             assert kwargs["json"]["stream"] is True
             assert kwargs["json"]["thinking"] == {"type": "disabled"}
             return Response()
 
     monkeypatch.setattr(llm_client.httpx, "AsyncClient", Client)
+
+    async def public_endpoint(_url):
+        return ResolvedLLMEndpoint("example.test", "93.184.216.34")
+
+    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", public_endpoint)
     set_runtime_config(
         RuntimeLLMConfig("glm", "glm-5.2", "https://example.test/chat", "key")
     )

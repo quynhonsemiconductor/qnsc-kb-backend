@@ -495,13 +495,13 @@ class Settings(BaseSettings):
     # Short on purpose. This runs inside document ingest, once per document, and a slow
     # provider must cost a suggestion rather than the import.
     DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
-    # Builds the tenant knowledge graph (domain/entity_extraction.py, graph_service.py)
-    # from every published article. On by default, same reasoning as
-    # DEPARTMENT_ROUTING_LLM_ENABLED: it degrades to "no entities extracted this publish"
-    # whenever no provider is configured, never to a broken publish, so there is no
-    # unsatisfiable-dependency reason to default it off the way CROSS_ENCODER_RERANKER_
-    # ENABLED is (that one needs an extra dependency group actually installed).
-    GRAPH_EXTRACTION_ENABLED: bool = True
+    # Master switch for the tenant Knowledge Graph. Keep it off while the product focuses
+    # on document retrieval/review: this also prevents publish-time entity extraction from
+    # spending an LLM request. Microsoft Graph connectors/email are unrelated and remain on.
+    KNOWLEDGE_GRAPH_ENABLED: bool = False
+    # Secondary extraction control retained for a future graph rollout. Both switches must
+    # be enabled before any publish-time graph extraction can call the LLM.
+    GRAPH_EXTRACTION_ENABLED: bool = False
     # Longer than DEPARTMENT_ROUTING_LLM_TIMEOUT: this runs once per publish rather than
     # once per document import, and the prompt asks for a whole entity+relationship
     # graph rather than one classification, so it is allowed more time before falling

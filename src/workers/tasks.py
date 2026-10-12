@@ -504,12 +504,28 @@ async def run_restructure_pending_draft(
             user_id=user_id_str,
             global_governance_access=True,
         )
-        # Celery has its own Python process and does not run API startup;
-        # load the administrator's saved provider before calling the LLM.
-        await load_runtime_config(db)
-        draft = await db.get(PendingDraft, uuid.UUID(draft_id_str))
-        if not draft or draft.status != "pending":
+        # Claim this exact queue generation under a row lock. A stale task can still be
+        # delivered after an administrator retries, and Redis may redeliver an unacked
+        # message after a worker restart. Only the first task that sees ``queued`` may
+        # transition it to processing; every duplicate exits before calling the model.
+        draft = (
+            await db.execute(
+                select(PendingDraft)
+                .where(PendingDraft.id == uuid.UUID(draft_id_str))
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if (
+            not draft
+            or draft.status != "pending"
+            or draft.restructure_status != "queued"
+        ):
             return
+        # Celery has its own Python process and does not run API startup. Complete every
+        # setup step that may fail while the locked row is still ``queued``: if setup
+        # raises, the transaction rolls back and Celery may retry the same message. Once
+        # ``processing`` is committed, a redelivery deliberately exits as a duplicate.
+        await load_runtime_config(db)
         user = await db.get(User, uuid.UUID(user_id_str))
         enabled = bool(
             settings.RESTRUCTURE_ENABLED
