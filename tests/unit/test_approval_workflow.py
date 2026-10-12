@@ -122,6 +122,28 @@ def test_reviewer_queue_is_limited_to_member_department_and_assignment():
     assert [item.id for item in asyncio.run(service.list_drafts(review_user, "pending"))] == [draft.id]
 
 
+@pytest.mark.parametrize("preparation_status", ["queued", "processing"])
+def test_in_flight_draft_cannot_be_approved_or_rejected(preparation_status):
+    assigned = reviewer("assigned@acme.test")
+    draft = PendingDraft(
+        id=uuid.uuid4(), title="Procedure", company_domain="acme.test",
+        source_ref="upload://procedure.pdf", source_hash="a" * 64,
+        created_by=uuid.uuid4(), assigned_approver_id=assigned.id, status="pending",
+        restructure_status=preparation_status,
+    )
+    service = GovernanceService(FakeGovernanceRepository(draft), FakeArticleRepository())
+
+    for operation in (
+        service.approve_draft(assigned, draft.id),
+        service.reject_draft(assigned, draft.id, "Not ready"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(operation)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "preparation_in_progress"
+        assert draft.status == "pending"
+
+
 def test_only_assigned_reviewer_can_reject(monkeypatch):
     author = User(id=uuid.uuid4(), email="author@acme.test", name="Author", company_domain="acme.test", role="Staff")
     assigned = reviewer("assigned@acme.test")

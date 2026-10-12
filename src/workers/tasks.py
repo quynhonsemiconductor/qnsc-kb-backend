@@ -478,6 +478,18 @@ def cleanup_orphaned_source_objects() -> int:
     return sync_run(_run_orphan_source_cleanup())
 
 
+def _draft_accepts_restructure_result(draft: PendingDraft | None) -> bool:
+    return bool(
+        draft
+        and draft.status == "pending"
+        and draft.restructure_status == "processing"
+    )
+
+
+def _should_suggest_draft_tags(draft: PendingDraft, auxiliary_ai_allowed: bool) -> bool:
+    return bool(not draft.tags and auxiliary_ai_allowed)
+
+
 async def run_restructure_pending_draft(
     draft_id_str: str, company_domain: str, user_id_str: str
 ) -> None:
@@ -566,6 +578,62 @@ async def run_restructure_pending_draft(
                     for department in departments
                 ],
             )
+            # Batch review operates on the formatted reading view, not raw extraction.
+            # Compute every optional suggestion without mutating the ORM row: a reviewer or
+            # approval agent may decide the draft while the model is running, and those
+            # uncommitted mutations must not leak into that already-final decision.
+            is_split_product = (
+                (draft.content_metadata or {}).get("submission_kind") == "split_candidate"
+            )
+            candidate_items = []
+            if not is_split_product:
+                candidate_items = await route_document_candidates_llm(
+                    draft.title,
+                    result.body_md,
+                    departments,
+                    use_llm=result.auxiliary_ai_allowed,
+                )
+
+            suggested_tags: list[str] | None = None
+            if _should_suggest_draft_tags(draft, result.auxiliary_ai_allowed):
+                from src.domain.auto_tagging import suggest_tags_for_document
+                from src.models.article import TagCatalog
+
+                catalogue_rows = (
+                    await db.execute(
+                        select(TagCatalog.tag, TagCatalog.normalized_tag).where(
+                            TagCatalog.company_domain == draft.company_domain,
+                            TagCatalog.active.is_(True),
+                        )
+                    )
+                ).all()
+                catalogue = {normalized for _tag, normalized in catalogue_rows}
+                suggested_tags = await suggest_tags_for_document(
+                    draft.title,
+                    result.body_md,
+                    (draft.content_metadata or {}).get("type", ""),
+                    catalogue=catalogue,
+                    catalogue_examples=[tag for tag, _normalized in catalogue_rows],
+                )
+
+            # Refresh under a row lock immediately before the first write. `populate_existing`
+            # replaces the identity-map copy whose status predates the model calls.
+            draft = (
+                await db.execute(
+                    select(PendingDraft)
+                    .where(PendingDraft.id == uuid.UUID(draft_id_str))
+                    .execution_options(populate_existing=True)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if not _draft_accepts_restructure_result(draft):
+                await db.rollback()
+                logger.info(
+                    "Discarded obsolete pending draft formatting result",
+                    draft_id=draft_id_str,
+                )
+                return
+
             draft.restructured_body_md = result.body_md
             draft.restructure_candidate_md = result.candidate_body_md
             draft.restructure_decision = (
@@ -576,61 +644,14 @@ async def run_restructure_pending_draft(
             draft.restructure_status = result.status
             draft.restructure_model = result.model
             draft.restructure_error = result.error
-            # Batch review operates on the formatted reading view, not raw extraction.
-            # Recreate candidates only after formatting has completed, then use the
-            # active department descriptions to choose an editable default route.
-            #
-            # NOT for a draft that IS a committed split product. `commit_candidates`
-            # creates each child with restructure_status="lossless_ready", the UI offers
-            # "Retry AI format" on anything that is not "llm", and re-splitting a child
-            # by department yields >1 candidate again -> batch_review_required -> commit
-            # -> more children, forever, fanning out on every pass. Reformatting a
-            # child's reading view is still useful, so only the re-split is skipped.
-            is_split_product = (
-                (draft.content_metadata or {}).get("submission_kind") == "split_candidate"
-            )
             if not is_split_product:
                 await db.execute(
                     delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
                 )
-                for item in await route_document_candidates_llm(
-                    draft.title, result.body_md, departments
-                ):
-                    db.add(
-                        DraftCandidate(
-                            draft_id=draft.id,
-                            **item,
-                        )
-                    )
-            # Same automatic treatment as department routing above: a reviewer who typed
-            # tags at upload time keeps them exactly as typed (never silently replaced),
-            # but a draft that arrives with none gets AI suggestions to review/edit
-            # instead of an empty field. Best-effort -- see domain/auto_tagging.py --
-            # so a failure here never touches the restructuring result already committed.
-            if not draft.tags:
-                from src.domain.auto_tagging import suggest_tags_for_document
-                from src.models.article import TagCatalog
-
-                # Same governance rule as the manual bulk endpoint (auto_tag_articles in
-                # articles.py): only suggest tags already in the tenant's approved
-                # vocabulary. An automatic, less-reviewed path is exactly where that
-                # matters MORE, not less.
-                catalogue_rows = (
-                    await db.execute(
-                        select(TagCatalog.tag, TagCatalog.normalized_tag).where(
-                            TagCatalog.company_domain == draft.company_domain,
-                            TagCatalog.active.is_(True),
-                        )
-                    )
-                ).all()
-                catalogue = {normalized for _tag, normalized in catalogue_rows}
-                draft.tags = await suggest_tags_for_document(
-                    draft.title,
-                    result.body_md,
-                    (draft.content_metadata or {}).get("type", ""),
-                    catalogue=catalogue,
-                    catalogue_examples=[tag for tag, _normalized in catalogue_rows],
-                )
+                for item in candidate_items:
+                    db.add(DraftCandidate(draft_id=draft.id, **item))
+            if not draft.tags and suggested_tags is not None:
+                draft.tags = suggested_tags
             db.add(
                 AuditLog(
                     user_id=user.id if user else None,
@@ -647,6 +668,22 @@ async def run_restructure_pending_draft(
                 restructure_model=result.model,
             )
         except Exception as exc:
+            await db.rollback()
+            draft = (
+                await db.execute(
+                    select(PendingDraft)
+                    .where(PendingDraft.id == uuid.UUID(draft_id_str))
+                    .execution_options(populate_existing=True)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if not _draft_accepts_restructure_result(draft):
+                await db.rollback()
+                logger.info(
+                    "Discarded obsolete pending draft formatting failure",
+                    draft_id=draft_id_str,
+                )
+                return
             draft.restructured_body_md = source_text
             draft.restructure_candidate_md = None
             draft.restructure_decision = "lossless_ready"
