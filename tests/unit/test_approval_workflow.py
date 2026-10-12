@@ -36,6 +36,7 @@ class FakeGovernanceRepository:
                 return None
         self.db = Db(external_document)
         self.audits = []
+        self.calls = []
 
     async def get_draft(self, draft_id):
         return self.draft if draft_id == self.draft.id else None
@@ -49,6 +50,13 @@ class FakeGovernanceRepository:
         return audit
 
     async def list_drafts(self, status=None, company_domain=None, dept=None, depts=None, assigned_approver_id=None):
+        self.calls.append({
+            "status": status,
+            "company_domain": company_domain,
+            "dept": dept,
+            "depts": depts,
+            "assigned_approver_id": assigned_approver_id,
+        })
         drafts = [self.draft]
         if assigned_approver_id:
             drafts = [item for item in drafts if item.assigned_approver_id in {None, assigned_approver_id}]
@@ -120,6 +128,60 @@ def test_reviewer_queue_is_limited_to_member_department_and_assignment():
 
     draft.assigned_approver_id = review_user.id
     assert [item.id for item in asyncio.run(service.list_drafts(review_user, "pending"))] == [draft.id]
+
+
+def test_an_assignment_never_hides_a_draft_from_an_identity_that_can_decide_it():
+    """A pending draft must never be invisible to everyone who may act on it.
+
+    `submit_draft` applies the department's `approver_rules` automatically, so an upload
+    can be assigned on the way into the queue. Filtering Admin/CEO and global publishers
+    to "unassigned or mine" then removed that draft from the only queues left: it was
+    neither awaiting approval nor decided anywhere in the UI, while the row still read
+    `pending`. A department-scoped reviewer still saw it, so the identity with MORE
+    authority saw less -- which is how a document appeared to vanish entirely.
+    """
+    draft = PendingDraft(
+        id=uuid.uuid4(), title="Procedure", company_domain="acme.test", dept="Engineering",
+        source_ref="upload://procedure.pdf", source_hash="c" * 64, status="pending",
+        assigned_approver_id=uuid.uuid4(),
+    )
+    service = GovernanceService(FakeGovernanceRepository(draft), FakeArticleRepository())
+
+    admin = User(id=uuid.uuid4(), email="admin@acme.test", name="Admin", company_domain="acme.test", role="Admin")
+    ceo = User(id=uuid.uuid4(), email="ceo@acme.test", name="CEO", company_domain="acme.test", role="CEO")
+
+    for identity in (admin, ceo):
+        assert service._can_approve_draft(identity, draft), "precondition: may decide any draft"
+        visible = asyncio.run(service.list_drafts(identity, "pending"))
+        assert [item.id for item in visible] == [draft.id]
+
+
+def test_a_company_lead_queue_stays_inside_its_own_tenant():
+    """Dropping the assignment filter must not widen the tenant boundary.
+
+    A company-scoped Admin role, unlike the legacy `role="Admin"` identity, is NOT a
+    global publisher, so this exercises the company branch: every draft in its own
+    company regardless of assignment, and nothing from any other company.
+    """
+    draft = PendingDraft(
+        id=uuid.uuid4(), title="Procedure", company_domain="acme.test",
+        source_ref="upload://procedure.pdf", source_hash="d" * 64, status="pending",
+        assigned_approver_id=uuid.uuid4(),
+    )
+    repo = FakeGovernanceRepository(draft)
+    service = GovernanceService(repo, FakeArticleRepository())
+
+    lead = User(id=uuid.uuid4(), email="lead@acme.test", name="Lead", company_domain="acme.test", role="Reviewer")
+    permission = Permission(key="article.publish", name="Publish")
+    role = Role(name="Admin", company_domain="acme.test")
+    role.permissions.append(RolePermission(permission=permission, scope="company"))
+    lead.roles.append(role)
+
+    visible = asyncio.run(service.list_drafts(lead, "pending"))
+
+    assert [item.id for item in visible] == [draft.id]
+    assert repo.calls[-1]["company_domain"] == "acme.test"
+    assert repo.calls[-1]["assigned_approver_id"] is None
 
 
 @pytest.mark.parametrize("preparation_status", ["queued", "processing"])
