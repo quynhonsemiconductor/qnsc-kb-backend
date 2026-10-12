@@ -260,6 +260,11 @@ class Settings(BaseSettings):
     # refuses a burst rather than queueing it, and a refused section falls back to
     # unformatted text for that part of the document.
     RESTRUCTURE_MAX_CONCURRENCY: int = 4
+    # Bound the TOTAL provider work for one document. A book can contain hundreds of
+    # 8,000-character sections; sending all of them keeps the single worker busy for close
+    # to its one-hour hard limit even though a complete lossless reading view already
+    # exists. Above this budget, keep that local view and make the draft reviewable now.
+    RESTRUCTURE_MAX_SECTIONS: int = 8
     # Formatting is an optional enhancement. Keep review responsive and use
     # the lossless local fallback when the configured provider is slow.
     RESTRUCTURE_TIMEOUT_SECONDS: float = 300.0

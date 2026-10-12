@@ -533,6 +533,25 @@ async def restructure_document(
             # handles both, and for a short document it is also the faster one.
             sections = []
 
+    if (
+        sections
+        and provider_config is not None
+        and len(sections) > settings.RESTRUCTURE_MAX_SECTIONS
+    ):
+        logger.info(
+            "Skipped LLM restructuring; document exceeds the section budget",
+            title=title,
+            source_characters=len(source_text),
+            section_count=len(sections),
+            max_sections=settings.RESTRUCTURE_MAX_SECTIONS,
+        )
+        return _result(
+            source_text,
+            fallback,
+            "lossless_ready",
+            "lossless-markdown",
+        )
+
     if sections and provider_config is not None:
         section_results = await _restructure_sections(
             title, sections, provider_config.model, department_descriptions
