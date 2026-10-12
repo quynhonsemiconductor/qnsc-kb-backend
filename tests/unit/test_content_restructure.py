@@ -194,6 +194,38 @@ def test_long_documents_are_split_into_bounded_ai_requests(monkeypatch):
     assert calls == sorted(calls, key=source.index)
 
 
+def test_book_sized_document_skips_llm_when_section_budget_is_exceeded(monkeypatch):
+    source = "\n\n".join(
+        f"Chapter {index}: " + ("Complete extracted content. " * 8)
+        for index in range(10)
+    )
+    calls: list[object] = []
+
+    async def fake_complete(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("A book-sized document must not be rewritten by the LLM")
+
+    monkeypatch.setattr(
+        content_restructure, "resolve_provider", lambda _model: _Provider()
+    )
+    monkeypatch.setattr(content_restructure, "complete", fake_complete)
+    monkeypatch.setattr(settings, "RESTRUCTURE_SECTION_CHARS", 220)
+    monkeypatch.setattr(settings, "RESTRUCTURE_MAX_SECTIONS", 8)
+    monkeypatch.setattr(settings, "RESTRUCTURE_SKIP_WHEN_STRUCTURED", False)
+
+    result = _run(
+        content_restructure.restructure_document("Long handbook", source, enabled=True)
+    )
+
+    assert result.status == "lossless_ready"
+    assert result.model == "lossless-markdown"
+    assert result.error is None
+    assert result.report.token_coverage == 1.0
+    assert result.report.numeric_coverage == 1.0
+    assert "Chapter 9" in result.body_md
+    assert calls == []
+
+
 def test_a_document_cannot_close_its_own_fence_and_give_instructions(monkeypatch):
     """The output of this call is published, so an instruction inside the source is an
     attempt to author the article. The delimiter must survive a body that closes it."""
