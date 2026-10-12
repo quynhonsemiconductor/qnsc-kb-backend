@@ -106,6 +106,17 @@ class GovernanceService:
             )
         draft.status = to_status
 
+    @staticmethod
+    def _ensure_preparation_complete(draft: PendingDraft) -> None:
+        if draft.restructure_status in {"queued", "processing"}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "preparation_in_progress",
+                    "message": "Wait for document preparation to finish before deciding this draft.",
+                },
+            )
+
     def _can_approve_draft(self, user: User, draft: PendingDraft) -> bool:
         """Only the assigned approver or a privileged Admin/CEO may approve."""
         return bool(
@@ -788,6 +799,7 @@ class GovernanceService:
                     status_code=409,
                     detail=f"Draft cannot be approved from status: {draft.status}",
                 )
+            self._ensure_preparation_complete(draft)
             if (
                 draft.company_domain != user.company_domain
                 and not self._is_global_publisher(user)
@@ -1582,15 +1594,20 @@ class GovernanceService:
     async def reject_draft(
         self, user: User, draft_id: uuid.UUID, review_note: str
     ) -> PendingDraft:
-        draft = await self._get_draft_for_user(draft_id, user)
+        db = self.gov_repo.db
+        if hasattr(db, "execute"):
+            draft = await self._get_draft_for_user(draft_id, user, for_update=True)
+        else:  # Lightweight unit-test repository compatibility.
+            draft = await self.gov_repo.get_draft(draft_id)
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
 
         if draft.status != "pending":
             raise HTTPException(
-                status_code=400,
+                status_code=409,
                 detail=f"Draft cannot be rejected from status: {draft.status}",
             )
+        self._ensure_preparation_complete(draft)
         if (
             draft.company_domain != user.company_domain
             and not self._is_global_publisher(user)

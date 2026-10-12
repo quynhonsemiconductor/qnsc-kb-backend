@@ -66,6 +66,8 @@ class _Draft:
         self.similarity_matches = kwargs.pop("similarity_matches", None)
         self.external_document_id = kwargs.pop("external_document_id", None)
         self.content_metadata = kwargs.pop("content_metadata", None)
+        self.status = kwargs.pop("status", "pending")
+        self.restructure_status = kwargs.pop("restructure_status", "llm")
         assert not kwargs, kwargs
 
 
@@ -235,6 +237,15 @@ def test_a_fenced_answer_is_still_read():
 def test_no_rule_means_no_decision(llm):
     assert _decide(rules=[]).action == ABSTAIN
     assert llm["calls"] == 0, "a draft nothing covers must not cost a model call"
+
+
+@pytest.mark.parametrize("status", ["queued", "processing"])
+def test_preparation_in_progress_abstains_without_a_model_call(llm, status):
+    verdict = _decide(draft=_Draft(restructure_status=status))
+
+    assert verdict.action == ABSTAIN
+    assert "preparation" in verdict.reason.lower()
+    assert llm["calls"] == 0
 
 
 def test_a_rule_with_no_authority_is_a_dry_run(llm):

@@ -219,6 +219,7 @@ def test_book_sized_document_skips_llm_when_section_budget_is_exceeded(monkeypat
 
     assert result.status == "lossless_ready"
     assert result.model == "lossless-markdown"
+    assert result.auxiliary_ai_allowed is False
     assert result.error is None
     assert result.report.token_coverage == 1.0
     assert result.report.numeric_coverage == 1.0

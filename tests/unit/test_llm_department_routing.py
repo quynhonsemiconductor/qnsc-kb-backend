@@ -85,6 +85,17 @@ def test_the_llm_routes_what_keyword_overlap_cannot(llm):
     )
 
 
+def test_routing_can_explicitly_skip_auxiliary_ai(llm):
+    routed = asyncio.run(
+        route_document_candidates_llm(
+            "Lecture-5-STA", MARKDOWN, UNDESCRIBED, use_llm=False
+        )
+    )
+
+    assert routed == route_document_candidates("Lecture-5-STA", MARKDOWN, UNDESCRIBED)
+    assert llm["calls"] == 0
+
+
 def test_the_chosen_department_is_offered_first_to_the_reviewer(llm):
     llm["reply"] = '{"assignments": [{"section": 1, "department": 2}]}'
     first = _route()[0]

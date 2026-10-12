@@ -78,6 +78,7 @@ class RestructureResult:
     candidate_body_md: str | None = None
     chunks: list[str] | None = None
     report: "RestructureReport" = field(default_factory=lambda: RestructureReport())
+    auxiliary_ai_allowed: bool = True
 
 
 @dataclass
@@ -294,6 +295,7 @@ def _result(
     candidate_body_md: str | None = None,
     chunks: list[str] | None = None,
     report: RestructureReport | None = None,
+    auxiliary_ai_allowed: bool = True,
 ) -> RestructureResult:
     """Construct a result with diagnostics and chunk boundaries populated."""
     return RestructureResult(
@@ -304,6 +306,7 @@ def _result(
         candidate_body_md=candidate_body_md,
         chunks=chunks if chunks is not None else split_into_chunks(body_md),
         report=report or _report(original, body_md),
+        auxiliary_ai_allowed=auxiliary_ai_allowed,
     )
 
 
@@ -550,6 +553,7 @@ async def restructure_document(
             fallback,
             "lossless_ready",
             "lossless-markdown",
+            auxiliary_ai_allowed=False,
         )
 
     if sections and provider_config is not None:

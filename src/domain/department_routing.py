@@ -452,7 +452,11 @@ async def _llm_section_departments(
 
 
 async def route_document_candidates_llm(
-    title: str, markdown: str, departments: Iterable[Any]
+    title: str,
+    markdown: str,
+    departments: Iterable[Any],
+    *,
+    use_llm: bool = True,
 ) -> list[dict[str, Any]]:
     """Route with the LLM when one is configured, and exactly as before when not.
 
@@ -466,7 +470,11 @@ async def route_document_candidates_llm(
         suggest_departments(section["title"], section["body_md"], department_list)
         for section in sections
     ]
-    outcome = await _llm_section_departments(title, sections, department_list)
+    outcome = (
+        await _llm_section_departments(title, sections, department_list)
+        if use_llm
+        else _RoutingOutcome(_ROUTING_OFF, {})
+    )
     chosen = outcome.assignments
 
     routed: list[dict[str, Any]] = []
