@@ -248,7 +248,19 @@ module "stack" {
   // that landed late and woke the environment, because nothing else would put it back down
   // until the next working day. Each pass is a no-op when develop is already down
   // (InvalidDBInstanceState, deliberately not retried).
-  idle_schedule = "cron(0 0,3 * * ? *)"
+  //
+  // CHANGED to 19:00 / 22:00 / 02:00 at the platform lead's request (2026-10-12), together with
+  // the api sizing in this change. The 19:00 stop is the one that was reverted before ("cut
+  // the evening short"), so it is a decision to keep an eye on, not a settled one. There is
+  // still no one-click wake workflow (see the note on `wake_schedule`), so anyone who needs
+  // develop after 19:00 has to deploy to wake it, which `ensure_rds` does.
+  //
+  // Why three passes and not one: 19:00 is the working-day stop. 22:00 and 02:00 are the
+  // catch-up for a deploy that lands after 19:00 and wakes the environment through
+  // `ensure_rds` (a late merge would otherwise keep RDS and both tasks running until the next
+  // 19:00). A late wake is therefore bounded to ~3-4 hours, and Saturday night is caught by
+  // the 02:00 pass on Sunday. Every pass is a no-op when develop is already down.
+  idle_schedule = "cron(0 19,22,2 * * ? *)"
 
   // 08:00 local, every day. Deploys already wake this environment, but that covers the
   // days it is CHANGED rather than the days it is USED — someone opening it on a
@@ -283,7 +295,16 @@ module "stack" {
   // IF qnsc-kb ever goes properly dormant, build a one-click `Wake develop` workflow first
   // (ci already has the `ensure-environment-awake` action; nothing exposes it as a
   // dispatchable workflow), THEN remove this line. In that order.
-  wake_schedule = "cron(0 8 ? * MON-FRI *)"
+  //
+  // MON-SAT now (was MON-FRI), 08:00-19:00 Asia/Ho_Chi_Minh, so the working window is 11 hours a
+  // day for six days = 66 h/week against 80 h/week before (16 h x 5). Sunday stays off.
+  //
+  // THE API'S "MIN 1 TASK DURING HOURS, 0 OUTSIDE" IS THIS PAIR OF SCHEDULES, not `min_count`.
+  // `api.min_count` stays 0 and autoscaling stays off on purpose (see the validation in
+  // modules/stack/variables.tf: target tracking cannot scale from zero, nothing publishes a
+  // metric at zero tasks). The scheduler sets the DESIRED count to 1 at 08:00 and to 0 at the
+  // stop passes; that is what makes the floor 1 in the day and 0 at night.
+  wake_schedule = "cron(0 8 ? * MON-SAT *)"
 
   // MUST NAME THE MODEL THE IMAGE ACTUALLY CARRIES. This is not a preference: with
   // embedding_runtime = "onnx" the loader reads whatever export sits in
