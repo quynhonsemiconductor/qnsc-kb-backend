@@ -38,6 +38,9 @@ def test_streaming_answer_does_not_use_request_user_after_response_starts(monkey
         async def create_conversation(self, *_args):
             return self.conversation
 
+        async def start_user_turn(self, *_args, **_kwargs):
+            return None
+
         async def add_message(self, *_args, **_kwargs):
             return None
 

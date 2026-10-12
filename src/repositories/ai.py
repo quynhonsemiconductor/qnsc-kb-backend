@@ -15,6 +15,21 @@ from src.models.ai import (
 import json
 
 
+def _is_retryable_failed_pair(
+    failed: object | None, original: object | None, question: str
+) -> bool:
+    action_data = getattr(failed, "action_data", None)
+    return bool(
+        failed
+        and original
+        and getattr(failed, "role", None) == "assistant"
+        and isinstance(action_data, dict)
+        and action_data.get("failed") is True
+        and getattr(original, "role", None) == "user"
+        and str(getattr(original, "content", "")).strip() == question.strip()
+    )
+
+
 class AIRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -81,6 +96,69 @@ class AIRepository:
             .order_by(AiMessage.created_at.asc())
         )
         return list(result.scalars().all())
+
+    async def start_user_turn(
+        self,
+        conversation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question: str,
+        *,
+        retry_failed: bool = False,
+    ) -> AiMessage:
+        """Append a question, or reopen exactly the latest failed turn.
+
+        A retry removes only the failed assistant response and retains its user question.
+        The conversation row lock serializes concurrent retries: after the first removes
+        the failure, the latest row is the in-progress user question and a second retry is
+        rejected rather than starting another generation for the same turn.
+        """
+        conversation = (
+            await self.db.execute(
+                select(AiConversation)
+                .where(
+                    AiConversation.id == conversation_id,
+                    AiConversation.user_id == user_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            raise ValueError("Conversation not found")
+
+        if retry_failed:
+            latest = list(
+                (
+                    await self.db.execute(
+                        select(AiMessage)
+                        .where(AiMessage.conversation_id == conversation_id)
+                        .order_by(AiMessage.created_at.desc(), AiMessage.id.desc())
+                        .limit(2)
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            failed = latest[0] if latest else None
+            original = latest[1] if len(latest) > 1 else None
+            if not _is_retryable_failed_pair(failed, original, question):
+                raise ValueError("Only the latest failed turn can be retried")
+            await self.db.delete(failed)
+            conversation.updated_at = datetime.utcnow()
+            await self.db.commit()
+            return original
+
+        message = AiMessage(
+            conversation_id=conversation_id,
+            role="user",
+            content=question,
+            citations="[]",
+        )
+        self.db.add(message)
+        conversation.updated_at = datetime.utcnow()
+        await self.db.commit()
+        await self.db.refresh(message)
+        return message
 
     async def add_message(
         self,
