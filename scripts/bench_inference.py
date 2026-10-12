@@ -123,7 +123,7 @@ def fetch_articles(cache: Path, limit: int) -> list[dict[str, str]]:
     import httpx
 
     found: list[dict[str, str]] = []
-    with httpx.Client(timeout=30.0, headers={"User-Agent": "qnsc-kb-bench/1.0 (performance benchmark)"}) as client:
+    with httpx.Client(timeout=30.0, headers={"User-Agent": "qnsc-kb-backend-bench/1.0 (https://github.com/quynhonsemiconductor/qnsc-kb-backend; performance benchmark, ~60 requests)"}) as client:
         for start in range(0, len(TITLES), 20):
             batch = TITLES[start : start + 20]
             response = client.get(
