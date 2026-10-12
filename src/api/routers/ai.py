@@ -38,6 +38,7 @@ class AskRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     article_id: uuid.UUID | None = None
     confirm_edit: bool = False
+    retry_failed: bool = False
     edit_instruction: str | None = Field(default=None, max_length=4000)
     language: Literal["en", "vi"] = "vi"
 
@@ -460,6 +461,10 @@ async def ask_question(
             headers={"Retry-After": str(retry_after)},
         )
     repo = AIRepository(db)
+    if req.retry_failed and req.conversation_id is None:
+        raise HTTPException(
+            status_code=409, detail="A failed turn can only be retried in its conversation"
+        )
     conversation = (
         await repo.get_conversation(req.conversation_id, current_user.id)
         if req.conversation_id
@@ -475,7 +480,15 @@ async def ask_question(
         conversation.title = req.question[:80]
         await db.commit()
 
-    await repo.add_message(conversation.id, "user", req.question)
+    try:
+        await repo.start_user_turn(
+            conversation.id,
+            current_user.id,
+            req.question,
+            retry_failed=req.retry_failed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     data = await get_ai_service(db).ask(
         current_user, req.question, conversation_id=conversation.id, language=req.language,
         article_id=req.article_id, confirm_edit=req.confirm_edit,
@@ -531,6 +544,10 @@ async def ask_question_stream(
         )
 
     repo = AIRepository(db)
+    if req.retry_failed and req.conversation_id is None:
+        raise HTTPException(
+            status_code=409, detail="A failed turn can only be retried in its conversation"
+        )
     conversation = (
         await repo.get_conversation(req.conversation_id, current_user.id)
         if req.conversation_id
@@ -546,7 +563,15 @@ async def ask_question_stream(
         conversation.title = req.question[:80]
         await db.commit()
 
-    await repo.add_message(conversation.id, "user", req.question)
+    try:
+        await repo.start_user_turn(
+            conversation.id,
+            current_user.id,
+            req.question,
+            retry_failed=req.retry_failed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     conversation_id = str(conversation.id)
 
     async def event_stream():
