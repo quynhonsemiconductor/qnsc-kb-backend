@@ -248,7 +248,16 @@ def _payload(
         "temperature": temperature,
     }
     if thinking is not None and provider.name == "glm":
-        payload["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        # `level`, never `{"type": "disabled"}`. Newer GLM models cannot turn thinking
+        # off and reject that payload outright with HTTP 400 code 1210 ("This model
+        # always engages in thinking and cannot be disabled; please use low, high, or
+        # max"). Because `thinking=False` is what every non-chat caller passes --
+        # restructuring, department routing, auto-tagging, the approval agent -- the
+        # rejection hit each one: document preparation failed EVERY section and always
+        # fell back to the lossless reading view, so an upload could never reach review
+        # as AI-formatted. `level` is accepted by both the current and the previous
+        # generation, so "as little deliberation as the model allows" replaces "off".
+        payload["thinking"] = {"level": "high" if thinking else "low"}
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     return payload

@@ -1,4 +1,10 @@
-"""glm must be told explicitly not to think, or the answer budget is spent before the answer.
+"""glm must be told to keep deliberation low, or the answer budget is spent before the answer.
+
+NOTE: the original fix here sent `{"type": "disabled"}`, which newer GLM models reject
+with HTTP 400 code 1210 — see `test_thinking_false_asks_for_the_least_deliberation_glm_allows`
+below. The field is now always `level`. The budget reasoning that follows is unchanged;
+only the wire shape is.
+
 
 An assistant reply ended mid-word:
 
@@ -37,14 +43,41 @@ def _messages():
     return [{"role": "user", "content": "hỏi gì đó"}]
 
 
-def test_thinking_false_disables_it_for_glm():
+def test_thinking_false_asks_for_the_least_deliberation_glm_allows():
+    """`level`, never `{"type": "disabled"}`.
+
+    Newer GLM models cannot turn thinking off and reject that payload outright:
+
+        HTTP 400 {"error":{"code":"1210","message":"This model always engages in
+        thinking and cannot be disabled; please use low, high, or max"}}
+
+    `thinking=False` is what every non-chat caller passes, so the rejection hit all of
+    them. Document preparation was the visible casualty: every section failed, the
+    lossless fallback always won, and an upload could never reach review AI-formatted.
+
+    Verified against the live provider — `{"type": "disabled"}` and `{"type": "low"}`
+    are both refused with 1210, while `level` is accepted by this model AND by the
+    previous generation.
+    """
     payload = _payload(_glm(), _messages(), 0.0, thinking=False)
-    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["thinking"] == {"level": "low"}
 
 
 def test_thinking_true_enables_it_for_glm():
     payload = _payload(_glm(), _messages(), 0.0, thinking=True)
-    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["thinking"] == {"level": "high"}
+
+
+def test_no_glm_thinking_payload_tries_to_disable_thinking():
+    """The shape itself, pinned against reintroduction.
+
+    A model that always thinks treats "off" as a bad request, so neither value may ever
+    be `disabled` again — for either flag state.
+    """
+    for requested in (True, False):
+        thinking = _payload(_glm(), _messages(), 0.0, thinking=requested)["thinking"]
+        assert "type" not in thinking
+        assert "disabled" not in thinking.values()
 
 
 def test_omitting_thinking_leaves_glm_on_its_own_default():
