@@ -235,7 +235,7 @@ def bench_cross_encoder(chunks: list[SimpleNamespace], queries: list[str], pools
     out: dict[str, Any] = {
         "load_seconds": round(load, 2),
         "model": getattr(model, "model", None).__class__.__name__,
-        "max_length_attr": getattr(model, "max_length", None),
+        "max_seq_length": getattr(model, "max_seq_length", None),
         "rss_after_mb": rss_mb(),
     }
     for pool in pools:
