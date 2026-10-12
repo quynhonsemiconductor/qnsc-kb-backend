@@ -125,7 +125,7 @@ services:
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
-    command: celery -A src.workers.celery_app worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=info
+    command: celery -A src.workers.celery_app worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=info -Q document-preparation,celery,ingestion,connectors,permissions
     mem_limit: 2g
     mem_reservation: 512m
     environment:

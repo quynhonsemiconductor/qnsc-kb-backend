@@ -5,7 +5,11 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
-from src.api.routers.governance import _draft_response, _visible_restructure_state
+from src.api.routers.governance import (
+    _draft_response,
+    _queue_draft_restructure,
+    _visible_restructure_state,
+)
 from src.models.governance import PendingDraft
 from src.repositories.governance import GovernanceRepository
 
@@ -70,6 +74,23 @@ def test_recent_queue_and_processing_jobs_remain_in_flight():
 
     assert _visible_restructure_state(queued, now)[0] == "queued"
     assert _visible_restructure_state(processing, now)[0] == "processing"
+
+
+def test_retrying_a_stalled_queued_row_refreshes_its_heartbeat():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    old = now - timedelta(minutes=10)
+    draft = _draft(
+        restructure_status="queued",
+        restructure_error="stale",
+        updated_at=old,
+    )
+
+    _queue_draft_restructure(draft, now)
+
+    assert draft.updated_at == now
+    assert draft.restructure_status == "queued"
+    assert draft.restructure_error is None
+    assert _visible_restructure_state(draft, now)[0] == "queued"
 
 
 def test_list_response_omits_document_bodies_but_keeps_layout_signal():
