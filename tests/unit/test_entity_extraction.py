@@ -44,6 +44,7 @@ def llm(monkeypatch):
 
     monkeypatch.setattr(llm_client, "complete", fake_complete)
     monkeypatch.setattr(llm_client, "resolve_provider", lambda *a, **k: state["provider"])
+    monkeypatch.setattr(settings, "KNOWLEDGE_GRAPH_ENABLED", True)
     monkeypatch.setattr(settings, "GRAPH_EXTRACTION_ENABLED", True)
     return state
 
@@ -64,10 +65,11 @@ def test_returns_well_formed_entities_and_relationships(llm):
     )
 
 
-def test_disabled_by_flag_returns_empty_without_calling(llm, monkeypatch):
+@pytest.mark.parametrize("flag", ["KNOWLEDGE_GRAPH_ENABLED", "GRAPH_EXTRACTION_ENABLED"])
+def test_disabled_by_either_flag_returns_empty_without_calling(llm, monkeypatch, flag):
     from src.core.config import settings
 
-    monkeypatch.setattr(settings, "GRAPH_EXTRACTION_ENABLED", False)
+    monkeypatch.setattr(settings, flag, False)
     result = _extract(llm)
     assert result == ExtractionResult([], [])
     assert "messages" not in llm

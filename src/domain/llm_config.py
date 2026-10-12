@@ -10,7 +10,7 @@ from src.core.config import settings
 from src.core.secrets import decrypt_secret, encrypt_secret
 from src.models.ops import LLMProviderConfig
 
-SUPPORTED_PROVIDERS = {"openai", "glm", "groq", "gemini"}
+SUPPORTED_PROVIDERS = {"openai", "glm", "groq", "gemini", "custom"}
 DEFAULT_BASE_URLS = {
     "openai": "https://api.openai.com/v1/chat/completions",
     "glm": "https://api.z.ai/api/coding/paas/v4/chat/completions",

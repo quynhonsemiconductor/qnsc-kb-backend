@@ -1,7 +1,7 @@
 import uuid
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from typing import Any, Literal
 from fastapi import APIRouter, Depends, Query, status, HTTPException
@@ -47,6 +47,123 @@ import structlog
 logger = structlog.get_logger()
 
 router = APIRouter()
+
+# A Celery dispatch that has not reached ``processing`` within five minutes did not
+# make it to a live worker. Once processing starts, the global one-hour task limit is
+# the upper bound; the extra five minutes avoids racing the worker's final commit.
+_RESTRUCTURE_QUEUE_STALE_AFTER = timedelta(minutes=5)
+_RESTRUCTURE_PROCESSING_STALE_AFTER = timedelta(minutes=65)
+
+
+def _visible_restructure_state(draft: PendingDraft, now: datetime | None = None) -> tuple[str, str | None]:
+    """Expose abandoned work as actionable without mutating history during a GET."""
+
+    current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    age = current - (draft.updated_at or draft.created_at)
+    if draft.restructure_status == "queued" and age > _RESTRUCTURE_QUEUE_STALE_AFTER:
+        return "stalled", "Document preparation did not reach a worker. Retry preparation."
+    if (
+        draft.restructure_status == "processing"
+        and age > _RESTRUCTURE_PROCESSING_STALE_AFTER
+    ):
+        return "stalled", "Document preparation exceeded the worker time limit. Retry preparation."
+    return draft.restructure_status, draft.restructure_error
+
+
+def _draft_response(
+    draft: PendingDraft,
+    service: GovernanceService,
+    current_user: User,
+    *,
+    include_content: bool,
+) -> dict[str, Any]:
+    can_view_content = (
+        draft.assigned_approver_id == current_user.id
+        or service._can_review_draft(current_user, draft)
+    )
+    visible_status, visible_error = _visible_restructure_state(draft)
+    response: dict[str, Any] = {
+        "id": str(draft.id),
+        "title": draft.title,
+        "company_domain": draft.company_domain,
+        "dept": draft.dept,
+        "source_ref": draft.source_ref,
+        "restructure_decision": draft.restructure_decision,
+        "restructure_status": visible_status,
+        "restructure_model": draft.restructure_model,
+        "restructure_error": visible_error,
+        "has_restructure_candidate": (
+            bool(draft.restructure_candidate_md)
+            if include_content and can_view_content
+            else draft.restructure_decision == "pending_review"
+        ),
+        "status": draft.status,
+        "created_by": str(draft.created_by) if draft.created_by else None,
+        "assigned_approver_id": (
+            str(draft.assigned_approver_id) if draft.assigned_approver_id else None
+        ),
+        "assigned_by": str(draft.assigned_by) if draft.assigned_by else None,
+        "assigned_at": draft.assigned_at,
+        "review_due_at": (
+            draft.assigned_at + timedelta(days=settings.REVIEW_SLA_DAYS)
+            if draft.assigned_at
+            else None
+        ),
+        "review_overdue": bool(
+            draft.assigned_at
+            and draft.assigned_at
+            < datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)
+        ),
+        "reviewed_by": str(draft.reviewed_by) if draft.reviewed_by else None,
+        "reviewed_at": draft.reviewed_at,
+        "created_at": draft.created_at,
+        "updated_at": draft.updated_at,
+        "similarity_level": draft.similarity_level,
+        "similarity_matches": draft.similarity_matches or [],
+        "requires_update_confirmation": draft.requires_update_confirmation,
+        "related_article_ids": draft.related_article_ids or [],
+        "tags": draft.tags or [],
+        "content_metadata": draft.content_metadata if can_view_content else None,
+        "external_document_id": (
+            str(draft.external_document_id) if draft.external_document_id else None
+        ),
+        "candidate_count": len(
+            [
+                item
+                for item in (getattr(draft, "candidates", []) or [])
+                if item.status == "candidate"
+            ]
+        ),
+    }
+    if not include_content:
+        # The deferred candidate body cannot be read here. The persisted decision is enough
+        # to preserve the inbox's "choose a version" state until detail is requested.
+        response["has_restructure_candidate"] = (
+            draft.restructure_decision == "pending_review"
+        )
+        return response
+
+    visible_body = draft.restructured_body_md if can_view_content else None
+    candidate_body = draft.restructure_candidate_md if can_view_content else None
+    report_body = candidate_body or visible_body
+    report = (
+        build_restructure_report(draft.summary or "", report_body)
+        if can_view_content and report_body
+        else None
+    )
+    response.update(
+        {
+            "source_hash": draft.source_hash,
+            "summary": draft.summary if can_view_content else None,
+            "restructured_body_md": visible_body,
+            "restructure_candidate_md": candidate_body,
+            "restructure_report": asdict(report) if report else None,
+            "restructure_chunk_count": (
+                len(split_into_chunks(report_body)) if report_body else 0
+            ),
+        }
+    )
+    return response
 
 
 def _permission_leakage_detected(retrieved: list[dict[str, Any]], citations: list[dict[str, Any]] | None) -> bool:
@@ -262,82 +379,31 @@ async def list_pending_drafts(
     art_repo = ArticleRepository(db)
     service = GovernanceService(gov_repo, art_repo)
     drafts = await service.list_drafts(current_user, status)
-    response = []
-    for draft in drafts:
-        can_view_content = (
-            draft.assigned_approver_id == current_user.id
-            or service._can_review_draft(current_user, draft)
-        )
-        visible_body = draft.restructured_body_md if can_view_content else None
-        report_body = draft.restructure_candidate_md or visible_body
-        report = (
-            build_restructure_report(draft.summary or "", report_body)
-            if can_view_content and report_body
-            else None
-        )
-        response.append(
-            {
-                "id": str(draft.id),
-                "title": draft.title,
-                "company_domain": draft.company_domain,
-                "dept": draft.dept,
-                "source_ref": draft.source_ref,
-                "source_hash": draft.source_hash,
-                # Any reviewer/publisher authorized for this draft may use and
-                # inspect the AI reading view and review unassigned drafts.
-                "summary": draft.summary if can_view_content else None,
-                "restructured_body_md": visible_body,
-                "restructure_candidate_md": (
-                    draft.restructure_candidate_md if can_view_content else None
-                ),
-                "restructure_decision": draft.restructure_decision,
-                "restructure_status": draft.restructure_status,
-                "restructure_model": draft.restructure_model,
-                "restructure_error": draft.restructure_error,
-                "restructure_report": asdict(report) if report else None,
-                "restructure_chunk_count": (
-                    len(split_into_chunks(report_body)) if report_body else 0
-                ),
-                "status": draft.status,
-                "created_by": str(draft.created_by) if draft.created_by else None,
-                "assigned_approver_id": (
-                    str(draft.assigned_approver_id)
-                    if draft.assigned_approver_id
-                    else None
-                ),
-                "assigned_by": str(draft.assigned_by) if draft.assigned_by else None,
-                "assigned_at": draft.assigned_at,
-                "review_due_at": draft.assigned_at + timedelta(days=settings.REVIEW_SLA_DAYS) if draft.assigned_at else None,
-                "review_overdue": bool(draft.assigned_at and draft.assigned_at < datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)),
-                "reviewed_by": str(draft.reviewed_by) if draft.reviewed_by else None,
-                "reviewed_at": draft.reviewed_at,
-                "created_at": draft.created_at,
-                "similarity_level": draft.similarity_level,
-                "similarity_matches": draft.similarity_matches or [],
-                "requires_update_confirmation": draft.requires_update_confirmation,
-                "related_article_ids": draft.related_article_ids or [],
-                "tags": draft.tags or [],
-                "content_metadata": (
-                    draft.content_metadata
-                    if draft.assigned_approver_id == current_user.id
-                    or service._can_review_draft(current_user, draft)
-                    else None
-                ),
-                "external_document_id": (
-                    str(draft.external_document_id)
-                    if draft.external_document_id
-                    else None
-                ),
-                "candidate_count": len(
-                    [
-                        item
-                        for item in (getattr(draft, "candidates", []) or [])
-                        if item.status == "candidate"
-                    ]
-                ),
-            }
-        )
-    return response
+    return [
+        _draft_response(draft, service, current_user, include_content=False)
+        for draft in drafts
+    ]
+
+
+@router.get("/pending-drafts/{id}/detail")
+async def get_pending_draft(
+    id: uuid.UUID,
+    include_content: bool = Query(True),
+    current_user: User = Depends(require_permission("governance.read")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Load one draft, including sensitive bodies only when explicitly needed."""
+
+    repository = GovernanceRepository(db)
+    service = GovernanceService(repository, ArticleRepository(db))
+    draft = await repository.get_draft_for_user(
+        id, current_user, lightweight=not include_content
+    )
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return _draft_response(
+        draft, service, current_user, include_content=include_content
+    )
 
 
 @router.post("/pending-drafts/{id}/assign-approver")
@@ -925,7 +991,7 @@ async def restructure_draft(
 ) -> Any:
     gov_repo = GovernanceRepository(db)
     service = GovernanceService(gov_repo, ArticleRepository(db))
-    draft = await gov_repo.get_draft_for_user(id, current_user)
+    draft = await gov_repo.get_draft_for_user(id, current_user, for_update=True)
     if not draft:
         from fastapi import HTTPException
 
@@ -949,6 +1015,12 @@ async def restructure_draft(
         raise HTTPException(
             status_code=403,
             detail="Only users with review or publish permission can restructure this draft",
+        )
+    visible_status, _visible_error = _visible_restructure_state(draft)
+    if draft.restructure_status in {"queued", "processing"} and visible_status != "stalled":
+        raise HTTPException(
+            status_code=409,
+            detail="Document preparation is already in progress",
         )
 
     # Retry is deliberately asynchronous. A slow provider must not hold the

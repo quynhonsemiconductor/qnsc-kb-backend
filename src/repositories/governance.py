@@ -4,7 +4,7 @@ from typing import Sequence
 from sqlalchemy import case, select, delete, and_, or_, func, update, false
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 from src.models.governance import PendingDraft, DraftTransition, DraftCandidate, ApproverRule, Gap, AuditLog
 from src.models.article import Article
 from src.models.interaction import Vote
@@ -16,6 +16,27 @@ from src.domain.rbac import AuthorizationService
 class GovernanceRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    @staticmethod
+    def _draft_inbox_options():
+        """Project only fields needed by the queue and lightweight status polling."""
+        return (
+            defer(PendingDraft.summary),
+            defer(PendingDraft.restructured_body_md),
+            defer(PendingDraft.restructure_candidate_md),
+            defer(PendingDraft.page_texts),
+            defer(PendingDraft.source_hash),
+            defer(PendingDraft.storage_key),
+            defer(PendingDraft.original_filename),
+            defer(PendingDraft.mime_type),
+            defer(PendingDraft.review_note),
+            defer(PendingDraft.update_target_article_id),
+            selectinload(PendingDraft.candidates).load_only(
+                DraftCandidate.id,
+                DraftCandidate.draft_id,
+                DraftCandidate.status,
+            ),
+        )
 
     # Pending Drafts
     async def create_draft(self, draft: PendingDraft) -> PendingDraft:
@@ -40,9 +61,11 @@ class GovernanceRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_draft_for_user(self, draft_id: uuid.UUID, user: User, *, for_update: bool = False) -> PendingDraft | None:
+    async def get_draft_for_user(self, draft_id: uuid.UUID, user: User, *, for_update: bool = False, lightweight: bool = False) -> PendingDraft | None:
         """Load a draft only inside the actor's tenant/department scope."""
         stmt = select(PendingDraft).where(PendingDraft.id == draft_id)
+        if lightweight:
+            stmt = stmt.options(*self._draft_inbox_options())
         global_access = (
             AuthorizationService.has_permission(user, "governance.read", requested_scope="global")
             or AuthorizationService.has_permission(user, "article.publish", requested_scope="global")
@@ -68,7 +91,11 @@ class GovernanceRepository:
         return result.scalar_one_or_none()
 
     async def list_drafts(self, status: str | None = None, company_domain: str | None = None, dept: str | None = None, depts: Sequence[str] | None = None, assigned_approver_id: uuid.UUID | None = None) -> Sequence[PendingDraft]:
-        stmt = select(PendingDraft)
+        # The review inbox needs queue metadata, not three complete copies of every
+        # document. At the 500-row cap those text columns made one poll return 18.7 MB,
+        # and a single stuck job caused the browser to repeat that request every four
+        # seconds. Keep list queries light; the detail endpoint loads content on demand.
+        stmt = select(PendingDraft).options(*self._draft_inbox_options())
         if status:
             stmt = stmt.where(PendingDraft.status == status)
         if company_domain:
