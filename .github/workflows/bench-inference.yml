@@ -13,6 +13,8 @@
 name: Bench · inference (CPU)
 
 on:
+  pull_request:
+    paths: ['.github/workflows/bench-inference.yml', 'scripts/bench_inference.py']
   workflow_dispatch:
     inputs:
       cross_encoder:
@@ -64,7 +66,7 @@ jobs:
 
       - name: Install dependencies (main + onnx, and ml for the cross-encoder)
         env:
-          WITH_CROSS: ${{ inputs.cross_encoder }}
+          WITH_CROSS: ${{ inputs.cross_encoder || 'true' }}
         run: |
           set -euo pipefail
           groups=main,onnx
@@ -104,7 +106,7 @@ jobs:
       # the two siblings of one core, and the run also tries two threads left free to spread over four.
       - name: Benchmark, one process per thread/CPU layout
         env:
-          WITH_CROSS: ${{ inputs.cross_encoder }}
+          WITH_CROSS: ${{ inputs.cross_encoder || 'true' }}
         run: |
           set -euo pipefail
           mkdir -p .bench/out
