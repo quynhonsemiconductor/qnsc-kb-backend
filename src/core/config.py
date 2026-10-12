@@ -293,6 +293,24 @@ class Settings(BaseSettings):
     RESTRUCTURE_SKIP_WHEN_STRUCTURED: bool = True
     RESTRUCTURE_SKIP_HEADINGS_PER_10K: float = 2.0
     RESTRUCTURE_SKIP_MIN_HEADINGS: int = 3
+    # Evidence extraction is local and enhancement-only. Every bound below is a security
+    # and cost ceiling, not a quality preference.
+    EVIDENCE_EXTRACTION_ENABLED: bool = True
+    EVIDENCE_MAX_ARTIFACTS_PER_DOCUMENT: int = 100
+    EVIDENCE_MAX_TABLE_ROWS: int = 500
+    EVIDENCE_MAX_TABLE_COLUMNS: int = 40
+    EVIDENCE_MAX_CELL_CHARS: int = 2000
+    EVIDENCE_MAX_SEARCH_TEXT_CHARS: int = 20000
+    # Only this many rows are embedded in citations/SSE/history. The complete bounded
+    # table remains server-side for deterministic analytics and the authorized endpoint.
+    EVIDENCE_TABLE_PREVIEW_ROWS: int = 50
+    EVIDENCE_PREVIEW_MAX_PIXELS: int = 1800
+    EVIDENCE_PREVIEW_MAX_BYTES: int = 5000000
+    EVIDENCE_ANALYTICS_ENABLED: bool = True
+    EVIDENCE_ANALYTICS_MAX_ROWS: int = 500
+    EVIDENCE_VISION_ENABLED: bool = False
+    EVIDENCE_VISION_MAX_IMAGES: int = 2
+    EVIDENCE_VISION_MAX_TOTAL_BYTES: int = 8000000
     AI_RATE_LIMIT_PER_MINUTE: int = 30
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
     RAG_MIN_RELEVANCE_SCORE: float = 0.12
@@ -396,7 +414,7 @@ class Settings(BaseSettings):
     # served for six hours as if it came from the new one. Bumped for the
     # e5-large-instruct encoder swap (see EMBEDDING_MODEL) -- a cached answer keyed to
     # v4's e5-small-derived retrieval must not be served once the vector space changes.
-    RETRIEVAL_VERSION: str = "v5-e5-large-instruct"
+    RETRIEVAL_VERSION: str = "v6-multimodal-evidence"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False

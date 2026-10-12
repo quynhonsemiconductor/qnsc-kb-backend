@@ -120,6 +120,7 @@ EXPECTED_RLS_POLICIES: frozenset[tuple[str, str]] = frozenset(
         ("article_chunks", "tenant_article_chunks"),
         ("parent_chunks", "tenant_parent_chunks"),
         ("document_sources", "tenant_document_sources"),
+        ("document_evidence", "tenant_document_evidence"),
         ("article_versions", "tenant_article_versions"),
         ("article_tags", "tenant_article_tags"),
         ("article_departments", "tenant_article_departments"),

@@ -13,6 +13,7 @@ import structlog
 
 from src.api.deps import SessionLocal, get_current_user, get_db, set_database_context
 from src.domain.ai_service import AIService, normalize_answer_markdown
+from src.domain.evidence_extraction import table_evidence_preview
 from src.rag.answer_sections import strip_source_metadata
 from src.domain.search_service import SearchService
 from src.domain.rbac import AuthorizationService
@@ -114,6 +115,7 @@ async def _hydrate_citations(
             ),
             selectinload(ArticleChunk.article),
             selectinload(ArticleChunk.article).selectinload(Article.owner),
+            selectinload(ArticleChunk.evidence),
         )
         .where(*conditions)
     )
@@ -156,6 +158,19 @@ async def _hydrate_citations(
                     + (f"?page={page_number}" if page_number else ""),
                     "owner_email": getattr(getattr(article, "owner", None), "email", None),
                     "last_reviewed": getattr(article, "last_reviewed", None).isoformat() if getattr(article, "last_reviewed", None) else None,
+                    **(
+                        {
+                            "evidence_id": str(evidence.id),
+                            "evidence_kind": evidence.kind,
+                            "evidence_label": evidence.label,
+                            "evidence_preview_url": f"/api/v1/articles/{article.id}/evidence/{evidence.id}/preview",
+                            "evidence_table": table_evidence_preview(
+                                evidence.structured_data
+                            ),
+                        }
+                        if (evidence := getattr(chunk, "evidence", None))
+                        else {}
+                    ),
                 }
             )
         # Every persisted citation must identify a concrete retrieved chunk.
@@ -206,6 +221,10 @@ def _answer_provenance(data: dict[str, Any]) -> dict[str, Any] | None:
     stored = dict(action_data) if isinstance(action_data, dict) else {}
     if not data.get("citations"):
         stored.setdefault("grounding", "uncited")
+    if data.get("analytics_results"):
+        stored["analytics_results"] = data["analytics_results"]
+    if data.get("evidence_status"):
+        stored["evidence_status"] = data["evidence_status"]
     return stored or None
 
 
@@ -320,9 +339,21 @@ async def get_conversation_messages(
         )
         action_data = getattr(message, "action_data", None)
         action_data = action_data if isinstance(action_data, dict) else None
+        # Action/status turns are intentionally uncited. Evidence metadata added to an
+        # ordinary cited answer is NOT an action and must never bypass citation
+        # re-authorization: otherwise revoking a source would hide the citations while
+        # leaving the answer and its calculated values visible through action_data.
+        uncited_status = bool(
+            action_data
+            and (
+                action_data.get("action")
+                or action_data.get("failed")
+                or action_data.get("grounding") == "uncited"
+            )
+        )
         inaccessible_source = (
             message.role == "assistant"
-            and not action_data
+            and not uncited_status
             and not _is_safe_historical_status_message(message)
             and (
                 not raw_citations
@@ -360,9 +391,18 @@ async def get_conversation_messages(
                     else False
                 ),
                 "citations": [] if inaccessible_source else citations,
-                "action": action_data.get("action") if action_data else None,
-                "action_data": action_data,
-                "failed": bool(action_data and action_data.get("failed")),
+                "action": (
+                    action_data.get("action")
+                    if action_data and not inaccessible_source
+                    else None
+                ),
+                # Calculations and evidence status can reveal the revoked source just as
+                # directly as the answer text. Scrub the whole metadata envelope when any
+                # cited chunk can no longer be re-authorized.
+                "action_data": None if inaccessible_source else action_data,
+                "failed": bool(
+                    action_data and action_data.get("failed") and not inaccessible_source
+                ),
                 "usage_log_id": (
                     str(message.usage_log_id) if message.usage_log_id else None
                 ),
@@ -600,7 +640,7 @@ async def ask_question_stream(
                 _answer_provenance(data),
             )
             yield f"data: {json.dumps({'type': 'sources', 'sources': data.get('citations', [])})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request'), 'clarification_options': data.get('clarification_options'), 'confidence': data.get('confidence')})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request'), 'clarification_options': data.get('clarification_options'), 'confidence': data.get('confidence'), 'unverified_claims': data.get('unverified_claims'), 'analytics_results': data.get('analytics_results', []), 'evidence_status': data.get('evidence_status')})}\n\n"
 
     return StreamingResponse(
         event_stream(),

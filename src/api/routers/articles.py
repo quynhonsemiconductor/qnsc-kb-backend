@@ -45,6 +45,8 @@ from src.domain.source_storage import (
     source_should_display_inline,
 )
 from src.models.article import Article, DocumentSource, TagCatalog
+from src.models.evidence import DocumentEvidence
+from src.domain.evidence_extraction import render_evidence_preview
 from src.models.interaction import ArticleFollower
 from src.models.governance import (
     ArticleEditRequest,
@@ -1520,6 +1522,63 @@ SOURCE_VIEW_SECURITY_HEADERS = {
         "form-action 'none'; frame-ancestors 'self'"
     ),
 }
+
+
+@router.get("/{id}/evidence/{evidence_id}/preview")
+async def view_article_evidence(
+    id: uuid.UUID,
+    evidence_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Render one evidence region only after authorizing its parent Article."""
+    article = await ArticleService(
+        ArticleRepository(db), UserRepository(db)
+    ).get_article(current_user, id)
+    result = await db.execute(
+        select(DocumentEvidence, DocumentSource)
+        .join(DocumentSource, DocumentSource.id == DocumentEvidence.document_source_id)
+        .where(
+            DocumentEvidence.id == evidence_id,
+            DocumentEvidence.article_id == article.id,
+            DocumentSource.article_id == article.id,
+        )
+    )
+    row = result.first()
+    if not row or not row.DocumentSource.storage_key:
+        raise HTTPException(status_code=404, detail="Evidence is not available")
+    evidence, source = row.DocumentEvidence, row.DocumentSource
+    if evidence.kind == "table":
+        return Response(
+            content=json.dumps(evidence.structured_data or {}).encode("utf-8"),
+            media_type="application/json",
+            headers={
+                **SOURCE_VIEW_SECURITY_HEADERS,
+                "Cache-Control": "private, no-store",
+            },
+        )
+    try:
+        source_bytes = await asyncio.to_thread(load_source, source.storage_key)
+        preview = await asyncio.to_thread(
+            render_evidence_preview,
+            source.original_filename or article.title,
+            source_bytes,
+            evidence.page_number,
+            evidence.bounding_box,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Original source file is missing") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(
+        content=preview,
+        media_type="image/png",
+        headers={
+            **SOURCE_VIEW_SECURITY_HEADERS,
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="evidence-{evidence.id}.png"',
+        },
+    )
 
 
 @router.get("/{id}/source")

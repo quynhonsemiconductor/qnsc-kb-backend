@@ -509,6 +509,18 @@ class SearchService:
                 "source_url": f"/api/v1/articles/{article.id}/source" + (f"?page={chunk.page_number or parent.page_number}" if (chunk.page_number or (parent and parent.page_number)) else ""),
                 "owner_email": getattr(getattr(article, "owner", None), "email", None),
                 "last_reviewed": article.last_reviewed.isoformat() if article.last_reviewed else None,
+                "evidence": (
+                    {
+                        "id": str(chunk.evidence.id),
+                        "kind": chunk.evidence.kind,
+                        "label": chunk.evidence.label,
+                        "page_number": chunk.evidence.page_number,
+                        "structured_data": chunk.evidence.structured_data,
+                        "preview_url": f"/api/v1/articles/{article.id}/evidence/{chunk.evidence.id}/preview",
+                    }
+                    if getattr(chunk, "evidence", None)
+                    else None
+                ),
                 "score": score
             })
 

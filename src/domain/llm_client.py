@@ -6,6 +6,7 @@ configuration. OpenAI, GLM, and Groq all use their OpenAI-compatible chat API.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass
@@ -417,3 +418,89 @@ async def complete(
         if on_token:
             await on_token(answer)
         return answer, _extract_usage(data), provider.model, provider.name
+
+
+async def complete_multimodal(
+    system_prompt: str,
+    user_prompt: str,
+    images: list[tuple[str, bytes]],
+    *,
+    timeout: float = 30.0,
+    max_tokens: int | None = None,
+) -> tuple[str, int, str, str]:
+    """Complete against bounded, server-selected images; never accepts client URLs."""
+    # Validate caller-controlled shape before configuration. An unsupported media type is
+    # invalid regardless of whether this deployment happens to have a provider configured,
+    # and resolving credentials first made this guard impossible to test or reason about.
+    if not images or len(images) > settings.EVIDENCE_VISION_MAX_IMAGES:
+        raise ValueError("invalid number of evidence images")
+    allowed_types = {"image/png", "image/jpeg", "image/webp"}
+    if any(mime not in allowed_types for mime, _data in images):
+        raise ValueError("unsupported evidence image type")
+    if sum(len(data) for _mime, data in images) > settings.EVIDENCE_VISION_MAX_TOTAL_BYTES:
+        raise ValueError("evidence images exceed the request size limit")
+    provider = resolve_provider()
+    if provider is None:
+        raise RuntimeError("No LLM provider is configured.")
+
+    if provider.native_gemini:
+        parts: list[dict[str, Any]] = []
+        for mime, data in images:
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": mime,
+                        "data": base64.b64encode(data).decode("ascii"),
+                    }
+                }
+            )
+        parts.append({"text": user_prompt})
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "temperature": 0.0,
+                "thinkingConfig": {"thinkingLevel": settings.GEMINI_THINKING_LEVEL},
+            },
+        }
+        if max_tokens is not None:
+            payload["generationConfig"]["maxOutputTokens"] = max_tokens
+        url = _gemini_url(provider, streaming=False)
+    else:
+        content: list[dict[str, Any]] = []
+        for mime, data in images:
+            encoded = base64.b64encode(data).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                }
+            )
+        content.append({"type": "text", "text": user_prompt})
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0.0,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        url = provider.url
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url, headers=_headers(provider), json=payload)
+        if response.status_code in (400, 404, 415, 422):
+            raise RuntimeError("The configured provider does not support evidence images")
+        if response.status_code in (401, 403):
+            raise ProviderAuthError("The provider rejected the configured API key")
+        if response.status_code == 429:
+            raise ProviderRateLimitError(
+                "The provider rate limited the vision request",
+                retry_after=_retry_after_seconds(response),
+            )
+        response.raise_for_status()
+        result = response.json()
+    answer = _extract_gemini_text(result) if provider.native_gemini else _extract_openai_text(result)
+    return answer, _extract_usage(result), provider.model, provider.name
