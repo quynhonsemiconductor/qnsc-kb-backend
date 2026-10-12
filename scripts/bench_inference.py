@@ -250,7 +250,12 @@ def bench_cross_encoder(chunks: list[SimpleNamespace], queries: list[str], pools
 
 
 def bench_quality(
-    chunks: list[SimpleNamespace], queries: list[dict[str, Any]], pools: list[int], cross_pools: list[int], with_cross: bool
+    chunks: list[SimpleNamespace],
+    queries: list[dict[str, Any]],
+    pools: list[int],
+    cross_pools: list[int],
+    with_cross: bool,
+    cross_queries: int = 10,
 ) -> dict[str, Any]:
     """Rank the corpus with the real embedder, then see what each pool size / reranker does to the gold chunk."""
     import numpy
@@ -296,8 +301,13 @@ def bench_quality(
         out[f"lexical_pool_{pool}"] = metrics(ranks)
     if cross_scorer is not None:
         for pool in cross_pools:
+            # Only the first `cross_queries` queries: the cross-encoder costs seconds per query on a
+            # small CPU, so scoring every query at every pool size takes hours and measures nothing the
+            # first few do not. Its metrics are therefore over a SMALLER set than the other rows, and
+            # the row says so (`queries`).
             ranks, seconds = [], []
-            for q, row in zip(queries, similarity):
+            subset = list(zip(queries, similarity))[:cross_queries]
+            for q, row in subset:
                 top = [int(i) for i in numpy.argsort(-row)[:pool]]
                 lexical = [c for c, _ in rerank_chunks_with_scores(q["query"], [chunks[i] for i in top], limit=pool)]
                 t = time.perf_counter()
@@ -305,7 +315,10 @@ def bench_quality(
                 seconds.append(time.perf_counter() - t)
                 order = sorted(range(len(lexical)), key=lambda k: scores[k], reverse=True)
                 ranks.append([lexical[k].id for k in order])
-            out[f"cross_encoder_pool_{pool}"] = {**metrics(ranks), "latency": stats_ms(seconds)}
+            gold = [q for q, _ in subset]
+            hit = lambda k: round(sum(q["gold_chunk"] in r[:k] for q, r in zip(gold, ranks)) / max(1, len(gold)), 3)
+            mrr = round(sum((1 / (r.index(q["gold_chunk"]) + 1)) if q["gold_chunk"] in r else 0 for q, r in zip(gold, ranks)) / max(1, len(gold)), 3)
+            out[f"cross_encoder_pool_{pool}"] = {"queries": len(gold), "R@5": hit(5), "R@10": hit(10), "MRR": mrr, "latency": stats_ms(seconds)}
     return out
 
 
@@ -405,7 +418,8 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3, help="passes over the query set for the embedding latency")
     parser.add_argument("--lexical-pools", default="48,80,120,240")
     parser.add_argument("--cross-encoder", action="store_true", help="also measure the optional cross-encoder (needs the ml group)")
-    parser.add_argument("--cross-pools", default="10,20,30")
+    parser.add_argument("--cross-pools", default="10,30")
+    parser.add_argument("--cross-queries", type=int, default=10, help="queries scored by the cross-encoder in the quality section")
     parser.add_argument("--db-dsn", default=None)
     parser.add_argument("--db-sizes", default="5000,30000")
     parser.add_argument("--ef-values", default="40,200,1000")
@@ -441,7 +455,7 @@ def main() -> int:
         result["cross_encoder"] = bench_cross_encoder(chunks, query_texts, cross_pools, args.threads)
         print(f"cross-encoder: {result['cross_encoder']}", flush=True)
     if "quality" in sections:
-        result["quality_proxy"] = bench_quality(chunks, queries, lexical_pools, cross_pools, args.cross_encoder)
+        result["quality_proxy"] = bench_quality(chunks, queries, lexical_pools, cross_pools, args.cross_encoder, args.cross_queries)
         print(f"quality proxy: {json.dumps(result['quality_proxy'])}", flush=True)
     if "pipeline" in sections:
         result["pipeline_no_db"] = bench_pipeline(chunks, query_texts, max(lexical_pools), args.cross_encoder, max(cross_pools))
