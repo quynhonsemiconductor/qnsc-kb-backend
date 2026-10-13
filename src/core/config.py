@@ -103,6 +103,16 @@ class Settings(BaseSettings):
     # Custom endpoints can forward the workspace API key to an arbitrary
     # host. Keep that capability opt-in, even for global administrators.
     LLM_ALLOW_CUSTOM_BASE_URL: bool = False
+    # Permit http://localhost-style LLM endpoints so a developer can point the workspace
+    # at Ollama, vLLM or LM Studio on their own machine.
+    #
+    # This switches OFF the SSRF defence that `llm_endpoint_security` exists to provide:
+    # a configured endpoint is fetched server-side with the workspace API key attached,
+    # so a loopback or private address becomes a way to reach anything the deployment can
+    # reach and to send a credential there. It is therefore honoured ONLY in a
+    # development environment (see `allows_local_llm_endpoints`) — setting it anywhere
+    # else has no effect at all, rather than quietly widening production.
+    LLM_ALLOW_LOCAL_ENDPOINTS: bool = False
     GEMINI_API_KEY: str | None = None
     # A floating `-latest` alias, not a pinned version. Google retires pinned models for
     # new API keys — the deployed default was gemini-2.5-flash-lite, and every call
@@ -726,6 +736,32 @@ class Settings(BaseSettings):
         failed with "not authorized".
         """
         return (self.MICROSOFT_CONNECTOR_AUTH_MODE or "").strip().lower()
+
+    @property
+    def is_development_environment(self) -> bool:
+        """Whether this process is running as local development.
+
+        Stripped as well as lower-cased, for the reason documented on
+        `microsoft_connector_auth_mode` above: an ENVIRONMENT value carrying stray
+        whitespace is what a Terraform join or a copied YAML line produces, and a
+        comparison that misses it answers the opposite of the truth.
+        """
+        return (self.ENVIRONMENT or "").strip().lower() in {
+            "development",
+            "dev",
+            "local",
+        }
+
+    @property
+    def allows_local_llm_endpoints(self) -> bool:
+        """Whether a loopback/private LLM endpoint may be configured and called.
+
+        Two conditions, both required: the operator opted in AND this is a development
+        environment. The flag alone is deliberately not enough — it travels in env files
+        and task definitions, and a copied value must not be able to disable the SSRF
+        defence on a deployed environment.
+        """
+        return bool(self.LLM_ALLOW_LOCAL_ENDPOINTS and self.is_development_environment)
 
     def validate_production(self) -> None:
         environment = self.ENVIRONMENT.lower()

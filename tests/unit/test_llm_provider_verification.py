@@ -199,6 +199,101 @@ def test_probe_accepts_openai_response_and_never_follows_redirects(monkeypatch):
     assert observed["authorization"] == "Bearer secret-key"
 
 
+def _probe_against_body(monkeypatch, body: bytes) -> int:
+    """Run `probe_provider` against one exact response body."""
+
+    async def validate(_url):
+        return ResolvedLLMEndpoint("models.example.com", "93.184.216.34")
+
+    class Response:
+        is_redirect = False
+        is_error = False
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield body
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", validate)
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", Client)
+    provider = Provider(
+        "custom",
+        "model-a",
+        "https://models.example.com/v1/chat/completions",
+        "secret-key",
+        custom_endpoint=True,
+    )
+    return asyncio.run(llm_client.probe_provider(provider))
+
+
+def test_probe_accepts_an_event_stream_from_a_gateway_that_always_streams(monkeypatch):
+    """Some OpenAI-compatible gateways answer `text/event-stream` for EVERY request.
+
+    The body is then `data:` chunks rather than one JSON object, so the probe's
+    `json.loads` saw nothing parseable and reported "did not return a valid Chat
+    Completions response". Because saving a provider requires a successful test, an
+    endpoint the workspace can genuinely use could not be configured at all.
+    """
+    body = (
+        b'data: {"choices":[{"delta":{"role":"assistant","content":"O"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"K"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    assert _probe_against_body(monkeypatch, body) >= 1
+
+
+def test_probe_accepts_a_single_event_carrying_a_whole_message(monkeypatch):
+    """A gateway that streams one non-streaming response as a single `message` event."""
+    body = b'data: {"choices":[{"message":{"content":"OK"}}]}\n\ndata: [DONE]\n\n'
+    assert _probe_against_body(monkeypatch, body) >= 1
+
+
+def test_probe_recovers_an_answer_left_in_a_streamed_reasoning_channel(monkeypatch):
+    """Same recovery the streaming answer path performs, via the shared sentinel."""
+    from src.domain.llm_client import GROUNDED_SENTINEL
+
+    body = (
+        b'data: {"choices":[{"delta":{"reasoning_content":"thinking '
+        + GROUNDED_SENTINEL.encode()
+        + b' OK"}}]}\n\ndata: [DONE]\n\n'
+    )
+    assert _probe_against_body(monkeypatch, body) >= 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json and not an event stream",
+        b"data: {not json}\n\n",
+        b'data: {"choices":[]}\n\ndata: [DONE]\n\n',
+        b'data: {"choices":[{"delta":{"content":""}}]}\n\ndata: [DONE]\n\n',
+        b"",
+    ],
+)
+def test_probe_still_rejects_a_response_with_no_assistant_text(monkeypatch, body):
+    """Accepting SSE must not turn the probe into something that accepts anything."""
+    with pytest.raises(RuntimeError):
+        _probe_against_body(monkeypatch, body)
+
+
 def test_probe_rejects_redirect_without_reading_or_following_it(monkeypatch):
     class Response:
         is_redirect = True

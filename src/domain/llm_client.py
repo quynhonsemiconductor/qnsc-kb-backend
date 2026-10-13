@@ -107,10 +107,16 @@ async def _guarded_request_target(
     if (parsed.hostname or "").lower().rstrip(".") != resolved.hostname:
         raise RuntimeError("The provider request host changed after endpoint validation")
     address = f"[{resolved.address}]" if ":" in resolved.address else resolved.address
-    pinned_url = urlunsplit((parsed.scheme, address, parsed.path, parsed.query, ""))
+    # The port has to survive the rewrite. Dropping it was invisible while every custom
+    # endpoint was public HTTPS on the default 443, but a locally hosted model listens
+    # elsewhere (11434 for Ollama, 8000 for vLLM) and the pinned URL would then reach
+    # port 80 at the right address.
+    authority = f"{address}:{parsed.port}" if parsed.port else address
+    pinned_url = urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, ""))
+    host_header = parsed.netloc.split("@", 1)[-1] or resolved.hostname
     return (
         pinned_url,
-        {"Host": resolved.hostname},
+        {"Host": host_header},
         {"sni_hostname": resolved.hostname},
     )
 
@@ -180,7 +186,17 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
             else _extract_openai_text(data)
         )
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
-        raise RuntimeError("The provider did not return a valid Chat Completions response") from exc
+        # Not JSON: some OpenAI-compatible gateways answer `text/event-stream` for every
+        # request, including one that never asked to stream. The streaming path already
+        # reads that shape, so a connection test must accept it too — otherwise an
+        # endpoint the workspace can genuinely use cannot be saved, because saving
+        # requires a successful test.
+        text, reasoning = _extract_sse_text(body.decode("utf-8", "replace"))
+        answer = text or _answer_from_reasoning(reasoning)
+        if not answer.strip():
+            raise RuntimeError(
+                "The provider did not return a valid Chat Completions response"
+            ) from exc
     if not answer.strip():
         raise RuntimeError("The provider response did not contain assistant text")
     return latency_ms
@@ -287,6 +303,36 @@ def _extract_gemini_text(data: dict[str, Any]) -> str:
             if isinstance(part, dict) and not part.get("thought") and part.get("text"):
                 parts.append(str(part["text"]))
     return "".join(parts)
+
+
+def _extract_sse_text(body: str) -> tuple[str, str]:
+    """Collect `(content, reasoning)` from a Chat Completions SSE stream.
+
+    Some OpenAI-compatible gateways answer `text/event-stream` for EVERY request, even
+    one that never asked to stream. The body is then a sequence of `data:` chunks rather
+    than a single JSON object, so a plain `json.loads` sees nothing parseable at all.
+    """
+    content = ""
+    reasoning = ""
+    for line in body.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        # `delta` while streaming, `message` for a gateway that streams one whole
+        # non-streaming response as a single event.
+        part = choices[0].get("delta") or choices[0].get("message") or {}
+        content += str(part.get("content") or "")
+        reasoning += str(part.get("reasoning_content") or part.get("reasoning") or "")
+    return content, reasoning
 
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
@@ -576,7 +622,24 @@ async def complete(
         # screen responsive; content_restructure will preserve the source with
         # a local lossless fallback when the provider is slow or unavailable.
         response = await with_exponential_retry(request_completion, attempts=1)
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            # Not JSON. An OpenAI-compatible gateway may answer `text/event-stream` for
+            # EVERY request, including this one, which never asked to stream. Reading it
+            # as JSON failed with "Expecting value: line 1 column 1" and surfaced to the
+            # user as "AI generation failed", even though the provider had answered
+            # correctly. `probe_provider` accepts the same shape, so a provider that
+            # passed its connection test must not then fail every real call.
+            text, reasoning = _extract_sse_text(response.text)
+            answer = text or _answer_from_reasoning(reasoning)
+            if not answer.strip():
+                raise RuntimeError(
+                    f"{provider.name} returned no readable assistant text"
+                )
+            if on_token:
+                await on_token(answer)
+            return answer, 0, provider.model, provider.name
         answer = (
             _extract_gemini_text(data)
             if provider.native_gemini
