@@ -1434,6 +1434,129 @@ def _index_job_response(job: IndexReprocessJob) -> dict[str, Any]:
     }
 
 
+@router.get("/worker-diagnostics")
+async def get_worker_diagnostics(
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+) -> dict[str, Any]:
+    """Report whether anything is CONSUMING the task queues.
+
+    `/health/ready` cannot answer this: the API and the Celery worker are separate
+    services, so a ready API says nothing about whether a worker exists to drain a
+    queue. On develop the worker runs `min_count = 0`, which makes "no worker running" a
+    reachable steady state in which an upload sits at "preparing" forever and every
+    retry only enqueues again — with no signal anywhere that work had stopped moving.
+
+    Every call is bounded. The Celery control API is given a short timeout and the
+    broker its own, because this endpoint is reached while something is already wrong
+    and must not hang on the dependency it is reporting on.
+
+    Two control calls, not three. Each one waits out its FULL timeout -- a broadcast has
+    no way to know whether more replies are coming -- so a redundant call is a redundant
+    multiple of it. `active_queues()` already names every worker that answered, which is
+    the liveness signal `ping()` would have supplied, so pinging first only bought a
+    third of the latency back as nothing.
+    """
+
+    from src.domain.worker_diagnostics import (
+        WorkerSnapshot,
+        attach_consumers,
+        summarise,
+    )
+    from src.workers.celery_app import celery_app
+
+    control_timeout = 3.0
+    queue_names = sorted(
+        {
+            str(route["queue"])
+            for route in (celery_app.conf.task_routes or {}).values()
+            if isinstance(route, dict) and route.get("queue")
+        }
+        # `celery` is the default queue: nothing routes to it explicitly, so it is absent
+        # from task_routes, yet every unrouted task lands there. Omitting it would hide
+        # the backlog that matters most.
+        | {str(celery_app.conf.task_default_queue or "celery")}
+    )
+
+    def _subscriptions() -> tuple[dict[str, Any], str | None]:
+        """Which worker consumes which queues. Answering at all IS the liveness signal."""
+        inspector = celery_app.control.inspect(timeout=control_timeout)
+        try:
+            return inspector.active_queues() or {}, None
+        except Exception as exc:  # pragma: no cover - exercised via the unit tests
+            return {}, f"{type(exc).__name__}: {exc}"
+
+    def _running() -> dict[str, Any]:
+        """What each worker is executing. Best-effort: absence degrades to 'unknown'."""
+        inspector = celery_app.control.inspect(timeout=control_timeout)
+        try:
+            return inspector.active() or {}
+        except Exception:
+            return {}
+
+    def _snapshots(
+        active_queues: dict[str, Any], active: dict[str, Any]
+    ) -> list[WorkerSnapshot]:
+        return [
+            WorkerSnapshot(
+                name=str(name),
+                queues=tuple(
+                    str(queue.get("name"))
+                    for queue in (active_queues.get(name) or [])
+                    if isinstance(queue, dict) and queue.get("name")
+                ),
+                # Names only. A task's arguments carry draft ids, user ids and extracted
+                # document text, none of which this question needs.
+                active_task_names=tuple(
+                    str(task.get("name") or "unknown")
+                    for task in (active.get(name) or [])
+                    if isinstance(task, dict)
+                ),
+            )
+            for name in sorted(active_queues)
+        ]
+
+    async def _depths() -> tuple[dict[str, int | None], str | None]:
+        from redis.asyncio import Redis
+
+        redis = Redis.from_url(
+            settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2
+        )
+        try:
+            # Redis lists one key per queue, so LLEN is the backlog. Asked directly
+            # rather than inferred from Celery, which reports what workers accepted
+            # rather than what is still waiting.
+            return {
+                name: int(await redis.llen(name)) for name in queue_names
+            }, None
+        except Exception as exc:
+            return {name: None for name in queue_names}, f"{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                await redis.aclose()
+            except Exception:
+                pass
+
+    # CONCURRENTLY, and off the event loop: kombu's control calls are synchronous, so
+    # each would otherwise block every other request for its whole timeout. A broadcast
+    # cannot know whether more replies are still coming, so it always waits the full
+    # timeout -- run in sequence the two of them cost 2x that for no reason, since
+    # neither depends on the other's answer.
+    subscriptions, running, (depths, broker_error) = await asyncio.gather(
+        asyncio.to_thread(_subscriptions),
+        asyncio.to_thread(_running),
+        _depths(),
+    )
+    active_queues, control_error = subscriptions
+    workers = _snapshots(active_queues, running)
+
+    return summarise(
+        job_mode=settings.JOB_MODE,
+        workers=workers,
+        queues=attach_consumers(queue_names, depths, workers),
+        broker_error=broker_error or control_error,
+    )
+
+
 @router.post("/index/reprocess", status_code=status.HTTP_202_ACCEPTED)
 async def start_index_reprocess(
     req: IndexReprocessRequest,
