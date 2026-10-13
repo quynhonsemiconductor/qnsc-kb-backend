@@ -107,10 +107,16 @@ async def _guarded_request_target(
     if (parsed.hostname or "").lower().rstrip(".") != resolved.hostname:
         raise RuntimeError("The provider request host changed after endpoint validation")
     address = f"[{resolved.address}]" if ":" in resolved.address else resolved.address
-    pinned_url = urlunsplit((parsed.scheme, address, parsed.path, parsed.query, ""))
+    # The port has to survive the rewrite. Dropping it was invisible while every custom
+    # endpoint was public HTTPS on the default 443, but a locally hosted model listens
+    # elsewhere (11434 for Ollama, 8000 for vLLM) and the pinned URL would then reach
+    # port 80 at the right address.
+    authority = f"{address}:{parsed.port}" if parsed.port else address
+    pinned_url = urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, ""))
+    host_header = parsed.netloc.split("@", 1)[-1] or resolved.hostname
     return (
         pinned_url,
-        {"Host": resolved.hostname},
+        {"Host": host_header},
         {"sni_hostname": resolved.hostname},
     )
 
