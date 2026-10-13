@@ -573,6 +573,7 @@ async def run_restructure_pending_draft(
                 draft.title,
                 source_text,
                 enabled=enabled,
+                background=True,
                 department_descriptions=[
                     (department.name, department.description or "")
                     for department in departments
@@ -779,6 +780,8 @@ async def _defer_restructure(
         await db.commit()
         logger.warning("AI formatting gave up after repeated rate limiting", draft_id=draft_id_str)
         return
+    # The wait that will actually happen, not the raw ask: a provider that says "in 2 hours" is retried in 10 minutes.
+    retry_after = max(1, min(int(retry_after), _MAX_DEFERRAL_COUNTDOWN_SECONDS))
     draft.restructure_status = "deferred"
     draft.restructure_error = (
         f"AI formatting deferred: the AI provider is rate limiting requests. Trying again automatically in "

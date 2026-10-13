@@ -272,6 +272,8 @@ async def decide(draft: Any, rules: Sequence[Any], connector_id: Any | None = No
             # before either appeared.
             thinking=False,
             max_tokens=200,
+            # A call nobody is waiting on a screen for: capped, and a short rate limit is waited out (llm_client.complete).
+            background=True,
         )
     except Exception:
         logger.warning("Approval agent could not reach the model", exc_info=True)

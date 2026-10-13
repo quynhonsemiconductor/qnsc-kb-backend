@@ -177,7 +177,7 @@ def test_restructure_reports_a_rate_limit_as_deferred_with_the_wait(monkeypatch)
 
 
 def test_any_section_deferred_defers_the_whole_document(monkeypatch):
-    async def sections(title, secs, model, deps):
+    async def sections(title, secs, model, deps, background=True):
         return [
             content_restructure._result("a", "a", "llm", "m"),
             content_restructure._result("b", "b", "deferred", "m", "AI formatting deferred"),
@@ -191,9 +191,12 @@ def test_any_section_deferred_defers_the_whole_document(monkeypatch):
     monkeypatch.setattr(settings, "RESTRUCTURE_MAX_CHARS", 10_000)
     monkeypatch.setattr(content_restructure, "_split_oversized_source", lambda text, n: ["a", "b"])
 
-    result = asyncio.run(content_restructure.restructure_document("T", "y" * 500, enabled=True))
-
+    result = asyncio.run(content_restructure.restructure_document("T", "y" * 500, enabled=True, background=True))
     assert result.status == "deferred" and result.retry_after
+
+    # the same sectioned document for a request handler is the lossless fallback, never "deferred"
+    handler = asyncio.run(content_restructure.restructure_document("T", "y" * 500, enabled=True, background=False))
+    assert handler.status == "fallback_formatting"
 
 
 # ── the task re-queues instead of failing ────────────────────────────────────────────────────
@@ -311,7 +314,7 @@ def test_an_interactive_429_is_raised_at_once_not_slept_on(monkeypatch, clean):
 def test_the_two_background_callers_opt_in():
     import inspect
 
-    assert "background=True" in inspect.getsource(content_restructure._restructure_single_document)
+    assert "background=background" in inspect.getsource(content_restructure._restructure_single_document)
     assert "background=True" in inspect.getsource(auto_tagging.suggest_tags_for_document)
     # and chat does not
     from src.domain import ai_service
@@ -375,3 +378,90 @@ def test_an_inline_retry_task_is_referenced_until_it_finishes(monkeypatch):
 
     held, after = asyncio.run(scenario())
     assert held == 1 and after == 0
+
+
+# ── synchronous callers (manual create / edit / admin re-run) ────────────────────────────────
+def _rate_limited_everywhere(monkeypatch, sleeps):
+    """A provider that answers 429 with a Retry-After to every request, through the REAL complete()."""
+    async def provider(messages, **_kw):
+        raise ProviderRateLimitError("groq rate limit reached", retry_after=20)
+
+    monkeypatch.setattr(llm_client, "_complete_once", provider)
+    monkeypatch.setattr(content_restructure, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq", model="m"))
+    monkeypatch.setattr(content_restructure, "is_already_structured", lambda _t: False)
+    monkeypatch.setattr(settings, "RESTRUCTURE_ENABLED", True)
+
+
+def test_a_request_handler_never_gets_deferred_and_never_sleeps_on_the_rate_limit(monkeypatch, clean):
+    """articles.py create/edit and the admin re-run persist whatever restructure_document returns, and nothing
+    re-queues for them: a 'deferred' there would block the draft until it shows as stalled."""
+    _rate_limited_everywhere(monkeypatch, clean)
+    source = "Quy trình mua sắm. " * 40
+
+    result = asyncio.run(content_restructure.restructure_document("T", source, enabled=True, background=False))
+
+    assert result.status == "fallback_formatting", result.status
+    assert result.body_md, "a lossless reading view must be returned"
+    assert "rate limited" in result.error and "Retry from Pending Drafts" in result.error
+    assert not any(s >= 15 for s in clean), f"a request handler must not sleep on Retry-After: {clean}"
+
+
+def test_the_default_is_the_request_handler_behaviour(monkeypatch, clean):
+    _rate_limited_everywhere(monkeypatch, clean)
+    result = asyncio.run(content_restructure.restructure_document("T", "x " * 200, enabled=True))
+    assert result.status == "fallback_formatting"
+
+
+def test_the_worker_task_still_gets_deferred_and_waits_inline(monkeypatch, clean):
+    _rate_limited_everywhere(monkeypatch, clean)
+    result = asyncio.run(content_restructure.restructure_document("T", "x " * 200, enabled=True, background=True))
+    assert result.status == "deferred" and result.retry_after == 20
+    assert any(s >= 20 for s in clean), "the worker waits out a short Retry-After before giving up"
+
+
+def test_every_synchronous_caller_says_so():
+    import inspect
+
+    from src.api.routers import articles
+    from src.domain import governance
+
+    assert inspect.getsource(articles).count("background=False") >= 2
+    assert "background=False" in inspect.getsource(governance)
+    from src.workers import tasks
+
+    assert "background=True" in inspect.getsource(tasks.run_restructure_pending_draft)
+
+
+@pytest.mark.parametrize("module,needle", [
+    ("src/domain/department_routing.py", "await complete("),
+    ("src/rag/contextual_header.py", "await complete("),
+    ("src/domain/approval_agent.py", "await complete("),
+    ("src/domain/structured_metadata.py", "await complete("),
+    ("src/domain/entity_extraction.py", "await complete("),
+])
+def test_other_background_callers_opt_in(module, needle):
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parents[2] / module).read_text(encoding="utf-8")
+    call = source[source.index(needle):]
+    call = call[: call.index("\n        )\n") if "\n        )\n" in call else len(call)]
+    assert "background=True" in call, f"{module} is not waited on by a user and must pass background=True"
+
+
+def test_a_connector_requeue_starts_with_a_full_deferral_budget():
+    from src.domain import cloud_sync
+
+    d = draft(status="fallback_formatting", metadata={"restructure_deferrals": 4})
+    d.created_by = uuid.uuid4()
+    queue: list = []
+    cloud_sync._queue_draft_formatting(d, SimpleNamespace(company_domain="acme.test"), queue)
+    assert d.restructure_status == "queued" and "restructure_deferrals" not in (d.content_metadata or {})
+
+
+def test_the_deferral_message_states_the_capped_wait(scheduled):
+    from src.workers import tasks
+
+    d = draft()
+    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 7200, "SOURCE"))
+    assert "about 600 s" in d.restructure_error and "7200" not in d.restructure_error
+    assert scheduled[0][3] == 600

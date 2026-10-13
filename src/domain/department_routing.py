@@ -433,6 +433,8 @@ async def _llm_section_departments(
             # Hidden reasoning would spend the whole budget before the JSON appears.
             thinking=False,
             max_tokens=64 + 24 * len(sections),
+            # A call nobody is waiting on a screen for: capped, and a short rate limit is waited out (llm_client.complete).
+            background=True,
         )
     except Exception:
         _logger.warning(

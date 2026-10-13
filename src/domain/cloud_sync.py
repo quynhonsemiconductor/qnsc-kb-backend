@@ -59,6 +59,7 @@ from src.repositories.governance import GovernanceRepository
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
 from src.domain.governance import GovernanceService
+from src.domain.content_restructure import clear_restructure_deferrals
 from src.domain.department_routing import route_document_candidates_llm
 
 logger = structlog.get_logger()
@@ -174,6 +175,8 @@ def _queue_draft_formatting(
         return
     draft.restructure_status = "queued"
     draft.restructure_error = None
+    # A connector re-queue is a fresh generation of formatting: it starts with a full deferral budget.
+    clear_restructure_deferrals(draft)
     format_queue.append(
         (str(draft.id), connector.company_domain, str(draft.created_by))
     )

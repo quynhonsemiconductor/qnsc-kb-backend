@@ -1536,7 +1536,7 @@ class GovernanceService:
             for page in (draft.page_texts or [])
             if page.get("text")
         )
-        result = await restructure_document(draft.title, source_text, enabled=enabled)
+        result = await restructure_document(draft.title, source_text, enabled=enabled, background=False)
         draft.restructured_body_md = result.body_md
         draft.restructure_candidate_md = result.candidate_body_md
         draft.restructure_decision = (

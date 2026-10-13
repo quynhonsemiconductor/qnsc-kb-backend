@@ -1760,7 +1760,7 @@ async def create_article(
         )
     )
     restructure_result = await restructure_document(
-        article_in.title, article_in.body_md, enabled=restructuring_enabled
+        article_in.title, article_in.body_md, enabled=restructuring_enabled, background=False
     )
     draft_body = restructure_result.body_md or article_in.body_md
     matches = await find_similar_documents(db, current_user, draft_body)
@@ -2119,7 +2119,7 @@ async def update_article(
         )
     )
     restructure_result = await restructure_document(
-        title, body_md, enabled=restructuring_enabled
+        title, body_md, enabled=restructuring_enabled, background=False
     )
     draft_body = restructure_result.body_md or body_md
     matches = await find_similar_documents(db, current_user, draft_body)

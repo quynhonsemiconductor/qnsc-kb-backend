@@ -234,7 +234,7 @@ def test_any_authorized_reviewer_can_restructure(monkeypatch):
     repo = FakeGovernanceRepository(draft)
     service = GovernanceService(repo, FakeArticleRepository())
 
-    async def fake_restructure(title, source_text, enabled=True):
+    async def fake_restructure(title, source_text, enabled=True, background=False):
         from src.domain.content_restructure import RestructureResult
 
         return RestructureResult("# Reading view\n\nOriginal extracted text", "llm", "test-model")

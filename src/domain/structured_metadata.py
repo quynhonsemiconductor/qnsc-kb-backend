@@ -79,6 +79,8 @@ async def extract_structured_metadata(title: str, body_md: str) -> dict[str, str
             ],
             model_override=settings.RESTRUCTURE_MODEL or None,
             max_tokens=200,
+            # A call nobody is waiting on a screen for: capped, and a short rate limit is waited out (llm_client.complete).
+            background=True,
         )
     except Exception as exc:
         raise StructuredMetadataUnavailable(f"extraction call failed: {exc}") from exc
