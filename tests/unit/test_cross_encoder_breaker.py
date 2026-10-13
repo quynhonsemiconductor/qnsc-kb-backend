@@ -280,6 +280,7 @@ def test_through_search_a_probe_that_raises_a_non_timeout_error_does_not_wedge_i
     chunks = [_chunk(_article(), 0.9, "a"), _chunk(_article(), 0.5, "b")]
     try:
         _search(chunks)  # this search is the probe, and it ends with a non-timeout error
+        assert not cross_encoder.breaker._probing, "the probe was accounted for (finish), not left to the expiry guard"
         assert cross_encoder.breaker.begin() is None, "re-opened, not half-open forever"
         now["t"] += 101
         calls = []
@@ -309,6 +310,7 @@ def test_a_cancelled_probe_does_not_wedge_it(enabled, monkeypatch):
             _search(chunks)
         except BaseException:
             pass  # a cancelled request propagates; what matters is the breaker's state
+        assert not cross_encoder.breaker._probing, "a cancelled probe was accounted for"
         assert cross_encoder.breaker.begin() is None
         now["t"] += 101
         assert cross_encoder.breaker.begin() is not None
