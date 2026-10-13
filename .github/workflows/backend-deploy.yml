@@ -283,13 +283,13 @@ jobs:
       # tell a working deploy from one whose database or cache is gone. /health/deps checks
       # both.
       #
-      # And NOT /health/ready, which also waits for the embedding model. The shared deploy
-      # workflow polls for a fixed 120 s, a cold e5-large load on Fargate has not been
-      # measured to fit in that, and a deploy must not fail because a model is warming up.
-      # Measure it from the first develop deploy: the api logs "Embedding model warm-up
-      # finished" with `seconds`. If that is comfortably under the poll, this can go back
-      # to /health/ready.
-      health_path: /health/deps
+      # /health/ready ALSO waits for the embedding model (503 while it loads), so this pipeline
+      # depends on the cold load fitting inside the shared deploy workflow's fixed 120 s poll.
+      # MEASURED on develop Fargate (api log "Embedding model warm-up finished"): 2.89 s, 3.93 s and
+      # 3.42 s over three deploys. That is far inside the poll, so the deploy waits for the model
+      # too, which is what readiness is for. If a load ever approaches ~60 s, go back to /health/deps
+      # (database and Redis only) rather than raising a timeout you do not own.
+      health_path: /health/ready
     # Least privilege: pass only what the reusable declares (no `secrets: inherit`).
     secrets:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}

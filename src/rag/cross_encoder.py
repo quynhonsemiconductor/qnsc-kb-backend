@@ -60,13 +60,30 @@ _model = Lazy(_load, "cross-encoder")
 _scoring = threading.Lock()
 
 
+class Attempt:
+    """One caller's turn at the reranker. `probe` marks the single call let through after the cooldown."""
+
+    __slots__ = ("probe", "recorded")
+
+    def __init__(self, probe: bool) -> None:
+        self.probe = probe
+        self.recorded = False
+
+
 class CircuitBreaker:
     """Stop trying a component that keeps timing out, and try it again later.
 
     closed -> (threshold consecutive timeouts) -> open -> (cooldown) -> half-open: ONE caller is let
     through; its success closes the breaker, its timeout re-opens it for another cooldown.
-    Only timeouts count. A refusal because a previous call is still running, or an exception from
-    the model, say nothing about whether it is too slow.
+    Only timeouts count towards opening. A refusal because a previous call is still running, or an
+    exception from the model, say nothing about whether it is too slow.
+
+    THE PROBE MUST ALWAYS BE ACCOUNTED FOR. If the one probe ends in any way other than success or
+    timeout (CrossEncoderUnavailable, the "still scoring" refusal, cancellation of the request) and
+    nothing clears the half-open state, every later caller is refused forever and the reranker is
+    wedged off until the process restarts. So usage is `begin()` ... `finish()` in a `finally`, and
+    an un-recorded probe re-opens the circuit for another cooldown. As a second guard a probe that
+    has been out longer than the cooldown is considered lost and another is allowed.
     """
 
     def __init__(self, clock=time.monotonic) -> None:
@@ -75,21 +92,34 @@ class CircuitBreaker:
         self._timeouts = 0
         self._opened_at: float | None = None
         self._probing = False
+        self._probe_started = 0.0
 
-    def allow(self) -> bool:
+    def begin(self) -> Attempt | None:
+        """None means skip the reranker. Otherwise pass the returned attempt to finish()."""
         with self._lock:
             if self._opened_at is None:
-                return True
+                return Attempt(probe=False)
+            now = self._clock()
+            cooldown = settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS
             if self._probing:
-                return False
-            if self._clock() - self._opened_at >= settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS:
-                self._probing = True
-                logger.info("Cross-encoder circuit half-open; letting one search through")
-                return True
-            return False
+                if now - self._probe_started < cooldown:
+                    return None
+                logger.warning("Cross-encoder probe was never accounted for; allowing another")
+            elif now - self._opened_at < cooldown:
+                return None
+            self._probing = True
+            self._probe_started = now
+            logger.info("Cross-encoder circuit half-open; letting one search through")
+            return Attempt(probe=True)
 
-    def record_timeout(self) -> None:
+    def allow(self) -> bool:
+        """begin() without the bookkeeping, for callers that only ask. Prefer begin()/finish()."""
+        return self.begin() is not None
+
+    def record_timeout(self, attempt: Attempt | None = None) -> None:
         with self._lock:
+            if attempt is not None:
+                attempt.recorded = True
             self._timeouts += 1
             self._probing = False
             if self._opened_at is not None or self._timeouts >= settings.CROSS_ENCODER_BREAKER_THRESHOLD:
@@ -102,13 +132,29 @@ class CircuitBreaker:
                     cooldown_seconds=settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS,
                 )
 
-    def record_success(self) -> None:
+    def record_success(self, attempt: Attempt | None = None) -> None:
         with self._lock:
+            if attempt is not None:
+                attempt.recorded = True
             if self._opened_at is not None:
                 logger.info("Cross-encoder recovered; circuit closed")
             self._timeouts = 0
             self._opened_at = None
             self._probing = False
+
+    def finish(self, attempt: Attempt | None) -> None:
+        """Always call this, in a `finally`. A no-op unless this attempt was the probe and recorded nothing."""
+        if attempt is None or not attempt.probe or attempt.recorded:
+            return
+        with self._lock:
+            if not self._probing:
+                return
+            self._probing = False
+            self._opened_at = self._clock()
+            logger.warning(
+                "Cross-encoder probe ended without a result; circuit re-opened for another cooldown",
+                cooldown_seconds=settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS,
+            )
 
     @property
     def is_open(self) -> bool:
@@ -133,10 +179,14 @@ def check_budget() -> float:
     reliable, silence is not a promise.
     """
     model = _model.get()
-    model.predict(_BUDGET_SAMPLE)  # first call pays one-off allocation; not representative
-    started = time.perf_counter()
-    model.predict(_BUDGET_SAMPLE)
-    per_pair = (time.perf_counter() - started) / len(_BUDGET_SAMPLE)
+    # Under the same lock as score(): torch inference is not meant to run concurrently in one process, and
+    # a search that arrives while this runs would otherwise either be timed alongside it (a bogus per-pair
+    # cost) or contend with it. Waiting is fine here, this runs in a startup thread.
+    with _scoring:
+        model.predict(_BUDGET_SAMPLE)  # first call pays one-off allocation; not representative
+        started = time.perf_counter()
+        model.predict(_BUDGET_SAMPLE)
+        per_pair = (time.perf_counter() - started) / len(_BUDGET_SAMPLE)
     pool = settings.CROSS_ENCODER_CANDIDATE_POOL
     expected = per_pair * pool
     if expected > settings.CROSS_ENCODER_TIMEOUT_SECONDS:

@@ -94,13 +94,15 @@ Everything else on the request path that this benchmark can see:
    measured costs the timeout will trip at every pool size tested, so on CPU the feature is
    effectively off; that is the correct outcome until it runs on a GPU. `CROSS_ENCODER_CANDIDATE_POOL`
    is unchanged at 30; if it is ever enabled on a CPU, 8 or fewer (unmeasured) is the starting point.
-3. **The deploy polls `/health/deps`, not `/health/ready`.** `/health/deps` is the old readiness
-   (database and Redis, nothing about the model). The shared `ci` deploy workflow polls for a fixed
-   120 s, and a cold model load on Fargate has not been measured to fit in that, so a slow warm-up must
-   not be able to fail a deploy. It is not liveness: it still fails when the database or Redis is gone.
-   **Measure the cold load on the first develop deploy**: the api logs
-   `Embedding model warm-up finished` with `seconds`. If that is comfortably under 120 s, the deploy can
-   go back to `/health/ready`.
+3. **The deploy polls `/health/ready` again; `/health/deps` stays as the fallback.** `/health/deps` is
+   the old readiness (database and Redis, nothing about the model). It was the deploy's probe for a
+   while because the shared `ci` workflow polls for a fixed 120 s and the cold model load on Fargate had
+   not been measured. **Measured on develop Fargate, three deploys (api log
+   `Embedding model warm-up finished`): 2.89 s, 3.93 s, 3.42 s.** Far inside the poll, so the deploy
+   waits for the model like any orchestrator would. These are develop's numbers (2 vCPU task); prod has not
+   been measured. If a
+   load ever approaches ~60 s, point the deploy back at `/health/deps`. It is not liveness: it still
+   fails when the database or Redis is gone.
 
 4. **Follow-ups to the above.**
    - A load that outlasts `EMBEDDING_WARMUP_TIMEOUT_SECONDS` is reported `timeout` (degraded, no longer

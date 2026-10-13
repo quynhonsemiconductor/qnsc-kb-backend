@@ -204,3 +204,129 @@ def test_budget_check_is_quiet_when_it_fits(monkeypatch):
         cross_encoder.check_budget()
 
     assert not [entry for entry in logs if entry["log_level"] == "warning"]
+
+
+# ── the probe can never wedge the circuit ────────────────────────────────────────────────────
+def _open(breaker, clock):
+    for _ in range(3):
+        breaker.record_timeout()
+    clock.now += 101  # past the cooldown
+
+
+def test_a_probe_that_ends_in_a_non_timeout_error_reopens_and_the_next_cooldown_allows_again():
+    """The wedge: probe ends by CrossEncoderUnavailable / 'still scoring' / cancellation, nothing records it,
+    and every later caller is refused forever."""
+    clock = Clock()
+    breaker = CircuitBreaker(clock)
+    _open(breaker, clock)
+
+    probe = breaker.begin()
+    assert probe is not None and probe.probe
+    breaker.finish(probe)  # ended with neither record_success nor record_timeout
+
+    assert breaker.begin() is None, "re-opened for another full cooldown, not let straight through"
+    clock.now += 101
+    again = breaker.begin()
+    assert again is not None and again.probe, "and the next cooldown allows a probe again"
+
+
+def test_finish_is_a_no_op_after_the_probe_recorded_a_result():
+    clock = Clock()
+    breaker = CircuitBreaker(clock)
+    _open(breaker, clock)
+    probe = breaker.begin()
+    breaker.record_success(probe)
+    breaker.finish(probe)
+    assert breaker.begin() is not None and not breaker.is_open
+
+
+def test_a_closed_circuit_attempt_that_ends_late_cannot_abort_someone_elses_probe():
+    clock = Clock()
+    breaker = CircuitBreaker(clock)
+    early = breaker.begin()  # started while closed
+    assert early is not None and not early.probe
+    _open(breaker, clock)
+    probe = breaker.begin()
+    breaker.finish(early)  # the old, non-probe attempt finally ends
+    assert breaker.begin() is None, "the probe is still out; one caller at a time"
+    breaker.record_success(probe)
+    assert not breaker.is_open
+
+
+def test_a_lost_probe_expires_on_its_own():
+    clock = Clock()
+    breaker = CircuitBreaker(clock)
+    _open(breaker, clock)
+    assert breaker.begin() is not None  # the probe, never finished (a bug elsewhere, a killed task)
+    clock.now += 50
+    assert breaker.begin() is None
+    clock.now += 60
+    assert breaker.begin() is not None, "after a full cooldown a stale probe is considered lost"
+
+
+def test_through_search_a_probe_that_raises_a_non_timeout_error_does_not_wedge_it(enabled, monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr(cross_encoder.breaker, "_clock", lambda: now["t"])
+    for _ in range(3):
+        cross_encoder.breaker.record_timeout()
+    now["t"] += 101
+
+    from src.rag.cross_encoder import CrossEncoderUnavailable
+
+    def refuses(query, passages):
+        raise CrossEncoderUnavailable("cross-encoder is still scoring an earlier search")
+
+    monkeypatch.setattr(module, "cross_encoder_score", refuses)
+    chunks = [_chunk(_article(), 0.9, "a"), _chunk(_article(), 0.5, "b")]
+    try:
+        _search(chunks)  # this search is the probe, and it ends with a non-timeout error
+        assert cross_encoder.breaker.begin() is None, "re-opened, not half-open forever"
+        now["t"] += 101
+        calls = []
+        monkeypatch.setattr(module, "cross_encoder_score", lambda q, p: calls.append(1) or [0.0] * len(p))
+        _search(chunks)
+        assert calls, "the next cooldown lets a probe through again"
+        assert not cross_encoder.breaker.is_open, "and its success closes the circuit"
+    finally:
+        monkeypatch.setattr(cross_encoder.breaker, "_clock", __import__("time").monotonic)
+        cross_encoder.breaker.record_success()
+
+
+def test_a_cancelled_probe_does_not_wedge_it(enabled, monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr(cross_encoder.breaker, "_clock", lambda: now["t"])
+    for _ in range(3):
+        cross_encoder.breaker.record_timeout()
+    now["t"] += 101
+
+    def cancelled(query, passages):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(module, "cross_encoder_score", cancelled)
+    chunks = [_chunk(_article(), 0.9, "a"), _chunk(_article(), 0.5, "b")]
+    try:
+        try:
+            _search(chunks)
+        except BaseException:
+            pass  # a cancelled request propagates; what matters is the breaker's state
+        assert cross_encoder.breaker.begin() is None
+        now["t"] += 101
+        assert cross_encoder.breaker.begin() is not None
+    finally:
+        monkeypatch.setattr(cross_encoder.breaker, "_clock", __import__("time").monotonic)
+        cross_encoder.breaker.record_success()
+
+
+def test_check_budget_waits_for_the_scoring_lock(monkeypatch):
+    monkeypatch.setattr(cross_encoder._model, "get", lambda: _model(0.001))
+    finished = threading.Event()
+
+    cross_encoder._scoring.acquire()
+    worker = threading.Thread(target=lambda: (cross_encoder.check_budget(), finished.set()))
+    worker.start()
+    try:
+        assert not finished.wait(0.3), "check_budget must not run while a search is scoring"
+    finally:
+        cross_encoder._scoring.release()
+    assert finished.wait(5)
+    worker.join(5)
