@@ -263,7 +263,12 @@ module "stack" {
   // that landed late and woke the environment, because nothing else would put it back down
   // until the next working day. Each pass is a no-op when develop is already down
   // (InvalidDBInstanceState, deliberately not retried).
-  idle_schedule = "cron(0 0,3 * * ? *)"
+  // OFF since 2026-10-13, at the owner's request: develop stays up around the clock while
+  // the KB is in active use. To restore idling, put back exactly:
+  //   idle_schedule = "cron(0 0,3 * * ? *)"
+  //   wake_schedule = null // OFF since 2026-10-13; see idle_schedule above
+  // (both together; idling without the wake is the one-way door described below).
+  idle_schedule = null
 
   // 08:00 local, every day. Deploys already wake this environment, but that covers the
   // days it is CHANGED rather than the days it is USED — someone opening it on a
@@ -298,7 +303,7 @@ module "stack" {
   // IF qnsc-kb ever goes properly dormant, build a one-click `Wake develop` workflow first
   // (ci already has the `ensure-environment-awake` action; nothing exposes it as a
   // dispatchable workflow), THEN remove this line. In that order.
-  wake_schedule = "cron(0 8 ? * MON-FRI *)"
+  wake_schedule = null // OFF since 2026-10-13; see idle_schedule above
 
   // MUST NAME THE MODEL THE IMAGE ACTUALLY CARRIES. This is not a preference: with
   // embedding_runtime = "onnx" the loader reads whatever export sits in
