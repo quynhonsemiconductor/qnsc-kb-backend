@@ -231,12 +231,25 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 ]
             page_text_by_number = {number: text for number, text in source_pages}
             for spec in evidence_specs:
-                if spec.get("kind") == "page_visual":
+                label = str(spec.get("label") or "Visual evidence")
+                kind = spec.get("kind")
+                # A figure carries its own caption, which is deliberately narrower than
+                # the page: pouring the whole page's text into one figure would make it
+                # retrievable for everything else that shares that page, which is the
+                # retrieval form of the whole-page cropping this replaced. Only a figure
+                # whose caption came back empty needs the page text, because
+                # label-only search text ("Figure 2 on page 7") matches nothing a person
+                # would ask.
+                needs_page_text = kind == "page_visual" or (
+                    kind == "figure"
+                    and str(spec.get("search_text") or "").strip() == label
+                )
+                if needs_page_text:
                     page_text = page_text_by_number.get(int(spec.get("page_number") or 1), "")
                     if page_text and page_text not in str(spec.get("search_text") or ""):
-                        spec["search_text"] = (
-                            f"{spec.get('label') or 'Visual evidence'}\n{page_text}"
-                        )[: settings.EVIDENCE_MAX_SEARCH_TEXT_CHARS]
+                        spec["search_text"] = (f"{label}\n{page_text}")[
+                            : settings.EVIDENCE_MAX_SEARCH_TEXT_CHARS
+                        ]
             # Tokenised once here, then reused by every _match_source_page call below.
             prepared_pages = _prepare_source_pages(source_pages)
             # Uploaded sources keep their original page text on DocumentSource

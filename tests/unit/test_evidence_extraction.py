@@ -43,7 +43,11 @@ def test_image_is_one_visual_artifact_without_decoding_or_remote_calls():
             "search_text": "Uploaded image",
             "structured_data": None,
             "content_hash": evidence[0]["content_hash"],
-            "extraction_version": "evidence-v1",
+            # Bumped when PDF visual evidence began cropping to each figure rather than
+            # to the whole page. A standalone uploaded image is unaffected -- the file
+            # IS the figure -- but it shares the version, because the version marks the
+            # extractor that produced the row, not the shape of one spec.
+            "extraction_version": "evidence-v2",
         }
     ]
 
