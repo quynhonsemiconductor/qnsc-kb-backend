@@ -1141,10 +1141,15 @@ module "observability" {
 // refuses an apply that asks for the alarm with Insights off, because the alarm would then sit in
 // INSUFFICIENT_DATA forever and look like it worked.
 //
-// 10 consecutive 1-minute datapoints, so the normal scale-up after the 08:00 wake (task start plus image
-// pull) does not page, and a service scaled to zero (desired 0) never breaches. treat_missing_data is
-// notBreaching: an environment scheduled to zero publishes nothing, and an alarm that walks to
-// INSUFFICIENT_DATA every night teaches people to ignore it.
+// 10 consecutive 1-minute datapoints, so a normal start (task launch plus image pull) or a deploy roll does
+// not page, and a service whose desired count is 0 never breaches.
+//
+// MISSING DATA IS FILLED, NOT IGNORED. A worker with no running tasks may publish no RunningTaskCount datapoint
+// at all, and with plain `desired > running` that missing series makes the expression itself missing, which
+// `notBreaching` reads as fine: silent in exactly the outage the alarm exists for. `FILL(running, 0)` turns an
+// absent running count into 0, so desired 1 / running (absent) is 1 > 0 and breaches. If DesiredTaskCount is also
+// absent there is no service to speak of (an environment that is stopped), the expression has no data, and
+// `notBreaching` keeps the alarm quiet instead of walking to INSUFFICIENT_DATA overnight.
 resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
   count = var.worker_task_alarm ? 1 : 0
 
@@ -1158,7 +1163,7 @@ resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
 
   metric_query {
     id          = "short"
-    expression  = "IF(desired > running, 1, 0)"
+    expression  = "IF(FILL(desired, 0) > FILL(running, 0), 1, 0)"
     label       = "worker running below desired"
     return_data = true
   }
