@@ -103,6 +103,16 @@ class Settings(BaseSettings):
     # Custom endpoints can forward the workspace API key to an arbitrary
     # host. Keep that capability opt-in, even for global administrators.
     LLM_ALLOW_CUSTOM_BASE_URL: bool = False
+    # Permit http://localhost-style LLM endpoints so a developer can point the workspace
+    # at Ollama, vLLM or LM Studio on their own machine.
+    #
+    # This switches OFF the SSRF defence that `llm_endpoint_security` exists to provide:
+    # a configured endpoint is fetched server-side with the workspace API key attached,
+    # so a loopback or private address becomes a way to reach anything the deployment can
+    # reach and to send a credential there. It is therefore honoured ONLY in a
+    # development environment (see `allows_local_llm_endpoints`) — setting it anywhere
+    # else has no effect at all, rather than quietly widening production.
+    LLM_ALLOW_LOCAL_ENDPOINTS: bool = False
     GEMINI_API_KEY: str | None = None
     # A floating `-latest` alias, not a pinned version. Google retires pinned models for
     # new API keys — the deployed default was gemini-2.5-flash-lite, and every call
@@ -311,6 +321,31 @@ class Settings(BaseSettings):
     EVIDENCE_MAX_TABLE_COLUMNS: int = 40
     EVIDENCE_MAX_CELL_CHARS: int = 2000
     EVIDENCE_MAX_SEARCH_TEXT_CHARS: int = 20000
+    # Which embedded images are worth citing as figures.
+    #
+    # Visual evidence used to be the WHOLE PAGE whenever a page held any image at all,
+    # so a preview showed the cited figure surrounded by unrelated content. Figures are
+    # now cropped to the image itself, which makes "is this image actually content?" a
+    # question that has to be answered -- a logo is an image too.
+    #
+    # Measured over the PDFs in this workspace (718 image placements): the median
+    # placement is 1.63% of its page and 383 of them are under 2%, because template
+    # artwork repeats on every page. Real figures sit far above that -- the lecture deck
+    # that prompted this has a median of 13.46% with only 3 of 70 images under 2%.
+    # 2% of a 612x792 page is roughly a 98pt square, which is an icon, not a diagram.
+    EVIDENCE_FIGURE_MIN_PAGE_FRACTION: float = 0.02
+    # Both sides must clear this, so a full-width 20pt rule or a thin divider cannot pass
+    # on area alone. 48pt is two thirds of an inch.
+    EVIDENCE_FIGURE_MIN_POINTS: float = 48.0
+    # An image repeated across much of the document is part of the template, whatever its
+    # size: a letterhead, a watermark, a slide-master logo. This is the sharpest of the
+    # three signals -- the deck above carries one image on all 149 pages -- and it is the
+    # only one that identifies a LARGE decoration.
+    EVIDENCE_FIGURE_TEMPLATE_PAGE_FRACTION: float = 0.25
+    # Below this, "on a quarter of the pages" is one or two pages and says nothing.
+    EVIDENCE_FIGURE_TEMPLATE_MIN_PAGES: int = 4
+    # How far above and below a figure to read its caption, as a fraction of page height.
+    EVIDENCE_FIGURE_CAPTION_MARGIN: float = 0.06
     # Only this many rows are embedded in citations/SSE/history. The complete bounded
     # table remains server-side for deterministic analytics and the authorized endpoint.
     EVIDENCE_TABLE_PREVIEW_ROWS: int = 50
@@ -742,6 +777,32 @@ class Settings(BaseSettings):
         failed with "not authorized".
         """
         return (self.MICROSOFT_CONNECTOR_AUTH_MODE or "").strip().lower()
+
+    @property
+    def is_development_environment(self) -> bool:
+        """Whether this process is running as local development.
+
+        Stripped as well as lower-cased, for the reason documented on
+        `microsoft_connector_auth_mode` above: an ENVIRONMENT value carrying stray
+        whitespace is what a Terraform join or a copied YAML line produces, and a
+        comparison that misses it answers the opposite of the truth.
+        """
+        return (self.ENVIRONMENT or "").strip().lower() in {
+            "development",
+            "dev",
+            "local",
+        }
+
+    @property
+    def allows_local_llm_endpoints(self) -> bool:
+        """Whether a loopback/private LLM endpoint may be configured and called.
+
+        Two conditions, both required: the operator opted in AND this is a development
+        environment. The flag alone is deliberately not enough — it travels in env files
+        and task definitions, and a copied value must not be able to disable the SSRF
+        defence on a deployed environment.
+        """
+        return bool(self.LLM_ALLOW_LOCAL_ENDPOINTS and self.is_development_environment)
 
     def validate_production(self) -> None:
         environment = self.ENVIRONMENT.lower()

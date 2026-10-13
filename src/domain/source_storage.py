@@ -66,6 +66,37 @@ def source_should_display_inline(filename: str | None) -> bool:
     return safe_source_media_type(filename) != "application/octet-stream"
 
 
+# Response headers for every endpoint that streams an original source back to a browser.
+# They live beside the media-type allow-list above because the two are one decision:
+# `safe_source_media_type` picks what the bytes may claim to be, and these headers
+# constrain what the browser may then do with them. Two copies eventually disagree, and
+# the disagreement is the vulnerability.
+#
+# The file is user-uploaded and untrusted, and it is displayed inside our own review
+# surface. Both facts have to hold at once:
+#
+#   sandbox allow-scripts  the document runs in an OPAQUE origin, so it can never read
+#                          a cookie, a token or the API as the signed-in user. Scripts
+#                          are permitted because a browser's built-in PDF viewer is
+#                          itself scripted and renders nothing under a bare `sandbox`.
+#                          allow-same-origin is deliberately NOT granted: combined with
+#                          allow-scripts it would let an uploaded HTML file escape.
+#   default-src 'none'     nothing loads and nothing is fetched, so a hostile document
+#                          has no channel to exfiltrate what it can see.
+#   frame-ancestors 'self' only our own UI may frame it.
+#
+# X-Frame-Options is stated here because the global middleware defaults every other
+# response to DENY, which blocks an iframe even same-origin.
+SOURCE_VIEW_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Content-Security-Policy": (
+        "sandbox allow-scripts; default-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'self'"
+    ),
+}
+
+
 def _is_object_storage() -> bool:
     return settings.SOURCE_STORAGE_BACKEND.lower() in {"r2", "cloudflare_r2"}
 
@@ -279,5 +310,20 @@ def _validated_storage_key(storage_key: str) -> tuple[str, str]:
 
 def load_source(storage_key: str) -> bytes:
     bucket, key = _validated_storage_key(storage_key)
-    response = _s3_client().get_object(Bucket=bucket, Key=key)
+    try:
+        response = _s3_client().get_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        # A key that is gone from the bucket is a MISSING FILE, not a server fault, and
+        # every caller already handles FileNotFoundError that way. R2 signals it as
+        # botocore's NoSuchKey, which is neither FileNotFoundError nor one of the
+        # configuration errors `_s3_put` wraps, so it escaped as a bare 500 — reached
+        # by an ordinary path, because rejecting a manual upload deletes its object
+        # while the draft row keeps the key.
+        if type(exc).__name__ in {"NoSuchKey", "404"} or getattr(
+            exc, "response", {}
+        ).get("Error", {}).get("Code") in {"NoSuchKey", "NoSuchBucket", "404"}:
+            raise FileNotFoundError(
+                f"The stored source object no longer exists: {key}"
+            ) from exc
+        raise
     return response["Body"].read()

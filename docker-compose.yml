@@ -73,7 +73,11 @@ services:
     # schedule database must not restart the API and reload the embedding
     # model during ordinary local development.
     command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src", "--reload-exclude", "tests/*", "--reload-exclude", "celerybeat-schedule*", "--reload-exclude", ".pytest_cache/*"]
-    mem_limit: 2g
+    # RAISED from 2g, same reason as the worker below: every search embeds its query
+    # in-process (`get_bge_embedding` in domain/search_service.py), so the API holds the
+    # same ~1.5 GiB model resident. Measured at 1.83 GiB of a 2 GiB limit — 91% — before
+    # this change, which leaves nothing for a reload or a concurrent request.
+    mem_limit: 4g
     mem_reservation: 512m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
@@ -126,7 +130,17 @@ services:
       - .:/app
       - hfcache:/opt/huggingface
     command: celery -A src.workers.celery_app worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=info -Q document-preparation,celery,ingestion,connectors,permissions
-    mem_limit: 2g
+    # RAISED from 2g. The baked ONNX export is 2.1 GB on disk and the model is held
+    # IN-PROCESS for the lifetime of the worker: measured in this container, RSS goes
+    # 12 MiB -> 50 MiB on import -> 1545 MiB on the first embed call, and stays there.
+    # A batch of 32 chunks adds 2 MiB, so this is a fixed cost, not document size.
+    #
+    # 2g left ~400 MiB for Celery, the ONNX runtime and every task on top of that
+    # model, so the worker ran at 85-99% of its limit and was OOM-killed (exit 137) by
+    # anything that briefly needed more. The deployed environments were already raised
+    # for exactly this reason -- develop runs 8192 MB and prod 6144 MB (see
+    # infra/live/*/main.tf) -- and dev compose was simply left behind.
+    mem_limit: 4g
     mem_reservation: 512m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb

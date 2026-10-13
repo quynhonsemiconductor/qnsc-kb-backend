@@ -43,6 +43,7 @@ from src.domain.source_storage import (
     create_presigned_source_url,
     safe_source_media_type,
     source_should_display_inline,
+    SOURCE_VIEW_SECURITY_HEADERS,
 )
 from src.models.article import Article, DocumentSource, TagCatalog
 from src.models.evidence import DocumentEvidence
@@ -1499,29 +1500,9 @@ async def complete_source_upload(
     }
 
 
-# The file is user-uploaded and untrusted, and it is displayed inside our own review
-# iframe. Both facts have to hold at once:
-#
-#   sandbox allow-scripts  the document runs in an OPAQUE origin, so it can never read
-#                          a cookie, a token or the API as the signed-in user. Scripts
-#                          are permitted because a browser's built-in PDF viewer is
-#                          itself scripted and renders nothing under a bare `sandbox`.
-#                          allow-same-origin is deliberately NOT granted: combined with
-#                          allow-scripts it would let an uploaded HTML file escape.
-#   default-src 'none'     nothing loads and nothing is fetched, so a hostile document
-#                          has no channel to exfiltrate what it can see.
-#   frame-ancestors 'self' only our own UI may frame it.
-#
-# X-Frame-Options is stated here because the global middleware defaults every other
-# response to DENY, which blocks an iframe even same-origin.
-SOURCE_VIEW_SECURITY_HEADERS = {
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "SAMEORIGIN",
-    "Content-Security-Policy": (
-        "sandbox allow-scripts; default-src 'none'; base-uri 'none'; "
-        "form-action 'none'; frame-ancestors 'self'"
-    ),
-}
+# Re-exported from the storage module, where it sits beside the media-type allow-list it
+# belongs with. Kept importable from here because existing callers and tests reference
+# this name.
 
 
 @router.get("/{id}/evidence/{evidence_id}/preview")
