@@ -87,3 +87,50 @@ def test_missing_dependency_raises_cross_encoder_unavailable(monkeypatch):
 
     with pytest.raises(CrossEncoderUnavailable):
         cross_encoder_module.score("query", ["passage"])
+
+
+# ── the reranker must not be able to make a search look stuck ────────────────────────────────
+# Measured on 2 vCPU: ~0.5 s per passage, ~15 s for the default pool of 30. Two bounds keep that
+# from reaching the user: a timeout at the call site, and one scoring call at a time so a
+# timed-out call (a thread, which cannot be cancelled) cannot be stacked on by the next search.
+
+import threading
+
+from src.rag import cross_encoder
+
+
+def test_a_second_scoring_call_is_refused_while_the_first_is_still_running(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    class _Slow:
+        def predict(self, pairs):
+            started.set()
+            release.wait(5)
+            return [0.5] * len(pairs)
+
+    monkeypatch.setattr(cross_encoder._model, "get", lambda: _Slow())
+    first = threading.Thread(target=lambda: cross_encoder.score("q", ["a", "b"]))
+    first.start()
+    try:
+        assert started.wait(5)
+        with pytest.raises(CrossEncoderUnavailable, match="still scoring"):
+            cross_encoder.score("q", ["c"])
+    finally:
+        release.set()
+        first.join(5)
+
+    # and it is usable again once the first call has finished (the lock is released in `finally`)
+    assert cross_encoder.score("q", ["a"]) == [0.5]
+
+
+def test_the_lock_is_released_when_scoring_raises(monkeypatch):
+    class _Broken:
+        def predict(self, pairs):
+            raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(cross_encoder._model, "get", lambda: _Broken())
+    with pytest.raises(CrossEncoderUnavailable):
+        cross_encoder.score("q", ["a"])
+
+    assert cross_encoder._scoring.acquire(blocking=False), "a failed call left the reranker locked"
+    cross_encoder._scoring.release()

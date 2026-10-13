@@ -39,6 +39,7 @@ from src.models.chunk import ArticleChunk
 from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
 from src.core.tracing import configure_tracing, get_tracer, trace
+from src.core.warmup import FAILED, READY, TIMEOUT, embedding_warmup
 from src.lib.embeddings import warm_up as warm_up_embeddings
 import structlog
 
@@ -47,14 +48,35 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 
 async def _preload_embedding_model() -> None:
-    """Warm the configured embedding backend without blocking API readiness."""
+    """Load the embedding model in a thread and record how it went.
+
+    The server starts serving while this runs; `/health/ready` reports 503 until it ends
+    (see src/core/warmup.py for why only a successful load holds the probe, and why a
+    failure or a timeout does not hold it forever). `embedding_warmup.begin()` is called by
+    the caller, synchronously, so the probe can never observe a gap before this task runs.
+    """
+    timeout = settings.EMBEDDING_WARMUP_TIMEOUT_SECONDS
+    logger.info("Embedding model warm-up started", timeout_seconds=timeout)
     try:
-        await asyncio.to_thread(warm_up_embeddings)
+        await asyncio.wait_for(asyncio.to_thread(warm_up_embeddings), timeout=timeout)
+    except asyncio.TimeoutError:
+        seconds = embedding_warmup.finish(TIMEOUT, f"not loaded after {timeout}s")
+        logger.warning(
+            "Embedding model warm-up timed out; readiness no longer waits for it "
+            "(the load continues, and a search that arrives first waits for it)",
+            seconds=seconds,
+            timeout_seconds=timeout,
+        )
     except Exception as exc:
+        seconds = embedding_warmup.finish(FAILED, str(exc))
         logger.warning(
             "Embedding model preload failed; keyword search remains available",
             error=str(exc),
+            seconds=seconds,
         )
+    else:
+        seconds = embedding_warmup.finish(READY)
+        logger.info("Embedding model warm-up finished", seconds=seconds)
 
 
 async def verify_embedding_column_width() -> None:
@@ -362,10 +384,14 @@ async def initialize_resources() -> None:
             await engine.dispose()
             await asyncio.sleep(attempt * 2)
 
-    # Do not make API readiness depend on a multi-second ONNX session load.
-    # The singleton still avoids repeated loading when the first embedding is
-    # requested, while the background warmup normally completes before then.
+    # The model loads in the background so the server is up and answering `/health/live`
+    # while it does (the ECS container health check and the image HEALTHCHECK use that
+    # one, with a start period). `/health/ready` is what waits for it, and gives up waiting
+    # after EMBEDDING_WARMUP_TIMEOUT_SECONDS. `begin()` runs HERE, before the task is
+    # scheduled, so there is no window in which readiness is true and the load is not
+    # yet recorded as in progress.
     if settings.OPENAI_API_KEY != "mock" and settings.EMBEDDING_MODEL != "mock":
+        embedding_warmup.begin()
         asyncio.create_task(_preload_embedding_model())
 
 
@@ -806,9 +832,10 @@ async def livez():
     once, and a slowdown becomes an outage." `/health/ready` is where the database
     and Redis checks belong — a failing readiness probe removes ONE pod from its
     Service instead of restarting all of them. That matters more here than
-    elsewhere: this API deliberately does not block readiness on the multi-second
-    ONNX session load (see the note at line 364), so the two probes already have
-    genuinely different jobs.
+    elsewhere: this API serves, and answers this probe, while the multi-second
+    ONNX model load runs (see the note in `initialize_resources`), and only
+    `/health/ready` waits for that load, so the two probes have genuinely
+    different jobs.
     """
     return {"status": "alive"}
 
@@ -828,8 +855,9 @@ async def metrics(
     return PlainTextResponse(prometheus_text(), media_type="text/plain; version=0.0.4")
 
 
-@app.get("/health/ready", tags=["system"])
-async def health_ready():
+async def _check_dependencies() -> None:
+    """Raise a 503 unless the database and Redis answer. Shared by both readiness probes."""
+    from fastapi import HTTPException
     from sqlalchemy import text
     from src.api.deps import engine
 
@@ -845,16 +873,55 @@ async def health_ready():
             await redis.ping()
         finally:
             await redis.aclose()
-        return {
-            "status": "ready",
-            "database": "ok",
-            "redis": "ok",
-            "job_mode": settings.JOB_MODE,
-        }
     except Exception as exc:
         logger.error("Readiness check failed", error=str(exc))
-        from fastapi import HTTPException
-
         raise HTTPException(
             status_code=503, detail={"status": "not_ready", "database": "unavailable"}
         )
+
+
+@app.get("/health/deps", tags=["system"])
+async def health_deps():
+    """Database and Redis only. This is what the DEPLOY pipeline polls.
+
+    It is the old `/health/ready` and deliberately does not look at the embedding model:
+    the pipeline's post-deploy check gives up after a fixed 120 s (hard-coded in the shared
+    `ci` workflow), and a cold model load on a small Fargate task is not measured to fit in
+    that. A deploy must not fail because a model is warming up. `/health/ready` is the
+    probe that waits for the model; point an orchestrator at that one.
+
+    It is not liveness either: it still fails when the database or Redis is gone, which is
+    the property `ci` requires of a deploy gate.
+    """
+    await _check_dependencies()
+    return {
+        "status": "ready",
+        "database": "ok",
+        "redis": "ok",
+        "job_mode": settings.JOB_MODE,
+    }
+
+
+@app.get("/health/ready", tags=["system"])
+async def health_ready():
+    from fastapi import HTTPException
+
+    await _check_dependencies()
+    if embedding_warmup.holds_readiness:
+        # Database and Redis are fine; the model is still loading. 503 is the honest answer:
+        # a search sent now would wait for the load. The deploy does not poll this path
+        # (see `/health/deps`).
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not_ready", "embedding": embedding_warmup.describe()},
+        )
+    return {
+        "status": "ready",
+        "database": "ok",
+        "redis": "ok",
+        "job_mode": settings.JOB_MODE,
+        "embedding": embedding_warmup.describe(),
+        # `degraded` is informational. The probe stays 200 because keyword search works;
+        # an alert on this field is the way to learn that vector search does not.
+        "degraded": embedding_warmup.degraded,
+    }

@@ -210,6 +210,11 @@ class Settings(BaseSettings):
     # raise both together or neither.
     EMBEDDING_MAX_TOKENS: int = 512
     EMBEDDING_BATCH_SIZE: int = 32
+    # How long `/health/ready` waits for the embedding model to load before it stops waiting
+    # (see src/core/warmup.py). It bounds a stuck load; it does not cancel it. Must exceed the
+    # real load time on the slowest task you run, or readiness goes 200 while the model is
+    # still loading, which is the state this setting exists to prevent.
+    EMBEDDING_WARMUP_TIMEOUT_SECONDS: float = 240.0
     # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
     # embedding API during bulk ingestion, not an exceptional one: without a retry a
     # single 429 fails the index for a whole article. Only 429 and 5xx are retried — a
@@ -391,6 +396,17 @@ class Settings(BaseSettings):
     # passage at index time — so this is a cost/latency dial, not a recall ceiling like
     # RAG_CANDIDATE_POOL_SIZE below.
     CROSS_ENCODER_CANDIDATE_POOL: int = 30
+    # A search must not wait on the reranker longer than this: on timeout the request returns
+    # the lexical order it already has. MEASURED (scripts/bench_inference.py, docs/performance-develop.md):
+    # bge-reranker-v2-m3 costs ~0.5 s per (query, passage) pair on 2 vCPU, so the default pool of 30
+    # is ~15 s there. The bound is what keeps "optional enhancement" from meaning "optionally
+    # makes search look stuck". The scoring thread cannot be cancelled; while it finishes,
+    # further searches skip the cross-encoder instead of queueing behind it.
+    CROSS_ENCODER_TIMEOUT_SECONDS: float = 3.0
+    # torch's own thread pool, separate from EMBEDDING_ONNX_THREADS. Left alone, torch sizes it from
+    # the host's cores, not from a Fargate task's CPU share, and oversubscribes the task.
+    # 0 leaves torch's default; set it with the task's `cpu` in infra/live/*/main.tf.
+    CROSS_ENCODER_THREADS: int = 2
     # Off by default, same posture as CROSS_ENCODER_RERANKER_ENABLED above: a new
     # retrieval leg with no production traffic behind it yet. It adds a third
     # candidate list to hybrid_search's existing RRF fusion (src/repositories/chunk.py) --

@@ -16,6 +16,7 @@ lexical scorer rather than 500ing the search.
 """
 from __future__ import annotations
 
+import threading
 from typing import Any, Sequence, TypeVar
 
 import structlog
@@ -40,6 +41,10 @@ def _load() -> Any:
             "the 'ml' poetry group (`poetry install --with ml`) or turn the flag off."
         ) from exc
 
+    if settings.CROSS_ENCODER_THREADS > 0:
+        import torch
+
+        torch.set_num_threads(settings.CROSS_ENCODER_THREADS)
     logger.info("Loading cross-encoder model", model=settings.CROSS_ENCODER_MODEL)
     model = CrossEncoder(settings.CROSS_ENCODER_MODEL)
     logger.info("Cross-encoder model ready", model=settings.CROSS_ENCODER_MODEL)
@@ -47,6 +52,11 @@ def _load() -> Any:
 
 
 _model = Lazy(_load, "cross-encoder")
+
+# One scoring call at a time. A timed-out call cannot be cancelled (it is a thread), so without
+# this a slow reranker would stack: each new search starting another multi-second job behind the
+# one the previous search already gave up on, until the task is saturated.
+_scoring = threading.Lock()
 
 
 def warm_up() -> None:
@@ -68,6 +78,8 @@ def score(query: str, passages: list[str]) -> list[float]:
     """
     if not passages:
         return []
+    if not _scoring.acquire(blocking=False):
+        raise CrossEncoderUnavailable("cross-encoder is still scoring an earlier search")
     try:
         model = _model.get()
         pairs = [(query, passage) for passage in passages]
@@ -76,6 +88,8 @@ def score(query: str, passages: list[str]) -> list[float]:
         raise
     except Exception as exc:
         raise CrossEncoderUnavailable(f"cross-encoder scoring failed: {exc}") from exc
+    finally:
+        _scoring.release()
     return [float(value) for value in raw_scores]
 
 
