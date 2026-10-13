@@ -2,6 +2,12 @@ import ssl
 
 from celery import Celery
 from src.core.config import settings
+from src.lib import log_redaction
+
+# The worker never calls setup_logging(), and it is the process that downloads from SharePoint/OneDrive:
+# a pre-authenticated download URL (`tempauth=...`) is a bearer credential and was being logged in full by
+# httpx's INFO line. Applies to the worker, beat and anything that imports this module.
+log_redaction.install()
 
 celery_app = Celery(
     "qnsc_kb_workers",
