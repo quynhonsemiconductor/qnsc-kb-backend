@@ -80,7 +80,7 @@ Everything else on the request path that this benchmark can see:
 
 1. **`/health/ready` waits for the model** (`src/core/warmup.py`, `src/api/main.py`). 503 with
    `{"embedding": {"state": "warming"}}` until the load ends; log lines on start, finish (with
-   seconds), failure and timeout. `EMBEDDING_WARMUP_TIMEOUT_SECONDS` (240) bounds the wait. A failed or
+   seconds), failure and timeout. `EMBEDDING_WARMUP_TIMEOUT_SECONDS` (90, kept at or under the shared deploy readiness poll of 120 s, so the probe stops holding before the deploy gives up) bounds the wait. A failed or
    timed-out load stops holding the probe and reports `degraded: true`, because keyword search works
    without the model and holding it forever would fail every deploy. Liveness (`/health/live`,
    `/livez`) is untouched.

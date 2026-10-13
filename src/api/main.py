@@ -41,9 +41,13 @@ from src.core.metrics import record_request, prometheus_text
 from src.core.tracing import configure_tracing, get_tracer, trace
 from src.core.warmup import FAILED, READY, TIMEOUT, embedding_warmup
 from src.rag import cross_encoder
+from src.lib import log_redaction
 from src.lib.embeddings import warm_up as warm_up_embeddings
 import structlog
 
+# Before anything can log a URL: httpx/httpcore to WARNING and credentials in query strings redacted.
+# setup_logging() (called at startup) configures structlog with the same processor.
+log_redaction.install()
 logger = structlog.get_logger()
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 

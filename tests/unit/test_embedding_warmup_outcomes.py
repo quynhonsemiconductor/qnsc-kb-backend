@@ -112,3 +112,11 @@ def test_initialize_resources_keeps_a_reference_to_the_preload_task():
     assert "_preload_task = asyncio.create_task(" in source, (
         "the event loop holds tasks weakly; an unreferenced preload task can be collected before it records its outcome"
     )
+
+
+def test_the_readiness_wait_is_shorter_than_the_deploy_poll():
+    """The deploy polls /health/ready for a fixed 120 s (shared ci workflow). A wait longer than that lets a stuck
+    load outlast the poll and fail the deploy instead of degrading."""
+    from src.core.config import settings
+
+    assert settings.EMBEDDING_WARMUP_TIMEOUT_SECONDS <= 90

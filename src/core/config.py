@@ -213,8 +213,11 @@ class Settings(BaseSettings):
     # How long `/health/ready` waits for the embedding model to load before it stops waiting
     # (see src/core/warmup.py). It bounds a stuck load; it does not cancel it. Must exceed the
     # real load time on the slowest task you run, or readiness goes 200 while the model is
-    # still loading, which is the state this setting exists to prevent.
-    EMBEDDING_WARMUP_TIMEOUT_SECONDS: float = 240.0
+    # still loading, which is the state this setting exists to prevent. Kept UNDER the shared deploy
+    # workflow's fixed 120 s readiness poll (the deploy polls /health/ready): a longer wait would let a
+    # stuck load outlast the poll and fail the deploy instead of degrading. Measured cold load on
+    # develop Fargate is ~3-4 s.
+    EMBEDDING_WARMUP_TIMEOUT_SECONDS: float = 90.0
     # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
     # embedding API during bulk ingestion, not an exceptional one: without a retry a
     # single 429 fails the index for a whole article. Only 429 and 5xx are retried — a
