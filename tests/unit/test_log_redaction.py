@@ -267,3 +267,60 @@ def test_the_redactor_sits_after_contextvars_and_exception_formatting():
         assert redactor == len(processors) - 2, f"must be just before the renderer: {names}"
     finally:
         structlog.reset_defaults()
+
+
+# ── args keep their shape (uvicorn's access log unpacks them) ────────────────────────────────
+def test_uvicorn_access_lines_are_emitted_and_redacted_with_its_default_logging_config():
+    """Reproduces the regression: collapsing record.args to None made AccessFormatter raise on every request
+    ('cannot unpack non-iterable NoneType') and the access line was lost."""
+    import copy
+    import logging.config
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    stream = io.StringIO()
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config["handlers"]["access"]["stream"] = stream
+    config["loggers"]["uvicorn.access"]["propagate"] = False
+    config["disable_existing_loggers"] = False
+    logging.config.dictConfig(config)
+    try:
+        path = "/api/v1/download?" + "temp" + "auth=" + TEMPAUTH + "&id=7"
+        logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", path, "1.1", 200)
+        out = stream.getvalue()
+    finally:
+        logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+    assert "Logging error" not in out and "Traceback" not in out, out
+    assert "GET" in out and "/api/v1/download" in out and "200" in out, "the access line must still be written"
+    assert "id=7" in out
+    for secret in SECRETS:
+        assert secret not in out, out
+
+
+def test_args_keep_their_container_type_length_and_non_text_types():
+    seen = {}
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            seen["args"] = record.args
+
+    handler = Capture()
+    logger = logging.getLogger("shape.test")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        logger.info("%s %s %d %s", "a", SHAREPOINT, 200, httpx.URL(SHAREPOINT))
+        positional = seen["args"]
+        logger.info("%(url)s %(n)d", {"url": SHAREPOINT, "n": 3})
+        mapping = seen["args"]
+    finally:
+        logger.removeHandler(handler)
+    assert isinstance(positional, tuple) and len(positional) == 4
+    assert positional[2] == 200 and isinstance(positional[2], int)
+    assert PAYLOAD not in str(positional)
+    assert isinstance(mapping, dict) and mapping["n"] == 3 and PAYLOAD not in str(mapping)
+
+
+@pytest.mark.parametrize("name", ["user_credentials", "access_tokens", "client_secrets", "passwords", "signatures"])
+def test_plural_credential_names_are_redacted_too(name):
+    assert OPAQUE not in log_redaction.redact(f"https://x/y?{name}={OPAQUE}")

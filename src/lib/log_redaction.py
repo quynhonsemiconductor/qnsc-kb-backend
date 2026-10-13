@@ -37,7 +37,11 @@ _WHOLE_NAMES = frozenset({
     "tempauth", "auth", "authorization", "token", "sig", "signature", "secret", "password", "passwd", "pwd",
     "code", "key", "apikey", "sas", "credential", "credentials", "assertion", "jwt", "bearer",
 })
-_SECRET_WORDS = frozenset({"token", "secret", "signature", "password", "passwd", "credential", "assertion", "apikey"})
+_SECRET_WORDS = frozenset({
+    "token", "secret", "signature", "password", "passwd", "credential", "assertion", "apikey",
+    # plurals: `user_credentials`, `access_tokens`, `client_secrets`
+    "tokens", "secrets", "signatures", "passwords", "credentials", "assertions", "apikeys",
+})
 _KEY_PREFIXES = frozenset({"api", "access", "secret", "private", "subscription", "signing", "encryption", "x"})
 
 _QUERY_PARAM = re.compile(r"([?&;])([\w.\-]+)=([^&\s'\"<>#]+)")
@@ -83,6 +87,34 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
+def _redact_arg(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = _safe_str(value)
+    if text is None:
+        return value
+    redacted = redact(text)
+    return redacted if redacted != text else value
+
+
+def _safe_str(value: Any) -> str | None:
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
+def _redact_args(args: Any) -> Any:
+    """Redact a LogRecord's args without changing their container type or length."""
+    if isinstance(args, dict):
+        return {key: _redact_arg(value) for key, value in args.items()}
+    if isinstance(args, tuple):
+        return tuple(_redact_arg(value) for value in args)
+    return args
+
+
 def structlog_processor(_logger: Any, _method: str, event_dict: dict) -> dict:
     """A structlog processor: redact every string in the event, however deeply nested."""
     return {key: _redact_value(value) for key, value in event_dict.items()}
@@ -102,17 +134,16 @@ def install() -> None:
 
     def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
         record = previous(*args, **kwargs)
-        # The FORMATTED message is what gets written, so that is what is redacted. Redacting `msg` and the str
-        # args separately missed everything that only becomes text on formatting (an `httpx.URL` argument, an
-        # exception object). Args are consumed here, so the record carries the finished, redacted message.
-        try:
-            message = record.getMessage()
-        except Exception:  # a malformed format string is the caller's bug; do not turn it into a lost record
-            message = None
-        if message is not None:
-            record.msg, record.args = redact(message), None
-        elif isinstance(record.msg, str):
+        # Redact the template and each ARGUMENT in place, KEEPING THE ARGS' SHAPE. Collapsing them into a
+        # finished message (and setting args to None) broke every formatter that unpacks `record.args`:
+        # uvicorn's AccessFormatter reads (client_addr, method, path, http_version, status_code) and raised on
+        # every request, losing the access line. Types that are not credentials-bearing text (the int status
+        # code) are left alone; an argument that is not a str but prints as text containing a credential (an
+        # httpx.URL) is replaced by its redacted text.
+        if isinstance(record.msg, str):
             record.msg = redact(record.msg)
+        if record.args:
+            record.args = _redact_args(record.args)
         if record.exc_info and record.exc_info[0] is not None and not record.exc_text:
             # Tracebacks are rendered later by the Formatter and name the URLs of failed requests. Render once
             # here, redacted; the Formatter uses `exc_text` when it is set.
