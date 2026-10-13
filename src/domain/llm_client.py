@@ -186,7 +186,17 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
             else _extract_openai_text(data)
         )
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
-        raise RuntimeError("The provider did not return a valid Chat Completions response") from exc
+        # Not JSON: some OpenAI-compatible gateways answer `text/event-stream` for every
+        # request, including one that never asked to stream. The streaming path already
+        # reads that shape, so a connection test must accept it too — otherwise an
+        # endpoint the workspace can genuinely use cannot be saved, because saving
+        # requires a successful test.
+        text, reasoning = _extract_sse_text(body.decode("utf-8", "replace"))
+        answer = text or _answer_from_reasoning(reasoning)
+        if not answer.strip():
+            raise RuntimeError(
+                "The provider did not return a valid Chat Completions response"
+            ) from exc
     if not answer.strip():
         raise RuntimeError("The provider response did not contain assistant text")
     return latency_ms
@@ -284,6 +294,36 @@ def _extract_gemini_text(data: dict[str, Any]) -> str:
             if isinstance(part, dict) and not part.get("thought") and part.get("text"):
                 parts.append(str(part["text"]))
     return "".join(parts)
+
+
+def _extract_sse_text(body: str) -> tuple[str, str]:
+    """Collect `(content, reasoning)` from a Chat Completions SSE stream.
+
+    Some OpenAI-compatible gateways answer `text/event-stream` for EVERY request, even
+    one that never asked to stream. The body is then a sequence of `data:` chunks rather
+    than a single JSON object, so a plain `json.loads` sees nothing parseable at all.
+    """
+    content = ""
+    reasoning = ""
+    for line in body.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        # `delta` while streaming, `message` for a gateway that streams one whole
+        # non-streaming response as a single event.
+        part = choices[0].get("delta") or choices[0].get("message") or {}
+        content += str(part.get("content") or "")
+        reasoning += str(part.get("reasoning_content") or part.get("reasoning") or "")
+    return content, reasoning
 
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
