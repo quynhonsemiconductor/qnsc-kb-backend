@@ -1,10 +1,12 @@
+import asyncio
+import re
 import uuid
 import json
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from typing import Any, Literal
-from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi import APIRouter, Depends, Query, Response, status, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -20,6 +22,12 @@ from src.models.governance import (
     DraftTransition,
     DraftCandidate,
     PendingDraft,
+)
+from src.domain.source_storage import (
+    load_source,
+    safe_source_media_type,
+    source_should_display_inline,
+    SOURCE_VIEW_SECURITY_HEADERS,
 )
 from src.repositories.governance import GovernanceRepository
 from src.repositories.article import ArticleRepository
@@ -418,6 +426,80 @@ async def get_pending_draft(
         raise HTTPException(status_code=404, detail="Draft not found")
     return _draft_response(
         draft, service, current_user, include_content=include_content
+    )
+
+
+@router.get("/pending-drafts/{id}/source")
+async def view_pending_draft_source(
+    id: uuid.UUID,
+    page: int | None = Query(default=None, ge=1),
+    current_user: User = Depends(require_permission("governance.read")),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Stream the stored upload so a reviewer can read the document itself.
+
+    Mirrors `view_article_source` in the articles router, with one difference that
+    matters: a pending draft is not an Article, so visibility comes from
+    `get_draft_for_user` — the same rule the detail endpoint above uses. A reviewer who
+    cannot see the draft gets 404 rather than its bytes.
+
+    Why this exists at all: the review screen only ever rendered extracted Markdown, so
+    a document that is mostly screenshots lost nearly everything it showed, and the
+    reviewer approved it without seeing it.
+    """
+
+    draft = await GovernanceRepository(db).get_draft_for_user(id, current_user)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if not draft.storage_key:
+        raise HTTPException(
+            status_code=404, detail="No original file is stored for this draft"
+        )
+    download_name = (
+        re.sub(r"[^A-Za-z0-9._-]+", "_", draft.original_filename or draft.title)
+        or "source.bin"
+    )
+    media_type = safe_source_media_type(download_name)
+    disposition = (
+        "inline" if source_should_display_inline(download_name) else "attachment"
+    )
+    if page is not None:
+        selected_page = next(
+            (
+                item
+                for item in (draft.page_texts or [])
+                if int(item.get("page_number") or 0) == page
+            ),
+            None,
+        )
+        if selected_page is None:
+            raise HTTPException(
+                status_code=404, detail="The requested source page is not available"
+            )
+        return Response(
+            content=str(selected_page.get("text") or "").encode("utf-8"),
+            media_type="text/plain",
+            headers={
+                **SOURCE_VIEW_SECURITY_HEADERS,
+                "X-Source-Page": str(page),
+                "Content-Disposition": (
+                    f'inline; filename="{download_name}.page-{page}.txt"'
+                ),
+            },
+        )
+    try:
+        data = await asyncio.to_thread(load_source, draft.storage_key)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404, detail="The stored original file is missing"
+        ) from exc
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            **SOURCE_VIEW_SECURITY_HEADERS,
+            "Content-Disposition": f'{disposition}; filename="{download_name}"',
+        },
     )
 
 
