@@ -316,6 +316,31 @@ class Settings(BaseSettings):
     EVIDENCE_MAX_TABLE_COLUMNS: int = 40
     EVIDENCE_MAX_CELL_CHARS: int = 2000
     EVIDENCE_MAX_SEARCH_TEXT_CHARS: int = 20000
+    # Which embedded images are worth citing as figures.
+    #
+    # Visual evidence used to be the WHOLE PAGE whenever a page held any image at all,
+    # so a preview showed the cited figure surrounded by unrelated content. Figures are
+    # now cropped to the image itself, which makes "is this image actually content?" a
+    # question that has to be answered -- a logo is an image too.
+    #
+    # Measured over the PDFs in this workspace (718 image placements): the median
+    # placement is 1.63% of its page and 383 of them are under 2%, because template
+    # artwork repeats on every page. Real figures sit far above that -- the lecture deck
+    # that prompted this has a median of 13.46% with only 3 of 70 images under 2%.
+    # 2% of a 612x792 page is roughly a 98pt square, which is an icon, not a diagram.
+    EVIDENCE_FIGURE_MIN_PAGE_FRACTION: float = 0.02
+    # Both sides must clear this, so a full-width 20pt rule or a thin divider cannot pass
+    # on area alone. 48pt is two thirds of an inch.
+    EVIDENCE_FIGURE_MIN_POINTS: float = 48.0
+    # An image repeated across much of the document is part of the template, whatever its
+    # size: a letterhead, a watermark, a slide-master logo. This is the sharpest of the
+    # three signals -- the deck above carries one image on all 149 pages -- and it is the
+    # only one that identifies a LARGE decoration.
+    EVIDENCE_FIGURE_TEMPLATE_PAGE_FRACTION: float = 0.25
+    # Below this, "on a quarter of the pages" is one or two pages and says nothing.
+    EVIDENCE_FIGURE_TEMPLATE_MIN_PAGES: int = 4
+    # How far above and below a figure to read its caption, as a fraction of page height.
+    EVIDENCE_FIGURE_CAPTION_MARGIN: float = 0.06
     # Only this many rows are embedded in citations/SSE/history. The complete bounded
     # table remains server-side for deterministic analytics and the authorized endpoint.
     EVIDENCE_TABLE_PREVIEW_ROWS: int = 50
