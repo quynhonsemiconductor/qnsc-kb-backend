@@ -530,7 +530,7 @@ async def run_restructure_pending_draft(
         if (
             not draft
             or draft.status != "pending"
-            or draft.restructure_status != "queued"
+            or draft.restructure_status not in ("queued", "deferred")
         ):
             return
         # Celery has its own Python process and does not run API startup. Complete every
@@ -578,6 +578,13 @@ async def run_restructure_pending_draft(
                     for department in departments
                 ],
             )
+            if result.status == "deferred":
+                # Rate limited: re-queue after the wait the provider asked for, before spending any more of the
+                # quota on routing or tags for a document that will be formatted again anyway.
+                await _defer_restructure(
+                    db, draft_id_str, company_domain, user_id_str, result.retry_after or 30
+                )
+                return
             # Batch review operates on the formatted reading view, not raw extraction.
             # Compute every optional suggestion without mutating the ORM row: a reviewer or
             # approval agent may decide the draft while the model is running, and those
@@ -694,6 +701,74 @@ async def run_restructure_pending_draft(
             logger.exception(
                 "Pending draft AI formatting failed", draft_id=str(draft.id)
             )
+
+
+def _schedule_restructure(
+    draft_id_str: str, company_domain: str, user_id_str: str, countdown: int
+) -> None:
+    """Run the formatting again after `countdown` seconds, in whichever job mode is active."""
+    if settings.JOB_MODE == "celery":
+        restructure_pending_draft_task.apply_async(
+            args=(draft_id_str, company_domain, user_id_str), countdown=countdown
+        )
+        return
+
+    async def _later() -> None:
+        await asyncio.sleep(countdown)
+        await run_restructure_pending_draft(draft_id_str, company_domain, user_id_str)
+
+    try:
+        asyncio.get_running_loop().create_task(_later())
+    except RuntimeError:
+        logger.warning("No event loop to defer restructuring on", draft_id=draft_id_str)
+
+
+async def _defer_restructure(
+    db, draft_id_str: str, company_domain: str, user_id_str: str, retry_after: int
+) -> None:
+    """Record that AI formatting is waiting on the provider's rate limit, and schedule the retry.
+
+    The draft goes to ``deferred`` (not left ``processing``, which reads as stuck, and not settled as a
+    failure) with a message that says what is happening and when it will be tried again. After
+    RESTRUCTURE_MAX_DEFERRALS the lossless fallback is used instead and a person is asked to retry, so a
+    permanently exhausted quota cannot loop forever.
+    """
+    draft = (
+        await db.execute(
+            select(PendingDraft)
+            .where(PendingDraft.id == uuid.UUID(draft_id_str))
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if not _draft_accepts_restructure_result(draft):
+        await db.rollback()
+        return
+    metadata = dict(draft.content_metadata or {})
+    deferrals = int(metadata.get("restructure_deferrals", 0)) + 1
+    metadata["restructure_deferrals"] = deferrals
+    draft.content_metadata = metadata
+    if deferrals > settings.RESTRUCTURE_MAX_DEFERRALS:
+        draft.restructure_status = "fallback_formatting"
+        draft.restructure_decision = "lossless_ready"
+        draft.restructure_model = "lossless-markdown"
+        draft.restructure_error = (
+            f"AI formatting could not run: the AI provider kept rate limiting ({deferrals - 1} deferrals). "
+            "A lossless reading view is shown; retry from Pending Drafts later."
+        )
+        await db.commit()
+        logger.warning("AI formatting gave up after repeated rate limiting", draft_id=draft_id_str)
+        return
+    draft.restructure_status = "deferred"
+    draft.restructure_error = (
+        f"AI formatting deferred: the AI provider is rate limiting requests. Trying again automatically in "
+        f"about {retry_after} s (attempt {deferrals} of {settings.RESTRUCTURE_MAX_DEFERRALS})."
+    )
+    await db.commit()
+    logger.info(
+        "AI formatting deferred", draft_id=draft_id_str, retry_after=retry_after, deferrals=deferrals
+    )
+    _schedule_restructure(draft_id_str, company_domain, user_id_str, retry_after)
 
 
 @celery_app.task(

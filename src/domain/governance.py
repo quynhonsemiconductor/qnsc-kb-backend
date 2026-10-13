@@ -108,7 +108,7 @@ class GovernanceService:
 
     @staticmethod
     def _ensure_preparation_complete(draft: PendingDraft) -> None:
-        if draft.restructure_status in {"queued", "processing"}:
+        if draft.restructure_status in {"queued", "processing", "deferred"}:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -362,7 +362,7 @@ class GovernanceService:
             raise HTTPException(
                 status_code=409, detail="Only pending documents can be batch reviewed"
             )
-        if draft.restructure_status in {"queued", "processing"}:
+        if draft.restructure_status in {"queued", "processing", "deferred"}:
             raise HTTPException(
                 status_code=409,
                 detail="AI formatting is still in progress; candidates will be ready after it finishes",
@@ -467,7 +467,7 @@ class GovernanceService:
             raise HTTPException(
                 status_code=409, detail="Only pending documents can be committed"
             )
-        if parent.restructure_status in {"queued", "processing"}:
+        if parent.restructure_status in {"queued", "processing", "deferred"}:
             raise HTTPException(
                 status_code=409,
                 detail="AI formatting is still in progress; candidates cannot be committed yet",

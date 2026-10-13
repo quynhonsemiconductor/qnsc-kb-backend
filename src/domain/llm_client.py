@@ -6,9 +6,13 @@ configuration. OpenAI, GLM, and Groq all use their OpenAI-compatible chat API.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import random
 import re
+import time
+import weakref
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Awaitable, Callable
@@ -32,6 +36,10 @@ class ProviderRateLimitError(RuntimeError):
     def __init__(self, message: str, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class ProviderEmptyReplyError(RuntimeError):
+    """The provider answered 200 with no text. A failed call that is worth retrying, not an answer."""
 
 
 class ProviderAuthError(RuntimeError):
@@ -386,6 +394,30 @@ def _extract_usage(data: dict[str, Any]) -> int:
     return int(usage.get("totalTokenCount") or usage.get("total_tokens") or 0)
 
 
+# ── rate-limit management ────────────────────────────────────────────────────────────────
+# Gates are per event loop: a Celery task runs each coroutine on a fresh loop (`sync_run`), and an asyncio
+# primitive created on one loop cannot be awaited on another.
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+# time.monotonic() before which the provider has asked not to be called again (process-wide, any loop).
+_rate_limited_until = 0.0
+
+
+def _gate() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    gate = _gates.get(loop)
+    if gate is None:
+        gate = _gates[loop] = asyncio.Semaphore(max(1, settings.LLM_MAX_CONCURRENCY))
+    return gate
+
+
+def _note_rate_limit(retry_after: int | None) -> float:
+    """Remember the provider's wait so the next caller does not spend a request finding out."""
+    global _rate_limited_until
+    wait = float(retry_after or 5)
+    _rate_limited_until = max(_rate_limited_until, time.monotonic() + wait)
+    return wait
+
+
 async def complete(
     messages: list[dict[str, str]],
     *,
@@ -395,7 +427,65 @@ async def complete(
     max_tokens: int | None = None,
     on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, int, str, str]:
-    """Generate text and return ``(text, token_count, model, provider)``."""
+    """Generate text and return ``(text, token_count, model, provider)``.
+
+    Wraps the provider call with the three things a shared, rate-limited provider needs:
+    * at most LLM_MAX_CONCURRENCY calls at once per process;
+    * a 429 is waited out (Retry-After, plus jitter) when the wait is short, and otherwise raised as
+      ProviderRateLimitError carrying the wait, with the provider left alone until it has passed;
+    * an empty reply is a failed call: retried, then ProviderEmptyReplyError.
+    """
+    rate_retries = 0
+    empty_retries = 0
+    while True:
+        remaining = _rate_limited_until - time.monotonic()
+        if remaining > 0:
+            if remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS:
+                raise ProviderRateLimitError(
+                    "The provider asked us to wait; not calling it again yet", retry_after=int(remaining) + 1
+                )
+            await asyncio.sleep(remaining + random.uniform(0, 1))
+        pause: float | None = None
+        async with _gate():
+            try:
+                result = await _complete_once(
+                    messages,
+                    model_override=model_override,
+                    timeout=timeout,
+                    thinking=thinking,
+                    max_tokens=max_tokens,
+                    on_token=on_token,
+                )
+            except ProviderRateLimitError as exc:
+                wait = _note_rate_limit(exc.retry_after)
+                if wait > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS or rate_retries >= settings.LLM_RATE_LIMIT_MAX_INLINE_RETRIES:
+                    logger.warning("LLM rate limited; giving up on this call", retry_after=wait, retries=rate_retries)
+                    raise
+                rate_retries += 1
+                pause = wait + random.uniform(0, 1)
+                logger.info("LLM rate limited; waiting and retrying", retry_after=wait, attempt=rate_retries)
+            else:
+                if result[0].strip():
+                    return result
+                if empty_retries >= settings.LLM_EMPTY_REPLY_RETRIES:
+                    raise ProviderEmptyReplyError(f"{result[3]} returned an empty reply {empty_retries + 1} times")
+                empty_retries += 1
+                pause = 1.0 * empty_retries
+                logger.warning("LLM returned an empty reply; retrying", attempt=empty_retries)
+        # The gate is released while sleeping, so a waiting call does not hold a slot.
+        await asyncio.sleep(pause or 0)
+
+
+async def _complete_once(
+    messages: list[dict[str, str]],
+    *,
+    model_override: str | None = None,
+    timeout: float = 30.0,
+    thinking: bool | None = None,
+    max_tokens: int | None = None,
+    on_token: Callable[[str], Awaitable[None]] | None = None,
+) -> tuple[str, int, str, str]:
+    """One provider request, no retry policy. Use ``complete``."""
     provider = resolve_provider(model_override)
     if provider is None:
         raise RuntimeError("No LLM provider is configured.")

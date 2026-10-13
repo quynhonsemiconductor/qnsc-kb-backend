@@ -247,7 +247,7 @@ def parse_decision(reply: str) -> tuple[str, str]:
 
 async def decide(draft: Any, rules: Sequence[Any], connector_id: Any | None = None) -> Verdict:
     """Decide what to do with one pending draft. Never raises."""
-    if getattr(draft, "restructure_status", None) in {"queued", "processing"}:
+    if getattr(draft, "restructure_status", None) in {"queued", "processing", "deferred"}:
         return _abstain("Document preparation is still in progress.")
     rule = select_rule(rules, draft, connector_id)
     if rule is None:
@@ -320,7 +320,7 @@ async def _apply(db: Any, draft: Any, rule: Any, verdict: Verdict) -> tuple[bool
 
     if getattr(draft, "status", "pending") != "pending" or getattr(
         draft, "restructure_status", None
-    ) in {"queued", "processing"}:
+    ) in {"queued", "processing", "deferred"}:
         return False, "Document preparation is still in progress or the draft was already decided."
     if not rule.created_by:
         return False, "The rule has no author to act as."
@@ -382,7 +382,7 @@ async def run(
                 .where(
                     PendingDraft.company_domain == company_domain,
                     PendingDraft.status == "pending",
-                    PendingDraft.restructure_status.notin_(["queued", "processing"]),
+                    PendingDraft.restructure_status.notin_(["queued", "processing", "deferred"]),
                 )
                 .order_by(PendingDraft.created_at)
                 .limit(limit or settings.APPROVAL_AGENT_BATCH_LIMIT)
