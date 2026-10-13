@@ -9,7 +9,8 @@ whose first search still had to wait for the model.
 WHAT A REQUEST DOES DURING THE LOAD, so nobody mistakes this for a correctness gate: nothing fails.
 `Lazy.get()` holds a lock, so a search that arrives mid-load simply waits for it, and the wait is
 the remaining load time. This module does not change that. It makes the task SAY it is not ready,
-which is what the deploy pipeline (`/health/ready`) and any load balancer or Kubernetes Service act on.
+which is what a load balancer or Kubernetes Service acts on. The DEPLOY pipeline polls
+`/health/deps` instead (database and Redis only), so a slow model load cannot fail a deploy.
 
 Three terminal outcomes, and only one of them holds the probe:
 

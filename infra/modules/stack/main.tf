@@ -531,13 +531,7 @@ module "api" {
     // There is no self-service signup: users are created by an administrator. The
     // first Admin is created out of band — see infra/README.
     { name = "ALLOW_SELF_REGISTRATION", value = "false" },
-    ],
-    // API only (the worker keeps the application default); see var.api_inference_threads.
-    var.api_inference_threads == null ? [] : [
-      { name = "EMBEDDING_ONNX_THREADS", value = tostring(var.api_inference_threads) },
-      { name = "CROSS_ENCODER_THREADS", value = tostring(var.api_inference_threads) },
-    ],
-  )
+  ])
 
   secrets = local.common_secrets
 

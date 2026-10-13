@@ -136,3 +136,29 @@ def test_liveness_never_reads_the_warm_up(fresh_state):
 
     assert asyncio.run(main.health_live()) == {"status": "alive"}
     assert asyncio.run(main.livez()) == {"status": "alive"}
+
+
+def test_the_deploy_probe_does_not_wait_for_the_model(fresh_state, backing_services_up):
+    """/health/deps is what the deploy polls (fixed 120 s, shared workflow). A cold model load
+    must not be able to fail a deploy, so it answers 200 while /health/ready answers 503."""
+    fresh_state.begin()
+
+    body = asyncio.run(main.health_deps())
+    with pytest.raises(HTTPException) as caught:
+        ready()
+
+    assert body["status"] == "ready"
+    assert caught.value.status_code == 503
+
+
+def test_the_deploy_probe_still_fails_when_a_dependency_is_down(fresh_state, monkeypatch):
+    """It is not liveness: ci requires a deploy gate to notice a missing database or cache."""
+    import src.api.deps as deps
+
+    broken = MagicMock(connect=MagicMock(side_effect=RuntimeError("database is down")))
+    monkeypatch.setattr(deps, "engine", broken)
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.health_deps())
+
+    assert caught.value.status_code == 503

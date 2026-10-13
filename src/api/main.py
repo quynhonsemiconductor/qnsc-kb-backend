@@ -855,8 +855,8 @@ async def metrics(
     return PlainTextResponse(prometheus_text(), media_type="text/plain; version=0.0.4")
 
 
-@app.get("/health/ready", tags=["system"])
-async def health_ready():
+async def _check_dependencies() -> None:
+    """Raise a 503 unless the database and Redis answer. Shared by both readiness probes."""
     from fastapi import HTTPException
     from sqlalchemy import text
     from src.api.deps import engine
@@ -879,9 +879,38 @@ async def health_ready():
             status_code=503, detail={"status": "not_ready", "database": "unavailable"}
         )
 
+
+@app.get("/health/deps", tags=["system"])
+async def health_deps():
+    """Database and Redis only. This is what the DEPLOY pipeline polls.
+
+    It is the old `/health/ready` and deliberately does not look at the embedding model:
+    the pipeline's post-deploy check gives up after a fixed 120 s (hard-coded in the shared
+    `ci` workflow), and a cold model load on a small Fargate task is not measured to fit in
+    that. A deploy must not fail because a model is warming up. `/health/ready` is the
+    probe that waits for the model; point an orchestrator at that one.
+
+    It is not liveness either: it still fails when the database or Redis is gone, which is
+    the property `ci` requires of a deploy gate.
+    """
+    await _check_dependencies()
+    return {
+        "status": "ready",
+        "database": "ok",
+        "redis": "ok",
+        "job_mode": settings.JOB_MODE,
+    }
+
+
+@app.get("/health/ready", tags=["system"])
+async def health_ready():
+    from fastapi import HTTPException
+
+    await _check_dependencies()
     if embedding_warmup.holds_readiness:
         # Database and Redis are fine; the model is still loading. 503 is the honest answer:
-        # a search sent now would wait for the load. The deploy's health poll retries.
+        # a search sent now would wait for the load. The deploy does not poll this path
+        # (see `/health/deps`).
         raise HTTPException(
             status_code=503,
             detail={"status": "not_ready", "embedding": embedding_warmup.describe()},

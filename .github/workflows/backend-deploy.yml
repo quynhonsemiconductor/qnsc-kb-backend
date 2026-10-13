@@ -279,10 +279,17 @@ jobs:
       # Celery beat rides in the worker TASK as a second container, so rolling the
       # worker service rolls beat with it — there is no third service to declare.
       #
-      # READINESS, not liveness: /health/live returns 200 without touching a dependency,
-      # so it cannot tell a working deploy from one whose database or cache is gone.
-      # /health/ready checks both.
-      health_path: /health/ready
+      # NOT LIVENESS: /health/live returns 200 without touching a dependency, so it cannot
+      # tell a working deploy from one whose database or cache is gone. /health/deps checks
+      # both.
+      #
+      # And NOT /health/ready, which also waits for the embedding model. The shared deploy
+      # workflow polls for a fixed 120 s, a cold e5-large load on Fargate has not been
+      # measured to fit in that, and a deploy must not fail because a model is warming up.
+      # Measure it from the first develop deploy: the api logs "Embedding model warm-up
+      # finished" with `seconds`. If that is comfortably under the poll, this can go back
+      # to /health/ready.
+      health_path: /health/deps
     # Least privilege: pass only what the reusable declares (no `secrets: inherit`).
     secrets:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
