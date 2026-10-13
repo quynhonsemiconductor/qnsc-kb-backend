@@ -105,3 +105,111 @@ def test_glm_uses_streaming_events_to_collect_content(monkeypatch):
     assert tokens == 7
     assert model == "glm-5.2"
     assert provider == "glm"
+
+
+def test_a_custom_gateway_that_always_streams_is_still_read(monkeypatch):
+    """An OpenAI-compatible gateway may answer `text/event-stream` for EVERY request.
+
+    The non-streaming path read the body with `response.json()`, which failed on that
+    shape with "Expecting value: line 1 column 1" and reached the user as "AI generation
+    failed. Please try again." — while the provider had in fact answered correctly, and
+    had already passed its connection test.
+    """
+
+    class Response:
+        status_code = 200
+        is_error = False
+        text = (
+            'data: {"choices":[{"delta":{"role":"assistant","content":"Grounded "}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["follow_redirects"] is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            assert url == "https://93.184.216.34/v1/chat/completions"
+            assert kwargs["headers"]["Host"] == "example.test"
+            return Response()
+
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", Client)
+
+    async def public_endpoint(_url):
+        return ResolvedLLMEndpoint("example.test", "93.184.216.34")
+
+    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", public_endpoint)
+    set_runtime_config(
+        RuntimeLLMConfig(
+            "custom", "kr/model", "https://example.test/v1/chat/completions", "key"
+        )
+    )
+
+    answer, _tokens, model, provider = asyncio.run(
+        llm_client.complete([{"role": "user", "content": "Ask"}], max_tokens=64)
+    )
+
+    assert answer == "Grounded answer"
+    assert (model, provider) == ("kr/model", "custom")
+
+
+def test_a_custom_gateway_returning_nothing_readable_still_fails(monkeypatch):
+    """Accepting SSE must not make this path accept an empty or unparseable answer."""
+
+    class Response:
+        status_code = 200
+        is_error = False
+        text = 'data: {"choices":[{"delta":{"content":""}}]}\n\ndata: [DONE]\n\n'
+
+        def json(self):
+            raise ValueError("not json")
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", Client)
+
+    async def public_endpoint(_url):
+        return ResolvedLLMEndpoint("example.test", "93.184.216.34")
+
+    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", public_endpoint)
+    set_runtime_config(
+        RuntimeLLMConfig(
+            "custom", "kr/model", "https://example.test/v1/chat/completions", "key"
+        )
+    )
+
+    try:
+        asyncio.run(
+            llm_client.complete([{"role": "user", "content": "Ask"}], max_tokens=64)
+        )
+    except RuntimeError as exc:
+        assert "no readable assistant text" in str(exc)
+    else:
+        raise AssertionError("an empty streamed answer must not be accepted")

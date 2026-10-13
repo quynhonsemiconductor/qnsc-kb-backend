@@ -613,7 +613,24 @@ async def complete(
         # screen responsive; content_restructure will preserve the source with
         # a local lossless fallback when the provider is slow or unavailable.
         response = await with_exponential_retry(request_completion, attempts=1)
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            # Not JSON. An OpenAI-compatible gateway may answer `text/event-stream` for
+            # EVERY request, including this one, which never asked to stream. Reading it
+            # as JSON failed with "Expecting value: line 1 column 1" and surfaced to the
+            # user as "AI generation failed", even though the provider had answered
+            # correctly. `probe_provider` accepts the same shape, so a provider that
+            # passed its connection test must not then fail every real call.
+            text, reasoning = _extract_sse_text(response.text)
+            answer = text or _answer_from_reasoning(reasoning)
+            if not answer.strip():
+                raise RuntimeError(
+                    f"{provider.name} returned no readable assistant text"
+                )
+            if on_token:
+                await on_token(answer)
+            return answer, 0, provider.model, provider.name
         answer = (
             _extract_gemini_text(data)
             if provider.native_gemini
