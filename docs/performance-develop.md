@@ -102,6 +102,20 @@ Everything else on the request path that this benchmark can see:
    `Embedding model warm-up finished` with `seconds`. If that is comfortably under 120 s, the deploy can
    go back to `/health/ready`.
 
+4. **Follow-ups to the above.**
+   - A load that outlasts `EMBEDDING_WARMUP_TIMEOUT_SECONDS` is reported `timeout` (degraded, no longer
+     holding readiness), and when it really ends it becomes `ready` or `failed`: the verdict follows the
+     load instead of sticking. Only running out of patience is a `timeout`; an error raised by the load
+     (a socket timeout while downloading) is a `failed`.
+   - A CloudWatch metric filter and alarm (`<name>-api-embedding-model-unhealthy`) on the api log lines
+     `Embedding model preload failed` and `Embedding model warm-up timed out`, publishing to the stack's
+     alarm topic. Not tested against a live log group: after the first apply, check it with
+     `aws logs test-metric-filter` or provoke a failure in develop.
+   - The cross-encoder has a circuit breaker: after `CROSS_ENCODER_BREAKER_THRESHOLD` (3) consecutive
+     timeouts it is skipped for `CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS` (300), then one search probes it.
+     When it is enabled, startup times a few pairs and warns if `CROSS_ENCODER_CANDIDATE_POOL` pairs
+     cannot fit the timeout (the sample is short, so a warning is reliable and silence is not a promise).
+
 ### Considered and not done
 
 - **api 2048 -> 4096 CPU** (with `EMBEDDING_ONNX_THREADS` = 2). Measured gain ~100 - 135 ms per

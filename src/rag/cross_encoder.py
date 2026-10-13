@@ -17,6 +17,7 @@ lexical scorer rather than 500ing the search.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Sequence, TypeVar
 
 import structlog
@@ -57,6 +58,105 @@ _model = Lazy(_load, "cross-encoder")
 # this a slow reranker would stack: each new search starting another multi-second job behind the
 # one the previous search already gave up on, until the task is saturated.
 _scoring = threading.Lock()
+
+
+class CircuitBreaker:
+    """Stop trying a component that keeps timing out, and try it again later.
+
+    closed -> (threshold consecutive timeouts) -> open -> (cooldown) -> half-open: ONE caller is let
+    through; its success closes the breaker, its timeout re-opens it for another cooldown.
+    Only timeouts count. A refusal because a previous call is still running, or an exception from
+    the model, say nothing about whether it is too slow.
+    """
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._timeouts = 0
+        self._opened_at: float | None = None
+        self._probing = False
+
+    def allow(self) -> bool:
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if self._probing:
+                return False
+            if self._clock() - self._opened_at >= settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS:
+                self._probing = True
+                logger.info("Cross-encoder circuit half-open; letting one search through")
+                return True
+            return False
+
+    def record_timeout(self) -> None:
+        with self._lock:
+            self._timeouts += 1
+            self._probing = False
+            if self._opened_at is not None or self._timeouts >= settings.CROSS_ENCODER_BREAKER_THRESHOLD:
+                first = self._opened_at is None
+                self._opened_at = self._clock()
+                logger.warning(
+                    "Cross-encoder circuit open: skipping the reranker" if first
+                    else "Cross-encoder still timing out; circuit stays open",
+                    consecutive_timeouts=self._timeouts,
+                    cooldown_seconds=settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS,
+                )
+
+    def record_success(self) -> None:
+        with self._lock:
+            if self._opened_at is not None:
+                logger.info("Cross-encoder recovered; circuit closed")
+            self._timeouts = 0
+            self._opened_at = None
+            self._probing = False
+
+    @property
+    def is_open(self) -> bool:
+        return self._opened_at is not None
+
+
+breaker = CircuitBreaker()
+
+_BUDGET_SAMPLE = [
+    ("what is the leave policy", "Employees accrue twelve days of annual leave per year, approved by their manager."),
+    ("who approves expenses", "Expenses above the limit need approval from the department head before payment."),
+]
+
+
+def check_budget() -> float:
+    """Load the model, time a few pairs, and warn if CROSS_ENCODER_CANDIDATE_POOL pairs cannot fit
+    CROSS_ENCODER_TIMEOUT_SECONDS. Returns seconds per pair.
+
+    Measured by running it, not assumed: the same model cost ~0.5 s per pair on 2 vCPU and ~0.47 s on
+    4, so the right pool depends on the task and a constant in the code would be a guess. The sample
+    passages are short, so this UNDER-estimates real chunks (parent text, titles); a warning here is
+    reliable, silence is not a promise.
+    """
+    model = _model.get()
+    model.predict(_BUDGET_SAMPLE)  # first call pays one-off allocation; not representative
+    started = time.perf_counter()
+    model.predict(_BUDGET_SAMPLE)
+    per_pair = (time.perf_counter() - started) / len(_BUDGET_SAMPLE)
+    pool = settings.CROSS_ENCODER_CANDIDATE_POOL
+    expected = per_pair * pool
+    if expected > settings.CROSS_ENCODER_TIMEOUT_SECONDS:
+        logger.warning(
+            "Cross-encoder cannot score its candidate pool inside its timeout on this task: "
+            "every reranked search will time out and fall back. Lower CROSS_ENCODER_CANDIDATE_POOL, "
+            "raise the timeout, or turn the reranker off.",
+            seconds_per_pair=round(per_pair, 3),
+            candidate_pool=pool,
+            expected_seconds=round(expected, 2),
+            timeout_seconds=settings.CROSS_ENCODER_TIMEOUT_SECONDS,
+        )
+    else:
+        logger.info(
+            "Cross-encoder budget ok",
+            seconds_per_pair=round(per_pair, 3),
+            candidate_pool=pool,
+            expected_seconds=round(expected, 2),
+        )
+    return per_pair
 
 
 def warm_up() -> None:

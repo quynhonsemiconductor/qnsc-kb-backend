@@ -403,6 +403,13 @@ class Settings(BaseSettings):
     # makes search look stuck". The scoring thread cannot be cancelled; while it finishes,
     # further searches skip the cross-encoder instead of queueing behind it.
     CROSS_ENCODER_TIMEOUT_SECONDS: float = 3.0
+    # After this many CONSECUTIVE timeouts the reranker is skipped for the cooldown below instead of
+    # being tried (and waited on, up to the timeout) by every search. A timed-out call also keeps a
+    # thread busy until it finishes, so on a CPU that is too small the feature would otherwise cost
+    # every comparison query the full timeout, forever. One success resets the count; after the
+    # cooldown a single search is allowed through to find out whether it has recovered.
+    CROSS_ENCODER_BREAKER_THRESHOLD: int = 3
+    CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS: float = 300.0
     # torch's own thread pool, separate from EMBEDDING_ONNX_THREADS. Left alone, torch sizes it from
     # the host's cores, not from a Fargate task's CPU share, and oversubscribes the task.
     # 0 leaves torch's default; set it with the task's `cpu` in infra/live/*/main.tf.

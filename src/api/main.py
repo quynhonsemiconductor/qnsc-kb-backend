@@ -40,11 +40,15 @@ from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
 from src.core.tracing import configure_tracing, get_tracer, trace
 from src.core.warmup import FAILED, READY, TIMEOUT, embedding_warmup
+from src.rag import cross_encoder
 from src.lib.embeddings import warm_up as warm_up_embeddings
 import structlog
 
 logger = structlog.get_logger()
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
+
+_preload_task: "asyncio.Task | None" = None
 
 
 async def _preload_embedding_model() -> None:
@@ -57,9 +61,12 @@ async def _preload_embedding_model() -> None:
     """
     timeout = settings.EMBEDDING_WARMUP_TIMEOUT_SECONDS
     logger.info("Embedding model warm-up started", timeout_seconds=timeout)
-    try:
-        await asyncio.wait_for(asyncio.to_thread(warm_up_embeddings), timeout=timeout)
-    except asyncio.TimeoutError:
+    load = asyncio.ensure_future(asyncio.to_thread(warm_up_embeddings))
+    # `asyncio.wait`, not `wait_for`: running out of patience must NOT cancel or reclassify the
+    # load. Only the wait times out here. An exception raised by the load itself (a socket timeout
+    # while downloading, a missing file) is a FAILURE and is recorded as one, whenever it happens.
+    done, _pending = await asyncio.wait({load}, timeout=timeout)
+    if not done:
         seconds = embedding_warmup.finish(TIMEOUT, f"not loaded after {timeout}s")
         logger.warning(
             "Embedding model warm-up timed out; readiness no longer waits for it "
@@ -67,6 +74,8 @@ async def _preload_embedding_model() -> None:
             seconds=seconds,
             timeout_seconds=timeout,
         )
+    try:
+        await load
     except Exception as exc:
         seconds = embedding_warmup.finish(FAILED, str(exc))
         logger.warning(
@@ -75,8 +84,27 @@ async def _preload_embedding_model() -> None:
             seconds=seconds,
         )
     else:
+        late = not done
         seconds = embedding_warmup.finish(READY)
-        logger.info("Embedding model warm-up finished", seconds=seconds)
+        logger.info(
+            "Embedding model warm-up finished" + (" late, after the readiness timeout" if late else ""),
+            seconds=seconds,
+        )
+    await _check_cross_encoder_budget()
+
+
+async def _check_cross_encoder_budget() -> None:
+    """Only when the reranker is enabled: load it and warn if its pool cannot fit its time budget.
+
+    Runs AFTER the embedding outcome is recorded, so it never delays readiness. A failure here is
+    logged and nothing else: the reranker is optional and search falls back without it.
+    """
+    if not settings.CROSS_ENCODER_RERANKER_ENABLED:
+        return
+    try:
+        await asyncio.to_thread(cross_encoder.check_budget)
+    except Exception as exc:
+        logger.warning("Cross-encoder budget check failed", error=str(exc))
 
 
 async def verify_embedding_column_width() -> None:
@@ -391,8 +419,11 @@ async def initialize_resources() -> None:
     # scheduled, so there is no window in which readiness is true and the load is not
     # yet recorded as in progress.
     if settings.OPENAI_API_KEY != "mock" and settings.EMBEDDING_MODEL != "mock":
+        global _preload_task
         embedding_warmup.begin()
-        asyncio.create_task(_preload_embedding_model())
+        # Kept in a module variable: the event loop holds only a weak reference to a task, so one
+        # nobody references can be garbage-collected mid-flight, taking the final status update with it.
+        _preload_task = asyncio.create_task(_preload_embedding_model())
 
 
 async def _inline_outbox_recovery_loop() -> None:
@@ -581,6 +612,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if _preload_task and not _preload_task.done():
+            _preload_task.cancel()
+            try:
+                await _preload_task
+            except asyncio.CancelledError:
+                pass
         if recovery_task:
             recovery_task.cancel()
             try:
