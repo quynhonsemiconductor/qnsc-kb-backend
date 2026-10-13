@@ -359,6 +359,31 @@ variable "embedding_realign_discard_vectors" {
   EOT
 }
 
+variable "api_inference_threads" {
+  type        = number
+  default     = null
+  description = <<-EOT
+    Threads for the api's in-process inference: sets EMBEDDING_ONNX_THREADS (the query
+    embedding) and CROSS_ENCODER_THREADS (the optional reranker) on the API service only.
+    null leaves the application defaults (2 and 2), which is what every task ran with
+    before this existed.
+
+    It is a CEILING tied to var.api.cpu, not a free dial, and the number to pick is not
+    cpu/1024. On Fargate x86 a vCPU is a hardware thread, so two vCPU are the two
+    hyper-threads of ONE core and give almost no extra throughput over one thread
+    (measured: docs/performance-develop.md). The task's CPU also has to cover the clamd and
+    cloudflared sidecars and the event loop. Raise this and api.cpu together or not at all.
+
+    The worker is deliberately not covered: it embeds batches at index time, and its
+    thread count is a separate decision with a separate measurement.
+  EOT
+
+  validation {
+    condition     = var.api_inference_threads == null ? true : (var.api_inference_threads >= 1 && var.api_inference_threads <= 16)
+    error_message = "api_inference_threads must be between 1 and 16, or null."
+  }
+}
+
 variable "embedding_runtime" {
   type        = string
   default     = "onnx"

@@ -378,11 +378,20 @@ class SearchService:
                 ]
             if cross_encoder_enabled and len(result) > 1:
                 try:
-                    cross_scores = await asyncio.to_thread(
-                        cross_encoder_score,
-                        retrieval_query,
-                        [chunk_passage(chunk) for chunk, _lexical_score in result],
-                    )
+                    try:
+                        cross_scores = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                cross_encoder_score,
+                                retrieval_query,
+                                [chunk_passage(chunk) for chunk, _lexical_score in result],
+                            ),
+                            timeout=settings.CROSS_ENCODER_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise CrossEncoderUnavailable(
+                            f"no answer within {settings.CROSS_ENCODER_TIMEOUT_SECONDS}s "
+                            f"for {len(result)} passages"
+                        ) from exc
                     # Order comes from the cross-encoder; the VALUE reported and
                     # thresholded below stays the lexical score. RAG_MIN_RELEVANCE_SCORE
                     # and every caller reading `score` were tuned against that scale, and
