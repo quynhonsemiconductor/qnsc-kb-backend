@@ -1130,3 +1130,74 @@ module "observability" {
 
   tags = local.tags
 }
+
+// ── Worker: running < desired for 10 minutes ─────────────────────────────────
+// Nothing watched this. The worker was down because a container in its task could not pull its image;
+// ECS kept retrying, the deploy only verified the API, the CPU/memory alarms have no data from a task that
+// is not running, and the queue stood still until someone noticed. The signal that does not depend on WHY
+// the task is not running is "fewer tasks running than the service wants".
+//
+// Needs Container Insights (RunningTaskCount / DesiredTaskCount, ECS/ContainerInsights); a precondition
+// refuses an apply that asks for the alarm with Insights off, because the alarm would then sit in
+// INSUFFICIENT_DATA forever and look like it worked.
+//
+// 10 consecutive 1-minute datapoints, so the normal scale-up after the 08:00 wake (task start plus image
+// pull) does not page, and a service scaled to zero (desired 0) never breaches. treat_missing_data is
+// notBreaching: an environment scheduled to zero publishes nothing, and an alarm that walks to
+// INSUFFICIENT_DATA every night teaches people to ignore it.
+resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
+  count = var.worker_task_alarm ? 1 : 0
+
+  alarm_name          = "${local.name}-worker-running-below-desired"
+  alarm_description   = "The worker service has had fewer tasks running than desired for 10 minutes. Check the service events and the stopped tasks' stoppedReason (an image that cannot be pulled, a failing essential container, no capacity)."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 1
+  evaluation_periods  = 10
+  datapoints_to_alarm = 10
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "short"
+    expression  = "IF(desired > running, 1, 0)"
+    label       = "worker running below desired"
+    return_data = true
+  }
+
+  metric_query {
+    id = "running"
+    metric {
+      namespace   = "ECS/ContainerInsights"
+      metric_name = "RunningTaskCount"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        ClusterName = module.ecs_cluster.cluster_name
+        ServiceName = module.worker.service_name
+      }
+    }
+  }
+
+  metric_query {
+    id = "desired"
+    metric {
+      namespace   = "ECS/ContainerInsights"
+      metric_name = "DesiredTaskCount"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        ClusterName = module.ecs_cluster.cluster_name
+        ServiceName = module.worker.service_name
+      }
+    }
+  }
+
+  alarm_actions = [module.observability.alarm_topic_arn]
+  tags          = local.tags
+
+  lifecycle {
+    precondition {
+      condition     = var.container_insights != "disabled"
+      error_message = "worker_task_alarm needs Container Insights (RunningTaskCount / DesiredTaskCount). Set container_insights to \"enabled\", or worker_task_alarm = false."
+    }
+  }
+}

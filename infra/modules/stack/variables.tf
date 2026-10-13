@@ -61,7 +61,18 @@ variable "api_record" {
 
 variable "image_tag" {
   type        = string
-  description = "Container image tag. develop tracks \"latest\"; production pins the release tag."
+  description = <<-EOT
+    Container image tag for the BASELINE task definitions. The deploy replaces it in every container on the
+    service image, so in develop this is a placeholder that is never pulled; production pins the release
+    tag. NEVER `latest`: the ECR repositories are immutable and the deploy pushes `<sha>` tags only, so
+    `latest` does not exist and any container left on it cannot start (2026-10: qnsc-kb's Celery beat did
+    exactly that and took the worker down).
+  EOT
+
+  validation {
+    condition     = var.image_tag != "latest" && var.image_tag != ""
+    error_message = "image_tag must not be \"latest\" or empty: that tag does not exist in the immutable ECR repositories. Use the release tag, or a clearly invalid placeholder in develop (the deploy sets the real one)."
+  }
 }
 
 // ── Ingress via Cloudflare Tunnel ────────────────────────────────────────────
@@ -486,6 +497,16 @@ variable "cloudflare_account_id" {
 variable "log_retention_days" {
   type    = number
   default = 7
+}
+
+variable "worker_task_alarm" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Alarm when the worker has fewer tasks running than desired for 10 minutes. Needs
+    container_insights != "disabled" (the metrics come from Container Insights); the alarm resource has a
+    precondition that says so rather than sitting in INSUFFICIENT_DATA.
+  EOT
 }
 
 variable "container_insights" {
