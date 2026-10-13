@@ -61,7 +61,7 @@ def test_a_short_retry_after_is_waited_out_and_the_call_succeeds(monkeypatch, cl
     fake, calls = scripted(ProviderRateLimitError("groq rate limit reached", retry_after=7), ok("done"))
     monkeypatch.setattr(llm_client, "_complete_once", fake)
 
-    text, *_ = asyncio.run(llm_client.complete(MSG))
+    text, *_ = asyncio.run(llm_client.complete(MSG, background=True))
 
     assert text == "done" and len(calls) == 2
     assert any(7 <= s <= 8.5 for s in clean), f"it must wait the Retry-After it was given, plus jitter: {clean}"
@@ -72,7 +72,7 @@ def test_a_long_retry_after_is_raised_with_the_wait_and_the_provider_is_left_alo
     monkeypatch.setattr(llm_client, "_complete_once", fake)
 
     with pytest.raises(ProviderRateLimitError) as caught:
-        asyncio.run(llm_client.complete(MSG))
+        asyncio.run(llm_client.complete(MSG, background=True))
     assert caught.value.retry_after == 600 and len(calls) == 1
 
     # The next caller does not spend a request finding out the same thing.
@@ -86,7 +86,7 @@ def test_inline_retries_are_bounded(monkeypatch):
     fake, calls = scripted(*[ProviderRateLimitError("rate", retry_after=1)] * 10)
     monkeypatch.setattr(llm_client, "_complete_once", fake)
     with pytest.raises(ProviderRateLimitError):
-        asyncio.run(llm_client.complete(MSG))
+        asyncio.run(llm_client.complete(MSG, background=True))
     assert len(calls) == 1 + settings.LLM_RATE_LIMIT_MAX_INLINE_RETRIES
 
 
@@ -107,10 +107,10 @@ def test_concurrent_calls_are_capped(monkeypatch):
     monkeypatch.setattr(llm_client, "_complete_once", slow)
 
     async def many():
-        await asyncio.gather(*(llm_client.complete(MSG) for _ in range(8)))
+        await asyncio.gather(*(llm_client.complete(MSG, background=True) for _ in range(8)))
 
     asyncio.run(many())
-    assert in_flight["max"] == 2, f"LLM_MAX_CONCURRENCY=2 but {in_flight['max']} calls ran at once"
+    assert in_flight["max"] == 2, f"LLM_MAX_CONCURRENCY=2 but {in_flight['max']} background calls ran at once"
 
 
 def test_an_empty_reply_is_retried_then_succeeds(monkeypatch):
@@ -231,7 +231,7 @@ def test_a_rate_limited_draft_is_deferred_with_a_message_and_a_scheduled_retry(s
     from src.workers import tasks
 
     d = draft()
-    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45))
+    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45, "SOURCE"))
 
     assert d.restructure_status == "deferred"
     assert "deferred" in d.restructure_error.lower() and "45" in d.restructure_error
@@ -244,10 +244,12 @@ def test_after_the_deferral_budget_the_lossless_fallback_is_used_and_nothing_is_
 
     monkeypatch.setattr(settings, "RESTRUCTURE_MAX_DEFERRALS", 2)
     d = draft(metadata={"restructure_deferrals": 2})
-    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45))
+    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45, "SOURCE"))
 
     assert d.restructure_status == "fallback_formatting"
     assert "kept rate limiting" in d.restructure_error
+    assert d.restructured_body_md == "SOURCE", "the give-up path must leave something to read, like the failure fallback"
+    assert d.restructure_decision == "lossless_ready" and d.restructure_model == "lossless-markdown"
     assert scheduled == []
 
 
@@ -256,7 +258,7 @@ def test_a_draft_decided_in_the_meantime_is_not_touched(scheduled):
 
     d = draft(status="llm")
     db = FakeDB(d)
-    asyncio.run(tasks._defer_restructure(db, str(d.id), "acme.test", "u1", 45))
+    asyncio.run(tasks._defer_restructure(db, str(d.id), "acme.test", "u1", 45, "SOURCE"))
     assert d.restructure_status == "llm" and scheduled == [] and db.rollbacks == 1
 
 
@@ -270,3 +272,106 @@ def test_deferred_counts_as_ai_busy_and_a_lost_retry_becomes_stalled():
     old = SimpleNamespace(restructure_status="deferred", restructure_error="x", updated_at=now - timedelta(minutes=30), created_at=now)
     assert _visible_restructure_state(fresh, now)[0] == "deferred"
     assert _visible_restructure_state(old, now)[0] == "stalled"
+
+
+# ── interactive calls are not gated ──────────────────────────────────────────────────────────
+def test_interactive_calls_are_not_capped(monkeypatch):
+    """A chat answer streams for up to LLM_TIMEOUT_SECONDS; with a cap of 2 the third simultaneous user would
+    queue behind two streams, for every provider including one that is not rate limited."""
+    in_flight = {"now": 0, "max": 0}
+
+    async def stream(messages, **_kw):
+        in_flight["now"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["now"])
+        for _ in range(5):
+            await asyncio.sleep(0)
+        in_flight["now"] -= 1
+        return ok()
+
+    monkeypatch.setattr(llm_client, "_complete_once", stream)
+
+    async def many():
+        await asyncio.gather(*(llm_client.complete(MSG) for _ in range(8)))  # the default: interactive
+
+    asyncio.run(many())
+    assert in_flight["max"] == 8, f"interactive chat was gated to {in_flight['max']} at a time"
+
+
+def test_an_interactive_429_is_raised_at_once_not_slept_on(monkeypatch, clean):
+    fake, calls = scripted(ProviderRateLimitError("rate", retry_after=7), ok("never reached"))
+    monkeypatch.setattr(llm_client, "_complete_once", fake)
+
+    with pytest.raises(ProviderRateLimitError) as caught:
+        asyncio.run(llm_client.complete(MSG))
+
+    assert caught.value.retry_after == 7 and len(calls) == 1
+    assert not any(s >= 7 for s in clean), f"an interactive call must not sleep on Retry-After: {clean}"
+
+
+def test_the_two_background_callers_opt_in():
+    import inspect
+
+    assert "background=True" in inspect.getsource(content_restructure._restructure_single_document)
+    assert "background=True" in inspect.getsource(auto_tagging.suggest_tags_for_document)
+    # and chat does not
+    from src.domain import ai_service
+
+    assert "background=True" not in inspect.getsource(ai_service)
+
+
+def test_clearing_the_deferral_count():
+    d = draft(metadata={"restructure_deferrals": 3, "type": "doc"})
+    content_restructure.clear_restructure_deferrals(d)
+    assert d.content_metadata == {"type": "doc"}
+    content_restructure.clear_restructure_deferrals(draft(metadata=None))  # no metadata: no error
+
+
+def test_a_fresh_queue_generation_starts_with_a_full_budget():
+    from src.api.routers.governance import _queue_draft_restructure
+
+    d = draft(status="fallback_formatting", metadata={"restructure_deferrals": 5})
+    d.restructure_candidate_md = None
+    d.updated_at = None
+    _queue_draft_restructure(d)
+    assert d.restructure_status == "queued" and "restructure_deferrals" not in d.content_metadata
+
+
+def test_the_retry_countdown_is_capped_below_the_stalled_threshold(monkeypatch):
+    from src.workers import tasks
+
+    seen = []
+    monkeypatch.setattr(settings, "JOB_MODE", "celery")
+    monkeypatch.setattr(tasks.restructure_pending_draft_task, "apply_async", lambda args, countdown: seen.append(countdown))
+
+    tasks._schedule_restructure("d", "acme.test", "u1", 7200)  # "try again in 2 hours" (a daily quota)
+    tasks._schedule_restructure("d", "acme.test", "u1", 45)
+    tasks._schedule_restructure("d", "acme.test", "u1", 0)
+
+    assert seen == [600, 45, 1]
+    assert 600 < 15 * 60, "must stay under the 15-minute stalled threshold"
+
+
+def test_an_inline_retry_task_is_referenced_until_it_finishes(monkeypatch):
+    from src.workers import tasks
+
+    monkeypatch.setattr(settings, "JOB_MODE", "inline")
+
+    async def scenario():
+        async def _noop(*_a):
+            return None
+
+        monkeypatch.setattr(tasks, "run_restructure_pending_draft", _noop)
+        real_sleep = asyncio.sleep
+
+        async def instant(_seconds, *a, **k):
+            await real_sleep(0)
+
+        monkeypatch.setattr(tasks.asyncio, "sleep", instant)
+        tasks._schedule_restructure("d", "acme.test", "u1", 5)
+        held = len(tasks._inline_retry_tasks)
+        for _ in range(5):
+            await real_sleep(0)
+        return held, len(tasks._inline_retry_tasks)
+
+    held, after = asyncio.run(scenario())
+    assert held == 1 and after == 0

@@ -125,8 +125,9 @@ class Settings(BaseSettings):
     # Provider rate limits are a condition to manage, not an error to surface (Groq's free tier answers 429 with
     # "Please try again in 27s"). Per PROCESS, because each Celery child and each API worker has its own gate.
     #
-    # LLM_MAX_CONCURRENCY caps simultaneous provider calls, so a burst (restructure's sections, tag suggestions
-    # for a connector sync) queues here instead of drawing a 429 for every call over the limit.
+    # LLM_MAX_CONCURRENCY caps simultaneous BACKGROUND provider calls (`complete(background=True)`: restructure's
+    # sections, tag suggestions for a connector sync), so a burst queues here instead of drawing a 429 for every
+    # call over the limit. Interactive calls (chat, streaming, multi-query, judging) are NOT capped.
     LLM_MAX_CONCURRENCY: int = 2
     # A 429 that asks for a wait up to this long is waited out inline and retried (honouring Retry-After, plus
     # jitter), up to LLM_RATE_LIMIT_MAX_INLINE_RETRIES times. A longer ask is raised as ProviderRateLimitError

@@ -426,27 +426,37 @@ async def complete(
     thinking: bool | None = None,
     max_tokens: int | None = None,
     on_token: Callable[[str], Awaitable[None]] | None = None,
+    background: bool = False,
 ) -> tuple[str, int, str, str]:
     """Generate text and return ``(text, token_count, model, provider)``.
 
-    Wraps the provider call with the three things a shared, rate-limited provider needs:
-    * at most LLM_MAX_CONCURRENCY calls at once per process;
-    * a 429 is waited out (Retry-After, plus jitter) when the wait is short, and otherwise raised as
-      ProviderRateLimitError carrying the wait, with the provider left alone until it has passed;
-    * an empty reply is a failed call: retried, then ProviderEmptyReplyError.
+    TWO CALLING MODES, and the difference matters:
+
+    * ``background=True`` is for work nobody is waiting on a screen for (document restructuring, tag
+      suggestion in the worker). It is capped at LLM_MAX_CONCURRENCY calls at once per process, and a 429
+      with a short Retry-After is waited out and retried, because waiting costs nothing there and a burst
+      would otherwise draw a 429 for every call over the limit.
+    * the default is INTERACTIVE (chat, streamed answers, multi-query, judging, routing on a request). It is
+      NOT gated: a concurrency cap here would make the third simultaneous chat user queue behind two streams
+      of up to LLM_TIMEOUT_SECONDS each, for every provider, rate limited or not. It never sleeps on a 429
+      either: it raises ProviderRateLimitError at once so the caller can tell the user when to retry.
+
+    Both modes: while the provider has asked not to be called (a recent 429), a call fails fast with the
+    remaining wait instead of spending a request to find out (a background call waits it out when it is
+    short), and an empty reply is a failed call, retried and then raised as ProviderEmptyReplyError.
     """
     rate_retries = 0
     empty_retries = 0
     while True:
         remaining = _rate_limited_until - time.monotonic()
         if remaining > 0:
-            if remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS:
+            if not background or remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS:
                 raise ProviderRateLimitError(
                     "The provider asked us to wait; not calling it again yet", retry_after=int(remaining) + 1
                 )
             await asyncio.sleep(remaining + random.uniform(0, 1))
         pause: float | None = None
-        async with _gate():
+        async with (_gate() if background else _NoGate()):
             try:
                 result = await _complete_once(
                     messages,
@@ -458,7 +468,11 @@ async def complete(
                 )
             except ProviderRateLimitError as exc:
                 wait = _note_rate_limit(exc.retry_after)
-                if wait > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS or rate_retries >= settings.LLM_RATE_LIMIT_MAX_INLINE_RETRIES:
+                if (
+                    not background
+                    or wait > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS
+                    or rate_retries >= settings.LLM_RATE_LIMIT_MAX_INLINE_RETRIES
+                ):
                     logger.warning("LLM rate limited; giving up on this call", retry_after=wait, retries=rate_retries)
                     raise
                 rate_retries += 1
@@ -474,6 +488,16 @@ async def complete(
                 logger.warning("LLM returned an empty reply; retrying", attempt=empty_retries)
         # The gate is released while sleeping, so a waiting call does not hold a slot.
         await asyncio.sleep(pause or 0)
+
+
+class _NoGate:
+    """The interactive path: same `async with` shape, no limit."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
 
 
 async def _complete_once(

@@ -128,6 +128,7 @@ async def suggest_tags_for_document(
                 },
             ],
             max_tokens=150,
+            background=True,
         )
     except Exception as exc:
         # Tags are optional, so a rate-limited or failed call leaves the document untagged rather than failing

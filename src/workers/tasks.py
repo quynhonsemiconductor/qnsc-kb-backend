@@ -498,7 +498,7 @@ async def run_restructure_pending_draft(
     Shared by the Celery task and inline-mode dispatch so the feature works
     identically in both deployment job modes.
     """
-    from src.domain.content_restructure import restructure_document
+    from src.domain.content_restructure import clear_restructure_deferrals, restructure_document
     from src.models import User
     from src.models.governance import AuditLog, DraftCandidate, PendingDraft
     from src.models.user import Department
@@ -582,7 +582,7 @@ async def run_restructure_pending_draft(
                 # Rate limited: re-queue after the wait the provider asked for, before spending any more of the
                 # quota on routing or tags for a document that will be formatted again anyway.
                 await _defer_restructure(
-                    db, draft_id_str, company_domain, user_id_str, result.retry_after or 30
+                    db, draft_id_str, company_domain, user_id_str, result.retry_after or 30, source_text
                 )
                 return
             # Batch review operates on the formatted reading view, not raw extraction.
@@ -651,6 +651,7 @@ async def run_restructure_pending_draft(
             draft.restructure_status = result.status
             draft.restructure_model = result.model
             draft.restructure_error = result.error
+            clear_restructure_deferrals(draft)
             if not is_split_product:
                 await db.execute(
                     delete(DraftCandidate).where(DraftCandidate.draft_id == draft.id)
@@ -703,10 +704,22 @@ async def run_restructure_pending_draft(
             )
 
 
+# The longest a deferral is allowed to wait. Two ceilings sit just above it: the API reports a deferred draft as
+# "stalled" after 15 minutes, and a Celery countdown message is held unacked against the broker's
+# visibility_timeout (task_time_limit + 300 s). A provider asking for "try again in 2 hours" (a daily quota)
+# is retried in 10 minutes, and defers again if it is still limited, up to RESTRUCTURE_MAX_DEFERRALS.
+_MAX_DEFERRAL_COUNTDOWN_SECONDS = 600
+
+# The event loop keeps only a weak reference to a task, so an inline-mode retry nobody references can be
+# garbage-collected before it runs.
+_inline_retry_tasks: set[asyncio.Task] = set()
+
+
 def _schedule_restructure(
     draft_id_str: str, company_domain: str, user_id_str: str, countdown: int
 ) -> None:
     """Run the formatting again after `countdown` seconds, in whichever job mode is active."""
+    countdown = max(1, min(int(countdown), _MAX_DEFERRAL_COUNTDOWN_SECONDS))
     if settings.JOB_MODE == "celery":
         restructure_pending_draft_task.apply_async(
             args=(draft_id_str, company_domain, user_id_str), countdown=countdown
@@ -718,13 +731,16 @@ def _schedule_restructure(
         await run_restructure_pending_draft(draft_id_str, company_domain, user_id_str)
 
     try:
-        asyncio.get_running_loop().create_task(_later())
+        task = asyncio.get_running_loop().create_task(_later())
     except RuntimeError:
         logger.warning("No event loop to defer restructuring on", draft_id=draft_id_str)
+        return
+    _inline_retry_tasks.add(task)
+    task.add_done_callback(_inline_retry_tasks.discard)
 
 
 async def _defer_restructure(
-    db, draft_id_str: str, company_domain: str, user_id_str: str, retry_after: int
+    db, draft_id_str: str, company_domain: str, user_id_str: str, retry_after: int, source_text: str
 ) -> None:
     """Record that AI formatting is waiting on the provider's rate limit, and schedule the retry.
 
@@ -749,6 +765,10 @@ async def _defer_restructure(
     metadata["restructure_deferrals"] = deferrals
     draft.content_metadata = metadata
     if deferrals > settings.RESTRUCTURE_MAX_DEFERRALS:
+        # Same fields as the failure fallback in run_restructure_pending_draft: without the body the draft would be
+        # settled as "fallback_formatting" with nothing to read.
+        draft.restructured_body_md = source_text
+        draft.restructure_candidate_md = None
         draft.restructure_status = "fallback_formatting"
         draft.restructure_decision = "lossless_ready"
         draft.restructure_model = "lossless-markdown"

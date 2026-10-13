@@ -34,6 +34,7 @@ from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
 from src.repositories.ops import OpsRepository
 from src.domain.governance import GovernanceService
+from src.domain.content_restructure import clear_restructure_deferrals
 from src.domain.ai_service import AIService
 from src.domain.search_service import SearchService
 from src.repositories.chunk import ChunkRepository
@@ -92,6 +93,8 @@ def _queue_draft_restructure(
     draft.restructure_error = None
     draft.restructure_candidate_md = None
     draft.restructure_decision = "not_reviewed"
+    # A fresh queue generation starts with a full deferral budget.
+    clear_restructure_deferrals(draft)
     # A stalled job is still persisted as ``queued``. Without an explicit heartbeat,
     # retrying queued -> queued leaves the ORM row clean, so no UPDATE runs and the next
     # GET immediately derives ``stalled`` again from the old timestamp.

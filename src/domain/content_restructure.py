@@ -84,6 +84,18 @@ class RestructureResult:
     retry_after: int | None = None
 
 
+def clear_restructure_deferrals(draft: object) -> None:
+    """Forget how many times rate limiting has deferred this draft's AI formatting.
+
+    The count only means something within one run of consecutive deferrals. Called when the formatting finally
+    succeeds and whenever a person or the system queues it afresh, so a draft that was deferred twice last
+    week does not start this week with a smaller budget.
+    """
+    metadata = getattr(draft, "content_metadata", None)
+    if metadata and "restructure_deferrals" in metadata:
+        draft.content_metadata = {k: v for k, v in metadata.items() if k != "restructure_deferrals"}  # type: ignore[attr-defined]
+
+
 @dataclass
 class RestructureReport:
     """Cheap, reviewer-facing diagnostics for a restructuring result."""
@@ -383,6 +395,7 @@ async def _restructure_single_document(
             timeout=settings.RESTRUCTURE_TIMEOUT_SECONDS,
             thinking=False,
             max_tokens=settings.RESTRUCTURE_MAX_OUTPUT_TOKENS,
+            background=True,
         )
         formatted = _clean_markdown(formatted_raw)
         report = _report(source_text, formatted)
