@@ -12,16 +12,21 @@ variable "cloudflare_api_token" {
 }
 
 variable "image_tag" {
-  type    = string
-  default = "latest"
+  type = string
+  # A placeholder that can never be a real tag, NOT "latest". `latest` does not exist in the immutable ECR
+  # repositories (only <sha> and release tags are pushed), so a baseline task definition carrying it leaves any
+  # container the deploy does not rewrite unable to start; that took the develop worker down. The module
+  # rejects "latest" outright. This default only ever applies to a plan with no TF_VAR_image_tag (a PR plan, a
+  # local plan), which never deploys anything.
+  default = "set-by-the-release-never-a-real-tag"
 
   description = <<-EOT
     Container image tag deployed to production.
 
     infra-apply.yml passes TF_VAR_image_tag = the release tag that triggered the apply,
-    so the value below is only a fallback for a local plan. Production should never
-    actually run "latest": that tag follows develop, so an apply that used it would
-    quietly move production onto an untested build.
+    so the value above is only a fallback for a plan with none (a pull-request plan or a
+    local one). It is deliberately not a real tag, and never "latest": that tag does not
+    exist in the immutable repositories, and the module refuses it.
   EOT
 }
 
