@@ -70,6 +70,8 @@ async def generate_section_context(title: str, heading: str | None, section_text
                 },
             ],
             max_tokens=120,
+            # A call nobody is waiting on a screen for: capped, and a short rate limit is waited out (llm_client.complete).
+            background=True,
         )
     except Exception as exc:
         logger.warning("Contextual chunk header generation failed", error=str(exc))

@@ -220,6 +220,8 @@ async def extract_entities_and_relationships(title: str, body_md: str) -> Extrac
             # same reasoning as department_routing.py's LLM call.
             thinking=False,
             max_tokens=1500,
+            # A call nobody is waiting on a screen for: capped, and a short rate limit is waited out (llm_client.complete).
+            background=True,
         )
     except Exception as exc:
         logger.warning("Entity extraction call failed", error=str(exc))

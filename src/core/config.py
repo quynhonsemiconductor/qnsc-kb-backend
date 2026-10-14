@@ -122,6 +122,24 @@ class Settings(BaseSettings):
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
     LLM_TIMEOUT_SECONDS: float = 90.0
+    # Provider rate limits are a condition to manage, not an error to surface (Groq's free tier answers 429 with
+    # "Please try again in 27s"). Per PROCESS, because each Celery child and each API worker has its own gate.
+    #
+    # LLM_MAX_CONCURRENCY caps simultaneous BACKGROUND provider calls (`complete(background=True)`: restructure's
+    # sections, tag suggestions for a connector sync), so a burst queues here instead of drawing a 429 for every
+    # call over the limit. Interactive calls (chat, streaming, multi-query, judging) are NOT capped.
+    LLM_MAX_CONCURRENCY: int = 2
+    # A 429 that asks for a wait up to this long is waited out inline and retried (honouring Retry-After, plus
+    # jitter), up to LLM_RATE_LIMIT_MAX_INLINE_RETRIES times. A longer ask is raised as ProviderRateLimitError
+    # for the caller to defer; the provider is also not called again until the wait has passed.
+    LLM_RATE_LIMIT_INLINE_WAIT_SECONDS: float = 30.0
+    LLM_RATE_LIMIT_MAX_INLINE_RETRIES: int = 2
+    # A reply that is empty is a failed call, not an answer: it is retried this many times, then raised as
+    # ProviderEmptyReplyError. (It used to reach callers as "" and surface as an "unparseable JSON" warning.)
+    LLM_EMPTY_REPLY_RETRIES: int = 2
+    # How many times one draft's AI formatting may be deferred by rate limiting before the lossless fallback is
+    # used instead and a person is told to retry.
+    RESTRUCTURE_MAX_DEFERRALS: int = 6
     # Local, in-process, and deliberately so: no embedding text leaves the deployment and
     # no third-party key gates indexing or search.
     #

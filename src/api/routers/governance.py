@@ -34,6 +34,7 @@ from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
 from src.repositories.ops import OpsRepository
 from src.domain.governance import GovernanceService
+from src.domain.content_restructure import clear_restructure_deferrals
 from src.domain.ai_service import AIService
 from src.domain.search_service import SearchService
 from src.repositories.chunk import ChunkRepository
@@ -61,6 +62,9 @@ router = APIRouter()
 # the upper bound; the extra five minutes avoids racing the worker's final commit.
 _RESTRUCTURE_QUEUE_STALE_AFTER = timedelta(minutes=5)
 _RESTRUCTURE_PROCESSING_STALE_AFTER = timedelta(minutes=65)
+# A deferred draft has a retry scheduled for the provider's Retry-After (seconds to minutes). If it is still
+# deferred after this long the scheduled retry was lost (a worker restart drops a countdown task).
+_RESTRUCTURE_DEFERRED_STALE_AFTER = timedelta(minutes=15)
 
 
 def _visible_restructure_state(draft: PendingDraft, now: datetime | None = None) -> tuple[str, str | None]:
@@ -70,6 +74,8 @@ def _visible_restructure_state(draft: PendingDraft, now: datetime | None = None)
     age = current - (draft.updated_at or draft.created_at)
     if draft.restructure_status == "queued" and age > _RESTRUCTURE_QUEUE_STALE_AFTER:
         return "stalled", "Document preparation did not reach a worker. Retry preparation."
+    if draft.restructure_status == "deferred" and age > _RESTRUCTURE_DEFERRED_STALE_AFTER:
+        return "stalled", "AI formatting was deferred by the provider's rate limit and the retry did not run. Retry preparation."
     if (
         draft.restructure_status == "processing"
         and age > _RESTRUCTURE_PROCESSING_STALE_AFTER
@@ -87,6 +93,8 @@ def _queue_draft_restructure(
     draft.restructure_error = None
     draft.restructure_candidate_md = None
     draft.restructure_decision = "not_reviewed"
+    # A fresh queue generation starts with a full deferral budget.
+    clear_restructure_deferrals(draft)
     # A stalled job is still persisted as ``queued``. Without an explicit heartbeat,
     # retrying queued -> queued leaves the ORM row clean, so no UPDATE runs and the next
     # GET immediately derives ``stalled`` again from the old timestamp.
@@ -592,7 +600,7 @@ async def list_draft_candidates(
         raise HTTPException(status_code=404, detail="Draft not found")
     # Candidates created by older uploads must not be exposed before their
     # reading view has completed either. New uploads do not create them yet.
-    if draft.restructure_status in {"queued", "processing"}:
+    if draft.restructure_status in {"queued", "processing", "deferred"}:
         return []
     await _ensure_candidate_routing(db, draft.company_domain, candidates)
     return [
@@ -1114,7 +1122,7 @@ async def restructure_draft(
             detail="Only users with review or publish permission can restructure this draft",
         )
     visible_status, _visible_error = _visible_restructure_state(draft)
-    if draft.restructure_status in {"queued", "processing"} and visible_status != "stalled":
+    if draft.restructure_status in {"queued", "processing", "deferred"} and visible_status != "stalled":
         raise HTTPException(
             status_code=409,
             detail="Document preparation is already in progress",

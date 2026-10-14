@@ -128,12 +128,26 @@ async def suggest_tags_for_document(
                 },
             ],
             max_tokens=150,
+            background=True,
         )
     except Exception as exc:
-        logger.warning("Automatic tag suggestion call failed", error=str(exc))
+        # Tags are optional, so a rate-limited or failed call leaves the document untagged rather than failing
+        # it. The provider-facing backoff (Retry-After, concurrency cap, empty-reply retry) lives in
+        # llm_client.complete(); what reaches here has already been retried.
+        logger.warning(
+            "Automatic tag suggestion call failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            retry_after=getattr(exc, "retry_after", None),
+        )
         return []
 
     cleaned = _CODE_FENCE_RE.sub("", answer.strip()).strip()
+    if not cleaned:
+        # An empty reply is a failed call, not malformed JSON. complete() retries and raises on it; this
+        # covers a caller handed an empty string by anything else.
+        logger.warning("Automatic tag suggestion returned an empty reply")
+        return []
     try:
         payload = json.loads(cleaned)
         raw_tags = payload.get("tags") if isinstance(payload, dict) else None

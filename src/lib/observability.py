@@ -14,12 +14,14 @@ def setup_logging():
     """
     structlog.configure(
         processors=[
-            structlog_processor,
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            # LAST before the renderer: after contextvars are merged and the traceback is text, so both are
+            # redacted. Placed first, it never saw either.
+            structlog_processor,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
