@@ -25,19 +25,52 @@ from typing import Any
 
 REDACTED = "[REDACTED]"
 
-# Names that carry a credential. Matched as a substring of the parameter name, case-insensitively, so
-# `X-Amz-Signature`, `access_token`, `client_secret` and `tempauth` are all covered without listing each.
-_SENSITIVE = r"[\w.\-]*(?:tempauth|auth|token|secret|signature|password|passwd|credential|apikey|api_key|sig|code|key|sas)[\w.\-]*"
-_QUERY_PARAM = re.compile(rf"(?i)([?&;]{_SENSITIVE}=)([^&\s'\"<>#]+)")
+# A query parameter is redacted by its WHOLE NAME, not by a substring of it. Substring matching redacted
+# `keyword=`, `author=` and `status_code=` (they contain `key`, `auth`, `code`), which made logs harder to read
+# and taught people to distrust the redaction.
+#
+# A name is sensitive when, lower-cased and split into words on `-`, `_`, `.` and camelCase:
+#   * it is exactly one of _WHOLE_NAMES (`code`, `key`, `sig`, `tempauth`, ...), or
+#   * its LAST word is one of _SECRET_WORDS (`access_token`, `X-Amz-Signature`, `client_secret`, `refreshToken`), or
+#   * it ends in `key` after a word that makes it a credential (`api_key`, `X-Api-Key`, `subscription-key`).
+_WHOLE_NAMES = frozenset({
+    "tempauth", "auth", "authorization", "token", "sig", "signature", "secret", "password", "passwd", "pwd",
+    "code", "key", "apikey", "sas", "credential", "credentials", "assertion", "jwt", "bearer",
+})
+_SECRET_WORDS = frozenset({
+    "token", "secret", "signature", "password", "passwd", "credential", "assertion", "apikey",
+    # plurals: `user_credentials`, `access_tokens`, `client_secrets`
+    "tokens", "secrets", "signatures", "passwords", "credentials", "assertions", "apikeys",
+})
+_KEY_PREFIXES = frozenset({"api", "access", "secret", "private", "subscription", "signing", "encryption", "x"})
+
+_QUERY_PARAM = re.compile(r"([?&;])([\w.\-]+)=([^&\s'\"<>#]+)")
 _BEARER = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=\-]{12,}")
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 QUIET_LOGGERS = ("httpx", "httpcore")
+
+
+def _sensitive_name(name: str) -> bool:
+    words = [w.lower() for w in re.split(r"[-_.]", _CAMEL.sub("-", name)) if w]
+    if not words:
+        return False
+    if "".join(words) in _WHOLE_NAMES:
+        return True
+    if words[-1] in _SECRET_WORDS:
+        return True
+    return len(words) > 1 and words[-1] == "key" and words[-2] in _KEY_PREFIXES
+
+
+def _redact_param(match: "re.Match[str]") -> str:
+    sep, name, value = match.groups()
+    return f"{sep}{name}={REDACTED}" if _sensitive_name(name) else match.group(0)
 
 
 def redact(text: str) -> str:
     if "=" not in text and "earer" not in text:
         return text
-    return _BEARER.sub(rf"\1{REDACTED}", _QUERY_PARAM.sub(rf"\1{REDACTED}", text))
+    return _BEARER.sub(rf"\1{REDACTED}", _QUERY_PARAM.sub(_redact_param, text))
 
 
 def _redact_value(value: Any) -> Any:
@@ -52,6 +85,34 @@ def _redact_value(value: Any) -> Any:
         # An exception's text is what gets logged (`error=str(exc)`); a URL in it is as exposed as one in a message.
         return redact(str(value))
     return value
+
+
+def _redact_arg(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = _safe_str(value)
+    if text is None:
+        return value
+    redacted = redact(text)
+    return redacted if redacted != text else value
+
+
+def _safe_str(value: Any) -> str | None:
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
+def _redact_args(args: Any) -> Any:
+    """Redact a LogRecord's args without changing their container type or length."""
+    if isinstance(args, dict):
+        return {key: _redact_arg(value) for key, value in args.items()}
+    if isinstance(args, tuple):
+        return tuple(_redact_arg(value) for value in args)
+    return args
 
 
 def structlog_processor(_logger: Any, _method: str, event_dict: dict) -> dict:
@@ -73,11 +134,20 @@ def install() -> None:
 
     def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
         record = previous(*args, **kwargs)
-        # Only pay for records that can contain a URL or token.
+        # Redact the template and each ARGUMENT in place, KEEPING THE ARGS' SHAPE. Collapsing them into a
+        # finished message (and setting args to None) broke every formatter that unpacks `record.args`:
+        # uvicorn's AccessFormatter reads (client_addr, method, path, http_version, status_code) and raised on
+        # every request, losing the access line. Types that are not credentials-bearing text (the int status
+        # code) are left alone; an argument that is not a str but prints as text containing a credential (an
+        # httpx.URL) is replaced by its redacted text.
         if isinstance(record.msg, str):
             record.msg = redact(record.msg)
         if record.args:
-            record.args = _redact_value(record.args)
+            record.args = _redact_args(record.args)
+        if record.exc_info and record.exc_info[0] is not None and not record.exc_text:
+            # Tracebacks are rendered later by the Formatter and name the URLs of failed requests. Render once
+            # here, redacted; the Formatter uses `exc_text` when it is set.
+            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
         return record
 
     logging.setLogRecordFactory(factory)
@@ -86,7 +156,14 @@ def install() -> None:
 
     config = structlog.get_config()
     processors = list(config.get("processors", []))
-    if structlog_processor not in processors:
-        # First, so everything after it (including the renderer) only ever sees redacted values.
-        structlog.configure(processors=[structlog_processor, *processors])
+    if structlog_processor not in processors and processors:
+        # Just BEFORE the renderer: after everything that adds text (contextvars, stack info, rendered
+        # exceptions), so what is redacted is what is written. Ahead of the renderer, redaction placed first
+        # never saw bound contextvars or a formatted traceback. `format_exc_info` is added in front of it so an
+        # exception is already text by then (the default ConsoleRenderer would render it itself, too late).
+        renderer = processors.pop()
+        if structlog.processors.format_exc_info not in processors:
+            processors.append(structlog.processors.format_exc_info)
+        processors.extend([structlog_processor, renderer])
+        structlog.configure(processors=processors)
     _installed = True
