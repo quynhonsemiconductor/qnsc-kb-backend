@@ -503,9 +503,26 @@ variable "worker_task_alarm" {
   type        = bool
   default     = true
   description = <<-EOT
-    Alarm when the worker has fewer tasks running than desired for 10 minutes. Needs
-    container_insights != "disabled" (the metrics come from Container Insights); the alarm resource has a
-    precondition that says so rather than sitting in INSUFFICIENT_DATA.
+    The SUSTAINED worker alarm: RunningTaskCount < 1 for 10 of 10 minutes, missing data counted as breaching
+    (Container Insights publishes nothing at zero tasks, so missing data IS the outage). Needs
+    container_insights != "disabled".
+
+    ONLY FOR A SERVICE THAT IS MEANT TO BE RUNNING ALL THE TIME. It is created only while idle_schedule is null:
+    an idle schedule scales the worker to zero on purpose, which this alarm would report every night. So the
+    pairing is: re-enabling idle_schedule disables this alarm, and removing it (the production go-live
+    checklist) arms it. The fast event-based signal (worker_event_alerts) is independent of this and stays on.
+  EOT
+}
+
+variable "worker_event_alerts" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    EventBridge rules that email the alarm topic when ECS reports that a worker task failed to start
+    (CannotPullContainerError, ResourceInitializationError, TaskFailedToStart), that the service cannot start or
+    place tasks (SERVICE_TASK_START_IMPAIRED / SERVICE_TASK_PLACEMENT_FAILURE), or that a deployment failed
+    (SERVICE_DEPLOYMENT_FAILED). Fast, free, and needs neither Container Insights nor a running task. Also adds
+    the EventBridge statement to the alarm topic's policy.
   EOT
 }
 

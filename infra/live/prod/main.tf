@@ -27,7 +27,8 @@
 //   1. cache = { enabled = true }              ~10 min, issues a NEW endpoint
 //   2. api    = { min_count = 1, enable_autoscaling = true }
 //   3. worker = { min_count = 1 }              leave max_count at 1 — beat is a singleton
-//   4. remove idle_schedule entirely
+//   4. remove idle_schedule entirely            (this also ARMS the sustained worker alarm, which exists
+//                                                only while idle_schedule is null)
 //   5. rds.instance_class → db.t4g.small at minimum; re-measure against the real corpus
 //      before settling, because the HNSW index is what grows
 //
@@ -104,8 +105,8 @@ module "stack" {
   // reset the task definition to whatever :latest points at — which is a develop build.
   image_tag = var.image_tag
 
-  // Service-level Container Insights, required by the worker running-below-desired alarm (the module
-  // refuses the alarm without it). Billed as custom metrics (about a dozen per service plus cluster
+  // Service-level Container Insights, required by the sustained worker-not-running alarm (the module
+  // refuses that alarm without it; the alarm only exists while idle_schedule is null). Billed as custom metrics (about a dozen per service plus cluster
   // level): confirm the amount in the AWS Pricing Calculator. To turn both off set "disabled" here and
   // worker_task_alarm = false.
   container_insights = "enabled"

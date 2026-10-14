@@ -1131,80 +1131,170 @@ module "observability" {
   tags = local.tags
 }
 
-// ── Worker: running < desired for 10 minutes ─────────────────────────────────
-// Nothing watched this. The worker was down because a container in its task could not pull its image;
-// ECS kept retrying, the deploy only verified the API, the CPU/memory alarms have no data from a task that
-// is not running, and the queue stood still until someone noticed. The signal that does not depend on WHY
-// the task is not running is "fewer tasks running than the service wants".
+// ── Worker health: two signals ───────────────────────────────────────────────
+// The worker went down because a container in its task could not pull its image. ECS kept retrying, the deploy
+// only verified the API, the CPU/memory alarms have no data from a task that is not running, and the queue stood
+// still until someone noticed.
 //
-// Needs Container Insights (RunningTaskCount / DesiredTaskCount, ECS/ContainerInsights); a precondition
-// refuses an apply that asks for the alarm with Insights off, because the alarm would then sit in
-// INSUFFICIENT_DATA forever and look like it worked.
+// MEASURED in develop (2026-10-14, alarm test): with the worker at 0 running tasks, Container Insights published
+// NO datapoint for RunningTaskCount and NO datapoint for DesiredTaskCount, and resumed only when a task was
+// pending again. So "desired > running" in any form (including FILL) evaluates 0 > 0 during exactly the outage
+// it was meant to catch. Missing data IS the outage signal. Two independent signals, therefore:
 //
-// 10 consecutive 1-minute datapoints, so a normal start (task launch plus image pull) or a deploy roll does
-// not page, and a service whose desired count is 0 never breaches.
-//
-// MISSING DATA IS FILLED, NOT IGNORED. A worker with no running tasks may publish no RunningTaskCount datapoint
-// at all, and with plain `desired > running` that missing series makes the expression itself missing, which
-// `notBreaching` reads as fine: silent in exactly the outage the alarm exists for. `FILL(running, 0)` turns an
-// absent running count into 0, so desired 1 / running (absent) is 1 > 0 and breaches. If DesiredTaskCount is also
-// absent there is no service to speak of (an environment that is stopped), the expression has no data, and
-// `notBreaching` keeps the alarm quiet instead of walking to INSUFFICIENT_DATA overnight.
-resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
-  count = var.worker_task_alarm ? 1 : 0
+//  1. FAST, event based (EventBridge, no Container Insights needed): ECS says so itself the moment a worker task
+//     fails to start (CannotPullContainerError, ResourceInitializationError, TaskFailedToStart), a service
+//     cannot start or place tasks, or a deployment fails. Sent to the alarm topic with the service and reason.
+//  2. SUSTAINED, metric based: RunningTaskCount < 1 for 10 of 10 minutes with missing data treated as BREACHING.
+//     It is only correct for a service that is meant to be running ALL the time. An idle schedule scales the
+//     worker to 0 on purpose, publishes no data, and would alarm every night, so it exists only while
+//     `idle_schedule` is null. THE PAIRING: re-enabling idle_schedule disables this alarm (and removing it, as the
+//     production go-live checklist does, arms it). It is derived from idle_schedule so the two cannot disagree.
 
-  alarm_name          = "${local.name}-worker-running-below-desired"
-  alarm_description   = "The worker service has had fewer tasks running than desired for 10 minutes. Check the service events and the stopped tasks' stoppedReason (an image that cannot be pulled, a failing essential container, no capacity)."
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = 1
+locals {
+  worker_always_on_alarm = var.worker_task_alarm && var.idle_schedule == null
+}
+
+resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
+  count = local.worker_always_on_alarm ? 1 : 0
+
+  alarm_name          = "${local.name}-worker-not-running"
+  alarm_description   = "The worker has had no running task (or no metric at all, which is what zero tasks looks like in Container Insights) for 10 minutes. Check the service events and the stopped tasks' stoppedReason (an image that cannot be pulled, a failing essential container, no capacity). Only exists while idle_schedule is null: an idle schedule scales the worker to zero on purpose."
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "RunningTaskCount"
+  statistic           = "Minimum"
+  period              = 60
   evaluation_periods  = 10
   datapoints_to_alarm = 10
-  treat_missing_data  = "notBreaching"
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
 
-  metric_query {
-    id          = "short"
-    expression  = "IF(FILL(desired, 0) > FILL(running, 0), 1, 0)"
-    label       = "worker running below desired"
-    return_data = true
-  }
-
-  metric_query {
-    id = "running"
-    metric {
-      namespace   = "ECS/ContainerInsights"
-      metric_name = "RunningTaskCount"
-      period      = 60
-      stat        = "Average"
-      dimensions = {
-        ClusterName = module.ecs_cluster.cluster_name
-        ServiceName = module.worker.service_name
-      }
-    }
-  }
-
-  metric_query {
-    id = "desired"
-    metric {
-      namespace   = "ECS/ContainerInsights"
-      metric_name = "DesiredTaskCount"
-      period      = 60
-      stat        = "Average"
-      dimensions = {
-        ClusterName = module.ecs_cluster.cluster_name
-        ServiceName = module.worker.service_name
-      }
-    }
+  dimensions = {
+    ClusterName = module.ecs_cluster.cluster_name
+    ServiceName = module.worker.service_name
   }
 
   alarm_actions = [module.observability.alarm_topic_arn]
+  ok_actions    = [module.observability.alarm_topic_arn]
   tags          = local.tags
 
   lifecycle {
     precondition {
       condition     = var.container_insights != "disabled"
-      error_message = "worker_task_alarm needs Container Insights (RunningTaskCount / DesiredTaskCount). Set container_insights to \"enabled\", or worker_task_alarm = false."
+      error_message = "worker_task_alarm needs Container Insights (RunningTaskCount). Set container_insights to \"enabled\", or worker_task_alarm = false."
     }
   }
+}
+
+// The alarm topic has no resource policy in the observability module (CloudWatch alarms publish under the
+// account's default policy). EventBridge is a service principal and needs an explicit statement. The default
+// statement is reproduced as it is, so alarms keep working, and one statement for EventBridge is added.
+resource "aws_sns_topic_policy" "alarms_from_events" {
+  count = var.worker_event_alerts ? 1 : 0
+
+  arn = module.observability.alarm_topic_arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "__default_statement_ID"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = [
+          "SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission", "SNS:RemovePermission",
+          "SNS:DeleteTopic", "SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:Publish",
+        ]
+        Resource  = module.observability.alarm_topic_arn
+        Condition = { StringEquals = { "AWS:SourceOwner" = data.aws_caller_identity.current.account_id } }
+      },
+      {
+        Sid       = "WorkerEventsPublish"
+        Effect    = "Allow"
+        Principal = { Service = "events.amazonaws.com" }
+        Action    = "sns:Publish"
+        Resource  = module.observability.alarm_topic_arn
+        Condition = { ArnLike = { "aws:SourceArn" = "arn:aws:events:${var.region}:${data.aws_caller_identity.current.account_id}:rule/${local.name}-worker-*" } }
+      },
+    ]
+  })
+}
+
+locals {
+  worker_event_rules_all = {
+    task-failed-to-start = {
+      description = "A worker task was stopped because it could not start (image pull, resource initialization) or an essential container exited (crash loop)."
+      pattern = {
+        source        = ["aws.ecs"]
+        "detail-type" = ["ECS Task State Change"]
+        detail = {
+          clusterArn = [module.ecs_cluster.cluster_arn]
+          group      = ["service:${module.worker.service_name}"]
+          lastStatus = ["STOPPED"]
+          "$or" = [
+            { stopCode = ["TaskFailedToStart"] },
+            # A crash-looping worker: the task starts, an essential container (worker or beat) exits, ECS restarts it.
+            # The sustained alarm may never see 10 minutes in a row with zero tasks when one is up for a minute in between.
+            { stopCode = ["EssentialContainerExited"] },
+            { stoppedReason = [{ wildcard = "*CannotPullContainerError*" }] },
+            { stoppedReason = [{ wildcard = "*ResourceInitializationError*" }] },
+          ]
+        }
+      }
+      paths    = { service = "$.detail.group", reason = "$.detail.stoppedReason", at = "$.time" }
+      template = "\"qnsc-kb worker task stopped (failed to start or crashed): <service>. Reason: <reason>. At <at>. Cluster ${module.ecs_cluster.cluster_name}.\""
+    }
+    service-impaired = {
+      description = "The worker service cannot start or place tasks."
+      pattern = {
+        source        = ["aws.ecs"]
+        "detail-type" = ["ECS Service Action"]
+        resources     = [module.worker.service_arn]
+        detail        = { eventName = ["SERVICE_TASK_START_IMPAIRED", "SERVICE_TASK_PLACEMENT_FAILURE"] }
+      }
+      paths    = { event = "$.detail.eventName", service = "$.resources[0]", at = "$.time" }
+      template = "\"qnsc-kb worker service problem: <event> on <service>. At <at>. Cluster ${module.ecs_cluster.cluster_name}.\""
+    }
+    deployment-failed = {
+      description = "A deployment of the worker service failed."
+      pattern = {
+        source        = ["aws.ecs"]
+        "detail-type" = ["ECS Deployment State Change"]
+        resources     = [module.worker.service_arn]
+        detail        = { eventName = ["SERVICE_DEPLOYMENT_FAILED"] }
+      }
+      paths    = { service = "$.resources[0]", reason = "$.detail.reason", at = "$.time" }
+      template = "\"qnsc-kb worker deployment FAILED: <service>. <reason>. At <at>. Cluster ${module.ecs_cluster.cluster_name}.\""
+    }
+  }
+  worker_event_rules = { for name, rule in local.worker_event_rules_all : name => rule if var.worker_event_alerts }
+}
+
+// Event-driven, free, and independent of Container Insights. Noise: ECS backs off its own restarts of a task that
+// keeps failing, so a persistent fault produces a trickle of task-stopped events rather than a flood; if it
+// is still too chatty, narrow the first rule to `stopCode = TaskFailedToStart` only. There is no dedupe here.
+resource "aws_cloudwatch_event_rule" "worker" {
+  for_each = local.worker_event_rules
+
+  name          = "${local.name}-worker-${each.key}"
+  description   = each.value.description
+  event_pattern = jsonencode(each.value.pattern)
+  tags          = local.tags
+}
+
+resource "aws_cloudwatch_event_target" "worker_to_alarm_topic" {
+  for_each = local.worker_event_rules
+
+  rule = aws_cloudwatch_event_rule.worker[each.key].name
+  arn  = module.observability.alarm_topic_arn
+
+  input_transformer {
+    input_paths    = each.value.paths
+    input_template = each.value.template
+  }
+
+  depends_on = [aws_sns_topic_policy.alarms_from_events]
 }
 
 // ── Embedding model health ───────────────────────────────────────────────────
