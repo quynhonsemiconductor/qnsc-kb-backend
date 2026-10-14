@@ -1224,7 +1224,7 @@ resource "aws_sns_topic_policy" "alarms_from_events" {
 locals {
   worker_event_rules_all = {
     task-failed-to-start = {
-      description = "A worker task was stopped because it could not start (image pull, resource initialization)."
+      description = "A worker task was stopped because it could not start (image pull, resource initialization) or an essential container exited (crash loop)."
       pattern = {
         source        = ["aws.ecs"]
         "detail-type" = ["ECS Task State Change"]
@@ -1234,13 +1234,16 @@ locals {
           lastStatus = ["STOPPED"]
           "$or" = [
             { stopCode = ["TaskFailedToStart"] },
+            # A crash-looping worker: the task starts, an essential container (worker or beat) exits, ECS restarts it.
+            # The sustained alarm may never see 10 minutes in a row with zero tasks when one is up for a minute in between.
+            { stopCode = ["EssentialContainerExited"] },
             { stoppedReason = [{ wildcard = "*CannotPullContainerError*" }] },
             { stoppedReason = [{ wildcard = "*ResourceInitializationError*" }] },
           ]
         }
       }
       paths    = { service = "$.detail.group", reason = "$.detail.stoppedReason", at = "$.time" }
-      template = "\"qnsc-kb worker task failed to start: <service>. Reason: <reason>. At <at>. Cluster ${module.ecs_cluster.cluster_name}.\""
+      template = "\"qnsc-kb worker task stopped (failed to start or crashed): <service>. Reason: <reason>. At <at>. Cluster ${module.ecs_cluster.cluster_name}.\""
     }
     service-impaired = {
       description = "The worker service cannot start or place tasks."

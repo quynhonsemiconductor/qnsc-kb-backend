@@ -66,8 +66,8 @@ module "stack" {
   // value just has to be one that can never be mistaken for a real tag. The module rejects `latest`.
   image_tag = "set-by-the-deploy-never-a-real-tag"
 
-  // Service-level Container Insights, required by the worker running-below-desired alarm (the module
-  // refuses the alarm without it). Billed as custom metrics (about a dozen per service plus cluster
+  // Service-level Container Insights, required by the sustained worker-not-running alarm (the module
+  // refuses that alarm without it; the alarm only exists while idle_schedule is null). Billed as custom metrics (about a dozen per service plus cluster
   // level): confirm the amount in the AWS Pricing Calculator. To turn both off set "disabled" here and
   // worker_task_alarm = false.
   container_insights = "enabled"
