@@ -98,14 +98,22 @@ def test_a_load_that_outlasts_the_timeout_stops_holding_readiness(fresh_state, b
     monkeypatch.setattr(main, "warm_up_embeddings", lambda: release.wait(5))
     fresh_state.begin()
 
+    async def scenario():
+        task = asyncio.create_task(main._preload_embedding_model())
+        await asyncio.sleep(0.3)  # past the timeout, load still running
+        body = await main.health_ready()
+        release.set()
+        await task
+        return body
+
     try:
-        asyncio.run(main._preload_embedding_model())
-        body = ready()
+        body = asyncio.run(scenario())
     finally:
         release.set()
 
-    assert fresh_state.status == warmup.TIMEOUT
-    assert body["degraded"] is True
+    assert body["degraded"] is True and body["embedding"]["state"] == warmup.TIMEOUT
+    # and once the load really ends, the verdict follows it (see test_embedding_warmup_outcomes.py)
+    assert fresh_state.status == warmup.READY
 
 
 def test_the_probe_goes_green_exactly_when_the_load_ends(fresh_state, backing_services_up, monkeypatch):
