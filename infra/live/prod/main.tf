@@ -104,6 +104,12 @@ module "stack" {
   // reset the task definition to whatever :latest points at — which is a develop build.
   image_tag = var.image_tag
 
+  // Service-level Container Insights, required by the worker running-below-desired alarm (the module
+  // refuses the alarm without it). Billed as custom metrics (about a dozen per service plus cluster
+  // level): confirm the amount in the AWS Pricing Calculator. To turn both off set "disabled" here and
+  // worker_task_alarm = false.
+  container_insights = "enabled"
+
   // 90 days of logs (an audit floor rather than a debugging preference), and a real
   // secret recovery window: unlike develop, a secret deleted here by mistake is not
   // trivially recreated, because its VALUE was never in Terraform.

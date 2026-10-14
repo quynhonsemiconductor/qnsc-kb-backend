@@ -54,8 +54,23 @@ module "stack" {
   runtime_state_key = "platform/runtime-dev/terraform.tfstate"
   storage_state_key = "platform/storage-dev/terraform.tfstate"
 
-  // Develop tracks the newest build; production pins the release tag it was cut from.
-  image_tag = "latest"
+  // A PLACEHOLDER, on purpose. `latest` never exists: the ECR repositories are IMMUTABLE and the deploy
+  // pushes `<sha>` tags only. Terraform owns the BASELINE task definition and every deploy derives from
+  // it, so a baseline tag that cannot be pulled leaks into any container the deploy does not rewrite. That
+  // is exactly how the worker went down: Celery beat (same image as the worker, second container) kept
+  // `...-worker:latest` -> CannotPullContainerError, and beat is essential, so the task failed.
+  //
+  // `ignore_changes = [task_definition]` on the services means an apply never rolls the RUNNING service
+  // to this baseline, and the deploy replaces the tag in every container on the service image
+  // (ci actions/update-task-definition) and refuses anything still on `latest` or missing from ECR. This
+  // value just has to be one that can never be mistaken for a real tag. The module rejects `latest`.
+  image_tag = "set-by-the-deploy-never-a-real-tag"
+
+  // Service-level Container Insights, required by the worker running-below-desired alarm (the module
+  // refuses the alarm without it). Billed as custom metrics (about a dozen per service plus cluster
+  // level): confirm the amount in the AWS Pricing Calculator. To turn both off set "disabled" here and
+  // worker_task_alarm = false.
+  container_insights = "enabled"
 
   // Cost-leaning: short retention, and immediate secret deletion so a
   // destroy+redeploy cycle does not trip "secret scheduled for deletion".
