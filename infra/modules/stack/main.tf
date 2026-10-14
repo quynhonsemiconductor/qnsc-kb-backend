@@ -1205,4 +1205,46 @@ resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
       error_message = "worker_task_alarm needs Container Insights (RunningTaskCount / DesiredTaskCount). Set container_insights to \"enabled\", or worker_task_alarm = false."
     }
   }
+
+// ── Embedding model health ───────────────────────────────────────────────────
+// Nothing else watches this. `/health/ready` is not on any load balancer's path here (ingress is
+// a Cloudflare Tunnel), the deploy polls `/health/ready`, and a model that failed to load or took
+// longer than EMBEDDING_WARMUP_TIMEOUT_SECONDS leaves the api answering 200 with vector search
+// degraded. The api logs one of these two lines (src/api/main.py::_preload_embedding_model) when
+// that happens; this turns them into a metric and an alarm on the shared alarm topic.
+//
+// Terms rather than a JSON selector so it matches whether the line is rendered as JSON or text.
+// NOT TESTED against a live log group (no AWS access when written): after the first apply, run
+// `aws logs test-metric-filter` with a real line, or provoke one in develop.
+//
+// treat_missing_data is notBreaching because a scheduled-to-zero environment publishes no logs, and
+// an alarm that walks to INSUFFICIENT_DATA every night teaches people to ignore it.
+resource "aws_cloudwatch_log_metric_filter" "embedding_model_unhealthy" {
+  name           = "${local.name}-api-embedding-model-unhealthy"
+  log_group_name = local.api_log_group
+  pattern        = "?\"Embedding model preload failed\" ?\"Embedding model warm-up timed out\""
+
+  metric_transformation {
+    name      = "EmbeddingModelUnhealthy"
+    namespace = "QNSC/${local.name}"
+    value     = "1"
+  }
+
+  depends_on = [module.api]
+}
+
+resource "aws_cloudwatch_metric_alarm" "embedding_model_unhealthy" {
+  alarm_name          = "${local.name}-api-embedding-model-unhealthy"
+  alarm_description   = "The api could not load the embedding model, or took longer than EMBEDDING_WARMUP_TIMEOUT_SECONDS. Vector search is degraded to keyword search until it loads. Check the api log group for the warm-up lines."
+  namespace           = "QNSC/${local.name}"
+  metric_name         = "EmbeddingModelUnhealthy"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [module.observability.alarm_topic_arn]
+  tags          = local.tags
 }
