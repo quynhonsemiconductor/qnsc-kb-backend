@@ -27,7 +27,8 @@
 //   1. cache = { enabled = true }              ~10 min, issues a NEW endpoint
 //   2. api    = { min_count = 1, enable_autoscaling = true }
 //   3. worker = { min_count = 1 }              leave max_count at 1 — beat is a singleton
-//   4. remove idle_schedule entirely
+//   4. remove idle_schedule entirely            (this also ARMS the sustained worker alarm, which exists
+//                                                only while idle_schedule is null)
 //   5. rds.instance_class → db.t4g.small at minimum; re-measure against the real corpus
 //      before settling, because the HNSW index is what grows
 //
