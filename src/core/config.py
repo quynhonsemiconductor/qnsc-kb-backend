@@ -231,8 +231,11 @@ class Settings(BaseSettings):
     # How long `/health/ready` waits for the embedding model to load before it stops waiting
     # (see src/core/warmup.py). It bounds a stuck load; it does not cancel it. Must exceed the
     # real load time on the slowest task you run, or readiness goes 200 while the model is
-    # still loading, which is the state this setting exists to prevent.
-    EMBEDDING_WARMUP_TIMEOUT_SECONDS: float = 240.0
+    # still loading, which is the state this setting exists to prevent. Kept UNDER the shared deploy
+    # workflow's fixed 120 s readiness poll (the deploy polls /health/ready): a longer wait would let a
+    # stuck load outlast the poll and fail the deploy instead of degrading. Measured cold load on
+    # develop Fargate is ~3-4 s.
+    EMBEDDING_WARMUP_TIMEOUT_SECONDS: float = 90.0
     # Hosted-embedding retries. Rate limits are the EXPECTED condition for a hosted
     # embedding API during bulk ingestion, not an exceptional one: without a retry a
     # single 429 fails the index for a whole article. Only 429 and 5xx are retried — a
@@ -421,6 +424,13 @@ class Settings(BaseSettings):
     # makes search look stuck". The scoring thread cannot be cancelled; while it finishes,
     # further searches skip the cross-encoder instead of queueing behind it.
     CROSS_ENCODER_TIMEOUT_SECONDS: float = 3.0
+    # After this many CONSECUTIVE timeouts the reranker is skipped for the cooldown below instead of
+    # being tried (and waited on, up to the timeout) by every search. A timed-out call also keeps a
+    # thread busy until it finishes, so on a CPU that is too small the feature would otherwise cost
+    # every comparison query the full timeout, forever. One success resets the count; after the
+    # cooldown a single search is allowed through to find out whether it has recovered.
+    CROSS_ENCODER_BREAKER_THRESHOLD: int = 3
+    CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS: float = 300.0
     # torch's own thread pool, separate from EMBEDDING_ONNX_THREADS. Left alone, torch sizes it from
     # the host's cores, not from a Fargate task's CPU share, and oversubscribes the task.
     # 0 leaves torch's default; set it with the task's `cpu` in infra/live/*/main.tf.

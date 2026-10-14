@@ -21,6 +21,7 @@ from src.rag.reranker import (
     retrieval_score,
 )
 from src.rag.cross_encoder import CrossEncoderUnavailable, reorder_by_cross_encoder
+from src.rag.cross_encoder import breaker as cross_encoder_breaker
 from src.rag.cross_encoder import score as cross_encoder_score
 from src.rag.query_router import is_comparison_query, needs_deep_retrieval, split_comparison_subjects
 from src.rag.multi_query import generate_followup_query, generate_subqueries
@@ -376,7 +377,8 @@ class SearchService:
                     (chunk, retrieval_score(retrieval_query, chunk, prepared))
                     for chunk in pool[:pool_limit]
                 ]
-            if cross_encoder_enabled and len(result) > 1:
+            attempt = cross_encoder_breaker.begin() if cross_encoder_enabled and len(result) > 1 else None
+            if attempt is not None:
                 try:
                     try:
                         cross_scores = await asyncio.wait_for(
@@ -388,6 +390,7 @@ class SearchService:
                             timeout=settings.CROSS_ENCODER_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError as exc:
+                        cross_encoder_breaker.record_timeout(attempt)
                         raise CrossEncoderUnavailable(
                             f"no answer within {settings.CROSS_ENCODER_TIMEOUT_SECONDS}s "
                             f"for {len(result)} passages"
@@ -397,12 +400,17 @@ class SearchService:
                     # and every caller reading `score` were tuned against that scale, and
                     # mixing in a cross-encoder's own (unbounded, model-specific) scale
                     # here would shift every threshold decision with no warning.
+                    cross_encoder_breaker.record_success(attempt)
                     result = reorder_by_cross_encoder(result, cross_scores)
                 except CrossEncoderUnavailable as exc:
                     logger.warning(
                         "Cross-encoder reranking failed, falling back to lexical order",
                         error=str(exc),
                     )
+                finally:
+                    # Also on CancelledError (a dropped request): a probe that ends without a result must not
+                    # leave the circuit half-open forever.
+                    cross_encoder_breaker.finish(attempt)
             return result
 
         ranked = await _rerank(candidates)
