@@ -1205,6 +1205,7 @@ resource "aws_cloudwatch_metric_alarm" "worker_not_running" {
       error_message = "worker_task_alarm needs Container Insights (RunningTaskCount / DesiredTaskCount). Set container_insights to \"enabled\", or worker_task_alarm = false."
     }
   }
+}
 
 // ── Embedding model health ───────────────────────────────────────────────────
 // Nothing else watches this. `/health/ready` is not on any load balancer's path here (ingress is
