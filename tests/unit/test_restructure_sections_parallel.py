@@ -29,7 +29,7 @@ def fake_llm(monkeypatch):
     """Record concurrency and let sections finish out of order."""
     state = {"active": 0, "peak": 0, "seen": []}
 
-    async def _fake(title, section, model, department_descriptions=None):
+    async def _fake(title, section, model, department_descriptions=None, background=True):
         state["active"] += 1
         state["peak"] = max(state["peak"], state["active"])
         state["seen"].append(section[:12])

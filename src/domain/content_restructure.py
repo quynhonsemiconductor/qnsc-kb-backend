@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import structlog
 
 from src.core.config import settings
-from src.domain.llm_client import complete, resolve_provider
+from src.domain.llm_client import ProviderRateLimitError, complete, resolve_provider
 from src.rag.prompt_fencing import fence_untrusted
 
 logger = structlog.get_logger()
@@ -79,6 +79,21 @@ class RestructureResult:
     chunks: list[str] | None = None
     report: "RestructureReport" = field(default_factory=lambda: RestructureReport())
     auxiliary_ai_allowed: bool = True
+    # Set with status "deferred": seconds the provider asked us to wait. The caller re-queues; nothing was
+    # formatted and nothing should be persisted as if it had been.
+    retry_after: int | None = None
+
+
+def clear_restructure_deferrals(draft: object) -> None:
+    """Forget how many times rate limiting has deferred this draft's AI formatting.
+
+    The count only means something within one run of consecutive deferrals. Called when the formatting finally
+    succeeds and whenever a person or the system queues it afresh, so a draft that was deferred twice last
+    week does not start this week with a smaller budget.
+    """
+    metadata = getattr(draft, "content_metadata", None)
+    if metadata and "restructure_deferrals" in metadata:
+        draft.content_metadata = {k: v for k, v in metadata.items() if k != "restructure_deferrals"}  # type: ignore[attr-defined]
 
 
 @dataclass
@@ -348,6 +363,7 @@ async def _restructure_single_document(
     source_text: str,
     model: str,
     department_descriptions: list[tuple[str, str]] | None = None,
+    background: bool = True,
 ) -> RestructureResult:
     """Run one bounded LLM formatting request and apply all lossless checks."""
     fallback = _fallback_text(source_text)
@@ -380,6 +396,7 @@ async def _restructure_single_document(
             timeout=settings.RESTRUCTURE_TIMEOUT_SECONDS,
             thinking=False,
             max_tokens=settings.RESTRUCTURE_MAX_OUTPUT_TOKENS,
+            background=background,
         )
         formatted = _clean_markdown(formatted_raw)
         report = _report(source_text, formatted)
@@ -422,6 +439,24 @@ async def _restructure_single_document(
             chunk_count=len(split_into_chunks(formatted)),
         )
         return _result(source_text, formatted, "llm", resolved_model)
+    except ProviderRateLimitError as exc:
+        # Not a failure of the document or of the model: the provider is over quota for a moment. Report it
+        # as a wait so the caller re-queues, instead of settling for the unformatted view and a vague error.
+        logger.info(
+            "Document restructuring deferred by the provider's rate limit",
+            title=title,
+            provider=provider,
+            retry_after=exc.retry_after,
+        )
+        result = _result(
+            source_text,
+            fallback,
+            "deferred",
+            model,
+            "AI formatting deferred: the AI provider is rate limiting requests.",
+        )
+        result.retry_after = exc.retry_after or 30
+        return result
     except Exception as exc:
         error_detail = (
             str(exc).strip()
@@ -448,6 +483,7 @@ async def _restructure_sections(
     sections: list[str],
     model: str,
     department_descriptions: list[tuple[str, str]] | None,
+    background: bool = True,
 ) -> list[RestructureResult]:
     """Format sections concurrently, returning them in document order.
 
@@ -469,7 +505,7 @@ async def _restructure_sections(
     async def _one(index: int, section: str) -> RestructureResult:
         async with limit:
             return await _restructure_single_document(
-                f"{title} — part {index}", section, model, department_descriptions
+                f"{title} — part {index}", section, model, department_descriptions, background
             )
 
     return list(
@@ -487,8 +523,40 @@ async def restructure_document(
     source_text: str,
     enabled: bool | None = None,
     department_descriptions: list[tuple[str, str]] | None = None,
+    *,
+    background: bool = False,
 ) -> RestructureResult:
     """Create a RAG-friendly reading representation without replacing source text.
+
+    ``background`` says who is waiting. The worker task passes True: its calls are gated and may wait out a
+    provider rate limit, and a limit it cannot wait out comes back as status ``deferred`` for the task to
+    re-queue. A request handler (manual create, edit, admin re-run) passes False: nothing re-queues for it, so
+    a rate limit is mapped HERE to the lossless fallback, never ``deferred``, and the request never sleeps
+    on a Retry-After. The default is the safe, request-handler behaviour.
+    """
+    result = await _restructure_document(
+        title, source_text, enabled, department_descriptions, background
+    )
+    if result.status == "deferred" and not background:
+        return _result(
+            source_text,
+            _fallback_text(source_text),
+            "fallback_formatting",
+            result.model,
+            "AI formatting was rate limited by the AI provider; a lossless reading view was generated "
+            "instead. Retry from Pending Drafts later.",
+        )
+    return result
+
+
+async def _restructure_document(
+    title: str,
+    source_text: str,
+    enabled: bool | None,
+    department_descriptions: list[tuple[str, str]] | None,
+    background: bool,
+) -> RestructureResult:
+    """The work behind ``restructure_document``.
 
     Oversized inputs are split into bounded paragraph groups and formatted in order.
     If one group falls back, the combined result remains safe and is marked as a
@@ -558,8 +626,17 @@ async def restructure_document(
 
     if sections and provider_config is not None:
         section_results = await _restructure_sections(
-            title, sections, provider_config.model, department_descriptions
+            title, sections, provider_config.model, department_descriptions, background
         )
+        deferred = [result for result in section_results if result.status == "deferred"]
+        if deferred:
+            # One section could not run. Keeping the others would persist a half-formatted document as if it
+            # were final, so the whole document waits and is formatted again.
+            waiting = _result(
+                source_text, fallback, "deferred", provider_config.model, deferred[0].error
+            )
+            waiting.retry_after = max(result.retry_after or 0 for result in deferred) or 30
+            return waiting
         combined = "\n\n".join(result.body_md for result in section_results).strip()
         all_succeeded = all(result.status == "llm" for result in section_results)
         logger.info(
@@ -601,5 +678,5 @@ async def restructure_document(
     # Use the resolved administrator-configured model even when the request
     # later fails, so fallback results retain accurate provider metadata.
     return await _restructure_single_document(
-        title, source_text, provider_config.model, department_descriptions
+        title, source_text, provider_config.model, department_descriptions, background
     )

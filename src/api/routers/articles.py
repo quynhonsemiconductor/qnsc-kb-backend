@@ -66,6 +66,7 @@ from src.domain.content_restructure import restructure_document
 from src.domain.document_splitter import split_document_candidates
 from src.domain.governance import GovernanceService
 from src.domain.llm_client import complete, resolve_provider
+from src.domain.content_restructure import clear_restructure_deferrals
 from src.domain.events import event_bus
 from src.domain.permissions import PermissionService
 from src.domain.article_edit_requests import create_article_edit_request as create_edit_request
@@ -1434,6 +1435,7 @@ async def complete_source_upload(
     draft.summary = extracted
     draft.page_texts = extracted_pages
     draft.restructure_status = "queued" if restructuring_enabled else "disabled"
+    clear_restructure_deferrals(draft)
     draft.restructure_model = (
         settings.RESTRUCTURE_MODEL if restructuring_enabled else "none"
     )
@@ -1758,7 +1760,7 @@ async def create_article(
         )
     )
     restructure_result = await restructure_document(
-        article_in.title, article_in.body_md, enabled=restructuring_enabled
+        article_in.title, article_in.body_md, enabled=restructuring_enabled, background=False
     )
     draft_body = restructure_result.body_md or article_in.body_md
     matches = await find_similar_documents(db, current_user, draft_body)
@@ -2117,7 +2119,7 @@ async def update_article(
         )
     )
     restructure_result = await restructure_document(
-        title, body_md, enabled=restructuring_enabled
+        title, body_md, enabled=restructuring_enabled, background=False
     )
     draft_body = restructure_result.body_md or body_md
     matches = await find_similar_documents(db, current_user, draft_body)
