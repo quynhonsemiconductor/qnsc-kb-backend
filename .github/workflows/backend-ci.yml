@@ -35,8 +35,24 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-backend-${{ github.ref }}
-  cancel-in-progress: true
+  # A PUSH TO MAIN IS NEVER CANCELLED, and that takes a group of its own per commit. The group used to be
+  # `ci-backend-${{ github.ref }}` with cancel-in-progress, so two commits landing on main close together shared
+  # `ci-backend-refs/heads/main` and the second CANCELLED the first's run. The first commit's deploy then failed its
+  # "wait for Backend · CI on this commit" gate: a green commit that could not deploy ("Canceling since a higher
+  # priority waiting request for ci-backend-refs/heads/main exists").
+  #
+  # `cancel-in-progress: false` alone would NOT have fixed it: GitHub keeps ONE pending run per group and cancels
+  # every other pending one, so a third push still killed the second's run. Only a distinct group per commit
+  # keeps them all.
+  #
+  #   pull_request -> one group per PR, cancel in progress (a newer push to the PR supersedes the older run:
+  #                   unchanged behaviour; refs/pull/N/merge was already per PR)
+  #   push (main)  -> one group per COMMIT, never cancelled
+  #   anything else (schedule, dispatch) -> its own run id, so it can neither cancel nor be cancelled by a push
+  #
+  # `pr-title.yml` deliberately has its own group and is unaffected.
+  group: ci-backend-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && format('main-{0}', github.sha) || format('{0}-{1}', github.event_name, github.run_id)) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
