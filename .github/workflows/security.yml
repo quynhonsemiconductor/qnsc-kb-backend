@@ -59,6 +59,7 @@ jobs:
     uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@v1
     with:
       blocking: true
+      combine: true # actionlint + zizmor as ONE job; the required check is now `actions-security / Workflow security (actionlint, zizmor)`
 
   security:
     # A CEILING, not a grant this workflow uses: the reusable's Trivy job declares
@@ -73,7 +74,11 @@ jobs:
     uses: quynhonsemiconductor/ci/.github/workflows/security.yml@v1
     with:
       product: qnsc-kb
-      image_target: api
+      # Gitleaks + osv-scanner + Semgrep as ONE job; the required check is now
+      # `security / Security scans (Gitleaks, osv-scanner, Semgrep)`.
+      combine: true
+      # Trivy runs in `Backend CI`'s Docker build job, on the image it already builds, instead of building it again here.
+      scan_container: false
       # OSV findings block. The dependency surface here is unusually wide — torch,
       # paddlepaddle, paddleocr, pymupdf and their transitive graph — which is an
       # argument for the gate rather than against it.
