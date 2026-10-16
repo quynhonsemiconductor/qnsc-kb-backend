@@ -81,11 +81,11 @@ jobs:
           ignore: |
             **/*.md
             docs/**
-          # A release-please PR only edits versions and the changelog (the push to main it becomes runs everything), and a
-          # Renovate PR that touches nothing but workflow files is an action bump. Their own security/lint workflows still run.
+          # A release-please PR: only when the author is the release bot (a branch name is chosen by whoever opens the PR, so the
+          # prefix alone proves nothing) AND the diff is the changelog, the manifest and `version` lines. The push to main it becomes
+          # runs everything. Renovate PRs are NOT skipped: an action bump must be exercised on its PR.
           skip-heads: |
-            release-please--=**
-            renovate/=.github/workflows/**,.github/actions/**
+            release-please--@qnsc-automation[bot]=CHANGELOG.md,.release-please-manifest.json,version-only:pyproject.toml
 
   # ─────────────────────────────────────────────────────────────────────────
   # 1. Format, lint, typecheck — fast gate, no services needed.
