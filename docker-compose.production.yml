@@ -76,7 +76,7 @@ services:
   clamav:
     logging: *default-logging
     mem_limit: 3g
-    image: clamav/clamav:1.4
+    image: clamav/clamav:1.5.4
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "clamdscan --ping 1"]
