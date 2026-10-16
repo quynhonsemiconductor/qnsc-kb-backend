@@ -640,38 +640,12 @@ module "worker" {
   tags = local.tags
 }
 
-// DKIM verifies the whole domain, so mail_from_email's local part is free to change
-// without a new identity. Gated the same as the IAM grant below: only develop sets
-// email_provider = "ses" today, so only its state ever owns this identity — both
-// environments creating one for the same real-world "qnsc.vn" would fight over it.
-resource "aws_sesv2_email_identity" "mail_from_domain" {
-  count          = var.email_provider == "ses" && var.mail_from_email != "" ? 1 : 0
-  email_identity = local.mail_from_domain
-
-  dkim_signing_attributes {
-    next_signing_key_length = "RSA_2048_BIT"
-  }
-
-  tags = local.tags
-}
-
-// The three CNAME records SES's DKIM verification asks for, in the same Cloudflare zone
-// module.tunnel_api's DNS record already lives in. Unproxied: a proxied CNAME resolves
-// through Cloudflare's edge rather than to the literal target, which is what verification
-// and signing both need to see.
-module "dns_ses_dkim" {
-  count  = var.email_provider == "ses" && var.mail_from_email != "" ? 3 : 0
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/dns-record?ref=dns-record-v1.1.0"
-
-  enabled = local.cloudflare_zone_id != ""
-  zone_id = local.cloudflare_zone_id
-  name    = "${aws_sesv2_email_identity.mail_from_domain[0].dkim_signing_attributes[0].tokens[count.index]}._domainkey"
-  type    = "CNAME"
-  content = "${aws_sesv2_email_identity.mail_from_domain[0].dkim_signing_attributes[0].tokens[count.index]}.dkim.amazonses.com"
-  proxied = false
-  comment = "${local.name} SES DKIM verification for ${local.mail_from_domain}"
-}
-
+// The SES identity and its DKIM CNAME records are NOT declared here. qnsc-infra's `edge` stack owns the one
+// identity for qnsc.vn that every product shares (an SES identity is per account and region), with the three
+// DKIM records in Cloudflare. This stack declared them as well for a while, so two states owned the same
+// objects and each apply rewrote the other's tags, comment and TTL. The product only needs permission to send
+// as the identity, granted below by ARN.
+//
 // Grants the worker task (the only caller of get_email_sender()) permission to send
 // through SES. Only created when email_provider is actually "ses" — the ecs-service
 // module exposes task_role_arn but not a role NAME output, so the role name is derived
@@ -687,10 +661,12 @@ resource "aws_iam_role_policy" "worker_ses_send" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid      = "SendApplicationEmail"
-      Effect   = "Allow"
-      Action   = ["ses:SendEmail", "ses:SendRawEmail"]
-      Resource = length(aws_sesv2_email_identity.mail_from_domain) > 0 ? aws_sesv2_email_identity.mail_from_domain[0].arn : "*"
+      Sid    = "SendApplicationEmail"
+      Effect = "Allow"
+      Action = ["ses:SendEmail", "ses:SendRawEmail"]
+      // The shared identity, by ARN (edge's `ses_identity_arn` output builds the same string). "*" only when
+      // email_provider is ses but the address was left empty, which a zero-Resource statement would reject.
+      Resource = local.mail_from_domain != "" ? "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.mail_from_domain}" : "*"
     }]
   })
 }
