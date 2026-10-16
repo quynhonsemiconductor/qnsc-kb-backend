@@ -351,24 +351,19 @@ module "stack" {
 // nightly drift-detection has failed on `edge` every night since 2026-10-13 for that reason (it would also fail
 // the plan guard the day either side tried to destroy them).
 //
-// `destroy = false` makes this a pure forget: the plan reports "will no longer be managed" and nothing is
-// deleted in AWS or Cloudflare. The worker's ses:SendEmail grant is unaffected; it names the identity by ARN
-// (modules/stack/main.tf, worker_ses_send), the way edge's `ses_identity_arn` output says every product should.
+// A bare `removed` block is a pure forget on the pinned OpenTofu 1.9.1 (and on 1.12): the plan says "will be removed
+// from the OpenTofu state but will not be destroyed" and nothing is deleted in AWS or Cloudflare. Do NOT write
+// `lifecycle { destroy = false }` here: 1.9.1 rejects that block ("Unsupported block type").
+//
+// The worker's ses:SendEmail grant is unaffected; it names the identity by ARN (modules/stack/main.tf,
+// worker_ses_send), the way edge's `ses_identity_arn` output says every product should.
 //
 // Delete these two blocks after the first apply-develop that has run them: with the state entries gone they
 // match nothing.
 removed {
   from = module.stack.aws_sesv2_email_identity.mail_from_domain
-
-  lifecycle {
-    destroy = false
-  }
 }
 
 removed {
   from = module.stack.module.dns_ses_dkim
-
-  lifecycle {
-    destroy = false
-  }
 }
