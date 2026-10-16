@@ -61,11 +61,39 @@ env:
   PYTHON_VERSION: '3.11' # matches the Dockerfile's python:3.11-slim base
 
 jobs:
+  # Does this pull request change anything this workflow tests? A change that touches only files the matching DEPLOY workflow ignores
+  # (its `paths-ignore`) cannot affect what this workflow builds, so the heavy jobs are skipped and one cheap gate reports instead.
+  # A push to main ALWAYS runs everything (deploys wait for that run), and every doubt (API error, empty file list, any file not on
+  # the list) runs everything too: see actions/changed-paths in the ci repo.
+  changes:
+    name: Which parts changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      - id: paths
+        uses: quynhonsemiconductor/ci/actions/changed-paths@v1
+        with:
+          ignore: |
+            **/*.md
+            docs/**
+          # A release-please PR: only when the author is the release bot (a branch name is chosen by whoever opens the PR, so the
+          # prefix alone proves nothing) AND the diff is the changelog, the manifest and `version` lines. The push to main it becomes
+          # runs everything. Renovate PRs are NOT skipped: an action bump must be exercised on its PR.
+          skip-heads: |
+            release-please--@qnsc-automation[bot]=CHANGELOG.md,.release-please-manifest.json,version-only:pyproject.toml
+
   # ─────────────────────────────────────────────────────────────────────────
   # 1. Format, lint, typecheck — fast gate, no services needed.
   # ─────────────────────────────────────────────────────────────────────────
   quality:
     name: Format & typecheck
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -118,6 +146,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   test:
     name: Tests
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -244,6 +274,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   migrations:
     name: Migration upgrade path
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -536,10 +568,22 @@ jobs:
   ci-required:
     name: Backend CI required
     if: always()
-    needs: [quality, test, migrations, build, openapi]
+    needs: [changes, quality, test, migrations, build, openapi]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@v1
+      # No `allow-skipped`, so a renamed or removed job still fails loudly. The two branches are exclusive:
+      #  * `changes` said run: every job must be `success`;
+      #  * otherwise: only `changes` itself must be `success` (the rest are skipped by design). If `changes` FAILED its output is
+      #    empty, this branch runs, and the gate fails: it cannot turn "could not decide" into a pass.
+      - name: Every job must have succeeded
+        if: ${{ needs.changes.outputs.run == 'true' }}
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@v1
         with:
           results: ${{ join(needs.*.result, ',') }}
+
+      - name: Nothing here to test (every changed file is ignorable)
+        if: ${{ needs.changes.outputs.run != 'true' }}
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@v1
+        with:
+          results: ${{ needs.changes.result }}
