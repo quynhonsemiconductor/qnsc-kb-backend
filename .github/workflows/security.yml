@@ -77,8 +77,10 @@ jobs:
       # Gitleaks + osv-scanner + Semgrep as ONE job; the required check is now
       # `security / Security scans (Gitleaks, osv-scanner, Semgrep)`.
       combine: true
-      # Trivy runs in `Backend CI`'s Docker build job, on the image it already builds, instead of building it again here.
-      scan_container: false
+      # Trivy runs in `Backend CI`'s Docker build job, on the image that job already builds, instead of building it again here.
+      # EXCEPT on the weekly schedule: Backend CI never runs on a schedule, so without this a new CVE in an unchanged image would
+      # go unseen until the next code change. The scheduled run builds and scans the image itself, as before.
+      scan_container: ${{ github.event_name == 'schedule' }}
       # OSV findings block. The dependency surface here is unusually wide — torch,
       # paddlepaddle, paddleocr, pymupdf and their transitive graph — which is an
       # argument for the gate rather than against it.
