@@ -370,6 +370,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [quality, test]
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+      security-events: write # Trivy SARIF upload (no-op on the free plan, lights up after GHAS)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -392,6 +396,8 @@ jobs:
           context: .
           target: api
           push: false
+          load: true            # the image Trivy scans below; a second build in the security workflow is gone
+          tags: qnsc-kb-api:scan
           build-args: |
             BAKE_EMBEDDING_MODEL=false
           cache-from: type=gha,scope=api
@@ -407,6 +413,13 @@ jobs:
             BAKE_EMBEDDING_MODEL=false
           cache-from: type=gha,scope=worker
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=worker' || '' }}
+
+      # CRITICAL blocks this job, hence `Backend CI required`; HIGH is reported. This used to be its own job in the security
+      # workflow that rebuilt the same image from scratch.
+      - name: Container CVE scan (Trivy)
+        uses: quynhonsemiconductor/ci/actions/scan-image@v1
+        with:
+          image-ref: qnsc-kb-api:scan
 
       - name: Build migrator image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

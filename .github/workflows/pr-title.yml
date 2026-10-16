@@ -17,7 +17,7 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read # required by amannn/action-semantic-pull-request
+  pull-requests: write # the area/size labels below; the title check itself only needs read
 
 jobs:
   pr-title:
@@ -27,3 +27,12 @@ jobs:
     steps:
       # No checkout: the action reads the title from the event payload.
       - uses: quynhonsemiconductor/ci/actions/pr-title-conventional-commits@v1
+
+      # The PR labeler used to be a job of its own (one more runner per push). It runs here, in the same
+      # runner, as steps. Not on `edited`: a title edit changes no files, so there is nothing to relabel.
+      # `continue-on-error`: this job IS a required check, and a label that cannot be written (a fork PR's
+      # read-only token) must never fail the title check.
+      - name: Area and size labels
+        if: ${{ github.event.action != 'edited' }}
+        continue-on-error: true
+        uses: quynhonsemiconductor/ci/actions/pr-labels@v1
