@@ -97,9 +97,9 @@ variable "mail_from_email" {
   description = <<-EOT
     Mailbox that invitations and password resets are sent FROM under EMAIL_PROVIDER=ses.
 
-    The domain is verified automatically (aws_sesv2_email_identity + module.dns_ses_dkim
-    in modules/stack/main.tf, gated on email_provider == "ses"), so this only needs to
-    change if the local part should differ. Emptying it reintroduces the dead-mail shape
+    The domain's SES identity and DKIM records are owned by qnsc-infra's `edge` stack, not
+    this one, so this only needs to change if the local part should differ (a different
+    DOMAIN needs an identity in edge first). Emptying it reintroduces the dead-mail shape
     microsoft_graph_sender has above: SesEmailSender raises "MAIL_FROM_EMAIL is not
     configured" on every attempt, and deliver_notification_queue retries every 30 seconds
     without ever arriving.

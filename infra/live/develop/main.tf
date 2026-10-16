@@ -344,19 +344,26 @@ module "stack" {
   entra_admin_emails     = var.entra_admin_emails
 }
 
-// State drift, not a real change: this SES identity for qnsc.vn already exists in AWS
-// (created when #143 first added SES support here) but was never recorded in this
-// stack's Terraform state, so every apply since has tried to CREATE it and AWS has
-// correctly rejected the duplicate with AlreadyExistsException -- failing apply-develop
-// on every subsequent PR, unrelated to what any of them actually changed.
+// The SES identity for qnsc.vn and its three DKIM CNAME records are owned by qnsc-infra's `edge` stack
+// (live/edge/main.tf, "Shared SES domain identity"): one identity per account and region, shared by every product.
+// This stack used to declare the same identity and the same three Cloudflare records as well, so two states
+// owned the same real objects. Each apply of one rewrote the other's tags, record comment and TTL, and qnsc-infra's
+// nightly drift-detection has failed on `edge` every night since 2026-10-13 for that reason (it would also fail
+// the plan guard the day either side tried to destroy them).
 //
-// A declarative import (OpenTofu >= 1.7, and this stack already requires >= 1.9) fixes
-// it through the same apply pipeline that already has AWS credentials via OIDC, instead
-// of someone needing local AWS/Terraform access to run `tofu import` by hand. It is a
-// no-op once the resource is in state, so leaving this block in costs nothing on future
-// applies -- but remove it once the next apply-develop run succeeds, so a future reader
-// does not have to work out whether it is still doing something.
-import {
-  to = module.stack.aws_sesv2_email_identity.mail_from_domain[0]
-  id = "qnsc.vn"
+// A bare `removed` block is a pure forget on the pinned OpenTofu 1.9.1 (and on 1.12): the plan says "will be removed
+// from the OpenTofu state but will not be destroyed" and nothing is deleted in AWS or Cloudflare. Do NOT write
+// `lifecycle { destroy = false }` here: 1.9.1 rejects that block ("Unsupported block type").
+//
+// The worker's ses:SendEmail grant is unaffected; it names the identity by ARN (modules/stack/main.tf,
+// worker_ses_send), the way edge's `ses_identity_arn` output says every product should.
+//
+// Delete these two blocks after the first apply-develop that has run them: with the state entries gone they
+// match nothing.
+removed {
+  from = module.stack.aws_sesv2_email_identity.mail_from_domain
+}
+
+removed {
+  from = module.stack.module.dns_ses_dkim
 }
