@@ -95,11 +95,6 @@ class Settings(BaseSettings):
     MIGRATION_DATABASE_USER: str | None = None
     MIGRATION_DATABASE_PASSWORD: str | None = None
 
-    OPENAI_API_KEY: str | None = None
-    GROQ_API_KEY: str | None = None
-    GLM_API_KEY: str | None = None
-    LLM_PROVIDER: str | None = None
-    LLM_BASE_URL: str | None = None
     # Custom endpoints can forward the workspace API key to an arbitrary
     # host. Keep that capability opt-in, even for global administrators.
     LLM_ALLOW_CUSTOM_BASE_URL: bool = False
@@ -114,11 +109,6 @@ class Settings(BaseSettings):
     # else has no effect at all, rather than quietly widening production.
     LLM_ALLOW_LOCAL_ENDPOINTS: bool = False
     GEMINI_API_KEY: str | None = None
-    # A floating `-latest` alias, not a pinned version. Google retires pinned models for
-    # new API keys — the deployed default was gemini-2.5-flash-lite, and every call
-    # returned 404 "no longer available to new users". Nothing validates a model name at
-    # startup, so it surfaced as broken AI answers, not as a failed deploy.
-    GEMINI_MODEL: str = "gemini-flash-lite-latest"
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
     LLM_TIMEOUT_SECONDS: float = 90.0
@@ -270,7 +260,6 @@ class Settings(BaseSettings):
     # It stays False by default, so nothing changes for anyone who does not set it. The
     # guard still fires, and its message names this flag rather than prescribing manual SQL.
     EMBEDDING_REALIGN_DISCARD_VECTORS: bool = False
-    LLM_MODEL: str = "gemma-4-26b-a4b-it"
     RESTRUCTURE_ENABLED: bool = True
     RESTRUCTURE_MODEL: str | None = None
     # GLM-5 has a 200K context window shared by prompt and generation. 120K
@@ -537,7 +526,6 @@ class Settings(BaseSettings):
     RAG_MAX_ANSWER_TOKENS: int | None = None
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
-    OIDC_CLIENT_SECRET: str | None = None
     OIDC_REDIRECT_URI: str | None = None
     OIDC_SCOPES: str = "openid profile email"
     MICROSOFT_CLIENT_ID: str | None = None
@@ -545,9 +533,6 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
-    # Entra is an authentication provider, not an account-provisioning path.
-    # A user must have a matching, unexpired invitation.
-    ENTRA_AUTO_PROVISION_DOMAIN: str = ""
     MICROSOFT_GRAPH_SENDER: str | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
     # "graph" keeps the existing Microsoft Graph transport (and its development
@@ -626,7 +611,6 @@ class Settings(BaseSettings):
     FACTORY_RESET_ENABLED: bool = False
     FACTORY_RESET_ALLOWED_EMAILS: str = ""
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
-    DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
@@ -664,7 +648,6 @@ class Settings(BaseSettings):
     # PDF only. MarkItDown stays authoritative for Office formats, where it reads the
     # document's own heading styles and already yields headings, tables and lists.
     PYMUPDF4LLM_ENABLED: bool = True
-    SOURCE_STORAGE_PATH: str = "/app/storage/sources"
     # MVP-1 stores originals in a private Cloudflare R2 bucket.  There is no
     # local-disk fallback because a local fallback would make deployment
     # topology part of the authorization boundary.

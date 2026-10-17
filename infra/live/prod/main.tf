@@ -244,5 +244,4 @@ module "stack" {
   microsoft_graph_sender = var.microsoft_graph_sender
   google_client_id       = var.google_client_id
   allowed_email_domains  = var.allowed_email_domains
-  entra_admin_emails     = var.entra_admin_emails
 }

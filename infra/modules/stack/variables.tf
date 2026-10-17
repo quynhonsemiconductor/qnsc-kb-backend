@@ -386,25 +386,6 @@ variable "embedding_runtime" {
   EOT
 }
 
-variable "gemini_model" {
-  type        = string
-  default     = "gemini-flash-lite-latest"
-  description = <<-EOT
-    The text GENERATION model (RAG answers), not the embedding model.
-
-    A floating `-latest` alias on purpose. The previous default pinned
-    gemini-2.5-flash-lite, and Google retired that whole family for new keys — every
-    generateContent call returned 404 "no longer available to new users", which surfaces
-    as broken AI features rather than as a deploy failure, because nothing validates a
-    model name at apply time. An alias survives that; the cost is that the model can move
-    under you, which retrieval quality is far more tolerant of than a dead endpoint.
-
-    Verify a change before applying it:
-      curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/MODEL:generateContent?key=KEY" \
-        -H 'Content-Type: application/json' -d '{"contents":[{"parts":[{"text":"hi"}]}]}'
-  EOT
-}
-
 variable "microsoft_tenant_id" {
   type        = string
   default     = "common"
@@ -647,18 +628,3 @@ variable "alarm_thresholds" {
   EOT
 }
 
-variable "entra_auto_provision_domain" {
-  type        = string
-  default     = "qnsc.vn"
-  description = "Email domain auto-provisioned on Entra sign-in, at the Staff role. Stated explicitly so develop's access rules do not depend on a code default."
-}
-
-variable "entra_admin_emails" {
-  type        = list(string)
-  default     = []
-  description = <<-EOT
-    Addresses provisioned as GLOBAL administrators on first Entra sign-in, instead of
-    Staff. Read only when the account is first created, so it never overrides a role set
-    later in the admin UI, and removing an address here does not demote anyone.
-  EOT
-}

@@ -341,7 +341,6 @@ module "stack" {
   mail_from_email        = var.mail_from_email
   google_client_id       = var.google_client_id
   allowed_email_domains  = var.allowed_email_domains
-  entra_admin_emails     = var.entra_admin_emails
 }
 
 // The SES identity for qnsc.vn and its three DKIM CNAME records are owned by qnsc-infra's `edge` stack

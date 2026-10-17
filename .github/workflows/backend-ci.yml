@@ -395,6 +395,89 @@ jobs:
         run: poetry run alembic -c migrations/alembic.ini check
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Local quickstart — the README's commands, from the example env and nothing else.
+  # A newcomer's first hour is the most expensive hour this project has, and it breaks silently: the
+  # example env drifts from Settings, compose drifts from the env (a `localhost` URL the container cannot
+  # reach, a port another stack owns), or a service reports unhealthy forever. This boots the real compose
+  # stack (db, redis, migrator, api, worker, beat) from `.env.example` and proves the health endpoint
+  # and one authenticated call, so that drift fails a pull request instead of the next person's afternoon.
+  #
+  # NOT proven here: the real embedding model. The ~2.3 GB bake is skipped (KB_BAKE_EMBEDDING_MODEL=false)
+  # and EMBEDDING_MODEL is set to `mock`, so search quality is untested; that path has its own tests and the
+  # deployed images carry the model. Everything else is the file as shipped.
+  # ─────────────────────────────────────────────────────────────────────────
+  quickstart:
+    name: Local quickstart
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Copy the example env (the only configuration)
+        run: |
+          cp .env.example .env
+          # The only edits, and only for CI speed: no model bake, zero-vector embeddings.
+          sed -i 's/^EMBEDDING_MODEL=.*/EMBEDDING_MODEL="mock"/' .env
+          echo 'KB_BAKE_EMBEDDING_MODEL=false' >> .env
+
+      - name: Start Postgres and Redis
+        run: docker compose up -d --build --wait db redis
+
+      - name: Migrate
+        run: docker compose --profile migrate run --rm migrator
+
+      - name: Start the API, the worker and beat
+        run: docker compose up -d --build api worker beat
+
+      - name: Health endpoint
+        run: |
+          for i in $(seq 1 60); do
+            if body="$(curl -fsS http://localhost:8000/health/ready 2>/dev/null)"; then
+              echo "ready after ~$((i * 3))s: $body"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::/health/ready never answered 200"
+          exit 1
+
+      - name: Authenticated call (the bootstrap administrator from .env.example)
+        run: |
+          set -euo pipefail
+          email="$(sed -n 's/^BOOTSTRAP_ADMIN_EMAIL="\(.*\)"/\1/p' .env.example)"
+          password="$(sed -n 's/^BOOTSTRAP_ADMIN_PASSWORD="\(.*\)"/\1/p' .env.example)"
+          token="$(curl -fsS -X POST http://localhost:8000/api/v1/auth/login \
+            --data-urlencode "username=$email" --data-urlencode "password=$password" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
+          me="$(curl -fsS -H "Authorization: Bearer $token" http://localhost:8000/api/v1/auth/me)"
+          echo "$me" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("signed in as", d["email"], d["role"]); assert d["role"] == "Admin"'
+
+      - name: The worker answers and beat is scheduling
+        run: |
+          set -euo pipefail
+          docker compose exec -T worker celery -A src.workers.celery_app inspect ping
+          for _ in $(seq 1 20); do
+            if docker compose logs beat 2>&1 | grep -q "Scheduler: Sending due task"; then echo "beat is sending tasks"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::beat never sent a task"
+          exit 1
+
+      - name: Service logs (on failure)
+        if: failure()
+        run: docker compose ps -a; docker compose logs --no-color --tail=120
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ─────────────────────────────────────────────────────────────────────────
   # 4. Docker build — all three targets the deploy pipeline ships.
   # ─────────────────────────────────────────────────────────────────────────
   build:
@@ -568,7 +651,7 @@ jobs:
   ci-required:
     name: Backend CI required
     if: always()
-    needs: [changes, quality, test, migrations, build, openapi]
+    needs: [changes, quality, test, migrations, build, openapi, quickstart]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
