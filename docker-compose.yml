@@ -221,7 +221,11 @@ services:
     # Beat serves nothing to probe, and the API image's :8000 HEALTHCHECK would mark it unhealthy.
     healthcheck:
       disable: true
-    command: celery -A src.workers.celery_app beat --loglevel=info
+    # --schedule in /tmp: by default beat writes `celerybeat-schedule` next to the code, i.e. into the
+    # bind-mounted /app, and on a Linux host that directory belongs to the host user, not to the
+    # container's unprivileged user ("PermissionError: [Errno 13] ... 'celerybeat-schedule'", found by
+    # the quickstart CI job; Docker Desktop and OrbStack hide it by mapping ownership).
+    command: celery -A src.workers.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     mem_limit: 256m
     mem_reservation: 64m
     environment:

@@ -452,11 +452,13 @@ jobs:
           set -euo pipefail
           email="$(sed -n 's/^BOOTSTRAP_ADMIN_EMAIL="\(.*\)"/\1/p' .env.example)"
           password="$(sed -n 's/^BOOTSTRAP_ADMIN_PASSWORD="\(.*\)"/\1/p' .env.example)"
-          token="$(curl -fsS -X POST http://localhost:8000/api/v1/auth/login \
-            --data-urlencode "username=$email" --data-urlencode "password=$password" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
-          me="$(curl -fsS -H "Authorization: Bearer $token" http://localhost:8000/api/v1/auth/me)"
-          echo "$me" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("signed in as", d["email"], d["role"]); assert d["role"] == "Admin"'
+          # Responses go to files and are parsed from there: a `curl | interpreter` pipe is the pattern Semgrep
+          # (rightly) flags, and here it would hide a failed request behind the interpreter's exit code.
+          curl -fsS -X POST http://localhost:8000/api/v1/auth/login \
+            --data-urlencode "username=$email" --data-urlencode "password=$password" -o login.json
+          token="$(python3 -c 'import json; print(json.load(open("login.json"))["access_token"])')"
+          curl -fsS -H "Authorization: Bearer $token" http://localhost:8000/api/v1/auth/me -o me.json
+          python3 -c 'import json; d=json.load(open("me.json")); print("signed in as", d["email"], d["role"]); assert d["role"] == "Admin"'
 
       - name: The worker answers and beat is scheduling
         run: |
