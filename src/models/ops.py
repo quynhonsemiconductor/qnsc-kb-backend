@@ -72,11 +72,25 @@ class NotificationQueue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     recipient_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     type: Mapped[str] = mapped_column(String(50), nullable=False)  # email, slack
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)  # pending, sent, failed
+    status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)  # pending, sent, failed, dead
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Not before this time (UTC): exponential backoff, or the server's Retry-After. NULL = eligible now. Also
+    # what keeps a row that keeps failing from sitting at the head of the batch and starving new mail.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # The delivery query's own shape: only email rows that are still deliverable, ordered by (next_attempt_at,
+    # created_at). Partial, so sent and dead rows (the bulk of the table) cost nothing.
+    __table_args__ = (
+        Index(
+            "ix_notification_queue_email_due",
+            "next_attempt_at",
+            "created_at",
+            postgresql_where=text("type = 'email' AND status IN ('pending', 'failed')"),
+        ),
+    )
 
 class DeadLetterJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "dead_letter_jobs"

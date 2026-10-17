@@ -402,18 +402,31 @@ variable "microsoft_graph_sender" {
   type        = string
   default     = ""
   description = <<-EOT
-    The mailbox Graph sends application email FROM — invitations and password resets.
-    A UPN or objectId, e.g. "no-reply@qnsc.vn".
+    The mailbox Graph sends application email FROM: invitations and password resets. A UPN, e.g.
+    "noreply-kb@qnsc.vn" in production and "noreply-kb-dev@qnsc.vn" in develop (a non-production environment
+    never sends from the production mailbox; a shared mailbox is enough and needs no licence).
 
-    Empty leaves outbound mail DEAD, silently. ENVIRONMENT is pinned to "production" in
-    every environment, so get_email_sender() never returns the development FakeEmailSender;
-    it returns the Graph sender, which raises "MICROSOFT_GRAPH_SENDER is not configured"
-    before any HTTP call. deliver_notification_queue then retries every 30 seconds forever
-    and the invitee never receives a link. Nothing in validate_production() catches this,
-    which is why it is stated here rather than left to the code default.
+    The Entra app (mail_graph_client_id) holds NO Graph consent. Its only authority is the Exchange Online
+    role "Application Mail.Send", assigned with a management scope that names this one mailbox, so the app
+    can send as this address and as nobody else. See docs/runbooks/email-graph.md.
 
-    The Entra app needs Mail.Send application permission with admin consent, and the
-    mailbox must exist in the tenant.
+    Empty is no longer a silent failure: with email_provider "graph" the WORKER refuses to start when
+    mail_graph_client_id is set and this or either secret is missing (the API never refuses to boot over mail).
+  EOT
+}
+
+variable "mail_graph_client_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Application (client) ID of the dedicated Entra app that sends mail (one per environment, separate from
+    the SSO/connector app in microsoft_client_id). A public identifier, not a secret. Authenticates with the
+    certificate whose PRIVATE KEY lives in a standalone secret (<product>/<env>/mail-graph-certificate); there is no client
+    secret. Empty until the owner has created the app (docs/runbooks/email-graph.md).
+
+    THIS IS THE SWITCH. While it is empty the (empty) secret container exists but nothing is injected, so this
+    module can be applied before the owner's steps. The owner puts the value in the secret FIRST, then sets
+    this, in that order. The deploy preflight names the secret if it still has no value.
   EOT
 }
 
@@ -422,15 +435,14 @@ variable "email_provider" {
   default = "graph"
 
   description = <<-EOT
-    Selects get_email_sender()'s transport (src/services/email.py): "graph" (default)
-    keeps the Microsoft Graph path above; "ses" sends through AWS SES instead, so
-    outbound mail no longer depends on Entra admin consent. "fake" forces the in-memory
-    sender and is not expected to be used here.
+    Selects get_email_sender()'s transport (src/services/email.py). "graph" (default, and what every
+    deployed environment uses) sends through Microsoft 365 with certificate auth (the mail secret is
+    injected into the worker once mail_graph_client_id is set). "ses" is the legacy AWS path, kept only until Graph is proven in develop
+    and then removed. "fake" is the in-memory sender for tests. "console" exists in the application but is
+    refused outside development and is not accepted here.
 
-    Switching to "ses" also requires mail_from_email below, an SES-verified sender
-    identity for that address (or its domain) in this account/region, and — if the
-    account is still in the SES sandbox — either verifying every recipient or
-    requesting production access, or every send fails with MessageRejected.
+    Switching away from "graph" destroys the empty-or-not mail secret container (recoverable for
+    secrets_recovery_window_days); the plan guard stops that unless it is acknowledged.
   EOT
 
   validation {

@@ -50,17 +50,31 @@ variable "microsoft_client_id" {
 
 variable "microsoft_graph_sender" {
   type        = string
+  default     = "noreply-kb-dev@qnsc.vn"
+  description = <<-EOT
+    The mailbox application email is sent FROM in develop: its OWN shared mailbox, never the production one.
+    A non-production environment must not send as production's address (users cannot tell the mail apart, a
+    leaked develop credential would speak for production, and develop's mail would count against production's
+    sending reputation). Develop's mail Entra app is scoped by Exchange RBAC to this mailbox only; sending as
+    the production mailbox must return 403 (docs/runbooks/email-graph.md, step 8).
+
+    The name must end in "-dev@<domain>"; the validation below keeps a copy-paste from pointing develop at
+    production's mailbox.
+  EOT
+
+  validation {
+    condition     = can(regex("-dev@", lower(var.microsoft_graph_sender)))
+    error_message = "develop's microsoft_graph_sender must be its own mailbox (noreply-<product>-dev@...), never production's."
+  }
+}
+variable "mail_graph_client_id" {
+  type        = string
   default     = ""
   description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
-
-    Left EMPTY deliberately until the mailbox exists and the Entra app has Mail.Send
-    application permission with admin consent. While it is empty, outbound mail is dead:
-    ENVIRONMENT is pinned to "production", so the development FakeEmailSender is never
-    selected, and the Graph sender raises before any HTTP call. Invitations and resets will
-    queue and retry every 30 seconds without ever arriving.
-
-    Set this before relying on the invite or forgot-password flows.
+    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
+    has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
+    set only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret qnsc-kb/develop/mail-graph-certificate.
+    While empty, nothing mail-related is injected; develop keeps sending through SES.
   EOT
 }
 
@@ -74,19 +88,6 @@ variable "microsoft_tenant_id" {
     connects THEIR SharePoint. Under "common" that is any user in any Microsoft tenant on
     earth, and their documents would be ingested into this knowledge base. Pinning the
     tenant is what limits the flow to qnsc.vn accounts.
-  EOT
-}
-
-variable "email_provider" {
-  type    = string
-  default = "ses"
-
-  description = <<-EOT
-    Overrides the module default ("graph") for this environment: develop sends through
-    AWS SES rather than Microsoft Graph, so outbound mail does not wait on Entra admin
-    consent for Mail.Send. See infra/modules/stack/variables.tf for what switching this
-    requires (mail_from_email below, a verified SES identity, and sandbox/production
-    access for the recipients being invited).
   EOT
 }
 

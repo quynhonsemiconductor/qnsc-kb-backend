@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -533,14 +534,24 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
+    # Application email (EMAIL_PROVIDER=graph): the mailbox mail is sent FROM, and the dedicated Entra app
+    # (the environment's "Service app") that sends as it with a CERTIFICATE (no client secret). The app holds no
+    # Entra Graph consent: its only authority is the Exchange "Application Mail.Send" role scoped to this one
+    # mailbox. The PEMs are SecretStr and reach ONLY the worker container, from the secrets bundle; the API
+    # never needs them and never refuses to boot over mail (the worker checks at its own start, see
+    # tasks.py). docs/runbooks/email-graph.md.
     MICROSOFT_GRAPH_SENDER: str | None = None
+    MAIL_GRAPH_CLIENT_ID: str | None = None
+    # Deployed: ONE standalone secret (qnsc-kb/<env>/mail-graph-certificate) holding the private key and the
+    # certificate in a single PEM. Injected into the WORKER container only, and readable only by the worker's
+    # execution role. The two settings below are for a local test and scripts/graph_mail_check.py.
+    MAIL_GRAPH_PEM: SecretStr | None = None
+    MAIL_GRAPH_CERT_PEM: SecretStr | None = None
+    MAIL_GRAPH_PRIVATE_KEY_PEM: SecretStr | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
-    # "graph" keeps the existing Microsoft Graph transport (and its development
-    # fallback to FakeEmailSender below). Set to "ses" to send through AWS SES
-    # instead — useful locally when you want invitations to actually arrive
-    # without an Entra app registration — or "fake" to force the in-memory
-    # sender regardless of environment. get_email_sender() in src/services/email.py
-    # is what reads this.
+    # "graph" sends through Microsoft 365 (certificate auth, see above); "console" logs the message and is
+    # accepted only in development; "fake" is the in-memory sender for tests; "ses" is the legacy AWS path,
+    # present only until Graph is proven. get_email_sender() in src/services/email.py reads this.
     EMAIL_PROVIDER: str = "graph"
     # Required when EMAIL_PROVIDER=ses; SesEmailSender raises without it.
     MAIL_FROM_EMAIL: str | None = None
