@@ -139,11 +139,17 @@ services:
       - hfcache:/opt/huggingface
     # The API image carries a HEALTHCHECK on :8000, which this process does not serve: without
     # this the worker reports `unhealthy` forever when it runs from that image.
+    #
+    # `--pool=solo` runs tasks IN the process that answers the control bus, so a long task (an
+    # ingestion walking a drive, a big embedding batch) cannot answer `inspect ping` until it
+    # finishes and the check fails while the worker is perfectly busy. Hence the generous 10
+    # retries x 30 s (five minutes) before `unhealthy`. Compose does not restart on unhealthy and
+    # nothing here depends on this service's health, so it is a status light, not a control.
     healthcheck:
       test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$$HOSTNAME"]
       interval: 30s
       timeout: 20s
-      retries: 3
+      retries: 10
       start_period: 60s
     command: celery -A src.workers.celery_app worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=info -Q document-preparation,celery,ingestion,connectors,permissions
     # RAISED from 2g. The baked ONNX export is 2.1 GB on disk and the model is held
@@ -267,7 +273,12 @@ services:
   #
   # Behind a profile so `docker compose up` never migrates implicitly. The image's
   # entrypoint bootstraps the least-privilege role first, which no-ops here because
-  # APP_DATABASE_ROLE is unset in dev, then runs `alembic upgrade head`.
+  # APP_DATABASE_ROLE is set to empty below, then runs `alembic upgrade head`.
+  #
+  # Consequence worth knowing: under this stack the api, worker and beat connect as the `postgres`
+  # SUPERUSER, which bypasses row-level security. The policies exist (the migrations create them)
+  # but are never applied locally; RLS is exercised in CI's integration tests and in the deployed
+  # environments, where the app runs as the least-privilege role.
   migrator:
     profiles: ["migrate"]
     build:
