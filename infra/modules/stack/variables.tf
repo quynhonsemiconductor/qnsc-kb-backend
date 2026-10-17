@@ -421,12 +421,12 @@ variable "mail_graph_client_id" {
   description = <<-EOT
     Application (client) ID of the dedicated Entra app that sends mail (one per environment, separate from
     the SSO/connector app in microsoft_client_id). A public identifier, not a secret. Authenticates with the
-    certificate in the secrets bundle (mail-graph-certificate, mail-graph-private-key); there is no client
+    certificate whose PRIVATE KEY lives in a standalone secret (<product>/<env>/mail-graph-certificate); there is no client
     secret. Empty until the owner has created the app (docs/runbooks/email-graph.md).
 
-    THIS IS THE SWITCH. While it is empty no mail secret is created or injected and nothing references a
-    bundle key that may not exist yet, so this module can be applied before the owner's steps. The owner puts
-    the two keys in the bundle FIRST, then sets this, in that order.
+    THIS IS THE SWITCH. While it is empty the (empty) secret container exists but nothing is injected, so this
+    module can be applied before the owner's steps. The owner puts the value in the secret FIRST, then sets
+    this, in that order. The deploy preflight names the secret if it still has no value.
   EOT
 }
 
@@ -436,13 +436,13 @@ variable "email_provider" {
 
   description = <<-EOT
     Selects get_email_sender()'s transport (src/services/email.py). "graph" (default, and what every
-    deployed environment uses) sends through Microsoft 365 with certificate auth (the two mail secrets
-    are created and injected into the worker once mail_graph_client_id is set). "ses" is the legacy AWS path, kept only until Graph is proven in develop
+    deployed environment uses) sends through Microsoft 365 with certificate auth (the mail secret is
+    injected into the worker once mail_graph_client_id is set). "ses" is the legacy AWS path, kept only until Graph is proven in develop
     and then removed. "fake" is the in-memory sender for tests. "console" exists in the application but is
     refused outside development and is not accepted here.
 
-    Switching away from "graph" removes the two mail secrets from the injected set; the bundle keys are
-    left in Secrets Manager (this module never deletes a secret).
+    Switching away from "graph" destroys the empty-or-not mail secret container (recoverable for
+    secrets_recovery_window_days); the plan guard stops that unless it is acknowledged.
   EOT
 
   validation {

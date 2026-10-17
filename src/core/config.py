@@ -542,6 +542,10 @@ class Settings(BaseSettings):
     # tasks.py). docs/runbooks/email-graph.md.
     MICROSOFT_GRAPH_SENDER: str | None = None
     MAIL_GRAPH_CLIENT_ID: str | None = None
+    # Deployed: ONE standalone secret (qnsc-kb/<env>/mail-graph-certificate) holding the private key and the
+    # certificate in a single PEM. Injected into the WORKER container only, and readable only by the worker's
+    # execution role. The two settings below are for a local test and scripts/graph_mail_check.py.
+    MAIL_GRAPH_PEM: SecretStr | None = None
     MAIL_GRAPH_CERT_PEM: SecretStr | None = None
     MAIL_GRAPH_PRIVATE_KEY_PEM: SecretStr | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"

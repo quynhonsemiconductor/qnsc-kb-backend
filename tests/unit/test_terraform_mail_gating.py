@@ -1,9 +1,10 @@
 """The mail wiring in Terraform, asserted on the text (no AWS or OpenTofu needed to run these).
 
 What they pin, each one a review finding on kb#215:
-  * the mail secrets are gated on mail_graph_client_id, so merging before the owner's steps references nothing
-    that does not exist yet;
-  * the certificate and key reach the WORKER container only;
+  * the mail credential is a STANDALONE secret (one PEM), injected only once mail_graph_client_id is set, so
+    merging before the owner's steps references nothing that has no value yet;
+  * it reaches the WORKER container only, is granted to the worker's execution role only, no task role can read
+    any secret, and a resource policy denies everyone else;
   * develop stays on SES until the client id is set;
   * the SES send grant is NOT keyed on the provider (expand/contract: it outlives the switch to Graph);
   * the three mail alarms exist.
@@ -37,31 +38,57 @@ def test_the_switch_is_the_client_id():
     assert re.search(r'mail_graph_enabled\s*=\s*var\.email_provider == "graph" && var\.mail_graph_client_id != ""', STACK)
 
 
-def test_the_bundle_keys_are_created_only_when_the_switch_is_on():
-    assert re.search(r'local\.mail_graph_enabled \? \{\s*"mail-graph-certificate"', STACK)
-    assert 'var.email_provider == "graph" ? {' not in STACK
+def test_the_mail_credential_is_not_a_key_of_the_shared_bundle():
+    """The bundle's ARN is on the API's execution role too, so a key inside it is readable by the API's role."""
+    names = STACK[STACK.index("secret_names ="):STACK.index('// NOTE: "tunnel-token"')]
+    assert "mail-graph" not in names and "MAIL_GRAPH" not in names
+    assert 'module.secrets.secret_arns["mail-graph' not in STACK
 
 
-def test_mail_secrets_are_not_in_the_shared_secret_list():
-    common = block(STACK, "common_secrets = concat(")
-    assert "MAIL_GRAPH" not in common and "mail-graph" not in common
+def test_the_mail_credential_is_a_standalone_secret_created_whenever_the_provider_is_graph():
+    secret = block(STACK, 'resource "aws_secretsmanager_secret" "mail_graph"')
+    assert 'count = var.email_provider == "graph" ? 1 : 0' in secret
+    assert 'name                    = "${var.product}/${var.env}/mail-graph-certificate"' in secret
+    assert "kms_key_id" in secret
+    # the container is not gated on the client id (the owner must be able to put the value first); injection is
+    assert "mail_graph_client_id" not in secret
+    assert "aws_secretsmanager_secret_version\" \"mail" not in STACK  # the value never enters state
 
 
-def test_mail_secrets_are_gated_and_contain_exactly_the_two_pems():
+def test_nobody_but_the_worker_execution_role_can_read_it():
+    policy = block(STACK, 'resource "aws_secretsmanager_secret_policy" "mail_graph"')
+    assert 'Effect    = "Deny"' in policy and 'Principal = "*"' in policy
+    assert 'Action    = "secretsmanager:GetSecretValue"' in policy
+    assert 'ArnNotEquals = { "aws:PrincipalArn" = module.worker.execution_role_arn }' in policy
+    assert "module.api" not in policy  # not the api's roles
+
+
+def test_no_task_role_in_the_stack_can_read_any_secret():
+    """ecs-service grants a task role secret access only through task_secret_arns; this stack must never pass it."""
+    for tf in INFRA.rglob("*.tf"):
+        text = re.sub(r"(//|#)[^\n]*", "", tf.read_text())  # comments may name it
+        assert "task_secret_arns" not in text, tf
+        assert "task_ssm_parameter_arns" not in text, tf
+
+
+def test_mail_secrets_are_gated_and_are_exactly_the_one_pem():
     start = STACK.index("  mail_secrets = ")
     mail = STACK[start : STACK.index("] : []", start)]
     assert "local.mail_graph_enabled" in mail
-    assert re.findall(r'name = "(\w+)"', mail) == ["MAIL_GRAPH_CERT_PEM", "MAIL_GRAPH_PRIVATE_KEY_PEM"]
+    assert re.findall(r'name = "(\w+)"', mail) == ["MAIL_GRAPH_PEM"]
+    assert "aws_secretsmanager_secret.mail_graph[0].arn" in mail
 
 
-def test_only_the_worker_container_receives_them():
+def test_only_the_worker_container_receives_it_and_only_the_worker_execution_role_is_granted_it():
     assert STACK.count("local.mail_secrets") == 1  # the worker module and nowhere else
     worker = block(STACK, 'module "worker"')
     assert "secrets          = concat(local.common_secrets, local.mail_secrets)" in worker
+    assert "aws_secretsmanager_secret.mail_graph[0].arn" in worker  # its execution role's secret_arns
     api = block(STACK, 'module "api"')
-    assert "mail_secrets" not in api and "secrets = local.common_secrets" in api
+    assert "mail_graph" not in api and "mail_secrets" not in api and "secrets = local.common_secrets" in api
     beat = STACK[STACK.index('name      = "beat"') : STACK.index('name      = "beat"') + 900]
     assert "mail_secrets" not in beat and "local.common_secrets" in beat
+    assert "MAIL_GRAPH" not in block(STACK, "common_secrets = concat(")
 
 
 def test_develop_stays_on_ses_until_the_client_id_is_set():
