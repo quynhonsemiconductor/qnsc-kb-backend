@@ -418,7 +418,8 @@ variable "microsoft_graph_sender" {
   default     = ""
   description = <<-EOT
     The mailbox Graph sends application email FROM: invitations and password resets. A UPN, e.g.
-    "noreply-kb@qnsc.vn" (a shared mailbox is enough; it needs no licence).
+    "noreply-kb@qnsc.vn" in production and "noreply-kb-dev@qnsc.vn" in develop (a non-production environment
+    never sends from the production mailbox; a shared mailbox is enough and needs no licence).
 
     The Entra app (mail_graph_client_id) holds NO Graph consent. Its only authority is the Exchange Online
     role "Application Mail.Send", assigned with a management scope that names this one mailbox, so the app

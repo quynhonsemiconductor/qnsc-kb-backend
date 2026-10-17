@@ -28,7 +28,8 @@ from src.services import email
 
 TENANT = "11111111-2222-4333-8444-555555555555"
 CLIENT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-SENDER = "noreply-kb@qnsc.vn"
+SENDER = "noreply-kb-dev@qnsc.vn"  # develop's own mailbox
+PROD_MAILBOX = "noreply-kb@qnsc.vn"
 
 
 def make_credential(*, days=365, started=None, key=None):
@@ -53,8 +54,9 @@ def make_credential(*, days=365, started=None, key=None):
 class FakeMicrosoft:
     """The token endpoint and Graph, as one MockTransport."""
 
-    def __init__(self, cert, *, graph_status=202, graph_error=None, token_error=None, expires_in=3600):
+    def __init__(self, cert, *, graph_status=202, graph_error=None, token_error=None, expires_in=3600, allowed_mailbox=None):
         self.cert = cert
+        self.allowed_mailbox = allowed_mailbox  # the one mailbox this app's Exchange RBAC scope covers
         self.graph_status, self.graph_error, self.token_error, self.expires_in = graph_status, graph_error, token_error, expires_in
         self.token_calls: list[dict] = []
         self.graph_calls: list[httpx.Request] = []
@@ -76,6 +78,9 @@ class FakeMicrosoft:
             return httpx.Response(200, json={"access_token": f"graph-token-{self.issued}", "expires_in": self.expires_in})
         self.graph_calls.append(request)
         headers = {"request-id": "req-123"}
+        mailbox = request.url.path.split("/")[3]
+        if self.allowed_mailbox and mailbox != self.allowed_mailbox:  # what Exchange RBAC for Applications does
+            return httpx.Response(403, headers=headers, json={"error": {"code": "ErrorAccessDenied", "message": "Access is denied. Check credentials and try again."}})
         if self.graph_status == 202:
             return httpx.Response(202, headers=headers)
         return httpx.Response(self.graph_status, headers=headers, json=self.graph_error or {"error": {"code": "ErrorAccessDenied", "message": "Access is denied. Check credentials and try again."}})
@@ -374,3 +379,28 @@ def test_production_refuses_the_console_provider():
 
 def test_the_graph_requirements_do_not_apply_to_other_providers():
     production(EMAIL_PROVIDER="fake", MICROSOFT_GRAPH_SENDER="", MAIL_GRAPH_CLIENT_ID="").validate_production()
+
+
+# ── one mailbox per environment ──────────────────────────────────────────────────────────────
+def test_the_develop_app_can_send_as_its_own_mailbox_but_not_as_the_production_one(world):
+    """Plan 7.4: a non-production environment never sends from the production mailbox. The scope is Exchange's
+    to enforce; what the application owes is to surface the refusal as a 403, per mailbox, unmodified."""
+    fake = FakeMicrosoft(world["cert"], allowed_mailbox=SENDER)
+
+    send(fake)  # its own mailbox
+    with pytest.raises(email.MailSendError) as caught:
+        send(fake, mailbox=PROD_MAILBOX)
+
+    assert caught.value.status == 403 and caught.value.code == "ErrorAccessDenied"
+    assert PROD_MAILBOX in str(caught.value)
+    assert [r.url.path for r in fake.graph_calls] == [f"/v1.0/users/{SENDER}/sendMail", f"/v1.0/users/{PROD_MAILBOX}/sendMail"]
+
+
+def test_the_mirror_image_the_production_app_cannot_send_as_the_dev_mailbox(world, monkeypatch):
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={"MICROSOFT_GRAPH_SENDER": PROD_MAILBOX}))
+    fake = FakeMicrosoft(world["cert"], allowed_mailbox=PROD_MAILBOX)
+
+    send(fake)
+    with pytest.raises(email.MailSendError) as caught:
+        send(fake, mailbox=SENDER)
+    assert caught.value.status == 403
