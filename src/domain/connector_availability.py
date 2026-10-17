@@ -48,9 +48,11 @@ def _microsoft_missing(system: str) -> list[str]:
         missing.append("MICROSOFT_CLIENT_ID")
     if _blank(settings.MICROSOFT_CLIENT_SECRET):
         missing.append("MICROSOFT_CLIENT_SECRET")
+    # Both modes, not only application: a delegated consent against /common lets an account from ANY tenant (or a
+    # personal account) authorize the connector, and its files would be ingested.
+    if settings.microsoft_tenant is None:
+        missing.append("MICROSOFT_TENANT_ID")
     if settings.microsoft_connector_auth_mode == "application":
-        if _blank(settings.MICROSOFT_TENANT_ID) or settings.MICROSOFT_TENANT_ID.strip() == "common":
-            missing.append("MICROSOFT_TENANT_ID")
         allowlist = (
             "MICROSOFT_SHAREPOINT_SITE_IDS"
             if system == "sharepoint"

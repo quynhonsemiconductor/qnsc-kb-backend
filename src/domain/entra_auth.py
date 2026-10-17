@@ -11,8 +11,22 @@ import jwt
 from src.core.config import settings
 
 
+def _tenant() -> str:
+    """The pinned tenant. Raises when there is none: sign-in never falls back to a multi-tenant authority."""
+    tenant = settings.microsoft_tenant
+    if tenant is None:
+        raise ValueError("MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)")
+    return tenant
+
+
 def configured() -> bool:
-    return bool(settings.MICROSOFT_CLIENT_ID and settings.MICROSOFT_CLIENT_SECRET and settings.MICROSOFT_LOGIN_REDIRECT_URI)
+    # Fail closed: without a pinned tenant, sign-in is "not configured" (503), not "any Microsoft account".
+    return bool(
+        settings.MICROSOFT_CLIENT_ID
+        and settings.MICROSOFT_CLIENT_SECRET
+        and settings.MICROSOFT_LOGIN_REDIRECT_URI
+        and settings.microsoft_tenant
+    )
 
 
 def new_nonce() -> str:
@@ -29,7 +43,7 @@ def authorization_url(state: str, nonce: str) -> str:
         "state": state,
         "nonce": nonce,
     }
-    return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?{urlencode(params)}"
+    return f"https://login.microsoftonline.com/{_tenant()}/oauth2/v2.0/authorize?{urlencode(params)}"
 
 
 def _validated_algorithm(header: dict[str, Any]) -> str:
@@ -47,24 +61,29 @@ def _validated_algorithm(header: dict[str, Any]) -> str:
 
 
 def _validate_tenant_claims(claims: dict[str, Any]) -> str:
-    """Pin the tenant and issuer of claims whose signature is already verified."""
+    """Pin the tenant and issuer of claims whose signature is already verified.
+
+    Both are compared with OUR configured tenant, never with each other: a token whose ``iss`` agrees with its
+    own ``tid`` proves only that it is a well-formed token from SOME tenant. There is no "common" escape hatch;
+    with no pinned tenant nothing is accepted.
+    """
+    pinned = _tenant().lower()
     tenant_id = str(claims.get("tid") or "").strip()
     if not tenant_id:
         raise ValueError("Microsoft ID token has no tenant claim")
-    issuer = str(claims.get("iss") or "").strip()
-    expected_issuer = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
-    if issuer != expected_issuer:
-        raise ValueError("Microsoft ID token issuer is invalid")
-    configured_tenant = str(settings.MICROSOFT_TENANT_ID or "").strip()
-    if configured_tenant.lower() != "common" and tenant_id.lower() != configured_tenant.lower():
+    if tenant_id.lower() != pinned:
         raise ValueError("Microsoft ID token tenant is invalid")
+    issuer = str(claims.get("iss") or "").strip().lower()
+    if issuer != f"https://login.microsoftonline.com/{pinned}/v2.0":
+        raise ValueError("Microsoft ID token issuer is invalid")
     return tenant_id
 
 
 async def exchange_code(code: str) -> dict[str, Any]:
+    tenant = _tenant()  # before any network call: an unpinned config never reaches a multi-tenant authority
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False) as client:
         response = await client.post(
-            f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+            f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
             data={
                 "client_id": settings.MICROSOFT_CLIENT_ID,
                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
@@ -81,6 +100,7 @@ async def exchange_code(code: str) -> dict[str, Any]:
 
 async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     """Verify signature, audience, nonce, and tenant claims before mapping."""
+    tenant = _tenant()
     unverified_header = jwt.get_unverified_header(id_token)
     kid = str(unverified_header.get("kid") or "")
     if not kid:
@@ -88,7 +108,7 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     algorithm = _validated_algorithm(unverified_header)
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, trust_env=False) as client:
         response = await client.get(
-            f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/discovery/v2.0/keys"
+            f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
         )
     if response.status_code >= 400:
         raise ValueError("Microsoft signing keys are unavailable")

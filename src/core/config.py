@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote, urlparse
 import re
 
@@ -530,7 +530,11 @@ class Settings(BaseSettings):
     OIDC_SCOPES: str = "openid profile email"
     MICROSOFT_CLIENT_ID: str | None = None
     MICROSOFT_CLIENT_SECRET: str | None = None
-    MICROSOFT_TENANT_ID: str = "common"
+    # The ONE Entra tenant this deployment trusts, as its directory (tenant) GUID. EMPTY by default and the code
+    # fails closed on empty: the multi-tenant authorities "common", "organizations" and "consumers" would let a
+    # work or personal account from ANY tenant complete sign-in or the connector's consent. See
+    # `microsoft_tenant` below, which is what every authority URL and token check goes through.
+    MICROSOFT_TENANT_ID: str = ""
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
     MICROSOFT_GRAPH_SENDER: str | None = None
@@ -775,6 +779,21 @@ class Settings(BaseSettings):
             for dept in self.APPROVAL_AGENT_HIGH_RISK_DEPARTMENTS.split(",")
             if dept.strip()
         ]
+
+    #: Authorities that mean "any tenant" (or any personal account). Never acceptable as the pin.
+    MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset({"common", "organizations", "consumers"})
+
+    @property
+    def microsoft_tenant(self) -> str | None:
+        """The pinned tenant, or None when MICROSOFT_TENANT_ID is blank or one of the multi-tenant authorities.
+
+        The single place the tenant is read for an authority URL or a token check, so that "not pinned" is one
+        condition that every caller refuses, instead of a string each of them compares in its own way.
+        """
+        tenant = (self.MICROSOFT_TENANT_ID or "").strip()
+        if not tenant or tenant.lower() in self.MULTI_TENANT_AUTHORITIES:
+            return None
+        return tenant
 
     @property
     def microsoft_connector_auth_mode(self) -> str:

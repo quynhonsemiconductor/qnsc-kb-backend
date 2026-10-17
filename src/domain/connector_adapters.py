@@ -51,6 +51,19 @@ class ConnectorProviderError(RuntimeError):
         self.code = code
 
 
+def _microsoft_tenant() -> str:
+    """The pinned Entra tenant for every Microsoft authority URL. Never common/organizations/consumers: those would
+    let an account from any tenant (or a personal account) complete consent and have its files ingested."""
+    tenant = settings.microsoft_tenant
+    if tenant is None:
+        raise ConnectorProviderError(
+            "MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)",
+            retryable=False,
+            code="tenant_not_pinned",
+        )
+    return tenant
+
+
 class ConnectorAdapter:
     provider = "base"
     allowed_api_hosts: frozenset[str] = frozenset()
@@ -239,12 +252,13 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
             "scope": self.oauth_scope,
             "state": state,
         }
-        return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?{urlencode(params)}"
+        return f"https://login.microsoftonline.com/{_microsoft_tenant()}/oauth2/v2.0/authorize?{urlencode(params)}"
 
     async def exchange_code(self, code: str) -> dict[str, Any]:
+        tenant = _microsoft_tenant()  # before any network call
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                 data={
                     "client_id": settings.MICROSOFT_CLIENT_ID,
                     "client_secret": settings.MICROSOFT_CLIENT_SECRET,
@@ -259,10 +273,11 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
             return response.json()
 
     async def refresh_token(self) -> dict[str, Any]:
+        tenant = _microsoft_tenant()  # before any network call
         async with httpx.AsyncClient(timeout=30.0) as client:
             if settings.microsoft_connector_auth_mode == "application":
                 response = await client.post(
-                    f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                    f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                     data={
                         "client_id": settings.MICROSOFT_CLIENT_ID,
                         "client_secret": settings.MICROSOFT_CLIENT_SECRET,
@@ -277,7 +292,7 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
             if not refresh:
                 raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
             response = await client.post(
-                f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                 data={"client_id": settings.MICROSOFT_CLIENT_ID, "client_secret": settings.MICROSOFT_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh, "scope": self.oauth_scope},
             )
             if response.status_code >= 400:

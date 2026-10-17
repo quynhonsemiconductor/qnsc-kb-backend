@@ -114,7 +114,7 @@ def _response(connector: Connector) -> dict[str, Any]:
         and settings.microsoft_connector_auth_mode == "application"
         and settings.MICROSOFT_CLIENT_ID
         and settings.MICROSOFT_CLIENT_SECRET
-        and settings.MICROSOFT_TENANT_ID
+        and settings.microsoft_tenant
     )
     return {
         "id": str(connector.id), "name": connector.name, "system": connector.system,
@@ -349,8 +349,8 @@ async def start_oauth(
         raise HTTPException(status_code=422, detail="Local folders do not require OAuth")
     if is_microsoft_graph(connector.system) and settings.microsoft_connector_auth_mode == "application":
         raise HTTPException(status_code=422, detail="Microsoft connector is using app-only mode; configure Entra application permissions and use Discover scopes directly")
-    if is_microsoft_graph(connector.system) and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI)):
-        raise HTTPException(status_code=422, detail="Microsoft connector is not configured. Set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, and MICROSOFT_REDIRECT_URI in the API environment.")
+    if is_microsoft_graph(connector.system) and not all((settings.MICROSOFT_CLIENT_ID, settings.MICROSOFT_CLIENT_SECRET, settings.MICROSOFT_REDIRECT_URI, settings.microsoft_tenant)):
+        raise HTTPException(status_code=422, detail="Microsoft connector is not configured. Set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_REDIRECT_URI and MICROSOFT_TENANT_ID (the tenant GUID, never common) in the API environment.")
     if connector.system == "google_drive" and not all((settings.GOOGLE_CLIENT_ID, settings.GOOGLE_CLIENT_SECRET, settings.GOOGLE_REDIRECT_URI)):
         raise HTTPException(status_code=422, detail="Google Drive connector is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in the API environment.")
     state = jwt.encode({"type": "connector_oauth", "connector_id": str(connector.id), "user_id": str(current_user.id), "exp": datetime.utcnow() + timedelta(minutes=10)}, settings.SECRET_KEY, algorithm="HS256")
