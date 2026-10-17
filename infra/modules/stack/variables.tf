@@ -437,35 +437,18 @@ variable "email_provider" {
   description = <<-EOT
     Selects get_email_sender()'s transport (src/services/email.py). "graph" (default, and what every
     deployed environment uses) sends through Microsoft 365 with certificate auth (the mail secret is
-    injected into the worker once mail_graph_client_id is set). "ses" is the legacy AWS path, kept only until Graph is proven in develop
-    and then removed. "fake" is the in-memory sender for tests. "console" exists in the application but is
-    refused outside development and is not accepted here.
+    injected into the worker once mail_graph_client_id is set). "fake" is the in-memory sender
+    for tests. "console" exists in the application but is refused outside development and is not accepted
+    here. (AWS SES was removed.)
 
     Switching away from "graph" destroys the empty-or-not mail secret container (recoverable for
     secrets_recovery_window_days); the plan guard stops that unless it is acknowledged.
   EOT
 
   validation {
-    condition     = contains(["graph", "ses", "fake"], var.email_provider)
-    error_message = "email_provider must be graph, ses, or fake."
+    condition     = contains(["graph", "fake"], var.email_provider)
+    error_message = "email_provider must be graph or fake."
   }
-}
-
-variable "mail_from_email" {
-  type    = string
-  default = ""
-
-  description = <<-EOT
-    Required when email_provider is "ses"; SesEmailSender raises without it. Must be an
-    address SES has verified (directly, or via a verified domain identity), e.g.
-    "no-reply@qnsc.vn".
-  EOT
-}
-
-variable "mail_from_name" {
-  type        = string
-  default     = "QNSC Knowledge Base"
-  description = "Display name on outbound mail sent through EMAIL_PROVIDER=ses."
 }
 
 variable "google_client_id" {

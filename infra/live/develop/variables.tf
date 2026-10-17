@@ -71,11 +71,20 @@ variable "mail_graph_client_id" {
   type        = string
   default     = ""
   description = <<-EOT
-    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
-    has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
-    set only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret qnsc-kb/develop/mail-graph-certificate.
-    While empty, nothing mail-related is injected; develop keeps sending through SES.
+    Application (client) ID of this environment's mail Entra app ("KB Develop Service"; a public identifier). THIS IS THE SWITCH: set it
+    only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret
+    qnsc-kb/develop/mail-graph-certificate (docs/runbooks/email-graph.md).
+
+    REQUIRED here. AWS SES is gone from this branch, so with no client id this environment would have no mail
+    transport at all: the worker would log "Mail is not configured" on every pass and send nothing. The validation
+    makes `tofu plan` fail until the id is carried in this file, so this change cannot be merged or applied before
+    both environments have their app.
   EOT
+
+  validation {
+    condition     = var.mail_graph_client_id != ""
+    error_message = "mail_graph_client_id is empty. This change removes SES, so develop would have no way to send mail. Create the app (docs/runbooks/email-graph.md), put the credential in its secret, then set the client id in infra/live/develop/variables.tf."
+  }
 }
 
 variable "microsoft_tenant_id" {
@@ -88,22 +97,6 @@ variable "microsoft_tenant_id" {
     connects THEIR SharePoint. Under "common" that is any user in any Microsoft tenant on
     earth, and their documents would be ingested into this knowledge base. Pinning the
     tenant is what limits the flow to qnsc.vn accounts.
-  EOT
-}
-
-variable "mail_from_email" {
-  type    = string
-  default = "no-reply@qnsc.vn"
-
-  description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM under EMAIL_PROVIDER=ses.
-
-    The domain's SES identity and DKIM records are owned by qnsc-infra's `edge` stack, not
-    this one, so this only needs to change if the local part should differ (a different
-    DOMAIN needs an identity in edge first). Emptying it reintroduces the dead-mail shape
-    microsoft_graph_sender has above: SesEmailSender raises "MAIL_FROM_EMAIL is not
-    configured" on every attempt, and deliver_notification_queue retries every 30 seconds
-    without ever arriving.
   EOT
 }
 
