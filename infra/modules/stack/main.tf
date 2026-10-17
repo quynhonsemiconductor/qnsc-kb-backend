@@ -52,13 +52,6 @@ locals {
   kms_key_arn        = data.terraform_remote_state.shared.outputs.kms_key_arn
   cloudflare_zone_id = try(data.terraform_remote_state.shared.outputs.cloudflare_zone_id, "")
 
-  // DKIM verifies the DOMAIN, not the mailbox, so this is the part after "@" — SES signs
-  // for any address at it, and the local part of mail_from_email can change later without
-  // a new identity. The regex has a fallback rather than failing plan outright: an
-  // environment with email_provider != "ses" can leave mail_from_email at its own
-  // default, which need not even look like an address.
-  mail_from_domain = var.email_provider == "ses" ? replace(var.mail_from_email, "/^[^@]*@/", "") : ""
-
   ecr_base         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
   ecr_api_url      = "${local.ecr_base}/${var.product}-api:${var.image_tag}"
   ecr_worker_url   = "${local.ecr_base}/${var.product}-worker:${var.image_tag}"
@@ -165,7 +158,6 @@ locals {
     // an environment that does not run those checks cannot prove production will pass
     // them.
     { name = "ENVIRONMENT", value = "production" },
-    { name = "AWS_REGION", value = var.region },
     { name = "REDIS_URL", value = local.redis_url },
 
     // Celery, not in-process: JOB_MODE=inline would run ingestion inside the request
@@ -228,8 +220,6 @@ locals {
     // must agree on config the way EMBEDDING_MODEL does above, and a future path that
     // sends mail from the api would otherwise silently pick up a different transport.
     { name = "EMAIL_PROVIDER", value = var.email_provider },
-    { name = "MAIL_FROM_EMAIL", value = var.mail_from_email },
-    { name = "MAIL_FROM_NAME", value = var.mail_from_name },
 
     // SSO sign-in, a DIFFERENT callback from the connector one above: that consents to
     // SharePoint content, this authenticates a person. Both must be registered on the
@@ -641,36 +631,10 @@ module "worker" {
   tags = local.tags
 }
 
-// The SES identity and its DKIM CNAME records are NOT declared here. qnsc-infra's `edge` stack owns the one
-// identity for qnsc.vn that every product shares (an SES identity is per account and region), with the three
-// DKIM records in Cloudflare. This stack declared them as well for a while, so two states owned the same
-// objects and each apply rewrote the other's tags, comment and TTL. The product only needs permission to send
-// as the identity, granted below by ARN.
-//
-// Grants the worker task (the only caller of get_email_sender()) permission to send
-// through SES. Only created when email_provider is actually "ses" — the ecs-service
-// module exposes task_role_arn but not a role NAME output, so the role name is derived
-// from the ARN's final path segment. Scoped to the identity above when one exists;
-// mail_from_email set without it (email_provider == "ses" but the address left empty)
-// falls back to "*" rather than a zero-Resource policy statement, which Terraform
-// rejects outright.
-resource "aws_iam_role_policy" "worker_ses_send" {
-  count = var.email_provider == "ses" ? 1 : 0
-  name  = "ses-send"
-  role  = split("/", module.worker.task_role_arn)[1]
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid    = "SendApplicationEmail"
-      Effect = "Allow"
-      Action = ["ses:SendEmail", "ses:SendRawEmail"]
-      // The shared identity, by ARN (edge's `ses_identity_arn` output builds the same string). "*" only when
-      // email_provider is ses but the address was left empty, which a zero-Resource statement would reject.
-      Resource = local.mail_from_domain != "" ? "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.mail_from_domain}" : "*"
-    }]
-  })
-}
+// There is no SES here any more: application mail goes through Microsoft 365 Graph with a certificate (see the
+// mail secrets above and docs/runbooks/email-graph.md). The shared SES identity for qnsc.vn and its DKIM records
+// are still owned by qnsc-infra's `edge` stack, which other products use; this stack neither declares them nor
+// holds a ses:SendEmail grant. (The worker's grant was keyed on email_provider == "ses" and went with it.)
 
 // ── Migrator — one-shot task run by the deploy pipeline before rolling services ──
 module "migrator" {
@@ -688,7 +652,6 @@ module "migrator" {
 
   environment = {
     ENVIRONMENT   = "production"
-    AWS_REGION    = var.region
     DATABASE_HOST = module.rds.address
     DATABASE_PORT = tostring(module.rds.port)
     DATABASE_NAME = module.rds.db_name

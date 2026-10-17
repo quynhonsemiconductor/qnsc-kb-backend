@@ -79,8 +79,10 @@ def test_the_r2_client_never_signs_with_an_aws_region(monkeypatch):
     monkeypatch.setattr(settings, "R2_ACCOUNT_ID", None)
     monkeypatch.setattr(settings, "R2_ACCESS_KEY_ID", "access-key")
     monkeypatch.setattr(settings, "R2_SECRET_ACCESS_KEY", "secret-key")
-    # The deployed value, set from var.region by infra/modules/stack/main.tf.
-    monkeypatch.setattr(settings, "AWS_REGION", "ap-southeast-1")
+    # A deployed process can carry the real AWS region in its environment (there is no Settings field for it
+    # any more); the client must ignore it either way.
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-1")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-southeast-1")
 
     import boto3
 

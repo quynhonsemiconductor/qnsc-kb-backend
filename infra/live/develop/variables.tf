@@ -81,22 +81,6 @@ variable "microsoft_tenant_id" {
   EOT
 }
 
-variable "mail_from_email" {
-  type    = string
-  default = "no-reply@qnsc.vn"
-
-  description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM under EMAIL_PROVIDER=ses.
-
-    The domain's SES identity and DKIM records are owned by qnsc-infra's `edge` stack, not
-    this one, so this only needs to change if the local part should differ (a different
-    DOMAIN needs an identity in edge first). Emptying it reintroduces the dead-mail shape
-    microsoft_graph_sender has above: SesEmailSender raises "MAIL_FROM_EMAIL is not
-    configured" on every attempt, and deliver_notification_queue retries every 30 seconds
-    without ever arriving.
-  EOT
-}
-
 variable "google_client_id" {
   type        = string
   default     = ""

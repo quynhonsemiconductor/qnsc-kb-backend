@@ -338,7 +338,6 @@ module "stack" {
   microsoft_tenant_id    = var.microsoft_tenant_id
   microsoft_graph_sender = var.microsoft_graph_sender
   mail_graph_client_id   = var.mail_graph_client_id
-  mail_from_email        = var.mail_from_email
   google_client_id       = var.google_client_id
   allowed_email_domains  = var.allowed_email_domains
 }
@@ -354,8 +353,8 @@ module "stack" {
 // from the OpenTofu state but will not be destroyed" and nothing is deleted in AWS or Cloudflare. Do NOT write
 // `lifecycle { destroy = false }` here: 1.9.1 rejects that block ("Unsupported block type").
 //
-// The worker's ses:SendEmail grant is unaffected; it names the identity by ARN (modules/stack/main.tf,
-// worker_ses_send), the way edge's `ses_identity_arn` output says every product should.
+// The worker no longer holds a ses:SendEmail grant at all: application mail is sent through Microsoft 365 Graph
+// (docs/runbooks/email-graph.md).
 //
 // Delete these two blocks after the first apply-develop that has run them: with the state entries gone they
 // match nothing.

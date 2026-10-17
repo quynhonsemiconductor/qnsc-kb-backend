@@ -8,7 +8,6 @@ Providers (EMAIL_PROVIDER):
 * ``console`` development only: writes the message to the log instead of sending it, so the invitation and
               password-reset links are visible without a mail server. Refused outside development.
 * ``fake``    in-memory list, for unit tests.
-* ``ses``     AWS SES; kept only until Graph is proven in develop, then removed.
 
 Why a certificate and a dedicated app. ``Mail.Send`` as an *application* permission is tenant-wide unless it is
 limited with Exchange Online RBAC for Applications, and a client secret is a bearer string that anything which
@@ -258,35 +257,6 @@ class MicrosoftGraphEmailSender(EmailSender):
         logger.info("Email sent through Microsoft Graph", sender=sender, request_id=response.headers.get("request-id"))
 
 
-class SesEmailSender(EmailSender):
-    """Sends through AWS SES. Opt in with EMAIL_PROVIDER=ses; boto3 resolves AWS
-    credentials through its normal chain (env vars, ~/.aws, or an IAM role), same
-    as source_storage.py does for R2."""
-
-    async def send(self, *, to: str, subject: str, text: str, html: str | None = None) -> None:
-        sender = settings.MAIL_FROM_EMAIL
-        if not sender:
-            raise RuntimeError("MAIL_FROM_EMAIL is not configured")
-        try:
-            import boto3
-        except ImportError as exc:
-            raise RuntimeError("boto3 is required for EMAIL_PROVIDER=ses") from exc
-        from_address = f"{settings.MAIL_FROM_NAME} <{sender}>" if settings.MAIL_FROM_NAME else sender
-        body: dict[str, Any] = {"Subject": {"Data": subject}, "Body": {}}
-        if html:
-            body["Body"]["Html"] = {"Data": html}
-        else:
-            body["Body"]["Text"] = {"Data": text}
-        client = boto3.client("sesv2", region_name=settings.AWS_REGION)
-        # boto3 has no async client; keep the event loop unblocked for the HTTP call.
-        await asyncio.to_thread(
-            client.send_email,
-            FromEmailAddress=from_address,
-            Destination={"ToAddresses": [to]},
-            Content={"Simple": body},
-        )
-
-
 def get_email_sender() -> EmailSender:
     provider = (settings.EMAIL_PROVIDER or "graph").strip().lower()
     if provider == "fake":
@@ -295,10 +265,8 @@ def get_email_sender() -> EmailSender:
         if not settings.is_development_environment:
             raise RuntimeError("EMAIL_PROVIDER=console is for local development only; it would log one-time links")
         return ConsoleEmailSender()
-    if provider == "ses":
-        return SesEmailSender()
     if provider != "graph":
-        raise RuntimeError(f"Unknown EMAIL_PROVIDER '{provider}'; expected graph, console, ses, or fake")
+        raise RuntimeError(f"Unknown EMAIL_PROVIDER '{provider}'; expected graph, console, or fake")
     if not settings.MAIL_GRAPH_CLIENT_ID:
         environment = (settings.ENVIRONMENT or "").strip().lower()
         # No Entra mail app configured: a local run prints, a test run records. Anywhere else this is a

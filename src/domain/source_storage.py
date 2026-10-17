@@ -249,11 +249,11 @@ def _s3_client() -> Any:
         #   ClientError: An error occurred (InvalidRegionName) when calling the
         #   PutObject operation: The region name 'ap-southeast-1' is not valid.
         #
-        # This read `settings.AWS_REGION or "auto"`, and the fallback looks like it
-        # covers this — but AWS_REGION is set, legitimately and unavoidably, to the real
-        # AWS region for Secrets Manager and ECS (infra sets it from var.region). So the
-        # fallback never fired in a deployment and every R2 call failed. Not just
-        # uploads: this client backs put, get, delete, head, list and presign.
+        # This once read `settings.AWS_REGION or "auto"`, and the fallback looked like it
+        # covered this — but AWS_REGION was set to the real AWS region in every deployment, so
+        # the fallback never fired and every R2 call failed. Not just uploads: this client
+        # backs put, get, delete, head, list and presign. The setting is gone (it was only read
+        # by the removed SES sender); the constant below is the whole story.
         "region_name": "auto",
         "endpoint_url": endpoint_url,
     }
