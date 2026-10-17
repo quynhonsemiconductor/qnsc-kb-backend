@@ -31,7 +31,7 @@ def test_production_compose_is_explicitly_hardened():
     assert "6379:6379" not in compose
     assert "caddy:2.8-alpine" in compose
     assert "PUBLIC_HOSTNAME" in compose
-    assert "GEMINI_MODEL" in compose
+    assert "GEMINI_MODEL" not in compose  # a dead variable: nothing reads it
     assert "MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}" in compose
     assert "MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:?set MICROSOFT_CLIENT_SECRET}" in compose
     assert "MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:?set MICROSOFT_TENANT_ID}" in compose

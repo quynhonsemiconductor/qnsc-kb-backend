@@ -16,9 +16,11 @@ def teardown_function() -> None:
 
 
 def test_llm_provider_does_not_fall_back_to_environment(monkeypatch):
-    monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
-    monkeypatch.setattr(settings, "GROQ_API_KEY", "environment-key")
-    monkeypatch.setattr(settings, "LLM_MODEL", "llama-3.3-70b-versatile")
+    # These were Settings fields that nothing read; they are gone. The guarantee is about the PROCESS
+    # ENVIRONMENT, so it is stated there: no provider, key or model in env produces a configuration.
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "environment-key")
+    monkeypatch.setenv("LLM_MODEL", "llama-3.3-70b-versatile")
 
     set_runtime_config(None)
 

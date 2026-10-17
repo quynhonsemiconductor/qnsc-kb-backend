@@ -422,7 +422,7 @@ async def initialize_resources() -> None:
     # after EMBEDDING_WARMUP_TIMEOUT_SECONDS. `begin()` runs HERE, before the task is
     # scheduled, so there is no window in which readiness is true and the load is not
     # yet recorded as in progress.
-    if settings.OPENAI_API_KEY != "mock" and settings.EMBEDDING_MODEL != "mock":
+    if settings.EMBEDDING_MODEL != "mock":
         global _preload_task
         embedding_warmup.begin()
         # Kept in a module variable: the event loop holds only a weak reference to a task, so one

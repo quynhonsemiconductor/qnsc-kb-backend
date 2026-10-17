@@ -13,8 +13,10 @@ services:
     image: pgvector/pgvector:pg16
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
-      # be reachable from the LAN.
-      - "127.0.0.1:5432:5432"
+      # be reachable from the LAN. The HOST port is KB_DB_PORT (default 5432): set it in
+      # .env when another Postgres already owns 5432 (a second project's compose stack
+      # is the usual culprit) -- containers reach each other on `db:5432` regardless.
+      - "127.0.0.1:${KB_DB_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -32,7 +34,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
     command: ["redis-server", "--requirepass", "devredis"]
     volumes:
       - redisdata:/data
@@ -50,18 +52,21 @@ services:
       dockerfile: Dockerfile
       target: api
       args:
+        # KB_BAKE_EMBEDDING_MODEL=false skips the ~2.3 GB bake; CI's quickstart job does that and runs
+        # with EMBEDDING_MODEL=mock to prove the stack boots. Leave it unset for real local work.
+        #
         # Baked, because the ONNX loader reads the export from disk and has no runtime
         # download path: unbaked, this container cannot embed at all and every search
         # silently degrades to keyword-only. It is two files, cached as a build layer,
         # and it is the same artifact production runs.
-        BAKE_EMBEDDING_MODEL: "true"
+        BAKE_EMBEDDING_MODEL: "${KB_BAKE_EMBEDDING_MODEL:-true}"
       # See the top-level `secrets:` block -- optional, and only used by the Dockerfile's
       # bake step for a public model's Hub API rate limit / transfer, never for auth to
       # anything this app itself calls at runtime.
       secrets:
         - hf_token
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${KB_API_PORT:-8000}:8000"
     volumes:
       - .:/app
       - ./connector_sources:/app/storage/connectors
@@ -121,14 +126,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: worker
+      # KB_WORKER_TARGET: `api` (default) runs the worker from the API image, which carries
+      # Celery and the whole embedding stack and builds on every architecture. `worker` adds
+      # PaddleOCR for SCANNED files and builds on x86_64 only (see the note above).
+      target: ${KB_WORKER_TARGET:-api}
       args:
-        BAKE_EMBEDDING_MODEL: "true"
+        BAKE_EMBEDDING_MODEL: "${KB_BAKE_EMBEDDING_MODEL:-true}"
       secrets:
         - hf_token
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
+    # The API image carries a HEALTHCHECK on :8000, which this process does not serve: without
+    # this the worker reports `unhealthy` forever when it runs from that image.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     command: celery -A src.workers.celery_app worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=info -Q document-preparation,celery,ingestion,connectors,permissions
     # RAISED from 2g. The baked ONNX export is 2.1 GB on disk and the model is held
     # IN-PROCESS for the lifetime of the worker: measured in this container, RSS goes
@@ -194,15 +210,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: worker
+      target: ${KB_WORKER_TARGET:-api}
       args:
-        BAKE_EMBEDDING_MODEL: "true"
+        BAKE_EMBEDDING_MODEL: "${KB_BAKE_EMBEDDING_MODEL:-true}"
       secrets:
         - hf_token
     volumes:
       - .:/app
       - hfcache:/opt/huggingface
-    command: celery -A src.workers.celery_app beat --loglevel=info
+    # Beat serves nothing to probe, and the API image's :8000 HEALTHCHECK would mark it unhealthy.
+    healthcheck:
+      disable: true
+    # --schedule in /tmp: by default beat writes `celerybeat-schedule` next to the code, i.e. into the
+    # bind-mounted /app, and on a Linux host that directory belongs to the host user, not to the
+    # container's unprivileged user ("PermissionError: [Errno 13] ... 'celerybeat-schedule'", found by
+    # the quickstart CI job; Docker Desktop and OrbStack hide it by mapping ownership).
+    command: celery -A src.workers.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     mem_limit: 256m
     mem_reservation: 64m
     environment:
@@ -255,6 +278,11 @@ services:
       - .:/app
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
+      # Explicit: migrations/env.py prefers MIGRATION_DATABASE_URL, and `.env` (mounted at
+      # /app/.env, copied from .env.example) sets it to `localhost` -- the HOST's Postgres, which
+      # from inside this container is nothing. Same for the app role below.
+      - MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
+      - APP_DATABASE_ROLE=
       - ENVIRONMENT=development
     depends_on:
       db:

@@ -91,19 +91,6 @@ variable "allowed_email_domains" {
   EOT
 }
 
-variable "entra_admin_emails" {
-  type    = list(string)
-  default = ["nghiavt@qnsc.vn", "sinhhpt@qnsc.vn", "quangld@qnsc.vn", "hieuvbm@qnsc.vn"]
-
-  description = <<-EOT
-    Provisioned as GLOBAL administrators on their FIRST Entra sign-in, rather than Staff.
-
-    Read only at account creation, so it never overrides a role changed later in the admin
-    UI, and removing an address does not demote anyone — promote and demote in the UI once
-    an account exists.
-  EOT
-}
-
 variable "alarm_emails" {
   type = list(string)
   # devops@qnsc.vn is an M365 SHARED MAILBOX, deliberately, not an alias on a person.
