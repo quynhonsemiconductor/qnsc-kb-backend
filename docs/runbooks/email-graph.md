@@ -9,7 +9,7 @@ prove it.
 | | Develop | Production |
 |---|---|---|
 | Shared mailbox | `noreply-kb-dev@qnsc.vn` | `noreply-kb@qnsc.vn` |
-| Entra app (a "Service app") | `qnsc-kb-mail-develop` | `qnsc-kb-mail-prod` |
+| Entra app (a "Service app") | `KB Develop Service` | `KB Prod Service` |
 | Exchange management scope | `KB mail sender (develop)` -> the dev mailbox only | `KB mail sender (prod)` -> the prod mailbox only |
 | Secrets bundle | `qnsc-kb/develop/app` | `qnsc-kb/prod/app` |
 | Terraform | `infra/live/develop/variables.tf` | `infra/live/prod/variables.tf` |
@@ -71,7 +71,7 @@ New-ManagementScope -Name "KB mail sender (develop)" `
 
 ## 3. The Entra app registration (per environment)
 
-Entra admin center > App registrations > New registration: name `qnsc-kb-mail-<env>`, **single tenant**, no
+Entra admin center > App registrations > New registration: name `KB Develop Service` or `KB Prod Service` (the Service apps of plan §7.4), **single tenant**, no
 redirect URI. Then:
 
 * **API permissions: add NOTHING.** Do not add Microsoft Graph `Mail.Send`. (The default `User.Read`
@@ -89,7 +89,7 @@ pair for both environments.**
 ```bash
 umask 077
 openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
-  -keyout mail-<env>.key -out mail-<env>.crt -subj "/CN=qnsc-kb-mail-<env>"
+  -keyout mail-<env>.key -out mail-<env>.crt -subj "/CN=KB-<Env>-Service"
 openssl x509 -in mail-<env>.crt -noout -enddate -fingerprint -sha256
 ```
 
@@ -97,29 +97,42 @@ openssl x509 -in mail-<env>.crt -noout -enddate -fingerprint -sha256
   Upload certificate. The private key is never uploaded anywhere but the secrets bundle.
 * RSA only: the client assertion is RS256 and the application refuses an EC key.
 
-## 5. The secrets bundle (do this BEFORE the next deploy)
+## 5. The secrets bundle (do this BEFORE setting `mail_graph_client_id`)
 
 The two PEMs are keys `mail-graph-certificate` and `mail-graph-private-key` of the bundle JSON
 `qnsc-kb/<env>/app`. **Merge them into the existing JSON; do not replace it** (a plain `put-secret-value`
 with only these keys erases `secret-key`, `data-encryption-key`, the database password and the rest).
 
+**Nothing secret goes on a command line.** Command lines are visible in the process list and saved in shell
+history; the bundle is read from a pipe and written to a pipe, and `jq --rawfile` reads the PEMs from files:
+
 ```bash
-SECRET_ID=qnsc-kb/<env>/app
-CUR="$(aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text)"
-echo "$CUR" | jq 'keys'                       # note what is there; this prints key NAMES only
-NEW="$(jq --rawfile c mail-<env>.crt --rawfile k mail-<env>.key \
-  '. + {"mail-graph-certificate": $c, "mail-graph-private-key": $k}' <<<"$CUR")"
-aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "$NEW"
-aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text | jq 'keys'
-unset CUR NEW
+ID=qnsc-kb/<env>/app
+aws secretsmanager get-secret-value --secret-id "$ID" --query SecretString --output text \
+  | jq --rawfile c mail-<env>.crt --rawfile k mail-<env>.key \
+       '. + {"mail-graph-certificate": $c, "mail-graph-private-key": $k}' \
+  | aws secretsmanager put-secret-value --secret-id "$ID" --secret-string file:///dev/stdin
 ```
 
-The last command must list both new keys **and** all the old ones. Do not skip it: the deploy preflight
-checks that the bundle container holds a value, not that each key exists. A missing key fails the task at boot
-with `ResourceInitializationError` in a log that does not name the key (the circuit breaker then rolls the
-deploy back). Keep `mail-<env>.key` only until the verification in step 8 has passed, then `shred -u` it
-(or `rm -P` on macOS); keep the `.crt` and the expiry date. Make sure each environment's bundle got **its own**
-pair: develop's key in `qnsc-kb/develop/app`, production's in `qnsc-kb/prod/app`.
+Verify. This prints only `true` or `false`, never a value:
+
+```bash
+aws secretsmanager get-secret-value --secret-id "$ID" --query SecretString --output text \
+  | jq -e 'has("secret-key") and has("data-encryption-key") and has("mail-graph-certificate") and has("mail-graph-private-key")'
+```
+
+It must print `true`. Do not skip it: the deploy preflight checks that the bundle container holds a value,
+not that each key exists, and a missing key fails the task at boot with `ResourceInitializationError`. Terraform
+injects the two keys only once `mail_graph_client_id` is set (step 9), which is why the keys come first.
+
+Every other edit of the bundle (rotation, below) uses the same pipe; never paste a PEM into a command.
+
+Where the private key lives: generate it on an encrypted volume (FileVault is on a managed Mac) and keep the one
+copy in an encrypted location (the team password manager, or an encrypted disk image) until the verification in
+step 8 has passed; after that the bundle holds the working copy and the file can go. Do not rely on `shred` or
+`rm -P`: on APFS and SSDs they do not overwrite the blocks, so they give a false sense of having erased it.
+Keep the `.crt` and the expiry date. Make sure each environment's bundle got **its own** pair: develop's key in
+`qnsc-kb/develop/app`, production's in `qnsc-kb/prod/app`.
 
 ## 6. Exchange RBAC for Applications (the scope)
 
@@ -138,8 +151,8 @@ Test-ServicePrincipalAuthorization -Identity <develop-client-id> -Resource norep
 ```
 
 `Test-ServicePrincipalAuthorization` reads Exchange only and bypasses its permission cache; it **does not
-see Entra grants**. Real Graph calls can lag a fresh assignment (Microsoft's guidance is up to roughly half an
-hour); if step 8 returns 403 on the *allowed* mailbox straight after this, wait and retry before debugging.
+see Entra grants**. Real Graph calls can lag a fresh assignment (Microsoft documents propagation of up to roughly two
+hours); if step 8 returns 403 on the *allowed* mailbox straight after this, wait and retry (up to ~2 hours) before debugging.
 
 ## 7. Make sure there is NO unscoped grant in Entra (per app)
 
@@ -179,23 +192,47 @@ PASS  DENIED  as <other>: HTTP 403 ErrorAccessDenied (request-id ...)
 
 * `DENIED` is the **negative test** and it is the proof the scope works. If it says the send was *accepted*,
   that app can send as the other environment (or anyone): go back to step 7.
-* If the token's `roles` lists `Mail.Send`, step 7 was not done.
+* If the token carries **any** `roles` claim, the check fails: this app should hold no application role at all, so something was consented in Entra (step 7).
 * `TOKEN` failing with `AADSTS700027` (invalid assertion signature) or `AADSTS700024`: the certificate
   uploaded to Entra is not the one whose key is in that environment's bundle.
 
 ## 9. Configure the repository and deploy
 
-1. In `infra/live/<env>/variables.tf` set `mail_graph_client_id` to that environment's Application (client) ID
+The order matters, and `mail_graph_client_id` is the switch: while it is empty, **nothing** mail-related is injected
+and develop keeps sending through SES exactly as before, so merging the code before these steps takes nothing
+down.
+
+1. Steps 1-8 done for the environment, including step 5 (the bundle keys exist) and step 8 (the proof).
+2. In `infra/live/<env>/variables.tf` set `mail_graph_client_id` to that environment's Application (client) ID
    (a public identifier). `microsoft_graph_sender` already defaults to `noreply-kb-dev@qnsc.vn` in develop and
    `noreply-kb@qnsc.vn` in production, and `tofu plan` rejects a develop sender without `-dev@` and a production
-   one with it. Commit to the pull request that is to be merged; do not merge before steps 1-8 are done.
-2. Merging runs Infrastructure · Apply, which adds the two mail secrets and the three variables to the task
-   definition baseline. Nothing sends yet: the running services keep their revision.
-3. Deploy. The API now **refuses to boot** with `EMAIL_PROVIDER=graph` unless the sender, client ID and both PEMs
-   are present, so a half-configured environment fails the deploy instead of quietly queueing mail.
-4. End to end: invite a user from the app; the message arrives from the environment's own mailbox
-   (`noreply-kb-dev@qnsc.vn` from develop). A failed delivery is recorded on the notification row
-   (`status = failed`, `last_error`), for example `Graph sendMail as ... failed: HTTP 403 ErrorAccessDenied ...`.
+   one with it. Merge that change.
+3. Merging runs Infrastructure · Apply: develop's `email_provider` becomes `graph`, and the two mail secrets are
+   injected into the **worker container only** (the API and beat never receive the key). The SES send permission
+   stays in place on purpose, so a rollback to the previous task definition can still send; it is removed by the
+   separate clean-up change (#216) once Graph is proven.
+4. Deploy. The **worker** now refuses to start if the client id is set but the sender, certificate or key is
+   missing, so a half-configured environment fails the deploy instead of quietly queueing mail. The API does not
+   check mail at all. With the client id empty the worker starts and logs `Mail is not configured` on every
+   delivery pass, and the `...-worker-mail-not-configured` alarm fires.
+5. End to end: invite a user from the app; the message arrives from the environment's own mailbox
+   (`noreply-kb-dev@qnsc.vn` from develop).
+
+## What happens when delivery fails
+
+Delivery is bounded; it never retries forever.
+
+* **Permanent** (HTTP 400, 403, 404): the row becomes `status = 'dead'` at once and `Notification marked dead` is
+  logged (alarm `...-worker-mail-dead`). Typical cause: the scope or the mailbox is wrong; `last_error` says so.
+* **Transient**: retried with exponential backoff (30 s, 1 m, 2 m ... up to 1 h) and `Retry-After` honoured on
+  429/503; after 8 attempts the row is `dead` too.
+* **Affects every message** (the token request is refused, certificate unusable, throttling): the batch stops and
+  the remaining rows are not charged an attempt. Fix the cause and mail resumes by itself.
+* Rows are selected so that failing rows back off out of the way and cannot starve new mail.
+* Re-queue dead rows after fixing the cause: `UPDATE notification_queue SET status='pending', attempts=0,
+  next_attempt_at=NULL WHERE status='dead' AND type='email';`
+* Certificate expiry is checked **daily**: `Mail certificate expires soon` (30 days) and `Mail certificate has
+  expired` raise the `...-worker-mail-certificate` alarm.
 
 ## Rotation and revocation
 

@@ -50,31 +50,29 @@ Khuyến nghị production: dùng certificate credential thay cho client secret 
 
 ## 3. Cấp Microsoft Graph permissions
 
-Vào **API permissions → Add a permission → Microsoft Graph → Application permissions**.
+> **Chuẩn hiện hành (2026-10).** App `QNSC Knowledge Base` chỉ có **delegated** permissions (xem mục dưới về
+> `MICROSOFT_CONNECTOR_AUTH_MODE=delegated`) và **không có application permission nào**. Bảng application bên dưới
+> chỉ áp dụng nếu admin chủ động chọn chế độ app-only; đó không phải cấu hình đang chạy.
+>
+> **Email thông báo không đi qua app này.** Việc gửi mail dùng một app riêng cho mỗi môi trường (`KB Develop Service`,
+> `KB Prod Service`), xác thực bằng certificate, không có Graph consent nào; quyền gửi duy nhất đến từ Exchange Online
+> RBAC for Applications (role *Application Mail.Send* gắn với management scope chỉ gồm một mailbox). **Không cấp
+> `Mail.Send` (Application) cho app connector và không dùng Application Access Policy** — xem
+> [`runbooks/email-graph.md`](runbooks/email-graph.md).
+
+Nếu dùng chế độ app-only, vào **API permissions → Add a permission → Microsoft Graph → Application permissions**.
 
 ### Phương án bring-up nhanh
 
-Cấp và admin-consent:
+Cấp và admin-consent (chỉ khi chọn app-only):
 
 | Permission | Type | Bắt buộc | Backend gọi endpoint nào |
 | --- | --- | --- | --- |
 | `Sites.Read.All` | Application | Có | `GET /sites?search=*`, `GET /sites/{id}`, `GET /sites/{id}/drives` |
 | `Files.Read.All` | Application | Có | `GET /drives/{id}/root/delta`, `/root/children`, `/items/{id}/content`, `/items/{id}/permissions`, `GET /users/{id}/drive`, và `POST /subscriptions` trên `/drives/{id}/root` |
-| `Mail.Send` | Application | Có, nếu bật email | `POST /users/{sender}/sendMail` — worker `deliver_notification_queue` gửi thông báo review/quá hạn |
 | `User.Read.All` | Application | Không | Chỉ cần khi muốn resolve/enumerate user cho OneDrive |
 
 `POST /subscriptions` trên một drive **không** cần `Files.ReadWrite.All`. Bảng permission của Microsoft ghi driveItem (OneDrive for Business) = `Files.Read.All` cho cả delegated lẫn application; Graph từ chối write scope khi read scope đã đủ.
-
-`Mail.Send` ở mức application cho phép gửi mail dưới danh nghĩa **mọi mailbox** trong tenant. Siết lại bằng Application Access Policy trong Exchange Online, chỉ cho phép đúng hộp thư `MICROSOFT_GRAPH_SENDER`:
-
-```powershell
-New-ApplicationAccessPolicy -AppId <QNSC_APP_CLIENT_ID> `
-  -PolicyScopeGroupId <security-group chứa mailbox gửi> `
-  -AccessRight RestrictAccess `
-  -Description "QNSC KB notification sender only"
-
-Test-ApplicationAccessPolicy -Identity <sender@tenant> -AppId <QNSC_APP_CLIENT_ID>
-```
 
 QNSC không tự enumerate toàn tenant khi chạy application mode; nên ưu tiên truyền `MICROSOFT_ONEDRIVE_USER_IDS` và `MICROSOFT_SHAREPOINT_SITE_IDS` rõ ràng.
 
@@ -138,9 +136,10 @@ MICROSOFT_TENANT_ID="<tenant-guid>"
 MICROSOFT_CONNECTOR_AUTH_MODE="application"
 MICROSOFT_GRAPH_SCOPE="https://graph.microsoft.com/.default"
 
-# Hộp thư gửi thông báo review/quá hạn. Cần permission Mail.Send.
-# Bỏ trống ở môi trường dev để dùng fake sender, không gửi mail thật.
-MICROSOFT_GRAPH_SENDER="kb-notify@example.com"
+# Hộp thư gửi thông báo review/quá hạn. Mail gửi bằng app riêng + certificate (MAIL_GRAPH_CLIENT_ID,
+# MAIL_GRAPH_CERT_PEM, MAIL_GRAPH_PRIVATE_KEY_PEM), quyền từ Exchange RBAC; xem docs/runbooks/email-graph.md.
+# Local: dùng EMAIL_PROVIDER=console, không gửi mail thật.
+MICROSOFT_GRAPH_SENDER="noreply-kb@qnsc.vn"   # develop: noreply-kb-dev@qnsc.vn
 
 # CSV site object IDs đã được grant Sites.Selected.
 # Để trống nếu chỉ kết nối OneDrive user.

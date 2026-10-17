@@ -338,9 +338,12 @@ module "stack" {
   microsoft_tenant_id    = var.microsoft_tenant_id
   microsoft_graph_sender = var.microsoft_graph_sender
   mail_graph_client_id   = var.mail_graph_client_id
-  mail_from_email        = var.mail_from_email
-  google_client_id       = var.google_client_id
-  allowed_email_domains  = var.allowed_email_domains
+  // Graph only once the owner has created the app (client id set); until then develop keeps sending through
+  // SES exactly as before, so applying this change before the owner's steps changes nothing observable.
+  email_provider        = var.mail_graph_client_id != "" ? "graph" : "ses"
+  mail_from_email       = var.mail_from_email
+  google_client_id      = var.google_client_id
+  allowed_email_domains = var.allowed_email_domains
 }
 
 // The SES identity for qnsc.vn and its three DKIM CNAME records are owned by qnsc-infra's `edge` stack

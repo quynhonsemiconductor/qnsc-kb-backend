@@ -106,6 +106,11 @@ celery_app.conf.update(
             "task": "renew_webhook_subscriptions",
             "schedule": 600.0,
         },
+        # A certificate that lapses silently stops all application mail. Daily, and the alarm is on the log line.
+        "check-mail-certificate": {
+            "task": "check_mail_certificate",
+            "schedule": 86400.0,
+        },
         "prune-operational-metrics": {
             "task": "prune_operational_metrics",
             "schedule": 86400.0,

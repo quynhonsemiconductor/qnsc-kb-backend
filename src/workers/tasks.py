@@ -8,12 +8,13 @@ from typing import Any
 from sqlalchemy import JSON, DateTime, Uuid, delete, exists, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from celery.signals import worker_ready, worker_process_init, task_prerun, task_failure
+from celery.signals import worker_init, worker_ready, worker_process_init, task_prerun, task_failure
 from src.workers.celery_app import celery_app
 from src.api.deps import SessionLocal, engine, set_database_context
 from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.core.config import settings
+from src.services import email as email_service
 from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue, ConnectorJob, Connector
 from src.models.connectors import SyncRequest
 from src.domain.connector_providers import (
@@ -22,7 +23,6 @@ from src.domain.connector_providers import (
 )
 from src.models.governance import PendingDraft
 from src.models.user import User
-from src.services.email import get_email_sender
 from src.models.ai import AiCache
 from src.workers.loop import reset_worker_loop, sync_run
 
@@ -34,6 +34,26 @@ def worker_process_init_handler(**kwargs):
     """Drop the parent process's asyncpg pool after Celery forks."""
     reset_worker_loop()
     engine.sync_engine.dispose(close=False)
+
+
+@worker_init.connect
+def worker_init_mail_guard(**kwargs):
+    """Check the mail configuration when the WORKER starts (and only then; the API never does).
+
+    Fail closed where it matters: a worker told to use the mail app (client id set) that lacks the certificate,
+    the key or the sender cannot send anything, so it refuses to start rather than queue mail it can never
+    deliver; likewise `console` outside development, which would write one-time links to the logs. With NO mail
+    app configured at all the worker starts anyway (the knowledge base works without mail) and says so loudly on
+    every delivery pass, which an alarm watches (infra: "Mail is not configured").
+    """
+    fatal, unconfigured = email_service.configuration_problems()
+    if fatal:
+        raise RuntimeError("Mail configuration: " + "; ".join(fatal))
+    if unconfigured:
+        logger.error(
+            "Mail is not configured: EMAIL_PROVIDER=graph but MAIL_GRAPH_CLIENT_ID is empty, so notifications "
+            "will not be delivered (docs/runbooks/email-graph.md)"
+        )
 
 
 @worker_ready.connect
@@ -225,22 +245,52 @@ def prune_operational_metrics() -> None:
     sync_run(prune())
 
 
+# Email delivery is bounded. A row that fails is retried with exponential backoff, a row the server will never
+# accept (400/403/404) or one that has used up its attempts becomes status "dead" (logged at ERROR, which an
+# alarm watches) and is never selected again, and a failure that affects every message (bad credentials, a
+# throttled tenant) stops the batch instead of burning an attempt on each remaining row.
+MAIL_MAX_ATTEMPTS = 8
+MAIL_BACKOFF_BASE_SECONDS = 30
+MAIL_BACKOFF_CAP_SECONDS = 3600
+
+
+def mail_backoff_seconds(attempts: int) -> int:
+    """30 s, 60 s, 120 s ... capped at an hour, for the Nth failed attempt."""
+    return min(MAIL_BACKOFF_BASE_SECONDS * (2 ** max(0, attempts - 1)), MAIL_BACKOFF_CAP_SECONDS)
+
+
 @celery_app.task(name="deliver_notification_queue")
 def deliver_notification_queue() -> None:
     """Deliver queued email notifications and persist an auditable outcome."""
     async def deliver() -> None:
+        try:
+            sender = email_service.get_email_sender()
+        except RuntimeError as exc:
+            logger.error("Mail is not configured", reason=str(exc))
+            return
+        if isinstance(sender, email_service.MicrosoftGraphEmailSender) and not (settings.MAIL_GRAPH_CLIENT_ID or "").strip():
+            logger.error(
+                "Mail is not configured: EMAIL_PROVIDER=graph but MAIL_GRAPH_CLIENT_ID is empty, so notifications "
+                "are not being delivered (docs/runbooks/email-graph.md)"
+            )
+            return
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
+            now = datetime.utcnow()
             rows = (await db.execute(
                 select(NotificationQueue)
-                .where(NotificationQueue.type == "email", NotificationQueue.status.in_(["pending", "failed"]))
-                .order_by(NotificationQueue.created_at)
+                .where(
+                    NotificationQueue.type == "email",
+                    NotificationQueue.status.in_(["pending", "failed"]),
+                    # NULL = never failed. A row that is backing off is not eligible, so rows that keep
+                    # failing leave the head of the batch and cannot starve new mail.
+                    (NotificationQueue.next_attempt_at.is_(None)) | (NotificationQueue.next_attempt_at <= now),
+                )
+                .order_by(NotificationQueue.next_attempt_at.asc().nullsfirst(), NotificationQueue.created_at)
                 .limit(100)
                 .with_for_update(skip_locked=True)
             )).scalars().all()
-            sender = get_email_sender()
             for row in rows:
-                row.attempts += 1
                 payload = row.payload or {}
                 try:
                     await sender.send(
@@ -249,15 +299,54 @@ def deliver_notification_queue() -> None:
                         text=str(payload.get("text") or ""),
                         html=str(payload["html"]) if payload.get("html") else None,
                     )
+                    row.attempts += 1
                     row.status = "sent"
                     row.sent_at = datetime.utcnow()
                     row.last_error = None
+                    row.next_attempt_at = None
                 except Exception as exc:
-                    row.status = "failed"
+                    row.attempts += 1
                     row.last_error = str(exc)[:1000]
+                    permanent = bool(getattr(exc, "permanent", False))
+                    if permanent or row.attempts >= MAIL_MAX_ATTEMPTS:
+                        row.status = "dead"
+                        row.next_attempt_at = None
+                        logger.error(
+                            "Notification marked dead",
+                            notification_id=str(row.id),
+                            attempts=row.attempts,
+                            permanent=permanent,
+                            error=row.last_error,
+                        )
+                    else:
+                        row.status = "failed"
+                        wait = max(mail_backoff_seconds(row.attempts), int(getattr(exc, "retry_after", None) or 0))
+                        row.next_attempt_at = datetime.utcnow() + timedelta(seconds=wait)
+                    if getattr(exc, "stops_the_batch", False):
+                        # Credentials, configuration or throttling: every remaining row would fail the same way,
+                        # and each failure would cost it an attempt. Leave them untouched for the next pass.
+                        logger.warning("Stopping the mail batch", reason=row.last_error)
+                        break
             await db.commit()
 
     sync_run(deliver())
+
+
+@celery_app.task(name="check_mail_certificate")
+def check_mail_certificate() -> None:
+    """Daily: report how long the mail certificate has left (a once-per-process warning is invisible in a worker
+    that lives for weeks). The alarm watches the two WARN/ERROR lines below."""
+    status = email_service.certificate_status()
+    if status is None:
+        return
+    if not status["valid"]:
+        logger.error("Mail certificate has expired or cannot be read", detail="MAIL_GRAPH_CERT_PEM is not a certificate")
+    elif status["expired"]:
+        logger.error("Mail certificate has expired", expires=status["expires"], days_left=status["days_left"])
+    elif status["days_left"] <= 30:
+        logger.warning("Mail certificate expires soon", expires=status["expires"], days_left=status["days_left"])
+    else:
+        logger.info("Mail certificate is healthy", expires=status["expires"], days_left=status["days_left"])
 
 
 @celery_app.task(name="verify_review_deadlines")

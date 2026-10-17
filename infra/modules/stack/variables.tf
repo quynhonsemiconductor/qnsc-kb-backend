@@ -410,8 +410,8 @@ variable "microsoft_graph_sender" {
     role "Application Mail.Send", assigned with a management scope that names this one mailbox, so the app
     can send as this address and as nobody else. See docs/runbooks/email-graph.md.
 
-    Empty is no longer a silent failure: with email_provider "graph", validate_production() refuses to
-    boot when this, mail_graph_client_id, or either secret is missing.
+    Empty is no longer a silent failure: with email_provider "graph" the WORKER refuses to start when
+    mail_graph_client_id is set and this or either secret is missing (the API never refuses to boot over mail).
   EOT
 }
 
@@ -423,6 +423,10 @@ variable "mail_graph_client_id" {
     the SSO/connector app in microsoft_client_id). A public identifier, not a secret. Authenticates with the
     certificate in the secrets bundle (mail-graph-certificate, mail-graph-private-key); there is no client
     secret. Empty until the owner has created the app (docs/runbooks/email-graph.md).
+
+    THIS IS THE SWITCH. While it is empty no mail secret is created or injected and nothing references a
+    bundle key that may not exist yet, so this module can be applied before the owner's steps. The owner puts
+    the two keys in the bundle FIRST, then sets this, in that order.
   EOT
 }
 
@@ -432,8 +436,8 @@ variable "email_provider" {
 
   description = <<-EOT
     Selects get_email_sender()'s transport (src/services/email.py). "graph" (default, and what every
-    deployed environment uses) sends through Microsoft 365 with certificate auth and creates the two
-    mail secrets in the bundle. "ses" is the legacy AWS path, kept only until Graph is proven in develop
+    deployed environment uses) sends through Microsoft 365 with certificate auth (the two mail secrets
+    are created and injected into the worker once mail_graph_client_id is set). "ses" is the legacy AWS path, kept only until Graph is proven in develop
     and then removed. "fake" is the in-memory sender for tests. "console" exists in the application but is
     refused outside development and is not accepted here.
 
