@@ -388,14 +388,29 @@ variable "embedding_runtime" {
 
 variable "microsoft_tenant_id" {
   type        = string
-  default     = "common"
-  description = "Entra tenant for the Microsoft connector's OAuth flow (connectors only — this application has no SSO login path yet)."
+  default     = ""
+  description = <<-EOT
+    The Entra tenant (directory) GUID that Microsoft sign-in AND the connector's OAuth consent are pinned to. No
+    default and no "common": under "common", "organizations" or "consumers" an account from any tenant (or a
+    personal one) could complete sign-in or consent. The application also refuses to boot in production with
+    anything but a GUID, and verifies every ID token's tid and iss against it (docs/runbooks/entra-apps.md).
+  EOT
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", var.microsoft_tenant_id))
+    error_message = "microsoft_tenant_id must be the Entra tenant GUID, never common, organizations or consumers, and never empty."
+  }
 }
 
 variable "microsoft_client_id" {
   type        = string
   default     = ""
-  description = "Public identifier, not a secret. Empty leaves the Microsoft connector dormant."
+  description = <<-EOT
+    Public identifier, not a secret. Application (client) ID of THIS environment's own single-tenant Entra app
+    ("KB Dev" for develop, "KB Prod" for production; never shared between environments). It serves both the
+    Microsoft sign-in and the user-delegated connector consent. Empty leaves both dormant.
+    docs/runbooks/entra-apps.md.
+  EOT
 }
 
 variable "microsoft_graph_sender" {

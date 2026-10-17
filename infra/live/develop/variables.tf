@@ -45,7 +45,7 @@ variable "cloudflare_account_id" {
 variable "microsoft_client_id" {
   type        = string
   default     = "dbd99dbb-d20e-4076-8f8b-75c15e733414"
-  description = "Entra application (client) ID for the Microsoft connector. A public identifier. Empty leaves that connector dormant."
+  description = "Entra application (client) ID of the develop app 'KB Dev' (single tenant): Microsoft sign-in AND the user-delegated connector consent. A public identifier. docs/runbooks/entra-apps.md. Empty leaves that connector dormant."
 }
 
 variable "microsoft_graph_sender" {

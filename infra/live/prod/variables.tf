@@ -53,10 +53,19 @@ variable "cloudflare_account_id" {
 }
 
 
+variable "microsoft_tenant_id" {
+  type        = string
+  default     = "dc0f2078-ac28-4ff2-b21a-d4b28df32361"
+  description = <<-EOT
+    The QNSC Entra tenant, NOT "common". Sign-in and the connector's delegated consent are pinned to it; the
+    application also checks every ID token's tid and iss against it. See docs/runbooks/entra-apps.md.
+  EOT
+}
+
 variable "microsoft_client_id" {
   type        = string
   default     = ""
-  description = "Entra application (client) ID for the Microsoft connector. A public identifier."
+  description = "Entra application (client) ID of the production app 'KB Prod' (single tenant, production URLs only): Microsoft sign-in AND the user-delegated connector consent. A public identifier. docs/runbooks/entra-apps.md."
 }
 
 variable "microsoft_graph_sender" {

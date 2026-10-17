@@ -42,6 +42,19 @@ def _configure_microsoft(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "MICROSOFT_CLIENT_ID", "client-id")
     monkeypatch.setattr(settings, "MICROSOFT_CLIENT_SECRET", "client-secret")
     monkeypatch.setattr(settings, "MICROSOFT_REDIRECT_URI", "https://api.acme.test/cb")
+    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "11111111-2222-4333-8444-555555555555")
+
+
+@pytest.mark.parametrize("authority", ["", "  ", "common", "Common", "organizations", "consumers"])
+def test_delegated_mode_also_needs_a_pinned_tenant(unconfigured, monkeypatch, authority):
+    """A delegated consent against /common lets an account from ANY tenant (or a personal one) authorize the
+    connector and have its files ingested. The pin is required in BOTH modes, not only application mode."""
+    _configure_microsoft(monkeypatch)
+    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", authority)
+    monkeypatch.setattr(settings, "MICROSOFT_CONNECTOR_AUTH_MODE", "delegated")
+
+    assert provider_availability("sharepoint").missing == ("MICROSOFT_TENANT_ID",)
+    assert provider_availability("onedrive").available is False
 
 
 def test_every_declared_provider_is_reported(unconfigured):
