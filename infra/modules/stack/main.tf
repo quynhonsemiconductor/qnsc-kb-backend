@@ -52,6 +52,13 @@ locals {
   kms_key_arn        = data.terraform_remote_state.shared.outputs.kms_key_arn
   cloudflare_zone_id = try(data.terraform_remote_state.shared.outputs.cloudflare_zone_id, "")
 
+  // The mail app is "configured" once the owner has created it and put its client id in the live stack. Until
+  // then NOTHING mail-related is injected: the secrets are gated exactly like microsoft-client-secret, so
+  // merging this change before the owner's steps cannot make a task reference a bundle key that does not
+  // exist (ResourceInitializationError at boot, a circuit-breaker rollback, and the next release failing the
+  // same way). Order of the owner's steps: bundle keys first, THEN the client id.
+  mail_graph_enabled = var.email_provider == "graph" && var.mail_graph_client_id != ""
+
   ecr_base         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
   ecr_api_url      = "${local.ecr_base}/${var.product}-api:${var.image_tag}"
   ecr_worker_url   = "${local.ecr_base}/${var.product}-worker:${var.image_tag}"
@@ -112,11 +119,11 @@ locals {
     // the bundle's JSON. The key is the credential; the certificate is public but travels with it so the
     // thumbprint in the client assertion can never disagree with the key.
     //
-    // THE OWNER MUST ADD BOTH KEYS BEFORE THE NEXT DEPLOY (docs/runbooks/email-graph.md), merging them into
-    // the existing JSON rather than replacing it. The deploy preflight proves the bundle CONTAINER holds a
-    // value, not that each key exists: a missing key is not caught there, it fails the task at boot with
-    // ResourceInitializationError. (The circuit breaker then rolls the deploy back; nothing is lost.)
-    var.email_provider == "graph" ? {
+    // Present only once mail_graph_client_id is set. THE OWNER ADDS BOTH KEYS FIRST (docs/runbooks/email-graph.md),
+    // merging them into the existing JSON rather than replacing it, and only then sets the client id. The
+    // deploy preflight proves the bundle CONTAINER holds a value, not that each key exists: a missing key is
+    // not caught there, it fails the task at boot with ResourceInitializationError.
+    local.mail_graph_enabled ? {
       "mail-graph-certificate" = "Public certificate of the mail Entra app (MAIL_GRAPH_CERT_PEM), PEM"
       "mail-graph-private-key" = "Private key of the mail Entra app certificate (MAIL_GRAPH_PRIVATE_KEY_PEM), PEM"
     } : {},
@@ -209,9 +216,9 @@ locals {
     { name = "MICROSOFT_REDIRECT_URI", value = var.microsoft_client_id != "" ? "${local.api_base_url}/api/v1/connectors/oauth/callback" : "" },
 
     // Who application email is sent FROM, and the dedicated Entra app that sends as it (certificate
-    // auth: MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM arrive as secrets below). Empty values used to
-    // leave mail dead silently, retrying every 30 seconds forever; validate_production() now refuses to
-    // boot with EMAIL_PROVIDER=graph and any of the four missing.
+    // auth: MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM are WORKER-ONLY secrets, see mail_secrets). The
+    // API never refuses to boot over mail; the worker does the checking at its own start (tasks.py): client id
+    // set with the rest missing refuses to start, client id empty logs an error that an alarm watches.
     { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
     { name = "MAIL_GRAPH_CLIENT_ID", value = var.mail_graph_client_id },
 
@@ -251,12 +258,17 @@ locals {
     { name = "R2_SECRET_ACCESS_KEY", secret_arn = module.secrets.secret_arns["r2-secret-access-key"] },
     ], var.microsoft_client_id != "" ? [
     { name = "MICROSOFT_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["microsoft-client-secret"] },
-    ] : [], var.email_provider == "graph" ? [
-    { name = "MAIL_GRAPH_CERT_PEM", secret_arn = module.secrets.secret_arns["mail-graph-certificate"] },
-    { name = "MAIL_GRAPH_PRIVATE_KEY_PEM", secret_arn = module.secrets.secret_arns["mail-graph-private-key"] },
     ] : [], var.google_client_id != "" ? [
     { name = "GOOGLE_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["google-client-secret"] },
   ] : [])
+
+  // The mail app's certificate and private key reach the WORKER container only: it is the only caller of
+  // get_email_sender() (deliver_notification_queue). The API and beat never need the key, and a key that
+  // is not in a container cannot be read out of it. Empty until mail_graph_client_id is set (mail_graph_enabled).
+  mail_secrets = local.mail_graph_enabled ? [
+    { name = "MAIL_GRAPH_CERT_PEM", secret_arn = module.secrets.secret_arns["mail-graph-certificate"] },
+    { name = "MAIL_GRAPH_PRIVATE_KEY_PEM", secret_arn = module.secrets.secret_arns["mail-graph-private-key"] },
+  ] : []
 
   tags = { Environment = var.env }
 }
@@ -591,7 +603,7 @@ module "worker" {
   health_check_command = "celery -A src.workers.celery_app inspect ping -d celery@$HOSTNAME || exit 1"
 
   environment_vars = local.common_env
-  secrets          = local.common_secrets
+  secrets          = concat(local.common_secrets, local.mail_secrets)
 
   secret_arns = concat(local.secret_iam_arns, [module.rds.master_secret_arn])
   kms_key_arn = local.kms_key_arn
@@ -634,7 +646,7 @@ module "worker" {
 // There is no SES here any more: application mail goes through Microsoft 365 Graph with a certificate (see the
 // mail secrets above and docs/runbooks/email-graph.md). The shared SES identity for qnsc.vn and its DKIM records
 // are still owned by qnsc-infra's `edge` stack, which other products use; this stack neither declares them nor
-// holds a ses:SendEmail grant. (The worker's grant was keyed on email_provider == "ses" and went with it.)
+// holds a ses:SendEmail grant. The worker's ses:SendEmail grant, kept by #215 so a rollback to an EMAIL_PROVIDER=ses revision still worked, is deleted here (the "contract" half of expand/contract, infra/README.md): merge this only after Graph mail is proven on develop.
 
 // ── Migrator — one-shot task run by the deploy pipeline before rolling services ──
 module "migrator" {
@@ -1269,6 +1281,65 @@ resource "aws_cloudwatch_metric_alarm" "embedding_model_unhealthy" {
   alarm_description   = "The api could not load the embedding model, or took longer than EMBEDDING_WARMUP_TIMEOUT_SECONDS. Vector search is degraded to keyword search until it loads. Check the api log group for the warm-up lines."
   namespace           = "QNSC/${local.name}"
   metric_name         = "EmbeddingModelUnhealthy"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [module.observability.alarm_topic_arn]
+  tags          = local.tags
+}
+
+// ── Mail alarms: three worker log lines, each an alarm on the shared topic ──────────────────────────────────
+// The worker is where mail is sent (src/workers/tasks.py), so these watch the worker log group. Terms rather
+// than a JSON selector, like embedding_model_unhealthy above, and notBreaching for the same reason (a
+// scheduled-to-zero environment publishes no logs). NOT TESTED against a live log group (no AWS access when
+// written): after the first apply run `aws logs test-metric-filter` with a real line.
+locals {
+  mail_alarms = {
+    not-configured = {
+      metric      = "MailNotConfigured"
+      pattern     = "\"Mail is not configured\""
+      description = "EMAIL_PROVIDER=graph but no mail app is configured (mail_graph_client_id is empty), or the provider is not allowed here: no notification email is being delivered. Logged on every 30 s delivery pass. See docs/runbooks/email-graph.md."
+    }
+    certificate = {
+      metric      = "MailCertificateExpiring"
+      pattern     = "?\"Mail certificate expires soon\" ?\"Mail certificate has expired\""
+      description = "The mail certificate has under 30 days left, has expired, or cannot be read. Checked daily by the worker. Rotate it: docs/runbooks/email-graph.md."
+    }
+    dead = {
+      metric      = "MailNotificationDead"
+      pattern     = "\"Notification marked dead\""
+      description = "A notification email was given up on: the server refused it permanently (400/403/404, e.g. a mailbox the app may not send as) or it used up its attempts. Find the rows with status 'dead' in notification_queue; last_error says why."
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "mail" {
+  for_each = local.mail_alarms
+
+  name           = "${local.name}-worker-mail-${each.key}"
+  log_group_name = local.worker_log_group
+  pattern        = each.value.pattern
+
+  metric_transformation {
+    name      = each.value.metric
+    namespace = "QNSC/${local.name}"
+    value     = "1"
+  }
+
+  depends_on = [module.worker]
+}
+
+resource "aws_cloudwatch_metric_alarm" "mail" {
+  for_each = local.mail_alarms
+
+  alarm_name          = "${local.name}-worker-mail-${each.key}"
+  alarm_description   = each.value.description
+  namespace           = "QNSC/${local.name}"
+  metric_name         = each.value.metric
   statistic           = "Sum"
   period              = 300
   evaluation_periods  = 1

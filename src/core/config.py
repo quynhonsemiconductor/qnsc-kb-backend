@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -534,13 +535,15 @@ class Settings(BaseSettings):
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
     # Application email (EMAIL_PROVIDER=graph): the mailbox mail is sent FROM, and the dedicated Entra app
-    # that sends as it with a CERTIFICATE (no client secret). The app holds no Entra Graph consent: its only
-    # authority is the Exchange "Application Mail.Send" role scoped to this one mailbox. The PEMs come from
-    # the secrets bundle; see docs/runbooks/email-graph.md.
+    # (the environment's "Service app") that sends as it with a CERTIFICATE (no client secret). The app holds no
+    # Entra Graph consent: its only authority is the Exchange "Application Mail.Send" role scoped to this one
+    # mailbox. The PEMs are SecretStr and reach ONLY the worker container, from the secrets bundle; the API
+    # never needs them and never refuses to boot over mail (the worker checks at its own start, see
+    # tasks.py). docs/runbooks/email-graph.md.
     MICROSOFT_GRAPH_SENDER: str | None = None
     MAIL_GRAPH_CLIENT_ID: str | None = None
-    MAIL_GRAPH_CERT_PEM: str | None = None
-    MAIL_GRAPH_PRIVATE_KEY_PEM: str | None = None
+    MAIL_GRAPH_CERT_PEM: SecretStr | None = None
+    MAIL_GRAPH_PRIVATE_KEY_PEM: SecretStr | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
     # "graph" sends through Microsoft 365 (certificate auth, see above); "console" logs the message and is
     # accepted only in development; "fake" is the in-memory sender for tests. get_email_sender() in
@@ -1003,26 +1006,6 @@ class Settings(BaseSettings):
             if "@" not in self.BOOTSTRAP_ADMIN_EMAIL:
                 raise RuntimeError(
                     "BOOTSTRAP_ADMIN_EMAIL must be an email address in production"
-                )
-
-        # Outbound mail. It used to be unchecked, so an empty sender meant invitations and password resets
-        # queued and retried every 30 seconds forever without arriving, and nothing said so. A deployment
-        # that cannot send mail now refuses to start.
-        email_provider = (self.EMAIL_PROVIDER or "graph").strip().lower()
-        if email_provider == "console":
-            raise RuntimeError("EMAIL_PROVIDER=console is for local development only")
-        if email_provider == "graph":
-            mail_required = {
-                "MICROSOFT_GRAPH_SENDER": self.MICROSOFT_GRAPH_SENDER,
-                "MAIL_GRAPH_CLIENT_ID": self.MAIL_GRAPH_CLIENT_ID,
-                "MAIL_GRAPH_CERT_PEM": self.MAIL_GRAPH_CERT_PEM,
-                "MAIL_GRAPH_PRIVATE_KEY_PEM": self.MAIL_GRAPH_PRIVATE_KEY_PEM,
-            }
-            missing = sorted(name for name, value in mail_required.items() if not (value or "").strip())
-            if missing:
-                raise RuntimeError(
-                    f"EMAIL_PROVIDER=graph needs {', '.join(missing)} in production "
-                    "(docs/runbooks/email-graph.md)"
                 )
 
 
