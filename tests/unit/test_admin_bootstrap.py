@@ -48,6 +48,11 @@ def _production_settings(**overrides) -> Settings:
         R2_SECRET_ACCESS_KEY="secret-key",
         S3_ENDPOINT_URL="",
         BOOTSTRAP_ADMIN_PASSWORD="a-real-deployment-password",
+        # Outbound mail is part of what production insists on (EMAIL_PROVIDER defaults to graph).
+        MICROSOFT_GRAPH_SENDER="noreply-kb@qnsc.vn",
+        MAIL_GRAPH_CLIENT_ID="mail-client-id",
+        MAIL_GRAPH_CERT_PEM="certificate",
+        MAIL_GRAPH_PRIVATE_KEY_PEM="private-key",
     )
     base.update(overrides)
     return Settings(**base)

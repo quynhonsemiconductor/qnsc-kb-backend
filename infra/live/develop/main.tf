@@ -337,7 +337,7 @@ module "stack" {
   microsoft_client_id    = var.microsoft_client_id
   microsoft_tenant_id    = var.microsoft_tenant_id
   microsoft_graph_sender = var.microsoft_graph_sender
-  email_provider         = var.email_provider
+  mail_graph_client_id   = var.mail_graph_client_id
   mail_from_email        = var.mail_from_email
   google_client_id       = var.google_client_id
   allowed_email_domains  = var.allowed_email_domains

@@ -242,6 +242,7 @@ module "stack" {
   cloudflare_account_id  = var.cloudflare_account_id
   microsoft_client_id    = var.microsoft_client_id
   microsoft_graph_sender = var.microsoft_graph_sender
+  mail_graph_client_id   = var.mail_graph_client_id
   google_client_id       = var.google_client_id
   allowed_email_domains  = var.allowed_email_domains
 }
