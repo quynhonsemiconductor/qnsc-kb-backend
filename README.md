@@ -67,7 +67,7 @@ The password is never stored in the repository.
 | AI answers and AI formatting | Need a chat provider. It is NOT an environment variable: an administrator saves provider, model and key in the app (Admin > AI provider). Until then the workspace answers from the retrieval fallback. To use a model on your machine (Ollama, vLLM, LM Studio) set `LLM_ALLOW_LOCAL_ENDPOINTS=true` in `.env` |
 | File upload | Needs your OWN Cloudflare R2 bucket and keys in `.env` (`SOURCE_STORAGE_BUCKET`, `R2_*`). There is no local-disk or MinIO backend, by design |
 | Malware scanning (ClamAV) | Off locally (`MALWARE_SCAN_ENABLED=false`); deployed environments run it |
-| Microsoft / Google connectors, SSO, email | Off until their credentials are set in `.env` |
+| Microsoft / Google connectors, SSO, email | Off until their credentials are set in `.env`. Microsoft sign-in and the connector also need `MICROSOFT_TENANT_ID` set to your Entra **tenant GUID** (never `common`; blank or `common` leaves both off, by design). Use the **KB Dev** app registration: `docs/runbooks/entra-apps.md` |
 
 Secrets in `.env.example` (`SECRET_KEY`, `DATA_ENCRYPTION_KEY`) are throwaway placeholders that
 work in development; generate real ones with `openssl rand -hex 32` for anything other people can

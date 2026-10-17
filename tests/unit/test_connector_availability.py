@@ -125,7 +125,7 @@ def test_application_mode_needs_a_real_tenant_and_its_own_allowlist(unconfigured
 def test_one_graph_allowlist_does_not_satisfy_the_other(unconfigured, monkeypatch):
     _configure_microsoft(monkeypatch)
     monkeypatch.setattr(settings, "MICROSOFT_CONNECTOR_AUTH_MODE", "application")
-    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "tenant-guid")
+    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "aaaaaaaa-1111-2222-3333-444444444444")
     monkeypatch.setattr(settings, "MICROSOFT_ONEDRIVE_USER_IDS", "alice@acme.test")
 
     assert provider_availability("onedrive").available is True

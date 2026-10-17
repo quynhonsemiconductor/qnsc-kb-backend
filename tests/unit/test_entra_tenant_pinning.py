@@ -211,3 +211,27 @@ async def test_the_connector_code_exchange_refuses_a_multi_tenant_authority(monk
     with pytest.raises(connector_adapters.ConnectorProviderError) as caught:
         await _adapter().exchange_code("code")
     assert caught.value.code == "tenant_not_pinned"
+
+
+# ── the pin must be GUID-shaped ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("value", ["qnsc.vn", "contoso.onmicrosoft.com", "tenant-id", "not-a-guid", f"{OURS}x", OURS[:-1],
+                                   f"{OURS}/evil", "dc0f2078ac284ff2b21ad4b28df32361"])
+def test_anything_that_is_not_a_guid_is_not_a_pin(monkeypatch, value):
+    """A domain name is a valid Entra authority but can never equal a token's tid; a typo must not become a URL."""
+    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", value)
+    assert settings.microsoft_tenant is None
+    assert entra_auth.configured() is False
+
+
+@pytest.mark.parametrize("value", [OURS, OURS.upper(), "00000000-0000-0000-0000-000000000000", "12345678-1234-1234-1234-123456789abc"])
+def test_any_guid_shape_is_a_pin_with_no_version_or_variant_restriction(monkeypatch, value):
+    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", f" {value} ")
+    assert settings.microsoft_tenant == value
+
+
+def test_production_accepts_the_same_shape_and_refuses_the_rest():
+    from tests.unit.test_admin_bootstrap import _production_settings
+
+    _production_settings(MICROSOFT_TENANT_ID="00000000-0000-0000-0000-000000000000").validate_production()
+    with pytest.raises(RuntimeError, match="tenant GUID"):
+        _production_settings(MICROSOFT_TENANT_ID="qnsc.vn").validate_production()
