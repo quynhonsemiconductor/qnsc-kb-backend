@@ -782,10 +782,20 @@ class Settings(BaseSettings):
 
     #: Authorities that mean "any tenant" (or any personal account). Never acceptable as the pin.
     MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset({"common", "organizations", "consumers"})
+    #: An Entra tenant id is a GUID. Shape only: no version or variant nibble, because a tenant id is not
+    #: guaranteed to be an RFC 4122 UUID and a stricter pattern would refuse a real tenant.
+    TENANT_GUID: ClassVar[re.Pattern[str]] = re.compile(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    )
 
     @property
     def microsoft_tenant(self) -> str | None:
-        """The pinned tenant, or None when MICROSOFT_TENANT_ID is blank or one of the multi-tenant authorities.
+        """The pinned tenant GUID, or None when MICROSOFT_TENANT_ID is not one.
+
+        None for blank, for the multi-tenant authorities (common, organizations, consumers) and for anything that
+        is not GUID-shaped. A verified domain name (qnsc.vn) is a valid authority to Entra but can never equal a
+        token's ``tid`` (a GUID), so accepting it would only turn a mistake into sign-in failures; refusing it up
+        front names the mistake.
 
         The single place the tenant is read for an authority URL or a token check, so that "not pinned" is one
         condition that every caller refuses, instead of a string each of them compares in its own way.
@@ -793,7 +803,7 @@ class Settings(BaseSettings):
         tenant = (self.MICROSOFT_TENANT_ID or "").strip()
         if not tenant or tenant.lower() in self.MULTI_TENANT_AUTHORITIES:
             return None
-        return tenant
+        return tenant if self.TENANT_GUID.fullmatch(tenant) else None
 
     @property
     def microsoft_connector_auth_mode(self) -> str:
@@ -993,10 +1003,7 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Microsoft Entra client, tenant, login redirect, and delegated connector redirect settings are required in production"
             )
-        if not re.fullmatch(
-            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
-            self.MICROSOFT_TENANT_ID.strip(),
-        ):
+        if not self.TENANT_GUID.fullmatch(self.MICROSOFT_TENANT_ID.strip()):
             raise RuntimeError(
                 "MICROSOFT_TENANT_ID must be a specific Entra tenant GUID in production"
             )
