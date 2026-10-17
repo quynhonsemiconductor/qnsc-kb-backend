@@ -53,10 +53,9 @@ locals {
   cloudflare_zone_id = try(data.terraform_remote_state.shared.outputs.cloudflare_zone_id, "")
 
   // The mail app is "configured" once the owner has created it and put its client id in the live stack. Until
-  // then NOTHING mail-related is injected: the secrets are gated exactly like microsoft-client-secret, so
-  // merging this change before the owner's steps cannot make a task reference a bundle key that does not
-  // exist (ResourceInitializationError at boot, a circuit-breaker rollback, and the next release failing the
-  // same way). Order of the owner's steps: bundle keys first, THEN the client id.
+  // then NOTHING mail-related is injected, so merging this change before the owner's steps cannot make a task
+  // reference a secret that has no value yet (ResourceInitializationError at boot, a circuit-breaker rollback,
+  // and the next release failing the same way). Order of the owner's steps: the mail secret's value first, THEN the client id.
   mail_graph_enabled = var.email_provider == "graph" && var.mail_graph_client_id != ""
 
   ecr_base         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
@@ -115,18 +114,7 @@ locals {
     },
     var.microsoft_client_id != "" ? { "microsoft-client-secret" = "Microsoft connector OAuth client secret" } : {},
     var.google_client_id != "" ? { "google-client-secret" = "Google connector OAuth client secret" } : {},
-    // The mail app's certificate and private key (EMAIL_PROVIDER=graph), one PEM each, as two more keys of
-    // the bundle's JSON. The key is the credential; the certificate is public but travels with it so the
-    // thumbprint in the client assertion can never disagree with the key.
-    //
-    // Present only once mail_graph_client_id is set. THE OWNER ADDS BOTH KEYS FIRST (docs/runbooks/email-graph.md),
-    // merging them into the existing JSON rather than replacing it, and only then sets the client id. The
-    // deploy preflight proves the bundle CONTAINER holds a value, not that each key exists: a missing key is
-    // not caught there, it fails the task at boot with ResourceInitializationError.
-    local.mail_graph_enabled ? {
-      "mail-graph-certificate" = "Public certificate of the mail Entra app (MAIL_GRAPH_CERT_PEM), PEM"
-      "mail-graph-private-key" = "Private key of the mail Entra app certificate (MAIL_GRAPH_PRIVATE_KEY_PEM), PEM"
-    } : {},
+    // The mail app's certificate and key are NOT in this bundle: see aws_secretsmanager_secret.mail_graph.
   )
   // NOTE: "tunnel-token" is deliberately NOT in that map. The tunnel is created by
   // Terraform (module.tunnel below), which means the connector token is an attribute
@@ -216,7 +204,7 @@ locals {
     { name = "MICROSOFT_REDIRECT_URI", value = var.microsoft_client_id != "" ? "${local.api_base_url}/api/v1/connectors/oauth/callback" : "" },
 
     // Who application email is sent FROM, and the dedicated Entra app that sends as it (certificate
-    // auth: MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM are WORKER-ONLY secrets, see mail_secrets). The
+    // auth: the key + certificate is the WORKER-ONLY secret MAIL_GRAPH_PEM, see mail_secrets). The
     // API never refuses to boot over mail; the worker does the checking at its own start (tasks.py): client id
     // set with the rest missing refuses to start, client id empty logs an error that an alarm watches.
     { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
@@ -262,12 +250,13 @@ locals {
     { name = "GOOGLE_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["google-client-secret"] },
   ] : [])
 
-  // The mail app's certificate and private key reach the WORKER container only: it is the only caller of
-  // get_email_sender() (deliver_notification_queue). The API and beat never need the key, and a key that
-  // is not in a container cannot be read out of it. Empty until mail_graph_client_id is set (mail_graph_enabled).
+  // The mail credential (ONE PEM: private key + certificate) reaches the WORKER container only: it is the only
+  // caller of get_email_sender() (deliver_notification_queue). The API and beat never need it, and a key that is
+  // not in a container cannot be read out of it. It is a STANDALONE secret, not a key of the bundle above: the
+  // bundle's ARN is on the api's execution role too, so anything in it is readable by the api's role. Empty until
+  // mail_graph_client_id is set (mail_graph_enabled).
   mail_secrets = local.mail_graph_enabled ? [
-    { name = "MAIL_GRAPH_CERT_PEM", secret_arn = module.secrets.secret_arns["mail-graph-certificate"] },
-    { name = "MAIL_GRAPH_PRIVATE_KEY_PEM", secret_arn = module.secrets.secret_arns["mail-graph-private-key"] },
+    { name = "MAIL_GRAPH_PEM", secret_arn = aws_secretsmanager_secret.mail_graph[0].arn },
   ] : []
 
   tags = { Environment = var.env }
@@ -410,6 +399,52 @@ resource "aws_secretsmanager_secret_version" "tunnel_token" {
 
   secret_id     = aws_secretsmanager_secret.tunnel_token[0].id
   secret_string = module.tunnel[0].token
+}
+
+// ── The mail credential: a standalone secret, readable only by the worker's execution role ──────────────────
+// ONE PEM holding the private key and its certificate, so the pair is written and read atomically and can never
+// drift apart. Not a key of the secrets bundle: the bundle's ARN is granted to the api's execution role as well,
+// which would make the key readable by the api's role. This secret is referenced only by the worker container
+// (mail_secrets) and granted only to the worker's execution role (its secret_arns). No TASK role anywhere in
+// this stack can read any secret (task_secret_arns is never passed to ecs-service), so application code, which
+// runs as the task role, cannot read it either.
+//
+// The CONTAINER is created whenever the provider is graph, empty and without a version, so the owner can put the
+// value BEFORE setting mail_graph_client_id; it is injected only once that is set (mail_graph_enabled). The value
+// never enters Terraform state. The deploy preflight (ci backend-deploy) lists this secret's versions on every
+// deploy and fails by NAME if it holds none: that is the per-secret check the bundle's keys never had.
+resource "aws_secretsmanager_secret" "mail_graph" {
+  count = var.email_provider == "graph" ? 1 : 0
+
+  name                    = "${var.product}/${var.env}/mail-graph-certificate"
+  description             = "Mail app credential for Microsoft Graph: private key and certificate in ONE PEM (MAIL_GRAPH_PEM). Worker only. Value is set out of band: docs/runbooks/email-graph.md."
+  kms_key_id              = local.kms_key_arn
+  recovery_window_in_days = var.secrets_recovery_window_days
+
+  tags = local.tags
+}
+
+// A boundary, not just an absence of grants: nobody may read the value back except the worker's execution role
+// (the ECS agent, at task start). Administrators included; the owner keeps the key file, which is the only copy
+// outside AWS. put-secret-value, describe-secret and list-secret-version-ids are not denied, so the owner can
+// still write it, rotate it and see that it has a version. To read it for a break-glass, delete this policy first.
+resource "aws_secretsmanager_secret_policy" "mail_graph" {
+  count = var.email_provider == "graph" ? 1 : 0
+
+  secret_arn = aws_secretsmanager_secret.mail_graph[0].arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "OnlyTheWorkerExecutionRoleReadsTheMailCredential"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "secretsmanager:GetSecretValue"
+      Resource  = "*"
+      Condition = {
+        ArnNotEquals = { "aws:PrincipalArn" = module.worker.execution_role_arn }
+      }
+    }]
+  })
 }
 
 // ── ClamAV sidecar ───────────────────────────────────────────────────────────
@@ -605,7 +640,9 @@ module "worker" {
   environment_vars = local.common_env
   secrets          = concat(local.common_secrets, local.mail_secrets)
 
-  secret_arns = concat(local.secret_iam_arns, [module.rds.master_secret_arn])
+  // The mail secret is granted here, on the WORKER's execution role, and nowhere else. No task role in this
+  // stack gets any secretsmanager permission (task_secret_arns is never passed).
+  secret_arns = concat(local.secret_iam_arns, [module.rds.master_secret_arn], local.mail_graph_enabled ? [aws_secretsmanager_secret.mail_graph[0].arn] : [])
   kms_key_arn = local.kms_key_arn
 
   additional_containers = concat([
@@ -1309,10 +1346,15 @@ locals {
       pattern     = "?\"Mail certificate expires soon\" ?\"Mail certificate has expired\""
       description = "The mail certificate has under 30 days left, has expired, or cannot be read. Checked daily by the worker. Rotate it: docs/runbooks/email-graph.md."
     }
+    sender-refused = {
+      metric      = "MailSenderRefused"
+      pattern     = "\"Mail sender refused\""
+      description = "Graph refused the app the sender mailbox (HTTP 403 or 404): the Exchange management scope or role assignment is missing or still propagating (up to ~2 hours), or the mailbox does not exist or is not REST-enabled. Nothing is lost: the batch stops and is retried every 15 minutes. See docs/runbooks/email-graph.md, steps 1, 2 and 6."
+    }
     dead = {
       metric      = "MailNotificationDead"
       pattern     = "\"Notification marked dead\""
-      description = "A notification email was given up on: the server refused it permanently (400/403/404, e.g. a mailbox the app may not send as) or it used up its attempts. Find the rows with status 'dead' in notification_queue; last_error says why."
+      description = "A notification email was given up on: Graph refused the message itself (400/413) or it is older than 24 hours. Find the rows with status 'dead' in notification_queue; last_error says why."
     }
   }
 }

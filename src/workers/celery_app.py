@@ -1,6 +1,7 @@
 import ssl
 
 from celery import Celery
+from celery.schedules import crontab
 from src.core.config import settings
 from src.lib import log_redaction
 
@@ -106,10 +107,12 @@ celery_app.conf.update(
             "task": "renew_webhook_subscriptions",
             "schedule": 600.0,
         },
-        # A certificate that lapses silently stops all application mail. Daily, and the alarm is on the log line.
+        # A certificate that lapses silently stops all application mail. A wall-clock time, not a 24 h interval:
+        # an interval counts from beat's own start (on ephemeral storage), so an environment redeployed more than
+        # daily would never reach it. The worker also runs the check each time it starts (tasks.py).
         "check-mail-certificate": {
             "task": "check_mail_certificate",
-            "schedule": 86400.0,
+            "schedule": crontab(hour=1, minute=0),
         },
         "prune-operational-metrics": {
             "task": "prune_operational_metrics",

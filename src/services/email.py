@@ -20,9 +20,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import re
 import time
 import uuid
 import weakref
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -80,7 +82,14 @@ class MailSendError(RuntimeError):
     app may not send as, a mailbox that does not exist); ``retry_after`` is the server's own pacing for 429/503.
     """
 
-    PERMANENT_STATUSES = frozenset({400, 403, 404})
+    # What no retry can fix because the MESSAGE is the problem: malformed (400) or too large (413).
+    PERMANENT_STATUSES = frozenset({400, 413})
+    # 403 and 404 at the send stage are problems with the SENDER, not the message: the Exchange scope or the
+    # role assignment is missing or still propagating (up to ~2 hours), or the mailbox does not exist or is not
+    # REST-enabled yet. Every queued message fails identically, so these stop the batch, do not kill the rows,
+    # and are retried on a long fixed backoff while an alarm tells a human.
+    SENDER_STATUSES = frozenset({403, 404})
+    SENDER_BACKOFF_SECONDS = 15 * 60
 
     def __init__(
         self,
@@ -104,9 +113,19 @@ class MailSendError(RuntimeError):
         return self.stage == "send" and self.status in self.PERMANENT_STATUSES
 
     @property
+    def sender_refused(self) -> bool:
+        return self.stage == "send" and self.status in self.SENDER_STATUSES
+
+    @property
     def stops_the_batch(self) -> bool:
-        """Nothing else in this batch can succeed: bad config, a rejected token request, or throttling."""
-        return self.stage in {"config", "token"} or self.status in {429, 503}
+        """Nothing else in this batch can succeed: bad config, a rejected token request, throttling, or a
+        sender Exchange will not let the app use. The rows are not charged an attempt for it."""
+        return self.stage in {"config", "token"} or self.status in {429, 503} or self.sender_refused
+
+    @property
+    def minimum_wait(self) -> int:
+        """Seconds before ANY retry, from the server's Retry-After or, for a refused sender, a quarter hour."""
+        return max(self.retry_after or 0, self.SENDER_BACKOFF_SECONDS if self.sender_refused else 0)
 
 
 # ── certificate credential ───────────────────────────────────────────────────────────────────
@@ -133,12 +152,35 @@ def _reveal(value: Any) -> str:
     return value.get_secret_value() if hasattr(value, "get_secret_value") else str(value)
 
 
-def _credential() -> _Credential:
+_CERT_BLOCK = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.DOTALL)
+_KEY_BLOCK = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----.+?-----END (?:RSA )?PRIVATE KEY-----", re.DOTALL)
+
+
+def _pems() -> tuple[str, str]:
+    """(certificate PEM, private key PEM) from the configuration, or empty strings for what is missing.
+
+    Deployed environments get ONE standalone secret, MAIL_GRAPH_PEM, holding the private key and the certificate
+    together in a single PEM, so the pair is written and read atomically and cannot drift apart. The two separate
+    settings are for a local test and for scripts/graph_mail_check.py; when both are set they win.
+    """
     cert_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_CERT_PEM))
     key_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_PRIVATE_KEY_PEM))
+    if cert_pem and key_pem:
+        return cert_pem, key_pem
+    combined = _normalise_pem(_reveal(settings.MAIL_GRAPH_PEM))
+    if combined:
+        cert = _CERT_BLOCK.search(combined)
+        key = _KEY_BLOCK.search(combined)
+        return (cert_pem or (cert.group(0) if cert else "")), (key_pem or (key.group(0) if key else ""))
+    return cert_pem, key_pem
+
+
+def _credential() -> _Credential:
+    cert_pem, key_pem = _pems()
     if not cert_pem or not key_pem:
         raise MailSendError(
-            "MAIL_GRAPH_CERT_PEM and MAIL_GRAPH_PRIVATE_KEY_PEM are required for EMAIL_PROVIDER=graph", stage="config"
+            "MAIL_GRAPH_PEM (a private key and its certificate in one PEM) is required for EMAIL_PROVIDER=graph",
+            stage="config",
         )
     cache_key = (hashlib.sha256(cert_pem.encode()).hexdigest(), hashlib.sha256(key_pem.encode()).hexdigest())
     cached = _credential_cache.get(cache_key)
@@ -153,13 +195,13 @@ def _credential() -> _Credential:
         key = serialization.load_pem_private_key(key_pem.encode(), password=None)
     except Exception as exc:  # the message names the setting, never the material
         raise MailSendError(
-            f"MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM could not be parsed: {type(exc).__name__}", stage="config"
+            f"MAIL_GRAPH_PEM could not be parsed: {type(exc).__name__}", stage="config"
         ) from exc
     if not isinstance(key, rsa.RSAPrivateKey):
-        raise MailSendError("MAIL_GRAPH_PRIVATE_KEY_PEM must be an RSA key (RS256 client assertion)", stage="config")
+        raise MailSendError("The mail private key must be an RSA key (RS256 client assertion)", stage="config")
     public = cert.public_key()
     if not isinstance(public, rsa.RSAPublicKey) or public.public_numbers() != key.public_key().public_numbers():
-        raise MailSendError("MAIL_GRAPH_CERT_PEM does not belong to MAIL_GRAPH_PRIVATE_KEY_PEM", stage="config")
+        raise MailSendError("The mail certificate does not belong to the mail private key", stage="config")
     not_after = cert.not_valid_after_utc
     now = datetime.now(timezone.utc)
     if not_after <= now:
@@ -213,11 +255,22 @@ def reset_token_cache() -> None:
 
 
 def _retry_after(response: httpx.Response) -> int | None:
-    """Seconds the server asked us to wait (429/503), capped: a header of "86400" must not park mail for a day."""
-    raw = response.headers.get("retry-after")
-    if raw and raw.strip().isdigit():
-        return min(int(raw.strip()), 3600)
-    return None
+    """Seconds the server asked us to wait (429/503), capped: a header of "86400" must not park mail for a day.
+
+    Both forms RFC 9110 allows: delta-seconds ("120") and an HTTP-date. Anything else is ignored.
+    """
+    raw = (response.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return min(int(raw), 3600)
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return min(max(int((when - datetime.now(timezone.utc)).total_seconds()), 0), 3600)
 
 
 def _error_from(response: httpx.Response, what: str, stage: str = "send") -> MailSendError:
@@ -329,10 +382,11 @@ def configuration_problems() -> tuple[list[str], bool]:
         return [], False
     if not (settings.MAIL_GRAPH_CLIENT_ID or "").strip():
         return [], True
+    cert_pem, key_pem = _pems()
     required = {
         "MICROSOFT_GRAPH_SENDER": settings.MICROSOFT_GRAPH_SENDER,
-        "MAIL_GRAPH_CERT_PEM": _reveal(settings.MAIL_GRAPH_CERT_PEM),
-        "MAIL_GRAPH_PRIVATE_KEY_PEM": _reveal(settings.MAIL_GRAPH_PRIVATE_KEY_PEM),
+        "a certificate in MAIL_GRAPH_PEM": cert_pem,
+        "a private key in MAIL_GRAPH_PEM": key_pem,
     }
     missing = sorted(name for name, value in required.items() if not (value or "").strip())
     return ([f"MAIL_GRAPH_CLIENT_ID is set, so {', '.join(missing)} must be too"] if missing else []), False
@@ -344,7 +398,7 @@ def certificate_status(now: datetime | None = None) -> dict[str, Any] | None:
     Run daily by the worker (a once-per-process warning at the first send is invisible in a process that lives
     for weeks). Expired is reported, not raised: the daily task must always get to log it.
     """
-    cert_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_CERT_PEM))
+    cert_pem, _ = _pems()
     if not cert_pem:
         return None
     from cryptography import x509

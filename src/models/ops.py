@@ -79,7 +79,18 @@ class NotificationQueue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Not before this time (UTC): exponential backoff, or the server's Retry-After. NULL = eligible now. Also
     # what keeps a row that keeps failing from sitting at the head of the batch and starving new mail.
-    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # The delivery query's own shape: only email rows that are still deliverable, ordered by (next_attempt_at,
+    # created_at). Partial, so sent and dead rows (the bulk of the table) cost nothing.
+    __table_args__ = (
+        Index(
+            "ix_notification_queue_email_due",
+            "next_attempt_at",
+            "created_at",
+            postgresql_where=text("type = 'email' AND status IN ('pending', 'failed')"),
+        ),
+    )
 
 class DeadLetterJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "dead_letter_jobs"

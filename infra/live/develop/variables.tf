@@ -63,7 +63,7 @@ variable "microsoft_graph_sender" {
   EOT
 
   validation {
-    condition     = can(regex("-dev@", var.microsoft_graph_sender))
+    condition     = can(regex("-dev@", lower(var.microsoft_graph_sender)))
     error_message = "develop's microsoft_graph_sender must be its own mailbox (noreply-<product>-dev@...), never production's."
   }
 }
@@ -71,11 +71,20 @@ variable "mail_graph_client_id" {
   type        = string
   default     = ""
   description = <<-EOT
-    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
-    has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
-    set only AFTER the owner has put mail-graph-certificate and mail-graph-private-key in the secrets bundle.
-    While empty, no mail secret is injected; develop keeps sending through SES.
+    Application (client) ID of this environment's mail Entra app ("KB Develop Service"; a public identifier). THIS IS THE SWITCH: set it
+    only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret
+    qnsc-kb/develop/mail-graph-certificate (docs/runbooks/email-graph.md).
+
+    REQUIRED here. AWS SES is gone from this branch, so with no client id this environment would have no mail
+    transport at all: the worker would log "Mail is not configured" on every pass and send nothing. The validation
+    makes `tofu plan` fail until the id is carried in this file, so this change cannot be merged or applied before
+    both environments have their app.
   EOT
+
+  validation {
+    condition     = var.mail_graph_client_id != ""
+    error_message = "mail_graph_client_id is empty. This change removes SES, so develop would have no way to send mail. Create the app (docs/runbooks/email-graph.md), put the credential in its secret, then set the client id in infra/live/develop/variables.tf."
+  }
 }
 
 variable "microsoft_tenant_id" {
