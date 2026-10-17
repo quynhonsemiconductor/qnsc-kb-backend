@@ -48,7 +48,12 @@ def worker_init_mail_guard(**kwargs):
     """
     fatal, unconfigured = email_service.configuration_problems()
     if fatal:
-        raise RuntimeError("Mail configuration: " + "; ".join(fatal))
+        # SystemExit, NOT an exception: Celery's Signal.send catches and logs an Exception raised by a receiver
+        # and carries on, so the worker would have reached "ready" with mail it can never send. A BaseException
+        # propagates out of the signal and the process exits non-zero, which is what fails the deploy.
+        message = "Mail configuration: " + "; ".join(fatal)
+        logger.critical(message)
+        raise SystemExit(message)
     if unconfigured:
         logger.error(
             "Mail is not configured: EMAIL_PROVIDER=graph but MAIL_GRAPH_CLIENT_ID is empty, so notifications "
@@ -59,6 +64,12 @@ def worker_init_mail_guard(**kwargs):
 @worker_ready.connect
 def worker_ready_handler(sender=None, **kwargs):
     logger.info("Celery worker ready", worker=str(sender))
+    # The certificate check also runs at start. A daily beat schedule counted from beat's own start never fires
+    # in an environment redeployed more than once a day; this makes every deploy a check.
+    try:
+        check_mail_certificate()
+    except Exception:  # a failed check must never keep a worker from serving
+        logger.exception("Mail certificate check failed at worker start")
 
 
 @task_prerun.connect
@@ -245,11 +256,13 @@ def prune_operational_metrics() -> None:
     sync_run(prune())
 
 
-# Email delivery is bounded. A row that fails is retried with exponential backoff, a row the server will never
-# accept (400/403/404) or one that has used up its attempts becomes status "dead" (logged at ERROR, which an
-# alarm watches) and is never selected again, and a failure that affects every message (bad credentials, a
-# throttled tenant) stops the batch instead of burning an attempt on each remaining row.
-MAIL_MAX_ATTEMPTS = 8
+# Email delivery is bounded, by AGE rather than by a count of attempts. A row that fails is retried with
+# exponential backoff (30 s doubling to a 1 h cap). It becomes status "dead" (logged at ERROR, which an alarm
+# watches, and never selected again) when the message itself is refused (400/413), or when it is older than
+# MAIL_MAX_AGE: a count would kill every queued message after about an hour of any Graph or network outage, while
+# a reset link is worthless after a day anyway. A failure that affects every message (bad credentials, a throttled
+# tenant, a sender Exchange refuses) stops the batch and is NOT charged to the row as an attempt.
+MAIL_MAX_AGE = timedelta(hours=24)
 MAIL_BACKOFF_BASE_SECONDS = 30
 MAIL_BACKOFF_CAP_SECONDS = 3600
 
@@ -305,10 +318,14 @@ def deliver_notification_queue() -> None:
                     row.last_error = None
                     row.next_attempt_at = None
                 except Exception as exc:
-                    row.attempts += 1
+                    stops = bool(getattr(exc, "stops_the_batch", False))
                     row.last_error = str(exc)[:1000]
+                    if not stops:
+                        row.attempts += 1  # an outage must not use up the attempts of rows it never let us try
                     permanent = bool(getattr(exc, "permanent", False))
-                    if permanent or row.attempts >= MAIL_MAX_ATTEMPTS:
+                    created = row.created_at or datetime.utcnow()
+                    too_old = datetime.utcnow() - created > MAIL_MAX_AGE
+                    if permanent or too_old:
                         row.status = "dead"
                         row.next_attempt_at = None
                         logger.error(
@@ -316,15 +333,25 @@ def deliver_notification_queue() -> None:
                             notification_id=str(row.id),
                             attempts=row.attempts,
                             permanent=permanent,
+                            too_old=too_old,
                             error=row.last_error,
                         )
                     else:
-                        row.status = "failed"
-                        wait = max(mail_backoff_seconds(row.attempts), int(getattr(exc, "retry_after", None) or 0))
+                        row.status = "failed" if row.attempts else row.status
+                        wait = max(mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0))
                         row.next_attempt_at = datetime.utcnow() + timedelta(seconds=wait)
-                    if getattr(exc, "stops_the_batch", False):
-                        # Credentials, configuration or throttling: every remaining row would fail the same way,
-                        # and each failure would cost it an attempt. Leave them untouched for the next pass.
+                    if getattr(exc, "sender_refused", False):
+                        # The scope is missing or still propagating (up to ~2 h), or the mailbox is missing or not
+                        # REST-enabled. A human has to look; the alarm watches this line.
+                        logger.error(
+                            "Mail sender refused",
+                            status=getattr(exc, "status", None),
+                            code=getattr(exc, "code", None),
+                            request_id=getattr(exc, "request_id", None),
+                        )
+                    if stops:
+                        # Credentials, configuration, throttling or a refused sender: every remaining row would
+                        # fail the same way. Leave them untouched for the next pass.
                         logger.warning("Stopping the mail batch", reason=row.last_error)
                         break
             await db.commit()

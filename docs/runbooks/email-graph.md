@@ -220,19 +220,29 @@ down.
 
 ## What happens when delivery fails
 
-Delivery is bounded; it never retries forever.
+Delivery is bounded by **age**, not by a count; a message is never retried forever and an outage never kills it early.
 
-* **Permanent** (HTTP 400, 403, 404): the row becomes `status = 'dead'` at once and `Notification marked dead` is
-  logged (alarm `...-worker-mail-dead`). Typical cause: the scope or the mailbox is wrong; `last_error` says so.
-* **Transient**: retried with exponential backoff (30 s, 1 m, 2 m ... up to 1 h) and `Retry-After` honoured on
-  429/503; after 8 attempts the row is `dead` too.
-* **Affects every message** (the token request is refused, certificate unusable, throttling): the batch stops and
-  the remaining rows are not charged an attempt. Fix the cause and mail resumes by itself.
-* Rows are selected so that failing rows back off out of the way and cannot starve new mail.
+* **The message is refused** (HTTP 400, 413): the row becomes `status = 'dead'` at once and `Notification marked
+  dead` is logged (alarm `...-worker-mail-dead`).
+* **The sender is refused** (HTTP 403 or 404 on the send): this is a problem with the *sender*, not the message. The
+  Exchange scope or role assignment is missing or still propagating (**up to ~2 hours** after step 6), or the
+  mailbox does not exist or is not REST-enabled yet. The batch stops, **no row is charged an attempt or marked
+  dead**, each is retried after 15 minutes, and `Mail sender refused` is logged (alarm `...-worker-mail-sender-refused`).
+  Fix steps 1, 2 or 6 and mail resumes by itself.
+* **Everything else that is transient** (5xx, network): exponential backoff, 30 s doubling to a 1 h cap. Honours
+  `Retry-After` (seconds or an HTTP date) on 429/503.
+* **Affects every message** (the token request is refused, certificate unusable, throttling, or a refused sender):
+  the batch stops and the remaining rows are not charged an attempt.
+* **A row older than 24 hours** that is still failing becomes `dead` (a reset link is worthless by then).
+* Failing rows back off out of the way, so they cannot starve new mail.
 * Re-queue dead rows after fixing the cause: `UPDATE notification_queue SET status='pending', attempts=0,
-  next_attempt_at=NULL WHERE status='dead' AND type='email';`
-* Certificate expiry is checked **daily**: `Mail certificate expires soon` (30 days) and `Mail certificate has
-  expired` raise the `...-worker-mail-certificate` alarm.
+  next_attempt_at=NULL WHERE status='dead' AND type='email';` (rows older than 24 h will be marked dead again by
+  the first failure; also refresh their `created_at` if they should be retried).
+* Certificate expiry is checked **every night at 01:00 UTC and each time a worker starts** (so an environment
+  redeployed more than daily is still checked): `Mail certificate expires soon` (30 days) and `Mail certificate
+  has expired` raise the `...-worker-mail-certificate` alarm.
+* A worker that is told to use the mail app (client id set) but lacks the sender, certificate or key **exits** at
+  start with a CRITICAL `Mail configuration: ...` line, so the deploy fails instead of queueing mail.
 
 ## Rotation and revocation
 

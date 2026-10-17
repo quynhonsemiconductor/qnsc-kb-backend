@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+import email.utils as email_utils
 import hashlib
 import json
 from types import SimpleNamespace
@@ -404,17 +405,51 @@ def test_other_providers_have_nothing_to_check(monkeypatch):
     assert email.configuration_problems() == ([], False)
 
 
-def test_the_worker_refuses_to_start_on_a_fatal_problem_and_logs_an_error_for_the_unconfigured_case(monkeypatch):
+def test_the_worker_exits_on_a_fatal_mail_problem_through_the_real_signal_path(monkeypatch):
+    """Celery's Signal.send swallows an Exception raised by a receiver (the worker would reach "ready"). Only a
+    BaseException gets out, so the guard raises SystemExit; prove it through the signal, not by calling the function."""
+    from celery.signals import worker_init
     from src.workers import tasks
 
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT))
-    with pytest.raises(RuntimeError, match="Mail configuration"):
-        tasks.worker_init_mail_guard()
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(SystemExit) as caught:
+            worker_init.send(sender="worker")
+    assert "Mail configuration" in str(caught.value.code)
+    assert any(e["log_level"] == "critical" for e in logs)
+
+    # the control that makes this test mean something: an ordinary exception IS swallowed by the same signal
+    def boom(**kwargs):
+        raise RuntimeError("swallowed")
+
+    worker_init.connect(boom, weak=False)
+    try:
+        monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production"))  # nothing fatal now
+        worker_init.send(sender="worker")  # does not raise: Celery logged the RuntimeError and went on
+    finally:
+        worker_init.disconnect(boom)
+
+
+def test_the_worker_starts_when_no_mail_app_is_configured_and_logs_an_error(monkeypatch):
+    from celery.signals import worker_init
 
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production"))
     with structlog.testing.capture_logs() as logs:
-        tasks.worker_init_mail_guard()  # does not raise
+        worker_init.send(sender="worker")
     assert any(e["log_level"] == "error" and e["event"].startswith("Mail is not configured") for e in logs)
+
+
+def test_the_certificate_check_runs_when_the_worker_becomes_ready_and_on_a_wall_clock_schedule(world):
+    from celery.schedules import crontab
+    from celery.signals import worker_ready
+    from src.workers.celery_app import celery_app
+
+    with structlog.testing.capture_logs() as logs:
+        worker_ready.send(sender="worker")
+    assert any(e["event"] == "Mail certificate is healthy" for e in logs)
+
+    schedule = celery_app.conf.beat_schedule["check-mail-certificate"]["schedule"]
+    assert isinstance(schedule, crontab) and schedule.hour == {1} and schedule.minute == {0}  # not 86400.0 seconds
 
 
 def test_the_secrets_are_secretstr_and_never_appear_in_a_repr():
@@ -430,7 +465,9 @@ def test_a_sender_with_odd_characters_is_quoted_into_the_url(world, monkeypatch)
 
 
 def test_retry_after_is_parsed_capped_and_ignored_when_not_a_number(world):
-    for header, expected in (("30", 30), ("999999", 3600), ("Wed, 21 Oct 2026 07:28:00 GMT", None)):
+    in_two_minutes = email_utils.format_datetime(dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=2), usegmt=True)
+    for header, expected in (("30", 30), ("999999", 3600), ("garbage", None), (in_two_minutes, "about 120"),
+                             ("Wed, 21 Oct 2020 07:28:00 GMT", 0)):
         fake = FakeMicrosoft(world["cert"], graph_status=429, graph_error={"error": {"code": "TooManyRequests", "message": "slow"}})
         original = fake.__call__
 
@@ -442,14 +479,26 @@ def test_retry_after_is_parsed_capped_and_ignored_when_not_a_number(world):
 
         with pytest.raises(email.MailSendError) as caught:
             send(with_header)
-        assert caught.value.retry_after == expected and caught.value.stops_the_batch is True
+        got = caught.value.retry_after
+        assert (110 <= got <= 120) if expected == "about 120" else got == expected
+        assert caught.value.stops_the_batch is True
 
 
 def test_error_classification(world):
-    fake = FakeMicrosoft(world["cert"], graph_status=403)
-    with pytest.raises(email.MailSendError) as caught:
-        send(fake)
-    assert caught.value.permanent is True and caught.value.stops_the_batch is False
+    # the MESSAGE is the problem: permanent, and it does not stop the others
+    for status in (400, 413):
+        with pytest.raises(email.MailSendError) as caught:
+            send(FakeMicrosoft(world["cert"], graph_status=status))
+        assert caught.value.permanent is True and caught.value.stops_the_batch is False
+
+    # the SENDER is the problem (scope missing or propagating, mailbox missing): not permanent, stops the batch,
+    # waits a quarter of an hour
+    for status in (403, 404):
+        with pytest.raises(email.MailSendError) as caught:
+            send(FakeMicrosoft(world["cert"], graph_status=status))
+        error = caught.value
+        assert error.permanent is False and error.stops_the_batch is True and error.sender_refused is True
+        assert error.minimum_wait == 15 * 60
 
     email.reset_token_cache()
     token_fail = FakeMicrosoft(world["cert"], token_error={"error": "invalid_client", "error_description": "bad"})
@@ -460,7 +509,7 @@ def test_error_classification(world):
     transient = FakeMicrosoft(world["cert"], graph_status=500, graph_error={"error": {"code": "ErrorInternalServerError", "message": "x"}})
     with pytest.raises(email.MailSendError) as caught:
         send(transient)
-    assert caught.value.permanent is False and caught.value.stops_the_batch is False
+    assert caught.value.permanent is False and caught.value.stops_the_batch is False and caught.value.minimum_wait == 0
 
 
 def test_the_certificate_status_reports_days_left_and_none_without_a_certificate(world, monkeypatch):

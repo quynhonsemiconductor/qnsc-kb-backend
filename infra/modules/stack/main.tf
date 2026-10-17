@@ -1345,10 +1345,15 @@ locals {
       pattern     = "?\"Mail certificate expires soon\" ?\"Mail certificate has expired\""
       description = "The mail certificate has under 30 days left, has expired, or cannot be read. Checked daily by the worker. Rotate it: docs/runbooks/email-graph.md."
     }
+    sender-refused = {
+      metric      = "MailSenderRefused"
+      pattern     = "\"Mail sender refused\""
+      description = "Graph refused the app the sender mailbox (HTTP 403 or 404): the Exchange management scope or role assignment is missing or still propagating (up to ~2 hours), or the mailbox does not exist or is not REST-enabled. Nothing is lost: the batch stops and is retried every 15 minutes. See docs/runbooks/email-graph.md, steps 1, 2 and 6."
+    }
     dead = {
       metric      = "MailNotificationDead"
       pattern     = "\"Notification marked dead\""
-      description = "A notification email was given up on: the server refused it permanently (400/403/404, e.g. a mailbox the app may not send as) or it used up its attempts. Find the rows with status 'dead' in notification_queue; last_error says why."
+      description = "A notification email was given up on: Graph refused the message itself (400/413) or it is older than 24 hours. Find the rows with status 'dead' in notification_queue; last_error says why."
     }
   }
 }

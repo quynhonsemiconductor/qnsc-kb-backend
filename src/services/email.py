@@ -24,6 +24,7 @@ import hashlib
 import time
 import uuid
 import weakref
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -81,7 +82,14 @@ class MailSendError(RuntimeError):
     app may not send as, a mailbox that does not exist); ``retry_after`` is the server's own pacing for 429/503.
     """
 
-    PERMANENT_STATUSES = frozenset({400, 403, 404})
+    # What no retry can fix because the MESSAGE is the problem: malformed (400) or too large (413).
+    PERMANENT_STATUSES = frozenset({400, 413})
+    # 403 and 404 at the send stage are problems with the SENDER, not the message: the Exchange scope or the
+    # role assignment is missing or still propagating (up to ~2 hours), or the mailbox does not exist or is not
+    # REST-enabled yet. Every queued message fails identically, so these stop the batch, do not kill the rows,
+    # and are retried on a long fixed backoff while an alarm tells a human.
+    SENDER_STATUSES = frozenset({403, 404})
+    SENDER_BACKOFF_SECONDS = 15 * 60
 
     def __init__(
         self,
@@ -105,9 +113,19 @@ class MailSendError(RuntimeError):
         return self.stage == "send" and self.status in self.PERMANENT_STATUSES
 
     @property
+    def sender_refused(self) -> bool:
+        return self.stage == "send" and self.status in self.SENDER_STATUSES
+
+    @property
     def stops_the_batch(self) -> bool:
-        """Nothing else in this batch can succeed: bad config, a rejected token request, or throttling."""
-        return self.stage in {"config", "token"} or self.status in {429, 503}
+        """Nothing else in this batch can succeed: bad config, a rejected token request, throttling, or a
+        sender Exchange will not let the app use. The rows are not charged an attempt for it."""
+        return self.stage in {"config", "token"} or self.status in {429, 503} or self.sender_refused
+
+    @property
+    def minimum_wait(self) -> int:
+        """Seconds before ANY retry, from the server's Retry-After or, for a refused sender, a quarter hour."""
+        return max(self.retry_after or 0, self.SENDER_BACKOFF_SECONDS if self.sender_refused else 0)
 
 
 # ── certificate credential ───────────────────────────────────────────────────────────────────
@@ -214,11 +232,22 @@ def reset_token_cache() -> None:
 
 
 def _retry_after(response: httpx.Response) -> int | None:
-    """Seconds the server asked us to wait (429/503), capped: a header of "86400" must not park mail for a day."""
-    raw = response.headers.get("retry-after")
-    if raw and raw.strip().isdigit():
-        return min(int(raw.strip()), 3600)
-    return None
+    """Seconds the server asked us to wait (429/503), capped: a header of "86400" must not park mail for a day.
+
+    Both forms RFC 9110 allows: delta-seconds ("120") and an HTTP-date. Anything else is ignored.
+    """
+    raw = (response.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return min(int(raw), 3600)
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return min(max(int((when - datetime.now(timezone.utc)).total_seconds()), 0), 3600)
 
 
 def _error_from(response: httpx.Response, what: str, stage: str = "send") -> MailSendError:
