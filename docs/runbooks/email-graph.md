@@ -11,7 +11,7 @@ prove it.
 | Shared mailbox | `noreply-kb-dev@qnsc.vn` | `noreply-kb@qnsc.vn` |
 | Entra app (a "Service app") | `KB Develop Service` | `KB Prod Service` |
 | Exchange management scope | `KB mail sender (develop)` -> the dev mailbox only | `KB mail sender (prod)` -> the prod mailbox only |
-| Secrets bundle | `qnsc-kb/develop/app` | `qnsc-kb/prod/app` |
+| Mail credential (standalone secret) | `qnsc-kb/develop/mail-graph-certificate` | `qnsc-kb/prod/mail-graph-certificate` |
 | Terraform | `infra/live/develop/variables.tf` | `infra/live/prod/variables.tf` |
 | Local | `EMAIL_PROVIDER=console` (the `.env.example` default): no mailbox, no app | |
 
@@ -26,7 +26,7 @@ must contain `-dev@`, production's must not), and step 8 proves it on the real t
 | Choice | Why |
 |---|---|
 | A **dedicated Entra app per environment**, not the SSO/connector app | Separate credentials and revocation; the connector app has other, broader permissions |
-| **Certificate**, no client secret | A secret is a string anything that can read the environment can replay; the key never leaves the secrets bundle, and the app proves possession by signing a short-lived assertion |
+| **Certificate**, no client secret | A secret is a string anything that can read the environment can replay; the key lives in one standalone secret that only the worker's execution role can read, and the app proves possession by signing a short-lived assertion |
 | **No Mail.Send consent in Entra at all** | Application `Mail.Send` consented in Entra is tenant-wide (send as ANY mailbox). Exchange RBAC for Applications grants are *independent* of Entra grants and the effective access is the **union**, so an unscoped Entra consent would silently cancel the scope. The app's only authority is the scoped Exchange role |
 | A **management scope** naming exactly one mailbox, per app | A stolen key can send as that environment's mailbox and as nobody else, in particular not as the other environment's |
 | **Shared mailboxes** | No licence, no sign-in; the sender address needs to exist, not to be a person |
@@ -94,45 +94,61 @@ openssl x509 -in mail-<env>.crt -noout -enddate -fingerprint -sha256
 ```
 
 * Upload **`mail-<env>.crt` only** to that environment's app: Certificates & secrets > Certificates >
-  Upload certificate. The private key is never uploaded anywhere but the secrets bundle.
+  Upload certificate. The private key is never uploaded anywhere but its standalone secret (step 5).
 * RSA only: the client assertion is RS256 and the application refuses an EC key.
 
-## 5. The secrets bundle (do this BEFORE setting `mail_graph_client_id`)
+## 5. The mail credential: a standalone secret (do this BEFORE setting `mail_graph_client_id`)
 
-The two PEMs are keys `mail-graph-certificate` and `mail-graph-private-key` of the bundle JSON
-`qnsc-kb/<env>/app`. **Merge them into the existing JSON; do not replace it** (a plain `put-secret-value`
-with only these keys erases `secret-key`, `data-encryption-key`, the database password and the rest).
+The credential is **one PEM holding the private key and the certificate** (`cat mail-<env>.key mail-<env>.crt`),
+stored as the value of its own secret, `qnsc-kb/<env>/mail-graph-certificate`. It is **not** a key of the shared
+`qnsc-kb/<env>/app` bundle: the bundle is granted to the API's execution role as well, so anything inside it is
+readable by the API's role. This secret is referenced only by the **worker** container, granted only to the
+**worker's execution role**, and a resource policy denies `GetSecretValue` to every other principal, you included.
+No task role in the stack can read any secret. One value, one write: the key and the certificate cannot drift apart,
+and there is no bundle JSON to merge or to clobber.
+
+The secret's **container** is created by Terraform as soon as the stack is applied (empty, without a version); you
+only write the value. The deploy fails by name until you do (see below).
 
 **Nothing secret goes on a command line.** Command lines are visible in the process list and saved in shell
-history; the bundle is read from a pipe and written to a pipe, and `jq --rawfile` reads the PEMs from files:
+history. The value goes in through a pipe (`file:///dev/stdin`):
 
 ```bash
-ID=qnsc-kb/<env>/app
-aws secretsmanager get-secret-value --secret-id "$ID" --query SecretString --output text \
-  | jq --rawfile c mail-<env>.crt --rawfile k mail-<env>.key \
-       '. + {"mail-graph-certificate": $c, "mail-graph-private-key": $k}' \
+ID=qnsc-kb/<env>/mail-graph-certificate
+cat mail-<env>.key mail-<env>.crt \
   | aws secretsmanager put-secret-value --secret-id "$ID" --secret-string file:///dev/stdin
 ```
 
-Verify. This prints only `true` or `false`, never a value:
+Verify without reading it back (reading it back is denied by design, which is the point). It must show one version
+with `AWSCURRENT`:
 
 ```bash
-aws secretsmanager get-secret-value --secret-id "$ID" --query SecretString --output text \
-  | jq -e 'has("secret-key") and has("data-encryption-key") and has("mail-graph-certificate") and has("mail-graph-private-key")'
+aws secretsmanager list-secret-version-ids --secret-id "$ID" \
+  --query 'Versions[].VersionStages' --output text          # AWSCURRENT
+aws secretsmanager describe-secret --secret-id "$ID" --query '{Name:Name,Changed:LastChangedDate}'
 ```
 
-It must print `true`. Do not skip it: the deploy preflight checks that the bundle container holds a value,
-not that each key exists, and a missing key fails the task at boot with `ResourceInitializationError`. Terraform
-injects the two keys only once `mail_graph_client_id` is set (step 9), which is why the keys come first.
+The proof that the VALUE is right is step 8 (`scripts/graph_mail_check.py` reads the same two files from your
+workstation and signs with them); the worker then loads the identical bytes. Check the file you piped first:
+`openssl x509 -in mail-<env>.crt -noout -modulus | openssl md5` and `openssl rsa -in mail-<env>.key -noout -modulus |
+openssl md5` must print the same hash.
 
-Every other edit of the bundle (rotation, below) uses the same pipe; never paste a PEM into a command.
+**The per-secret deploy preflight.** `ci` runs, before every roll, `list-secret-version-ids` on every secret a task
+definition injects and **fails by the secret's name** when one holds no version: `... injects secret
+'qnsc-kb/<env>/mail-graph-certificate' but it holds no value`. That is metadata only (it needs no permission to read
+the value), and it is the per-secret check that the keys inside the bundle never had. What it does *not* prove is
+that the value is a valid PEM; step 8 does, and so does the worker, which refuses to start with a CRITICAL
+`Mail configuration: ...` line when the key or the certificate block is missing.
 
 Where the private key lives: generate it on an encrypted volume (FileVault is on a managed Mac) and keep the one
-copy in an encrypted location (the team password manager, or an encrypted disk image) until the verification in
-step 8 has passed; after that the bundle holds the working copy and the file can go. Do not rely on `shred` or
-`rm -P`: on APFS and SSDs they do not overwrite the blocks, so they give a false sense of having erased it.
-Keep the `.crt` and the expiry date. Make sure each environment's bundle got **its own** pair: develop's key in
-`qnsc-kb/develop/app`, production's in `qnsc-kb/prod/app`.
+copy in an encrypted location (the team password manager, or an encrypted disk image). It is the only copy outside
+AWS, because AWS will not give it back. Do not rely on `shred` or `rm -P`: on APFS and SSDs they do not overwrite
+the blocks, so they give a false sense of having erased it. Keep the `.crt` and the expiry date. Each environment
+has **its own** pair and its own secret: develop's in `qnsc-kb/develop/mail-graph-certificate`, production's in
+`qnsc-kb/prod/mail-graph-certificate`.
+
+Break-glass: to read the value back, an administrator first deletes the secret's resource policy
+(`aws secretsmanager delete-resource-policy`); Terraform restores it on the next apply.
 
 ## 6. Exchange RBAC for Applications (the scope)
 
@@ -194,7 +210,7 @@ PASS  DENIED  as <other>: HTTP 403 ErrorAccessDenied (request-id ...)
   that app can send as the other environment (or anyone): go back to step 7.
 * If the token carries **any** `roles` claim, the check fails: this app should hold no application role at all, so something was consented in Entra (step 7).
 * `TOKEN` failing with `AADSTS700027` (invalid assertion signature) or `AADSTS700024`: the certificate
-  uploaded to Entra is not the one whose key is in that environment's bundle.
+  uploaded to Entra is not the one whose key is in that environment's mail secret.
 
 ## 9. Configure the repository and deploy
 
@@ -202,15 +218,16 @@ The order matters, and `mail_graph_client_id` is the switch: while it is empty, 
 and develop keeps sending through SES exactly as before, so merging the code before these steps takes nothing
 down.
 
-1. Steps 1-8 done for the environment, including step 5 (the bundle keys exist) and step 8 (the proof).
+1. Steps 1-8 done for the environment, including step 5 (the secret has a value) and step 8 (the proof).
 2. In `infra/live/<env>/variables.tf` set `mail_graph_client_id` to that environment's Application (client) ID
    (a public identifier). `microsoft_graph_sender` already defaults to `noreply-kb-dev@qnsc.vn` in develop and
    `noreply-kb@qnsc.vn` in production, and `tofu plan` rejects a develop sender without `-dev@` and a production
    one with it. Merge that change.
-3. Merging runs Infrastructure · Apply: develop's `email_provider` becomes `graph`, and the two mail secrets are
-   injected into the **worker container only** (the API and beat never receive the key). The SES send permission
-   stays in place on purpose, so a rollback to the previous task definition can still send; it is removed by the
-   separate clean-up change (#216) once Graph is proven.
+3. Merging runs Infrastructure · Apply: develop's `email_provider` becomes `graph`, and the mail secret is injected
+   into the **worker container only** and granted to the worker's execution role only (the API and beat never
+   receive it, and no task role can read it). The SES send permission stays in place on purpose, so a rollback to
+   the previous task definition can still send; it is removed by the separate clean-up change (#216) once Graph
+   is proven.
 4. Deploy. The **worker** now refuses to start if the client id is set but the sender, certificate or key is
    missing, so a half-configured environment fails the deploy instead of quietly queueing mail. The API does not
    check mail at all. With the client id empty the worker starts and logs `Mail is not configured` on every
@@ -247,7 +264,7 @@ Delivery is bounded by **age**, not by a count; a message is never retried forev
 ## Rotation and revocation
 
 * **Rotate (before the expiry date; the worker logs `Mail certificate expires soon` 30 days out):** generate a new
-  pair, upload the new certificate in Entra **next to** the old one, replace the two bundle keys (merge, as in
+  pair, upload the new certificate in Entra **next to** the old one, write the new `key + certificate` PEM to the same secret (a new version, as in
   step 5), redeploy, verify with step 8, then delete the old certificate in Entra.
 * **Revoke now:** delete the certificate in Entra (new tokens stop at once; an issued token lives up to an
   hour). To cut the app off from its mailbox as well: `Remove-ManagementRoleAssignment` for its assignment.

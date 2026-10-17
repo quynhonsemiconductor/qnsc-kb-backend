@@ -91,8 +91,8 @@ variable "mail_graph_client_id" {
   description = <<-EOT
     Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
     has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
-    set only AFTER the owner has put mail-graph-certificate and mail-graph-private-key in the secrets bundle.
-    While empty, no mail secret is injected; the worker logs "Mail is not configured" and an alarm fires once it is running.
+    set only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret qnsc-kb/prod/mail-graph-certificate.
+    While empty, nothing mail-related is injected; the worker logs "Mail is not configured" and an alarm fires once it is running.
   EOT
 }
 

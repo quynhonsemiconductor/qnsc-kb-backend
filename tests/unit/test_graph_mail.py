@@ -239,8 +239,8 @@ def test_a_rejected_assertion_surfaces_the_token_endpoint_error(world):
     ({"MICROSOFT_GRAPH_SENDER": ""}, "MICROSOFT_GRAPH_SENDER"),
     ({"MAIL_GRAPH_CLIENT_ID": ""}, "MAIL_GRAPH_CLIENT_ID"),
     ({"MICROSOFT_TENANT_ID": "common"}, "tenant GUID"),
-    ({"MAIL_GRAPH_CERT_PEM": ""}, "MAIL_GRAPH_CERT_PEM"),
-    ({"MAIL_GRAPH_PRIVATE_KEY_PEM": ""}, "MAIL_GRAPH_PRIVATE_KEY_PEM"),
+    ({"MAIL_GRAPH_CERT_PEM": ""}, "MAIL_GRAPH_PEM"),
+    ({"MAIL_GRAPH_PRIVATE_KEY_PEM": ""}, "MAIL_GRAPH_PEM"),
     ({"MAIL_GRAPH_CERT_PEM": "not a pem"}, "could not be parsed"),
 ])
 def test_misconfiguration_fails_with_the_name_of_the_setting(world, monkeypatch, override, needle):
@@ -377,19 +377,58 @@ def test_no_mail_app_configured_is_reported_but_not_fatal(monkeypatch):
     assert email.configuration_problems() == ([], True)
 
 
-@pytest.mark.parametrize("missing", ["MICROSOFT_GRAPH_SENDER", "MAIL_GRAPH_CERT_PEM", "MAIL_GRAPH_PRIVATE_KEY_PEM"])
-def test_a_client_id_without_the_rest_is_fatal(monkeypatch, missing):
-    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER,
-                  MAIL_GRAPH_CERT_PEM="cert", MAIL_GRAPH_PRIVATE_KEY_PEM="key")
-    values[missing] = ""
+@pytest.mark.parametrize("missing,needle", [
+    ("MICROSOFT_GRAPH_SENDER", "MICROSOFT_GRAPH_SENDER"),
+    ("certificate", "a certificate in MAIL_GRAPH_PEM"),
+    ("key", "a private key in MAIL_GRAPH_PEM"),
+    ("both", "MAIL_GRAPH_PEM"),
+])
+def test_a_client_id_without_the_rest_is_fatal(monkeypatch, missing, needle):
+    """The deployed form is ONE secret, MAIL_GRAPH_PEM, with the key and the certificate in it: either block
+    absent, or the whole thing empty, is fatal for a worker that was told to use the mail app."""
+    cert, key = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----", "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----"
+    pem = {"certificate": key, "key": cert, "both": ""}.get(missing, key + "\n" + cert)
+    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_PEM=pem)
+    if missing == "MICROSOFT_GRAPH_SENDER":
+        values["MICROSOFT_GRAPH_SENDER"] = ""
     monkeypatch.setattr(email, "settings", settings_for(**values))
     fatal, unconfigured = email.configuration_problems()
-    assert unconfigured is False and len(fatal) == 1 and missing in fatal[0]
+    assert unconfigured is False and fatal and needle in " ".join(fatal)
+
+
+def test_the_deployed_form_one_pem_with_the_key_and_the_certificate_sends(world, monkeypatch):
+    """What ECS injects: MAIL_GRAPH_PEM only. Either order of the two blocks, real or literal-\\n newlines."""
+    for combined in (world["key_pem"] + world["cert_pem"], world["cert_pem"] + "\n" + world["key_pem"],
+                     (world["key_pem"] + world["cert_pem"]).strip().replace("\n", "\\n")):
+        email._credential_cache.clear()
+        only_the_secret = world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None,
+                                                              "MAIL_GRAPH_PEM": combined})
+        monkeypatch.setattr(email, "settings", only_the_secret)
+        fake = FakeMicrosoft(world["cert"])
+        send(fake)
+        assert len(fake.graph_calls) == 1
+        assert email.certificate_status()["valid"] is True
+        assert email.configuration_problems() == ([], False)
+
+
+def test_a_pem_whose_key_and_certificate_do_not_match_is_refused(world, monkeypatch):
+    other_key, other_cert, other_cert_pem, other_key_pem = make_credential()
+    email._credential_cache.clear()
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={
+        "MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None, "MAIL_GRAPH_PEM": world["key_pem"] + other_cert_pem}))
+    with pytest.raises(email.MailSendError, match="does not belong"):
+        send(FakeMicrosoft(world["cert"]))
+
+
+def test_the_pem_secret_never_appears_in_a_repr_or_a_dump():
+    s = settings_for(MAIL_GRAPH_PEM="PEMBODY")
+    assert "PEMBODY" not in repr(s) and "PEMBODY" not in str(s.model_dump())
 
 
 def test_a_complete_configuration_has_no_problems(monkeypatch):
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT,
-                                                        MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_CERT_PEM="c", MAIL_GRAPH_PRIVATE_KEY_PEM="k"))
+                                                        MICROSOFT_GRAPH_SENDER=SENDER,
+                                                        MAIL_GRAPH_PEM="-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"))
     assert email.configuration_problems() == ([], False)
 
 
