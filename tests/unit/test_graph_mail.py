@@ -12,6 +12,7 @@ import base64
 import datetime as dt
 import hashlib
 import json
+from types import SimpleNamespace
 from urllib.parse import parse_qs
 
 import httpx
@@ -266,13 +267,30 @@ def test_an_expired_certificate_is_refused_with_the_date(world, monkeypatch):
         send(FakeMicrosoft(world["cert"]))
 
 
-def test_a_certificate_close_to_expiry_warns_but_works(world, monkeypatch):
+def test_a_certificate_close_to_expiry_still_sends_and_the_daily_check_warns(world, monkeypatch):
     key, cert, cert_pem, key_pem = make_credential(days=10)
     monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": cert_pem, "MAIL_GRAPH_PRIVATE_KEY_PEM": key_pem}))
     email._credential_cache.clear()
+    send(FakeMicrosoft(cert))  # a send is not blocked by a certificate that is merely close to expiry
+    from src.workers import tasks
+
     with structlog.testing.capture_logs() as logs:
-        send(FakeMicrosoft(cert))
-    assert any(entry["event"] == "Mail certificate expires soon" for entry in logs)
+        tasks.check_mail_certificate()
+    assert any(e["event"] == "Mail certificate expires soon" and e["log_level"] == "warning" for e in logs)
+
+
+def test_the_daily_check_errors_on_an_expired_certificate_and_is_quiet_when_healthy(world, monkeypatch):
+    from src.workers import tasks
+
+    with structlog.testing.capture_logs() as logs:
+        tasks.check_mail_certificate()
+    assert [e["log_level"] for e in logs] == ["info"]
+
+    _, _, cert_pem, _ = make_credential(days=10, started=dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=100))
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": cert_pem}))
+    with structlog.testing.capture_logs() as logs:
+        tasks.check_mail_certificate()
+    assert any(e["event"] == "Mail certificate has expired" and e["log_level"] == "error" for e in logs)
 
 
 def test_an_elliptic_curve_key_is_refused_because_the_assertion_is_rs256(world, monkeypatch):
@@ -345,40 +363,113 @@ def test_the_test_environment_records_instead_of_sending(monkeypatch):
     assert isinstance(email.get_email_sender(), email.FakeEmailSender)
 
 
-# ── the production guard ─────────────────────────────────────────────────────────────────────
-def production(**overrides):
-    base = dict(
-        _env_file=None, ENVIRONMENT="production", SECRET_KEY="a" * 32, DATA_ENCRYPTION_KEY="d" * 32,
-        AUTO_CREATE_SCHEMA=False, ALLOW_SELF_REGISTRATION=False, ENABLE_API_DOCS=False,
-        MALWARE_SCAN_ENABLED=True, MALWARE_SCANNER_HOST="clamav", FRONTEND_URL="https://kb.example.com",
-        CORS_ORIGINS="https://kb.example.com", MICROSOFT_CLIENT_ID="c", MICROSOFT_CLIENT_SECRET="s",
-        MICROSOFT_TENANT_ID=TENANT, MICROSOFT_REDIRECT_URI="https://kb.example.com/cb",
-        MICROSOFT_LOGIN_REDIRECT_URI="https://kb.example.com/login", GOOGLE_REDIRECT_URI=None,
-        SOURCE_STORAGE_BACKEND="r2", SOURCE_STORAGE_BUCKET="b", R2_ACCOUNT_ID="a", R2_ACCESS_KEY_ID="k",
-        R2_SECRET_ACCESS_KEY="s", S3_ENDPOINT_URL="", BOOTSTRAP_ADMIN_PASSWORD="a-real-deployment-password",
-        MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_CLIENT_ID=CLIENT, MAIL_GRAPH_CERT_PEM="pem", MAIL_GRAPH_PRIVATE_KEY_PEM="pem",
-    )
-    base.update(overrides)
-    return Settings(**base)
+# ── the worker's start-up guard (the API never refuses to boot over mail) ────────────────────
+def test_the_api_boots_with_no_mail_configuration_at_all():
+    """validate_production() used to refuse; the worker now owns that check, so the knowledge base keeps serving."""
+    from tests.unit.test_admin_bootstrap import _production_settings  # a settings object valid apart from mail
+
+    _production_settings(MICROSOFT_GRAPH_SENDER=None, MAIL_GRAPH_CLIENT_ID=None).validate_production()
 
 
-def test_production_boots_with_the_graph_mail_configuration_complete():
-    production().validate_production()
+def test_no_mail_app_configured_is_reported_but_not_fatal(monkeypatch):
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production"))
+    assert email.configuration_problems() == ([], True)
 
 
-@pytest.mark.parametrize("missing", ["MICROSOFT_GRAPH_SENDER", "MAIL_GRAPH_CLIENT_ID", "MAIL_GRAPH_CERT_PEM", "MAIL_GRAPH_PRIVATE_KEY_PEM"])
-def test_production_refuses_to_boot_when_a_mail_setting_is_missing(missing):
-    with pytest.raises(RuntimeError, match=missing):
-        production(**{missing: ""}).validate_production()
+@pytest.mark.parametrize("missing", ["MICROSOFT_GRAPH_SENDER", "MAIL_GRAPH_CERT_PEM", "MAIL_GRAPH_PRIVATE_KEY_PEM"])
+def test_a_client_id_without_the_rest_is_fatal(monkeypatch, missing):
+    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER,
+                  MAIL_GRAPH_CERT_PEM="cert", MAIL_GRAPH_PRIVATE_KEY_PEM="key")
+    values[missing] = ""
+    monkeypatch.setattr(email, "settings", settings_for(**values))
+    fatal, unconfigured = email.configuration_problems()
+    assert unconfigured is False and len(fatal) == 1 and missing in fatal[0]
 
 
-def test_production_refuses_the_console_provider():
-    with pytest.raises(RuntimeError, match="local development only"):
-        production(EMAIL_PROVIDER="console").validate_production()
+def test_a_complete_configuration_has_no_problems(monkeypatch):
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT,
+                                                        MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_CERT_PEM="c", MAIL_GRAPH_PRIVATE_KEY_PEM="k"))
+    assert email.configuration_problems() == ([], False)
 
 
-def test_the_graph_requirements_do_not_apply_to_other_providers():
-    production(EMAIL_PROVIDER="fake", MICROSOFT_GRAPH_SENDER="", MAIL_GRAPH_CLIENT_ID="").validate_production()
+def test_console_is_fatal_outside_development_and_fine_inside(monkeypatch):
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", EMAIL_PROVIDER="console"))
+    assert email.configuration_problems()[0]
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="development", EMAIL_PROVIDER="console"))
+    assert email.configuration_problems() == ([], False)
+
+
+def test_other_providers_have_nothing_to_check(monkeypatch):
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", EMAIL_PROVIDER="fake"))
+    assert email.configuration_problems() == ([], False)
+
+
+def test_the_worker_refuses_to_start_on_a_fatal_problem_and_logs_an_error_for_the_unconfigured_case(monkeypatch):
+    from src.workers import tasks
+
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT))
+    with pytest.raises(RuntimeError, match="Mail configuration"):
+        tasks.worker_init_mail_guard()
+
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production"))
+    with structlog.testing.capture_logs() as logs:
+        tasks.worker_init_mail_guard()  # does not raise
+    assert any(e["log_level"] == "error" and e["event"].startswith("Mail is not configured") for e in logs)
+
+
+def test_the_secrets_are_secretstr_and_never_appear_in_a_repr():
+    s = settings_for(MAIL_GRAPH_CERT_PEM="CERTBODY", MAIL_GRAPH_PRIVATE_KEY_PEM="KEYBODY")
+    assert "KEYBODY" not in repr(s) and "CERTBODY" not in repr(s) and "KEYBODY" not in str(s.model_dump())
+
+
+def test_a_sender_with_odd_characters_is_quoted_into_the_url(world, monkeypatch):
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={"MICROSOFT_GRAPH_SENDER": "a b/c?d@qnsc.vn"}))
+    fake = FakeMicrosoft(world["cert"])
+    send(fake)
+    assert "/users/a%20b%2Fc%3Fd@qnsc.vn/sendMail" in str(fake.graph_calls[0].url)
+
+
+def test_retry_after_is_parsed_capped_and_ignored_when_not_a_number(world):
+    for header, expected in (("30", 30), ("999999", 3600), ("Wed, 21 Oct 2026 07:28:00 GMT", None)):
+        fake = FakeMicrosoft(world["cert"], graph_status=429, graph_error={"error": {"code": "TooManyRequests", "message": "slow"}})
+        original = fake.__call__
+
+        def with_header(request, original=original, header=header):
+            response = original(request)
+            if request.url.host != "login.microsoftonline.com":
+                response.headers["retry-after"] = header
+            return response
+
+        with pytest.raises(email.MailSendError) as caught:
+            send(with_header)
+        assert caught.value.retry_after == expected and caught.value.stops_the_batch is True
+
+
+def test_error_classification(world):
+    fake = FakeMicrosoft(world["cert"], graph_status=403)
+    with pytest.raises(email.MailSendError) as caught:
+        send(fake)
+    assert caught.value.permanent is True and caught.value.stops_the_batch is False
+
+    email.reset_token_cache()
+    token_fail = FakeMicrosoft(world["cert"], token_error={"error": "invalid_client", "error_description": "bad"})
+    with pytest.raises(email.MailSendError) as caught:
+        send(token_fail)
+    assert caught.value.stage == "token" and caught.value.stops_the_batch is True and caught.value.permanent is False
+
+    transient = FakeMicrosoft(world["cert"], graph_status=500, graph_error={"error": {"code": "ErrorInternalServerError", "message": "x"}})
+    with pytest.raises(email.MailSendError) as caught:
+        send(transient)
+    assert caught.value.permanent is False and caught.value.stops_the_batch is False
+
+
+def test_the_certificate_status_reports_days_left_and_none_without_a_certificate(world, monkeypatch):
+    status = email.certificate_status()
+    assert status["valid"] and 360 <= status["days_left"] <= 365 and status["expired"] is False
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": None}))
+    assert email.certificate_status() is None
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": "garbage"}))
+    assert email.certificate_status()["valid"] is False
 
 
 # ── one mailbox per environment ──────────────────────────────────────────────────────────────
@@ -404,3 +495,48 @@ def test_the_mirror_image_the_production_app_cannot_send_as_the_dev_mailbox(worl
     with pytest.raises(email.MailSendError) as caught:
         send(fake, mailbox=SENDER)
     assert caught.value.status == 403
+
+
+# ── scripts/graph_mail_check.py: any application role in the token fails the check ──────────────────────
+def _check_script():
+    import importlib.util
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "graph_mail_check.py"
+    spec = importlib.util.spec_from_file_location("graph_mail_check", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _token_with(claims: dict) -> str:
+    import base64
+    import json
+
+    return "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode() + ".s"
+
+
+@pytest.mark.parametrize("roles,expected_exit", [(["Mail.Send"], 1), (["Sites.Read.All"], 1), (["User.Read.All", "Mail.Read"], 1), ([], 0)])
+def test_the_check_script_fails_on_any_role_claim(tmp_path, monkeypatch, capsys, roles, expected_exit):
+    script = _check_script()
+    (tmp_path / "c.pem").write_text("not-a-real-certificate")
+    (tmp_path / "k.pem").write_text("not-a-real-key")
+    monkeypatch.setattr(email, "settings", email.settings)  # the script reassigns it; monkeypatch restores it
+
+    async def fake_token(client):
+        return _token_with({"appid": CLIENT, "roles": roles} if roles else {"appid": CLIENT})
+
+    async def fake_send(self, **kwargs):
+        if kwargs.get("mailbox"):
+            raise email.MailSendError("denied", status=403, code="ErrorAccessDenied")
+
+    monkeypatch.setattr(email, "_access_token", fake_token)
+    monkeypatch.setattr(email.MicrosoftGraphEmailSender, "send", fake_send)
+    args = SimpleNamespace(authority=None, graph_api=None, tenant=TENANT, client_id=CLIENT, cert=str(tmp_path / "c.pem"),
+                           key=str(tmp_path / "k.pem"), sender=SENDER, to="me@qnsc.vn", denied_mailbox=[PROD_MAILBOX])
+    monkeypatch.setattr(email, "LOGIN_AUTHORITY", email.LOGIN_AUTHORITY)
+    monkeypatch.setattr(email, "GRAPH_API", email.GRAPH_API)
+
+    assert asyncio.run(script.run(args)) == expected_exit
+    out = capsys.readouterr().out
+    assert ("FAIL  SCOPE" in out) == bool(roles)

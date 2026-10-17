@@ -24,6 +24,7 @@ import hashlib
 import time
 import uuid
 import weakref
+from urllib.parse import quote
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,13 +73,41 @@ class ConsoleEmailSender(EmailSender):
 
 
 class MailSendError(RuntimeError):
-    """Graph (or the token endpoint) refused the request. Carries what is needed to diagnose it, never a secret."""
+    """Graph (or the token endpoint) refused the request. Carries what is needed to diagnose it, never a secret.
 
-    def __init__(self, message: str, *, status: int | None = None, code: str | None = None, request_id: str | None = None):
+    ``stage`` says WHERE it failed, because the right response differs: ``config`` and ``token`` failures affect
+    every message, so the delivery loop stops the batch instead of failing each row in turn; ``send`` failures
+    belong to one message. ``permanent`` is True for statuses no retry can fix (a malformed message, a mailbox the
+    app may not send as, a mailbox that does not exist); ``retry_after`` is the server's own pacing for 429/503.
+    """
+
+    PERMANENT_STATUSES = frozenset({400, 403, 404})
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        code: str | None = None,
+        request_id: str | None = None,
+        stage: str = "send",
+        retry_after: int | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.code = code
         self.request_id = request_id
+        self.stage = stage
+        self.retry_after = retry_after
+
+    @property
+    def permanent(self) -> bool:
+        return self.stage == "send" and self.status in self.PERMANENT_STATUSES
+
+    @property
+    def stops_the_batch(self) -> bool:
+        """Nothing else in this batch can succeed: bad config, a rejected token request, or throttling."""
+        return self.stage in {"config", "token"} or self.status in {429, 503}
 
 
 # ── certificate credential ───────────────────────────────────────────────────────────────────
@@ -98,11 +127,20 @@ def _normalise_pem(value: str) -> str:
 _credential_cache: dict[tuple[str, str], _Credential] = {}
 
 
+def _reveal(value: Any) -> str:
+    """The PEM settings are SecretStr (so they never appear in a repr or a log); tests may hand a plain str."""
+    if value is None:
+        return ""
+    return value.get_secret_value() if hasattr(value, "get_secret_value") else str(value)
+
+
 def _credential() -> _Credential:
-    cert_pem = _normalise_pem(settings.MAIL_GRAPH_CERT_PEM or "")
-    key_pem = _normalise_pem(settings.MAIL_GRAPH_PRIVATE_KEY_PEM or "")
+    cert_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_CERT_PEM))
+    key_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_PRIVATE_KEY_PEM))
     if not cert_pem or not key_pem:
-        raise MailSendError("MAIL_GRAPH_CERT_PEM and MAIL_GRAPH_PRIVATE_KEY_PEM are required for EMAIL_PROVIDER=graph")
+        raise MailSendError(
+            "MAIL_GRAPH_CERT_PEM and MAIL_GRAPH_PRIVATE_KEY_PEM are required for EMAIL_PROVIDER=graph", stage="config"
+        )
     cache_key = (hashlib.sha256(cert_pem.encode()).hexdigest(), hashlib.sha256(key_pem.encode()).hexdigest())
     cached = _credential_cache.get(cache_key)
     if cached:
@@ -115,19 +153,21 @@ def _credential() -> _Credential:
         cert = x509.load_pem_x509_certificate(cert_pem.encode())
         key = serialization.load_pem_private_key(key_pem.encode(), password=None)
     except Exception as exc:  # the message names the setting, never the material
-        raise MailSendError(f"MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM could not be parsed: {type(exc).__name__}") from exc
+        raise MailSendError(
+            f"MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM could not be parsed: {type(exc).__name__}", stage="config"
+        ) from exc
     if not isinstance(key, rsa.RSAPrivateKey):
-        raise MailSendError("MAIL_GRAPH_PRIVATE_KEY_PEM must be an RSA key (RS256 client assertion)")
+        raise MailSendError("MAIL_GRAPH_PRIVATE_KEY_PEM must be an RSA key (RS256 client assertion)", stage="config")
     public = cert.public_key()
     if not isinstance(public, rsa.RSAPublicKey) or public.public_numbers() != key.public_key().public_numbers():
-        raise MailSendError("MAIL_GRAPH_CERT_PEM does not belong to MAIL_GRAPH_PRIVATE_KEY_PEM")
+        raise MailSendError("MAIL_GRAPH_CERT_PEM does not belong to MAIL_GRAPH_PRIVATE_KEY_PEM", stage="config")
     not_after = cert.not_valid_after_utc
     now = datetime.now(timezone.utc)
     if not_after <= now:
-        raise MailSendError(f"The mail certificate expired on {not_after.date().isoformat()}; rotate it (docs/runbooks/email-graph.md)")
-    days_left = (not_after - now).days
-    if days_left <= _CERT_EXPIRY_WARNING_DAYS:
-        logger.warning("Mail certificate expires soon", days_left=days_left, expires=not_after.date().isoformat())
+        raise MailSendError(
+            f"The mail certificate expired on {not_after.date().isoformat()}; rotate it (docs/runbooks/email-graph.md)",
+            stage="config",
+        )
     der = cert.public_bytes(serialization.Encoding.DER)
     credential = _Credential(
         private_key=key,
@@ -173,7 +213,15 @@ def reset_token_cache() -> None:
     _token = None
 
 
-def _error_from(response: httpx.Response, what: str) -> MailSendError:
+def _retry_after(response: httpx.Response) -> int | None:
+    """Seconds the server asked us to wait (429/503), capped: a header of "86400" must not park mail for a day."""
+    raw = response.headers.get("retry-after")
+    if raw and raw.strip().isdigit():
+        return min(int(raw.strip()), 3600)
+    return None
+
+
+def _error_from(response: httpx.Response, what: str, stage: str = "send") -> MailSendError:
     code = message = None
     try:
         body = response.json()
@@ -186,7 +234,14 @@ def _error_from(response: httpx.Response, what: str) -> MailSendError:
         message = response.text[:200]
     request_id = response.headers.get("request-id") or response.headers.get("x-ms-request-id")
     text = f"{what} failed: HTTP {response.status_code}" + (f" {code}" if code else "") + (f": {str(message)[:300]}" if message else "")
-    return MailSendError(text, status=response.status_code, code=str(code) if code else None, request_id=request_id)
+    return MailSendError(
+        text,
+        status=response.status_code,
+        code=str(code) if code else None,
+        request_id=request_id,
+        stage=stage,
+        retry_after=_retry_after(response),
+    )
 
 
 async def _access_token(client: httpx.AsyncClient) -> str:
@@ -203,9 +258,9 @@ async def _access_token(client: httpx.AsyncClient) -> str:
         tenant = (settings.MICROSOFT_TENANT_ID or "").strip()
         client_id = (settings.MAIL_GRAPH_CLIENT_ID or "").strip()
         if not client_id:
-            raise MailSendError("MAIL_GRAPH_CLIENT_ID is not configured")
+            raise MailSendError("MAIL_GRAPH_CLIENT_ID is not configured", stage="config")
         if tenant.lower() in {"", "common", "organizations", "consumers"}:
-            raise MailSendError("MICROSOFT_TENANT_ID must be the tenant GUID for application mail (not 'common')")
+            raise MailSendError("MICROSOFT_TENANT_ID must be the tenant GUID for application mail (not 'common')", stage="config")
         response = await client.post(
             f"{LOGIN_AUTHORITY}/{tenant}/oauth2/v2.0/token",
             data={
@@ -217,11 +272,11 @@ async def _access_token(client: httpx.AsyncClient) -> str:
             },
         )
         if response.status_code != 200:
-            raise _error_from(response, "Requesting the Graph token")
+            raise _error_from(response, "Requesting the Graph token", stage="token")
         data = response.json()
         token = data.get("access_token")
         if not token:
-            raise MailSendError("The token endpoint returned no access_token")
+            raise MailSendError("The token endpoint returned no access_token", stage="token")
         _token = (str(token), time.monotonic() + float(data.get("expires_in") or 3600))
         return _token[0]
 
@@ -235,7 +290,7 @@ class MicrosoftGraphEmailSender(EmailSender):
     async def send(self, *, to: str, subject: str, text: str, html: str | None = None, mailbox: str | None = None) -> None:
         sender = (mailbox or settings.MICROSOFT_GRAPH_SENDER or "").strip()
         if not sender:
-            raise MailSendError("MICROSOFT_GRAPH_SENDER is not configured")
+            raise MailSendError("MICROSOFT_GRAPH_SENDER is not configured", stage="config")
         body: dict[str, Any] = {
             "message": {
                 "subject": subject,
@@ -247,7 +302,8 @@ class MicrosoftGraphEmailSender(EmailSender):
         async with httpx.AsyncClient(timeout=20, trust_env=False, transport=self._transport) as client:
             token = await _access_token(client)
             response = await client.post(
-                f"{GRAPH_API}/users/{sender}/sendMail",
+                # quoted: the mailbox is configuration (or a script argument), and it becomes a URL path segment
+                f"{GRAPH_API}/users/{quote(sender, safe='@')}/sendMail",
                 headers={"Authorization": f"Bearer {token}"},
                 json=body,
             )
@@ -285,6 +341,51 @@ class SesEmailSender(EmailSender):
             Destination={"ToAddresses": [to]},
             Content={"Simple": body},
         )
+
+
+def configuration_problems() -> tuple[list[str], bool]:
+    """What is wrong with the mail configuration, for the WORKER to act on at start-up.
+
+    Returns ``(fatal, unconfigured)``. ``fatal`` lists settings that make this process unable to send even
+    though it was told to (a client id with a missing certificate or key, or a provider that must not run
+    here): the worker refuses to start. ``unconfigured`` is True for EMAIL_PROVIDER=graph with no mail app at
+    all: the worker keeps running (the knowledge base works without mail), logs an error on every delivery
+    pass, and an alarm watches that line. The API never calls this: it must not refuse to boot over mail.
+    """
+    provider = (settings.EMAIL_PROVIDER or "graph").strip().lower()
+    if provider == "console" and not settings.is_development_environment:
+        return ["EMAIL_PROVIDER=console is for local development only"], False
+    if provider != "graph":
+        return [], False
+    if not (settings.MAIL_GRAPH_CLIENT_ID or "").strip():
+        return [], True
+    required = {
+        "MICROSOFT_GRAPH_SENDER": settings.MICROSOFT_GRAPH_SENDER,
+        "MAIL_GRAPH_CERT_PEM": _reveal(settings.MAIL_GRAPH_CERT_PEM),
+        "MAIL_GRAPH_PRIVATE_KEY_PEM": _reveal(settings.MAIL_GRAPH_PRIVATE_KEY_PEM),
+    }
+    missing = sorted(name for name, value in required.items() if not (value or "").strip())
+    return ([f"MAIL_GRAPH_CLIENT_ID is set, so {', '.join(missing)} must be too"] if missing else []), False
+
+
+def certificate_status(now: datetime | None = None) -> dict[str, Any] | None:
+    """Days left on the mail certificate, or None when no certificate is configured (nothing to watch).
+
+    Run daily by the worker (a once-per-process warning at the first send is invisible in a process that lives
+    for weeks). Expired is reported, not raised: the daily task must always get to log it.
+    """
+    cert_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_CERT_PEM))
+    if not cert_pem:
+        return None
+    from cryptography import x509
+
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem.encode())
+    except Exception:
+        return {"valid": False, "days_left": None, "expires": None}
+    not_after = cert.not_valid_after_utc
+    days_left = (not_after - (now or datetime.now(timezone.utc))).days
+    return {"valid": True, "days_left": days_left, "expires": not_after.date().isoformat(), "expired": days_left < 0}
 
 
 def get_email_sender() -> EmailSender:

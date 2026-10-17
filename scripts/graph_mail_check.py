@@ -73,9 +73,12 @@ async def run(args: argparse.Namespace) -> int:
         roles = claims.get("roles") or []
         report("TOKEN", True, f"issued for appid={claims.get('appid') or claims.get('azp')}; "
                f"roles in the token: {roles or 'none (expected when authority comes from Exchange RBAC only)'}")
-        if "Mail.Send" in roles:
-            report("SCOPE", False, "the token carries an unscoped Mail.Send role: remove the Mail.Send consent in Entra, "
-                   "or the Exchange scope below is meaningless")
+        if roles:
+            # ANY application role means something was consented in Entra, and Entra grants are tenant-wide, so
+            # they would make the Exchange scope meaningless. The app should hold no role at all.
+            report("SCOPE", False, f"the token carries application role(s) {roles}: remove every application permission "
+                   "consent from this app in Entra (runbook step 7), or the Exchange scope is meaningless")
+            return 1
     except email.MailSendError as exc:
         report("TOKEN", False, str(exc))
         return 1

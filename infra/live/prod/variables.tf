@@ -90,8 +90,9 @@ variable "mail_graph_client_id" {
   default     = ""
   description = <<-EOT
     Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
-    has created the app and the certificate (docs/runbooks/email-graph.md); until then the API refuses to
-    boot with EMAIL_PROVIDER=graph. Set it in this file, in the same pull request as the apply.
+    has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
+    set only AFTER the owner has put mail-graph-certificate and mail-graph-private-key in the secrets bundle.
+    While empty, no mail secret is injected; the worker logs "Mail is not configured" and an alarm fires once it is running.
   EOT
 }
 
