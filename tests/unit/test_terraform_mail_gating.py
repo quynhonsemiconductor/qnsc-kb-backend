@@ -76,7 +76,8 @@ def test_the_ses_grant_is_not_keyed_on_the_provider():
 
 
 def test_the_three_mail_alarms_watch_the_worker_log_group():
-    for line in ("Mail is not configured", "Mail certificate expires soon", "Mail certificate has expired", "Notification marked dead"):
+    for line in ("Mail is not configured", "Mail certificate expires soon", "Mail certificate has expired",
+                 "Notification marked dead", "Mail sender refused"):
         assert line in STACK
     filt = block(STACK, 'resource "aws_cloudwatch_log_metric_filter" "mail"')
     assert "log_group_name = local.worker_log_group" in filt
@@ -84,5 +85,6 @@ def test_the_three_mail_alarms_watch_the_worker_log_group():
 
 
 def test_each_environment_keeps_its_own_mailbox_rule():
-    assert 'can(regex("-dev@", var.microsoft_graph_sender))' in DEV_VARS
-    assert '!can(regex("-dev@", var.microsoft_graph_sender))' in PROD_VARS
+    # lower(): noreply-kb-DEV@ must not slip past either rule
+    assert 'can(regex("-dev@", lower(var.microsoft_graph_sender)))' in DEV_VARS
+    assert '!can(regex("-dev@", lower(var.microsoft_graph_sender)))' in PROD_VARS

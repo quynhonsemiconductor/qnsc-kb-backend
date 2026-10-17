@@ -63,7 +63,7 @@ variable "microsoft_graph_sender" {
   EOT
 
   validation {
-    condition     = can(regex("-dev@", var.microsoft_graph_sender))
+    condition     = can(regex("-dev@", lower(var.microsoft_graph_sender)))
     error_message = "develop's microsoft_graph_sender must be its own mailbox (noreply-<product>-dev@...), never production's."
   }
 }

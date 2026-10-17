@@ -50,9 +50,10 @@ class ScriptedSender(email.EmailSender):
             raise outcome
 
 
-def row(to, *, attempts=0):
+def row(to, *, attempts=0, age=timedelta(minutes=5)):
     return SimpleNamespace(id=uuid.uuid4(), type="email", status="pending", attempts=attempts, last_error=None,
-                           sent_at=None, next_attempt_at=None, payload={"to": to, "subject": "s", "text": "t"})
+                           sent_at=None, next_attempt_at=None, created_at=datetime.utcnow() - age,
+                           payload={"to": to, "subject": "s", "text": "t"})
 
 
 @pytest.fixture
@@ -89,8 +90,8 @@ def test_a_delivered_row_is_sent_and_a_transient_failure_backs_off(run):
     assert session.committed
 
 
-@pytest.mark.parametrize("status", [400, 403, 404])
-def test_a_permanent_failure_is_dead_at_once_and_alarmed(run, status):
+@pytest.mark.parametrize("status", [400, 413])
+def test_a_refused_message_is_dead_at_once_and_alarmed(run, status):
     doomed = row("d@x")
     _, _, logs = run([doomed], {"d@x": err(status)})
 
@@ -98,11 +99,15 @@ def test_a_permanent_failure_is_dead_at_once_and_alarmed(run, status):
     assert any(e["event"] == "Notification marked dead" and e["log_level"] == "error" and e["permanent"] for e in logs)
 
 
-def test_the_attempt_cap_turns_a_transient_failure_into_a_dead_row(run):
-    last = row("l@x", attempts=tasks.MAIL_MAX_ATTEMPTS - 1)
-    _, _, logs = run([last], {"l@x": err(500)})
-    assert last.status == "dead" and last.attempts == tasks.MAIL_MAX_ATTEMPTS
-    assert any(e["event"] == "Notification marked dead" and not e["permanent"] for e in logs)
+def test_an_outage_longer_than_an_hour_does_not_kill_mail_but_age_does(run):
+    """The old rule (8 attempts) made every queued message dead after about 64 minutes of any outage."""
+    young_but_many_attempts = row("a@x", attempts=20, age=timedelta(hours=2))
+    _, _, _ = run([young_but_many_attempts], {"a@x": err(500)})
+    assert young_but_many_attempts.status == "failed" and young_but_many_attempts.next_attempt_at is not None
+
+    stale = row("s@x", age=tasks.MAIL_MAX_AGE + timedelta(minutes=1))
+    _, _, logs = run([stale], {"s@x": err(500)})
+    assert stale.status == "dead" and any(e["event"] == "Notification marked dead" and e["too_old"] for e in logs)
 
 
 def test_backoff_doubles_and_is_capped():
@@ -110,27 +115,51 @@ def test_backoff_doubles_and_is_capped():
     assert tasks.mail_backoff_seconds(50) == tasks.MAIL_BACKOFF_CAP_SECONDS
 
 
-def test_throttling_stops_the_batch_and_honours_retry_after(run):
+def test_throttling_stops_the_batch_honours_retry_after_and_charges_no_attempt(run):
     first, second, third = row("a@x"), row("b@x"), row("c@x")
     _, sender, _ = run([first, second, third], {"a@x": err(429, retry_after=600)})
 
     assert sender.calls == ["a@x"]  # the other two were not tried
     assert (first.next_attempt_at - datetime.utcnow()).total_seconds() > 590  # Retry-After beat the 30 s backoff
+    assert first.attempts == 0 and "HTTP 429" in first.last_error  # an outage is not the row's fault
     assert second.attempts == third.attempts == 0 and second.status == third.status == "pending"
 
 
-def test_a_token_endpoint_failure_stops_the_batch_without_spending_attempts_on_the_rest(run):
+def test_a_token_endpoint_failure_stops_the_batch_without_spending_any_attempt(run):
     rows = [row(f"{n}@x") for n in range(5)]
     _, sender, _ = run(rows, {"0@x": err(401, stage="token")})
 
     assert sender.calls == ["0@x"]
-    assert [r.attempts for r in rows] == [1, 0, 0, 0, 0]
-    assert rows[0].status == "failed"  # not dead: the credential may be fixed and mail resumes
+    assert [r.attempts for r in rows] == [0, 0, 0, 0, 0]
+    assert rows[0].status == "pending" and rows[0].next_attempt_at is not None  # not dead: mail resumes when fixed
 
 
-def test_a_permanent_failure_does_not_stop_the_batch(run):
+def test_a_long_outage_cannot_walk_every_row_to_dead(run):
+    """Each pass tries one row and stops; 50 passes of a token outage leave every row alive with 0 attempts."""
+    rows = [row(f"{n}@x") for n in range(5)]
+    for _ in range(50):
+        for r in rows:
+            r.next_attempt_at = None  # as if the backoff had elapsed
+        run(rows, {f"{n}@x": err(401, stage="token") for n in range(5)})
+    assert all(r.status in {"pending", "failed"} and r.attempts == 0 for r in rows)
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_a_refused_sender_stops_the_batch_keeps_the_rows_and_alarms(run, status):
+    """Scope missing or propagating (up to ~2 h), mailbox missing: a SENDER problem, so no row may die for it."""
+    rows = [row(f"{n}@x") for n in range(100)]
+    _, sender, logs = run(rows, {"0@x": err(status)})
+
+    assert sender.calls == ["0@x"]
+    assert all(r.status == "pending" and r.attempts == 0 for r in rows)
+    assert not any(e["event"] == "Notification marked dead" for e in logs)
+    assert 14 * 60 <= (rows[0].next_attempt_at - datetime.utcnow()).total_seconds() <= 15 * 60 + 5
+    assert any(e["event"] == "Mail sender refused" and e["log_level"] == "error" and e["status"] == status for e in logs)
+
+
+def test_a_refused_message_does_not_stop_the_batch(run):
     bad, good = row("bad@x"), row("good@x")
-    _, sender, _ = run([bad, good], {"bad@x": err(403)})
+    _, sender, _ = run([bad, good], {"bad@x": err(400)})
     assert sender.calls == ["bad@x", "good@x"] and good.status == "sent" and bad.status == "dead"
 
 
