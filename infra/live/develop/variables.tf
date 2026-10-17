@@ -50,17 +50,21 @@ variable "microsoft_client_id" {
 
 variable "microsoft_graph_sender" {
   type        = string
+  default     = "noreply-kb@qnsc.vn"
+  description = <<-EOT
+    The mailbox application email is sent FROM (invitations, password resets): a shared mailbox, no licence.
+    Change it to the KB shared mailbox the owner names. The mail Entra app can send as this address only
+    (Exchange RBAC for Applications scope); see docs/runbooks/email-graph.md.
+  EOT
+}
+
+variable "mail_graph_client_id" {
+  type        = string
   default     = ""
   description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
-
-    Left EMPTY deliberately until the mailbox exists and the Entra app has Mail.Send
-    application permission with admin consent. While it is empty, outbound mail is dead:
-    ENVIRONMENT is pinned to "production", so the development FakeEmailSender is never
-    selected, and the Graph sender raises before any HTTP call. Invitations and resets will
-    queue and retry every 30 seconds without ever arriving.
-
-    Set this before relying on the invite or forgot-password flows.
+    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
+    has created the app and the certificate (docs/runbooks/email-graph.md); until then the API refuses to
+    boot with EMAIL_PROVIDER=graph. Set it in this file, in the same pull request as the apply.
   EOT
 }
 
@@ -74,19 +78,6 @@ variable "microsoft_tenant_id" {
     connects THEIR SharePoint. Under "common" that is any user in any Microsoft tenant on
     earth, and their documents would be ingested into this knowledge base. Pinning the
     tenant is what limits the flow to qnsc.vn accounts.
-  EOT
-}
-
-variable "email_provider" {
-  type    = string
-  default = "ses"
-
-  description = <<-EOT
-    Overrides the module default ("graph") for this environment: develop sends through
-    AWS SES rather than Microsoft Graph, so outbound mail does not wait on Entra admin
-    consent for Mail.Send. See infra/modules/stack/variables.tf for what switching this
-    requires (mail_from_email below, a verified SES identity, and sandbox/production
-    access for the recipients being invited).
   EOT
 }
 

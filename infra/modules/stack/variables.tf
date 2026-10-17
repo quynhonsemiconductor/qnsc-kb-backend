@@ -417,18 +417,26 @@ variable "microsoft_graph_sender" {
   type        = string
   default     = ""
   description = <<-EOT
-    The mailbox Graph sends application email FROM — invitations and password resets.
-    A UPN or objectId, e.g. "no-reply@qnsc.vn".
+    The mailbox Graph sends application email FROM: invitations and password resets. A UPN, e.g.
+    "noreply-kb@qnsc.vn" (a shared mailbox is enough; it needs no licence).
 
-    Empty leaves outbound mail DEAD, silently. ENVIRONMENT is pinned to "production" in
-    every environment, so get_email_sender() never returns the development FakeEmailSender;
-    it returns the Graph sender, which raises "MICROSOFT_GRAPH_SENDER is not configured"
-    before any HTTP call. deliver_notification_queue then retries every 30 seconds forever
-    and the invitee never receives a link. Nothing in validate_production() catches this,
-    which is why it is stated here rather than left to the code default.
+    The Entra app (mail_graph_client_id) holds NO Graph consent. Its only authority is the Exchange Online
+    role "Application Mail.Send", assigned with a management scope that names this one mailbox, so the app
+    can send as this address and as nobody else. See docs/runbooks/email-graph.md.
 
-    The Entra app needs Mail.Send application permission with admin consent, and the
-    mailbox must exist in the tenant.
+    Empty is no longer a silent failure: with email_provider "graph", validate_production() refuses to
+    boot when this, mail_graph_client_id, or either secret is missing.
+  EOT
+}
+
+variable "mail_graph_client_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Application (client) ID of the dedicated Entra app that sends mail (one per environment, separate from
+    the SSO/connector app in microsoft_client_id). A public identifier, not a secret. Authenticates with the
+    certificate in the secrets bundle (mail-graph-certificate, mail-graph-private-key); there is no client
+    secret. Empty until the owner has created the app (docs/runbooks/email-graph.md).
   EOT
 }
 
@@ -437,15 +445,14 @@ variable "email_provider" {
   default = "graph"
 
   description = <<-EOT
-    Selects get_email_sender()'s transport (src/services/email.py): "graph" (default)
-    keeps the Microsoft Graph path above; "ses" sends through AWS SES instead, so
-    outbound mail no longer depends on Entra admin consent. "fake" forces the in-memory
-    sender and is not expected to be used here.
+    Selects get_email_sender()'s transport (src/services/email.py). "graph" (default, and what every
+    deployed environment uses) sends through Microsoft 365 with certificate auth and creates the two
+    mail secrets in the bundle. "ses" is the legacy AWS path, kept only until Graph is proven in develop
+    and then removed. "fake" is the in-memory sender for tests. "console" exists in the application but is
+    refused outside development and is not accepted here.
 
-    Switching to "ses" also requires mail_from_email below, an SES-verified sender
-    identity for that address (or its domain) in this account/region, and — if the
-    account is still in the SES sandbox — either verifying every recipient or
-    requesting production access, or every send fails with MessageRejected.
+    Switching away from "graph" removes the two mail secrets from the injected set; the bundle keys are
+    left in Secrets Manager (this module never deletes a secret).
   EOT
 
   validation {

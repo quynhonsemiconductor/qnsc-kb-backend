@@ -70,17 +70,21 @@ variable "microsoft_client_id" {
 
 variable "microsoft_graph_sender" {
   type        = string
+  default     = "noreply-kb@qnsc.vn"
+  description = <<-EOT
+    The mailbox application email is sent FROM (invitations, password resets): a shared mailbox, no licence.
+    Change it to the KB shared mailbox the owner names. The mail Entra app can send as this address only
+    (Exchange RBAC for Applications scope); see docs/runbooks/email-graph.md.
+  EOT
+}
+
+variable "mail_graph_client_id" {
+  type        = string
   default     = ""
   description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
-
-    Empty means outbound mail is DEAD, silently: ENVIRONMENT is pinned to "production", so
-    the development FakeEmailSender is never selected and the Graph sender raises before any
-    HTTP call. Invitations and password resets queue and retry every 30 seconds forever
-    without arriving, and validate_production() does not catch it.
-
-    Requires the mailbox to exist in the tenant and the Entra app to hold Mail.Send
-    application permission with admin consent.
+    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
+    has created the app and the certificate (docs/runbooks/email-graph.md); until then the API refuses to
+    boot with EMAIL_PROVIDER=graph. Set it in this file, in the same pull request as the apply.
   EOT
 }
 

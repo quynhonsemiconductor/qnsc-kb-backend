@@ -115,6 +115,18 @@ locals {
     },
     var.microsoft_client_id != "" ? { "microsoft-client-secret" = "Microsoft connector OAuth client secret" } : {},
     var.google_client_id != "" ? { "google-client-secret" = "Google connector OAuth client secret" } : {},
+    // The mail app's certificate and private key (EMAIL_PROVIDER=graph), one PEM each, as two more keys of
+    // the bundle's JSON. The key is the credential; the certificate is public but travels with it so the
+    // thumbprint in the client assertion can never disagree with the key.
+    //
+    // THE OWNER MUST ADD BOTH KEYS BEFORE THE NEXT DEPLOY (docs/runbooks/email-graph.md), merging them into
+    // the existing JSON rather than replacing it. The deploy preflight proves the bundle CONTAINER holds a
+    // value, not that each key exists: a missing key is not caught there, it fails the task at boot with
+    // ResourceInitializationError. (The circuit breaker then rolls the deploy back; nothing is lost.)
+    var.email_provider == "graph" ? {
+      "mail-graph-certificate" = "Public certificate of the mail Entra app (MAIL_GRAPH_CERT_PEM), PEM"
+      "mail-graph-private-key" = "Private key of the mail Entra app certificate (MAIL_GRAPH_PRIVATE_KEY_PEM), PEM"
+    } : {},
   )
   // NOTE: "tunnel-token" is deliberately NOT in that map. The tunnel is created by
   // Terraform (module.tunnel below), which means the connector token is an attribute
@@ -204,13 +216,12 @@ locals {
     { name = "MICROSOFT_TENANT_ID", value = var.microsoft_tenant_id },
     { name = "MICROSOFT_REDIRECT_URI", value = var.microsoft_client_id != "" ? "${local.api_base_url}/api/v1/connectors/oauth/callback" : "" },
 
-    // Who application email is sent FROM. Without it every invitation and password reset
-    // queues a notification row that raises "MICROSOFT_GRAPH_SENDER is not configured"
-    // every 30 seconds forever, and the recipient never gets a link. ENVIRONMENT is pinned
-    // to "production" here, so the development FakeEmailSender is never selected and there
-    // is no fallback. validate_production() does not check this, so stating it is the only
-    // thing that makes outbound mail work.
+    // Who application email is sent FROM, and the dedicated Entra app that sends as it (certificate
+    // auth: MAIL_GRAPH_CERT_PEM / MAIL_GRAPH_PRIVATE_KEY_PEM arrive as secrets below). Empty values used to
+    // leave mail dead silently, retrying every 30 seconds forever; validate_production() now refuses to
+    // boot with EMAIL_PROVIDER=graph and any of the four missing.
     { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
+    { name = "MAIL_GRAPH_CLIENT_ID", value = var.mail_graph_client_id },
 
     // Only the worker actually calls get_email_sender() (deliver_notification_queue),
     // but this is stated in common_env rather than the worker-only block: api and worker
@@ -250,6 +261,9 @@ locals {
     { name = "R2_SECRET_ACCESS_KEY", secret_arn = module.secrets.secret_arns["r2-secret-access-key"] },
     ], var.microsoft_client_id != "" ? [
     { name = "MICROSOFT_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["microsoft-client-secret"] },
+    ] : [], var.email_provider == "graph" ? [
+    { name = "MAIL_GRAPH_CERT_PEM", secret_arn = module.secrets.secret_arns["mail-graph-certificate"] },
+    { name = "MAIL_GRAPH_PRIVATE_KEY_PEM", secret_arn = module.secrets.secret_arns["mail-graph-private-key"] },
     ] : [], var.google_client_id != "" ? [
     { name = "GOOGLE_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["google-client-secret"] },
   ] : [])
