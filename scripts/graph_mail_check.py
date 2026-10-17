@@ -4,16 +4,17 @@ Run by the owner from a workstation after the setup in docs/runbooks/email-graph
 local tests against a fake Microsoft). It uses src/services/email.py unchanged, so a pass here is a pass
 for the code that runs in the worker.
 
+    # develop's app: its own mailbox must work, the PRODUCTION mailbox must be refused
     python scripts/graph_mail_check.py \\
-        --tenant <tenant-guid> --client-id <mail-app-client-id> \\
+        --tenant <tenant-guid> --client-id <develop-mail-app-client-id> \\
         --cert mail.crt --key mail.key \\
-        --sender noreply-kb@qnsc.vn --to you@qnsc.vn \\
-        --denied-mailbox someone-else@qnsc.vn
+        --sender noreply-kb-dev@qnsc.vn --to you@qnsc.vn \\
+        --denied-mailbox noreply-kb@qnsc.vn --denied-mailbox someone-else@qnsc.vn
 
 Checks, each printed as PASS or FAIL (exit status 1 on any FAIL):
   1. TOKEN   the certificate is accepted and Entra issues a Graph token;
   2. SEND    sendMail AS the sender mailbox is accepted (HTTP 202);
-  3. DENIED  sendMail AS --denied-mailbox is REFUSED with 403. This is the negative test: it proves the
+  3. DENIED  sendMail AS each --denied-mailbox is REFUSED with 403 (repeat the flag). This is the negative test: it proves the
              Exchange RBAC scope is what limits the app. If it is accepted, the app can send as anyone and
              the setup is wrong (usually an unscoped Mail.Send consent is still granted in Entra).
 
@@ -87,13 +88,14 @@ async def run(args: argparse.Namespace) -> int:
         report("SEND", False, f"{exc} (request-id {exc.request_id})")
 
     if args.denied_mailbox:
-        try:
-            await sender.send(to=args.to, subject="QNSC KB mail check (must be refused)", text="This must not arrive.",
-                              mailbox=args.denied_mailbox)
-            report("DENIED", False, f"sendMail AS {args.denied_mailbox} was ACCEPTED: the app can send as other mailboxes")
-        except email.MailSendError as exc:
-            report("DENIED", exc.status == 403, f"as {args.denied_mailbox}: HTTP {exc.status} {exc.code} (request-id {exc.request_id})"
-                   + ("" if exc.status == 403 else "; expected 403"))
+        for denied in args.denied_mailbox:
+            try:
+                await sender.send(to=args.to, subject="QNSC KB mail check (must be refused)", text="This must not arrive.",
+                                  mailbox=denied)
+                report("DENIED", False, f"sendMail AS {denied} was ACCEPTED: the app can send as other mailboxes")
+            except email.MailSendError as exc:
+                report("DENIED", exc.status == 403, f"as {denied}: HTTP {exc.status} {exc.code} (request-id {exc.request_id})"
+                       + ("" if exc.status == 403 else "; expected 403"))
     else:
         print("SKIP  DENIED  no --denied-mailbox given; the scope has NOT been proven")
     return 1 if failures else 0
@@ -107,7 +109,7 @@ def main() -> int:
     parser.add_argument("--key", required=True, help="PEM file with the private key")
     parser.add_argument("--sender", required=True, help="the mailbox the app is scoped to")
     parser.add_argument("--to", required=True, help="recipient of the test message")
-    parser.add_argument("--denied-mailbox", help="a mailbox OUTSIDE the scope; sending as it must be refused with 403")
+    parser.add_argument("--denied-mailbox", action="append", help="a mailbox OUTSIDE the scope (repeatable); sending as it must be refused with 403. Always include the OTHER environment's mailbox")
     parser.add_argument("--authority", help="override https://login.microsoftonline.com (local fake Microsoft)")
     parser.add_argument("--graph-api", help="override https://graph.microsoft.com/v1.0 (local fake Microsoft)")
     return asyncio.run(run(parser.parse_args()))

@@ -63,12 +63,19 @@ variable "microsoft_graph_sender" {
   type        = string
   default     = "noreply-kb@qnsc.vn"
   description = <<-EOT
-    The mailbox application email is sent FROM (invitations, password resets): a shared mailbox, no licence.
-    Change it to the KB shared mailbox the owner names. The mail Entra app can send as this address only
-    (Exchange RBAC for Applications scope); see docs/runbooks/email-graph.md.
-  EOT
-}
+    The mailbox application email is sent FROM in production: a shared mailbox, no licence. Production's mail
+    Entra app is scoped by Exchange RBAC to this mailbox only, and develop has a separate mailbox and app
+    (noreply-kb-dev@qnsc.vn); each must get 403 when sending as the other
+    (docs/runbooks/email-graph.md, step 8). Change it to the KB shared mailbox the owner names.
 
+    A "-dev@" address is refused here: production must never send as a development mailbox either.
+  EOT
+
+  validation {
+    condition     = !can(regex("-dev@", var.microsoft_graph_sender))
+    error_message = "production's microsoft_graph_sender must not be a development mailbox (noreply-<product>-dev@...)."
+  }
+}
 variable "mail_graph_client_id" {
   type        = string
   default     = ""
