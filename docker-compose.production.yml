@@ -1,0 +1,314 @@
+# Default container logging: bounded rotation so json-file logs cannot
+# exhaust the host disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  edge:
+    logging: *default-logging
+    mem_limit: 256m
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+      frontend:
+        condition: service_started
+
+  frontend:
+    logging: *default-logging
+    mem_limit: 128m
+    build:
+      context: ../qnsc-kb-frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+    restart: unless-stopped
+
+  db:
+    logging: *default-logging
+    mem_limit: 2g
+    mem_reservation: 512m
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-qnsc_kb}
+      APP_DATABASE_USER: ${APP_DATABASE_USER:-qnsc_app}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?set APP_DATABASE_PASSWORD}
+    volumes:
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/01-app-user.sh:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  redis:
+    logging: *default-logging
+    mem_limit: 256m
+    mem_reservation: 64m
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  clamav:
+    logging: *default-logging
+    mem_limit: 3g
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+
+  # Migrations are NOT run from this service any more — see the `migrator` service
+  # below. Run it once before starting the stack:
+  #   docker compose -f docker-compose.production.yml --profile migrate run --rm migrator
+  api:
+    logging: *default-logging
+    mem_limit: 2g
+    mem_reservation: 512m
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
+      PREVIOUS_DATA_ENCRYPTION_KEYS: ${PREVIOUS_DATA_ENCRYPTION_KEYS:-}
+      AUTO_CREATE_SCHEMA: "false"
+      JOB_MODE: celery
+      ENABLE_API_DOCS: "false"
+      ENABLE_RLS: "true"
+      MALWARE_SCAN_ENABLED: "true"
+      MALWARE_SCANNER_HOST: clamav
+      MALWARE_SCANNER_PORT: "3310"
+      SOURCE_STORAGE_BACKEND: ${SOURCE_STORAGE_BACKEND:-r2}
+      SOURCE_STORAGE_BUCKET: ${SOURCE_STORAGE_BUCKET:-}
+      SOURCE_STORAGE_PREFIX: ${SOURCE_STORAGE_PREFIX:-qnsc-sources}
+      SOURCE_ORPHAN_GRACE_HOURS: ${SOURCE_ORPHAN_GRACE_HOURS:-24}
+      AWS_REGION: ${AWS_REGION:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      ALLOW_SELF_REGISTRATION: "false"
+      # The api creates this global administrator on first start, because there is no
+      # signup route and a migrated database has no users. `:?set` rather than a default:
+      # the app refuses to start in production with the password published in
+      # .env.example, so an unset value must fail here, loudly, before the image runs.
+      BOOTSTRAP_ADMIN_ENABLED: ${BOOTSTRAP_ADMIN_ENABLED:-true}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?set BOOTSTRAP_ADMIN_EMAIL}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-Admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD}
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS}
+      FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL}
+      DATABASE_URL: postgresql+asyncpg://${APP_DATABASE_USER:-qnsc_app}:${APP_DATABASE_PASSWORD:?set APP_DATABASE_PASSWORD}@db:5432/${POSTGRES_DB:-qnsc_kb}
+      # MIGRATION_DATABASE_URL is deliberately absent here. It carries the Postgres
+      # MASTER credential, and this container no longer runs migrations, so holding it
+      # would grant the internet-facing service superuser DDL it never uses. It lives
+      # on the `migrator` service alone.
+      APP_DATABASE_ROLE: ${APP_DATABASE_USER:-qnsc_app}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large-instruct}
+      EMBEDDING_VERSION: ${EMBEDDING_VERSION:-e5-large-instruct-v1}
+      # Stated, not defaulted, so local and production embed identically. ONNX on
+      # CPU only; the pooling and token window belong to THIS model (mean, 512) and
+      # are wrong for any other.
+      EMBEDDING_RUNTIME: ${EMBEDDING_RUNTIME:-onnx}
+      EMBEDDING_ONNX_POOLING: ${EMBEDDING_ONNX_POOLING:-mean}
+      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS:-512}
+      CONNECTOR_WEBHOOK_BASE_URL: ${CONNECTOR_WEBHOOK_BASE_URL:?set CONNECTOR_WEBHOOK_BASE_URL}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:?set MICROSOFT_CLIENT_SECRET}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:?set MICROSOFT_TENANT_ID}
+      MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-}
+      MICROSOFT_CONNECTOR_AUTH_MODE: ${MICROSOFT_CONNECTOR_AUTH_MODE:-application}
+      MICROSOFT_GRAPH_SCOPE: ${MICROSOFT_GRAPH_SCOPE:-https://graph.microsoft.com/.default}
+      MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES: ${MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES:-1440}
+      MICROSOFT_SHAREPOINT_SITE_IDS: ${MICROSOFT_SHAREPOINT_SITE_IDS:-}
+      MICROSOFT_ONEDRIVE_USER_IDS: ${MICROSOFT_ONEDRIVE_USER_IDS:-}
+      CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: ${CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS:-30}
+      CONNECTOR_RECONCILE_INTERVAL_MINUTES: ${CONNECTOR_RECONCILE_INTERVAL_MINUTES:-360}
+      CONNECTOR_AUTO_PUBLISH_MODE: ${CONNECTOR_AUTO_PUBLISH_MODE:-governed}
+      MICROSOFT_LOGIN_REDIRECT_URI: ${MICROSOFT_LOGIN_REDIRECT_URI:?set MICROSOFT_LOGIN_REDIRECT_URI}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - connector_data:/app/storage/connectors
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+
+  worker:
+    logging: *default-logging
+    mem_limit: 3g
+    mem_reservation: 1g
+    # Workers run OCR (per-file timeouts up to 300s) and embedding batches:
+    # allow in-flight jobs to finish on SIGTERM instead of being SIGKILLed
+    # ~10s into shutdown.
+    stop_grace_period: 10m
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    command: ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
+      PREVIOUS_DATA_ENCRYPTION_KEYS: ${PREVIOUS_DATA_ENCRYPTION_KEYS:-}
+      AUTO_CREATE_SCHEMA: "false"
+      JOB_MODE: celery
+      MALWARE_SCAN_ENABLED: "true"
+      MALWARE_SCANNER_HOST: clamav
+      MALWARE_SCANNER_PORT: "3310"
+      DATABASE_URL: postgresql+asyncpg://${APP_DATABASE_USER:-qnsc_app}:${APP_DATABASE_PASSWORD:?set APP_DATABASE_PASSWORD}@db:5432/${POSTGRES_DB:-qnsc_kb}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+      ENABLE_RLS: "true"
+      SOURCE_STORAGE_BACKEND: ${SOURCE_STORAGE_BACKEND:-r2}
+      SOURCE_STORAGE_BUCKET: ${SOURCE_STORAGE_BUCKET:-}
+      SOURCE_STORAGE_PREFIX: ${SOURCE_STORAGE_PREFIX:-qnsc-sources}
+      SOURCE_ORPHAN_GRACE_HOURS: ${SOURCE_ORPHAN_GRACE_HOURS:-24}
+      AWS_REGION: ${AWS_REGION:-auto}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      CONNECTOR_ROOT_PATH: /app/storage/connectors
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large-instruct}
+      EMBEDDING_VERSION: ${EMBEDDING_VERSION:-e5-large-instruct-v1}
+      # Stated, not defaulted, so local and production embed identically. ONNX on
+      # CPU only; the pooling and token window belong to THIS model (mean, 512) and
+      # are wrong for any other.
+      EMBEDDING_RUNTIME: ${EMBEDDING_RUNTIME:-onnx}
+      EMBEDDING_ONNX_POOLING: ${EMBEDDING_ONNX_POOLING:-mean}
+      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS:-512}
+      CONNECTOR_WEBHOOK_BASE_URL: ${CONNECTOR_WEBHOOK_BASE_URL:?set CONNECTOR_WEBHOOK_BASE_URL}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:?set MICROSOFT_CLIENT_SECRET}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:?set MICROSOFT_TENANT_ID}
+      MICROSOFT_CONNECTOR_AUTH_MODE: ${MICROSOFT_CONNECTOR_AUTH_MODE:-application}
+      MICROSOFT_GRAPH_SCOPE: ${MICROSOFT_GRAPH_SCOPE:-https://graph.microsoft.com/.default}
+      MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES: ${MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES:-1440}
+      MICROSOFT_SHAREPOINT_SITE_IDS: ${MICROSOFT_SHAREPOINT_SITE_IDS:-}
+      MICROSOFT_ONEDRIVE_USER_IDS: ${MICROSOFT_ONEDRIVE_USER_IDS:-}
+      # Application email, WORKER ONLY (it is the only caller of get_email_sender()): the certificate and key
+      # never reach the api container. Leave MAIL_GRAPH_CLIENT_ID empty and the worker still starts, logs
+      # "Mail is not configured" on every delivery pass, and sends nothing. Set the client id and it refuses to
+      # start unless the sender, certificate and key are all present. PEMs in an .env file may use literal \n.
+      # docs/runbooks/email-graph.md
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-graph}
+      # Release-template defaults: the worker refuses to start while the client id is still the placeholder. Replace it with the
+      # "KB Prod Service" app id (or set the variable) before this file is used for a production run.
+      MICROSOFT_GRAPH_SENDER: ${MICROSOFT_GRAPH_SENDER:-noreply-kb@qnsc.vn}
+      MAIL_GRAPH_CLIENT_ID: ${MAIL_GRAPH_CLIENT_ID:-<KB_PROD_SERVICE_APP_ID>}
+      MAIL_GRAPH_PEM: ${MAIL_GRAPH_PEM:-}
+      CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: ${CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS:-30}
+      CONNECTOR_RECONCILE_INTERVAL_MINUTES: ${CONNECTOR_RECONCILE_INTERVAL_MINUTES:-360}
+      CONNECTOR_AUTO_PUBLISH_MODE: ${CONNECTOR_AUTO_PUBLISH_MODE:-governed}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - connector_data:/app/storage/connectors
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+
+  beat:
+    logging: *default-logging
+    mem_limit: 256m
+    mem_reservation: 64m
+    stop_grace_period: 1m
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    command: ["celery", "-A", "src.workers.celery_app", "beat", "--loglevel=info"]
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
+      PREVIOUS_DATA_ENCRYPTION_KEYS: ${PREVIOUS_DATA_ENCRYPTION_KEYS:-}
+      DATABASE_URL: postgresql+asyncpg://${APP_DATABASE_USER:-qnsc_app}:${APP_DATABASE_PASSWORD:?set APP_DATABASE_PASSWORD}@db:5432/${POSTGRES_DB:-qnsc_kb}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # One-shot: create the least-privilege app role if missing, then run Alembic.
+  # Behind a profile so `docker compose up` never migrates implicitly — the same
+  # separation the ECS deploy pipeline enforces, where this runs as its own task
+  # before any service is rolled.
+  #
+  #   docker compose -f docker-compose.production.yml --profile migrate run --rm migrator
+  migrator:
+    profiles: ["migrate"]
+    logging: *default-logging
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrator
+    environment:
+      ENVIRONMENT: production
+      # The MASTER credential — migrations create extensions (vector, pgcrypto) and
+      # grant privileges, neither of which the application role may do.
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_ADMIN_USER:-postgres}:${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}@db:5432/${POSTGRES_DB:-qnsc_kb}
+      # Read by scripts/bootstrap_db_role.py to create/sync the role, and by
+      # migration 20260802_05_tenant_rls to decide whom to GRANT to.
+      APP_DATABASE_ROLE: ${APP_DATABASE_USER:-qnsc_app}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?set APP_DATABASE_PASSWORD}
+      ENABLE_RLS: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  connector_data:
+  caddy_data:
+  caddy_config:
