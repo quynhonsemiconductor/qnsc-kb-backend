@@ -81,6 +81,14 @@ def test_only_the_api_and_worker_carry_an_embedding_export():
     assert "embedding" not in code(stage("migrator")).replace("migrate-entrypoint", "")
 
 
+def test_the_exports_are_readable_by_any_uid():
+    """onnxruntime writes the quantised weights 0600 and root-owned; the api runs as appuser. Unreadable weights fail
+    deep inside InferenceSession and the api silently serves keyword-only search (found building #223 on top of #221:
+    main avoided it with `COPY --chown`; the exports are now chmod'ed in their own stages instead)."""
+    for name in ("embedding-int8", "model"):
+        assert re.search(r"(?m)^RUN chmod -R a\+rX ", code(stage(name))), name
+
+
 def test_application_code_is_still_the_last_layer_of_every_target():
     for target in ("api", "worker", "migrator"):
         copies = re.findall(r"(?m)^(COPY\b[^\n]*)", code(stage(target)))

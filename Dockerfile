@@ -162,6 +162,8 @@ target = os.environ['EMBEDDING_ONNX_DIR']; \
     rm -rf "$HF_HOME" && \
     find "$EMBEDDING_ONNX_DIR" -exec touch -h -d @0 {} +
 
+RUN chmod -R a+rX "$EMBEDDING_ONNX_DIR"
+
 # ---------------------------------------------------------------------------
 # embedding-int8 - the api's export: the same model quantised, so a search query is embedded in ~55 ms and ~700 MB
 # instead of ~200 ms and ~1.6 GB. The api embeds ONE short question per search; the worker embeds every chunk that
@@ -197,6 +199,11 @@ RUN --mount=type=secret,id=hf_token,required=false \
     fi && \
     rm -rf "$HF_HOME" /opt/embedding-fp32 && \
     find /opt/embedding-export -exec touch -h -d @0 {} +
+
+# onnxruntime writes the quantised weights 0600, root-owned, and the api runs as appuser: unreadable, the load fails
+# with a permission error deep inside InferenceSession and the api falls back to keyword-only search. Make every file
+# readable by whatever uid the task runs as. (chmod changes ctime, not mtime, so the normalised digest holds.)
+RUN chmod -R a+rX /opt/embedding-export
 
 # embedding-fp32 is the model stage under the name the api's switch uses; api-embedding is whichever one
 # API_EMBEDDING selects. COPY --from cannot expand a build arg, FROM can.
