@@ -92,7 +92,7 @@ PR #23 (merged) separated the two concerns:
 
 The ONNX provider is written, the width/normalisation invariants are enforced in one place, and
 `onnxruntime 1.28.0` + `tokenizers 0.22.2` are locked in an optional `onnx` dependency group.
-Default remains `torch`, so nothing has changed in behaviour yet.
+(When this section was written the default was `torch`; it is `onnx` now, see the end of this document.)
 
 ## The ask
 
@@ -118,8 +118,9 @@ Default remains `torch`, so nothing has changed in behaviour yet.
    once instead of twice, and the model loads in ~3 s instead of ~13 s. int8 stays parked until
    a full corpus re-embed (an `EMBEDDING_VERSION` bump) makes its error self-consistent.
    Measured in the image (2026-08-17): onnx warm-up 3.2 s / peak RSS 1.53 GB / query 116 ms;
-   torch warm-up 8.4 s / peak RSS 2.03 GB. The torch path still loads from the baked snapshot,
-   so `EMBEDDING_RUNTIME=torch` remains a working rollback until the `ml` group is dropped.
+   torch warm-up 8.4 s / peak RSS 2.03 GB. At that point the torch path still loaded from the baked snapshot. **It no longer does:** the `ml` group has left
+   every image, so `EMBEDDING_RUNTIME=torch` in a shipped image raises a clean `EmbeddingUnavailable`, and a rollback is
+   an older image tag.
 4. ~~If parity holds: set `EMBEDDING_RUNTIME=onnx`, drop the `ml` group from the api image, re-measure
    RSS, and right-size both tasks~~ — DONE across 2026-08-18 (PRs #51, #53, and the ml-drop). Develop
    flipped to `onnx` and verified live: query embedding at dimension 1024 against the torch-embedded

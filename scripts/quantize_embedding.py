@@ -121,17 +121,20 @@ def check_parity(cosines: list[float]) -> float:
     return worst
 
 
-def download_fp32(model_id: str, target: Path) -> None:
+def download_fp32(model_id: str, target: Path, revision: str | None = None) -> None:
     """The export the model publishes: graph + tokenizer, plus the weights sibling file
-    only when the repo has one (e5-large's fp32 graph exceeds protobuf's 2 GB limit)."""
+    only when the repo has one (e5-large's fp32 graph exceeds protobuf's 2 GB limit).
+
+    ``revision`` pins a commit of the model repo, so a build cannot silently pick up weights the Hub's owner
+    changed after the corpus was embedded; None follows the default branch."""
     from huggingface_hub import hf_hub_download, list_repo_files
 
     target.mkdir(parents=True, exist_ok=True)
     names = ["onnx/model.onnx", "onnx/tokenizer.json"]
-    if "onnx/model.onnx_data" in list_repo_files(model_id):
+    if "onnx/model.onnx_data" in list_repo_files(model_id, revision=revision):
         names.append("onnx/model.onnx_data")
     for name in names:
-        shutil.copyfile(hf_hub_download(model_id, name), target / Path(name).name)
+        shutil.copyfile(hf_hub_download(model_id, name, revision=revision), target / Path(name).name)
 
 
 def quantise(fp32_dir: Path, out_dir: Path) -> None:
@@ -209,13 +212,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar="MODEL_ID",
         help="fetch the published fp32 export of this model into --fp32-dir first",
     )
+    parser.add_argument(
+        "--revision",
+        metavar="COMMIT",
+        help="with --download: the commit of the model repo to fetch (default: the default branch)",
+    )
     args = parser.parse_args(argv)
     try:
         # Checked before the download: a used output directory is a mistake worth
         # reporting in seconds, not after 2.2 GB.
         require_empty(args.out_dir)
         if args.download:
-            download_fp32(args.download, args.fp32_dir)
+            download_fp32(args.download, args.fp32_dir, args.revision)
         build(args.fp32_dir, args.out_dir)
     except QuantisationError as exc:
         print(f"quantize_embedding: {exc}", file=sys.stderr)
