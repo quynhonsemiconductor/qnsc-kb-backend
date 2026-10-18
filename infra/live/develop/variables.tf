@@ -69,9 +69,9 @@ variable "microsoft_graph_sender" {
 }
 variable "mail_graph_client_id" {
   type        = string
-  default     = ""
+  default     = "7b9ae622-4df7-4cc5-bcbb-b8be1256ecaf" # "KB Dev Service"
   description = <<-EOT
-    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
+    Application (client) ID of this environment's mail Entra app, "KB Dev Service" (a public identifier). It was EMPTY until the owner
     has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
     set only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret qnsc-kb/develop/mail-graph-certificate.
     While empty, nothing mail-related is injected; develop keeps sending through SES.
