@@ -496,6 +496,14 @@ class SesEmailSender(EmailSender):
         )
 
 
+_PLACEHOLDER = re.compile(r"<[^<>\s]+>")
+
+
+def is_placeholder(value: str | None) -> bool:
+    """True for a documented placeholder such as ``<KB_PROD_SERVICE_APP_ID>``: never a real Entra or mailbox value."""
+    return bool(_PLACEHOLDER.fullmatch((value or "").strip()))
+
+
 def configuration_problems() -> tuple[list[str], bool]:
     """What is wrong with the mail configuration, for the WORKER to act on at start-up.
 
@@ -512,6 +520,19 @@ def configuration_problems() -> tuple[list[str], bool]:
         return [], False
     if not (settings.MAIL_GRAPH_CLIENT_ID or "").strip():
         return [], True
+    # A release template leaves placeholders such as <KB_PROD_SERVICE_APP_ID> for the owner to replace. Refuse them here, at
+    # start-up, instead of letting them reach Entra. Names only: the placeholder text is not echoed.
+    placeholders = sorted(
+        name
+        for name, value in {
+            "MAIL_GRAPH_CLIENT_ID": settings.MAIL_GRAPH_CLIENT_ID,
+            "MICROSOFT_GRAPH_SENDER": settings.MICROSOFT_GRAPH_SENDER,
+            "MICROSOFT_TENANT_ID": settings.MICROSOFT_TENANT_ID,
+        }.items()
+        if is_placeholder(value)
+    )
+    if placeholders:
+        return [f"{', '.join(placeholders)} still holds a release-template placeholder; replace it before EMAIL_PROVIDER=graph can start"], False
     if settings.microsoft_tenant is None:
         # Without a pinned tenant every token request fails at the config stage and stops every batch for ever.
         # Say so once, at start, instead.

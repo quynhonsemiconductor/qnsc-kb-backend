@@ -433,6 +433,30 @@ def test_a_complete_configuration_has_no_problems(monkeypatch):
     assert email.configuration_problems() == ([], False)
 
 
+@pytest.mark.parametrize("field,value", [
+    ("MAIL_GRAPH_CLIENT_ID", "<KB_PROD_SERVICE_APP_ID>"),
+    ("MICROSOFT_GRAPH_SENDER", "<KB_PROD_MAILBOX>"),
+    ("MICROSOFT_TENANT_ID", "<ENTRA_TENANT_ID>"),
+])
+def test_an_unreplaced_placeholder_is_fatal_and_named_without_its_value(monkeypatch, field, value):
+    """A release template's placeholder must stop the worker at start-up, and the message names the setting only."""
+    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER,
+                  MICROSOFT_TENANT_ID=TENANT, MAIL_GRAPH_PEM="-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----")
+    values[field] = value
+    monkeypatch.setattr(email, "settings", settings_for(**values))
+    fatal, unconfigured = email.configuration_problems()
+    assert unconfigured is False
+    assert len(fatal) == 1 and field in fatal[0] and "placeholder" in fatal[0]
+    assert value not in fatal[0]
+
+
+def test_real_values_and_empty_settings_are_not_placeholders():
+    assert email.is_placeholder("<KB_PROD_SERVICE_APP_ID>")
+    assert email.is_placeholder("  <X>  ")
+    for real in (CLIENT, SENDER, TENANT, "", None, "a<b>c", "<a> <b>", "<>"):
+        assert not email.is_placeholder(real), real
+
+
 def test_console_is_fatal_outside_development_and_fine_inside(monkeypatch):
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", EMAIL_PROVIDER="console"))
     assert email.configuration_problems()[0]
