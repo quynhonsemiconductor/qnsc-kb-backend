@@ -9,7 +9,7 @@ prove it.
 | | Develop | Production |
 |---|---|---|
 | Shared mailbox | `noreply-kb-dev@qnsc.vn` | `noreply-kb@qnsc.vn` |
-| Entra app (a "Service app") | `KB Develop Service` | `KB Prod Service` |
+| Entra app (a "Service app") | `KB Dev Service` | `KB Prod Service` |
 | Exchange management scope | `KB mail sender (develop)` -> the dev mailbox only | `KB mail sender (prod)` -> the prod mailbox only |
 | Mail credential (standalone secret) | `qnsc-kb/develop/mail-graph-certificate` | `qnsc-kb/prod/mail-graph-certificate` |
 | Terraform | `infra/live/develop/variables.tf` | `infra/live/prod/variables.tf` |
@@ -71,7 +71,7 @@ New-ManagementScope -Name "KB mail sender (develop)" `
 
 ## 3. The Entra app registration (per environment)
 
-Entra admin center > App registrations > New registration: name `KB Develop Service` or `KB Prod Service` (the Service apps of plan §7.4), **single tenant**, no
+Entra admin center > App registrations > New registration: name `KB Dev Service` or `KB Prod Service` (the Service apps of plan §7.4), **single tenant**, no
 redirect URI. Then:
 
 * **API permissions: add NOTHING.** Do not add Microsoft Graph `Mail.Send`. (The default `User.Read`
@@ -158,7 +158,7 @@ Develop shown; for production use the prod app, the prod scope and `noreply-kb@q
 ```powershell
 Connect-ExchangeOnline
 New-ServicePrincipal -AppId <develop-client-id> -ObjectId <develop-enterprise-app-object-id> `
-  -DisplayName "QNSC KB mail develop"
+  -DisplayName "KB Dev Service"
 New-ManagementRoleAssignment -App <develop-client-id> -Role "Application Mail.Send" `
   -CustomResourceScope "KB mail sender (develop)"
 

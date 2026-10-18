@@ -54,7 +54,7 @@ Khuyến nghị production: dùng certificate credential thay cho client secret 
 > `MICROSOFT_CONNECTOR_AUTH_MODE=delegated`) và **không có application permission nào**. Bảng application bên dưới
 > chỉ áp dụng nếu admin chủ động chọn chế độ app-only; đó không phải cấu hình đang chạy.
 >
-> **Email thông báo không đi qua app này.** Việc gửi mail dùng một app riêng cho mỗi môi trường (`KB Develop Service`,
+> **Email thông báo không đi qua app này.** Việc gửi mail dùng một app riêng cho mỗi môi trường (`KB Dev Service`,
 > `KB Prod Service`), xác thực bằng certificate, không có Graph consent nào; quyền gửi duy nhất đến từ Exchange Online
 > RBAC for Applications (role *Application Mail.Send* gắn với management scope chỉ gồm một mailbox). **Không cấp
 > `Mail.Send` (Application) cho app connector và không dùng Application Access Policy** — xem
