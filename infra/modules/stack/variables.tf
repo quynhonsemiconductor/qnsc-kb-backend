@@ -397,7 +397,7 @@ variable "microsoft_tenant_id" {
   EOT
 
   validation {
-    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", var.microsoft_tenant_id))
+    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.microsoft_tenant_id))
     error_message = "microsoft_tenant_id must be the Entra tenant GUID, never common, organizations or consumers, and never empty."
   }
 }
