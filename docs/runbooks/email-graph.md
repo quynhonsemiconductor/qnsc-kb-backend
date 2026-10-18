@@ -226,9 +226,10 @@ down.
    one with it. Merge that change.
 3. Merging runs Infrastructure · Apply: develop's `email_provider` becomes `graph`, and the mail secret is injected
    into the **worker container only** and granted to the worker's execution role only (the API and beat never
-   receive it, and no task role can read it). The SES send permission stays in place on purpose, so a rollback to
-   the previous task definition can still send; it is removed by the separate clean-up change (#216) once Graph
-   is proven.
+   receive it, and no task role can read it). SES is removed in the same release window
+   as the rova prod switch-on, after one real rova prod email has arrived (#216, see the release sequence in its PR
+   body). Rollback is a redeploy of the previous release, not a retained SES path; this environment has no prod
+   traffic yet, so production follows its own first prod release.
 4. Deploy. The **worker** now refuses to start if the client id is set but the sender, certificate or key is
    missing, so a half-configured environment fails the deploy instead of quietly queueing mail. The API does not
    check mail at all. With the client id empty the worker starts and logs `Mail is not configured` on every
