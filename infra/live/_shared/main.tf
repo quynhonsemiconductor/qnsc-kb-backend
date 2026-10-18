@@ -63,9 +63,9 @@ module "ecr" {
   # change: `release_retention_days` below did not exist as a variable until v2.1.0, so
   # this call pinned to v2.0.0 was passing an UNKNOWN variable and would have failed
   # `tofu validate`/plan. The tag exists (release-please cut it), so the bump resolves today.
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.1.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.2.0"
 
-  # keep_build_count is lower than the module default (20), for a narrower reason
+  # keep_build_count is lower than the module default (10 since ecr-v2.2.0), for a narrower reason
   # than "the images are big".
   #
   # These images ARE big — the api and worker carry ONNX Runtime, paddle and the baked bge-m3
