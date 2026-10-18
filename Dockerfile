@@ -19,6 +19,11 @@
 #      model and the api embeds the search query on every search — that is the deliberate
 #      cost of not sending text to a hosted embedder. The migrator gets neither.
 #
+#      The two do NOT carry the same weights. The worker writes every stored vector and so
+#      keeps the fp32 export; the api only embeds a question, and gets an int8 export ~4x
+#      smaller (see `embedding-int8`). Build the api with `--build-arg API_EMBEDDING=fp32`
+#      to get the fp32 export back.
+#
 # Build:
 #   docker build --target api      -t qnsc-kb-api .
 #   docker build --target worker   -t qnsc-kb-worker .
@@ -30,6 +35,20 @@
 # BAKE_EMBEDDING_MODEL=false only where that is intended, i.e. CI proving the image
 # builds. The arg used to be documented as BAKE_EMBEDDING_ONNX, which this file never
 # declared, so the flag silently did nothing wherever it was passed.
+
+# Build args that must exist before the first FROM, either because a FROM line uses them or
+# because more than one stage needs the same default.
+#
+# EMBEDDING_MODEL is declared HERE, once, with its default, and re-declared WITHOUT a default
+# in each stage that reads it. Two defaults would be two places to forget when the model
+# changes, and tests/unit/test_embedding_config_matches_image.py pins this line against the
+# Terraform and the code default.
+ARG EMBEDDING_MODEL=intfloat/multilingual-e5-large-instruct
+
+# Which export the api image serves queries from: `int8` (default) or `fp32`. The deploy
+# pipeline passes no build args, so the default IS production. Rolling back is a rebuild with
+# `fp32`, not a code change.
+ARG API_EMBEDDING=int8
 
 # ---------------------------------------------------------------------------
 # deps — the runtime dependency set every target shares. build-essential and libpq-dev
@@ -130,8 +149,10 @@ RUN useradd --create-home --uid 10001 appuser && \
     chown -R appuser:appuser /app
 
 # ---------------------------------------------------------------------------
-# runtime-ml — the api's base, carrying ONNX Runtime, Transformers and (by default) the
-# model weights themselves.
+# runtime-ml-base — what the api and the worker share: the runtime stage plus the Python
+# libraries (ONNX Runtime, Transformers). NO weights; each branch below adds its own, the
+# worker's fp32 export in `runtime-ml` and the api's int8 export in `runtime-ml-int8`. The
+# notes that follow are about the weights and apply to both.
 #
 # BAKING THE ONNX ASSETS IS THE POINT. The runtime downloads them on first use, so an
 # unbaked image pays ~2.3 GB and several minutes on the first search AFTER the task is
@@ -146,7 +167,7 @@ RUN useradd --create-home --uid 10001 appuser && \
 #
 # This layer is above every `COPY . .` on purpose — see rule 1.
 # ---------------------------------------------------------------------------
-FROM runtime AS runtime-ml
+FROM runtime AS runtime-ml-base
 
 # Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
 # The interpreter version lives in the FROM tag, which dependabot bumps on its own;
@@ -157,10 +178,66 @@ FROM runtime AS runtime-ml
 COPY --from=deps-ml /usr/local/lib/ /usr/local/lib/
 COPY --from=deps-ml /usr/local/bin /usr/local/bin
 
-ARG BAKE_EMBEDDING_MODEL=true
-ARG EMBEDDING_MODEL=intfloat/multilingual-e5-large-instruct
 ENV HF_HOME=/opt/huggingface
 ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
+
+# ---------------------------------------------------------------------------
+# embedding-int8 — BUILD ONLY, never shipped. Produces the export the api serves search
+# queries from; /opt/embedding-int8 is the one directory the api image copies out.
+#
+# Built on deps-ml so onnxruntime, tokenizers and huggingface_hub are the versions in
+# poetry.lock, which is what the shipped image will load the result with. `onnx` is the
+# one extra: it rewrites the graph and is not a runtime dependency, so it is installed
+# here and goes nowhere. Pinned because it is not in the lock.
+#
+# scripts/quantize_embedding.py explains the recipe and why it is this one, and fails the
+# build when the export is too big or drifts too far from fp32 — a degraded query vector
+# raises nothing at runtime, so the build is the only place that can refuse it.
+#
+# BAKE_EMBEDDING_MODEL=false leaves the directory empty and downloads nothing: that is what
+# CI's image build passes, so CI proves the stage graph builds but NOT the quantisation
+# itself. That runs only where the weights are actually baked.
+#
+# Editing scripts/quantize_embedding.py re-runs this stage and re-downloads ~2.3 GB;
+# the app code never invalidates it.
+# ---------------------------------------------------------------------------
+FROM deps-ml AS embedding-int8
+
+ARG BAKE_EMBEDDING_MODEL=true
+ARG EMBEDDING_MODEL
+ENV HF_HOME=/opt/huggingface
+
+RUN pip install --no-cache-dir "onnx==1.23.2"
+
+COPY scripts/quantize_embedding.py /opt/quantize_embedding.py
+
+# Same Hub-speed levers and optional token secret as the fp32 bake below; see the notes there.
+RUN --mount=type=secret,id=hf_token,required=false \
+    mkdir -p /opt/embedding-int8 && \
+    if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
+        export HF_XET_HIGH_PERFORMANCE=1 && \
+        if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi && \
+        python /opt/quantize_embedding.py \
+            --download "$EMBEDDING_MODEL" \
+            --fp32-dir /opt/embedding-fp32 \
+            --out-dir /opt/embedding-int8; \
+    fi
+
+# ---------------------------------------------------------------------------
+# runtime-ml-int8 — the api's base by default: the shared libraries plus the int8 export.
+# ---------------------------------------------------------------------------
+FROM runtime-ml-base AS runtime-ml-int8
+
+COPY --from=embedding-int8 --chown=appuser:appuser /opt/embedding-int8 /opt/embedding-onnx
+
+# ---------------------------------------------------------------------------
+# runtime-ml — the shared libraries plus the fp32 export. The worker's base, and the api's
+# when built with API_EMBEDDING=fp32.
+# ---------------------------------------------------------------------------
+FROM runtime-ml-base AS runtime-ml
+
+ARG BAKE_EMBEDDING_MODEL=true
+ARG EMBEDDING_MODEL
 
 # Materialise the export where the loader actually looks. This used to snapshot `onnx/*`
 # into the HF cache, but src/lib/embeddings/local_onnx.py reads EMBEDDING_ONNX_DIR and
@@ -264,17 +341,29 @@ COPY --from=deps-ml-ocr /usr/local/bin /usr/local/bin
 RUN apt-get update && apt-get install -y --no-install-recommends     libgomp1     libglib2.0-0     libgl1     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
+# runtime-ml-fp32 — an alias, so `api` can pick its base by name: `runtime-ml-${API_EMBEDDING}`
+# resolves to this one or to `runtime-ml-int8`. It adds nothing of its own.
+# ---------------------------------------------------------------------------
+FROM runtime-ml AS runtime-ml-fp32
+
+# ---------------------------------------------------------------------------
 # api — FastAPI under uvicorn.
 #
 # Carries the embedding stack but NOT OCR: main.py preloads the model at startup so no
 # request pays for loading it, and the api never extracts text from a scanned file.
+#
+# The weights are the int8 export unless API_EMBEDDING=fp32. That is safe only because the
+# api embeds QUERIES and the worker writes every stored vector (JOB_MODE=celery in every
+# deployed environment): an int8 query against fp32 chunks moves each score by ~0.002 on
+# average. An api that indexed would write int8 vectors beside fp32 ones, so if the api ever
+# starts indexing in-process, build it with API_EMBEDDING=fp32.
 #
 # Deliberately NO entrypoint running Alembic. That is right for a single-VPS compose and
 # wrong for ECS, where every task would run it — a deploy or a scale-out firing N
 # concurrent migrations against one database. Migrations belong to the `migrator` target,
 # which the pipeline runs once, before rolling any service.
 # ---------------------------------------------------------------------------
-FROM runtime-ml AS api
+FROM runtime-ml-${API_EMBEDDING} AS api
 
 COPY --chown=appuser:appuser . .
 
