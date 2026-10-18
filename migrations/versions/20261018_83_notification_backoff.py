@@ -38,6 +38,12 @@ def upgrade() -> None:
     if "next_attempt_at" not in columns:
         op.add_column(TABLE, sa.Column("next_attempt_at", sa.DateTime(), nullable=True))
     indexes = {index["name"] for index in inspector.get_indexes(TABLE)}
+    if INDEX in indexes and _index_is_invalid(op.get_bind()):
+        # A CREATE INDEX CONCURRENTLY that failed or was cancelled leaves the index behind, INVALID: it is listed,
+        # costs writes, and is never used. "Already exists" must not mean "done".
+        with op.get_context().autocommit_block():
+            op.drop_index(INDEX, table_name=TABLE, postgresql_concurrently=True)
+        indexes.discard(INDEX)
     if INDEX not in indexes:
         # CONCURRENTLY: the table takes writes while the API runs. It cannot run inside a transaction.
         with op.get_context().autocommit_block():
@@ -48,6 +54,19 @@ def upgrade() -> None:
                 postgresql_where=sa.text("type = 'email' AND status IN ('pending', 'failed')"),
                 postgresql_concurrently=True,
             )
+
+
+def _index_is_invalid(bind) -> bool:
+    """True when the index exists in pg_index with indisvalid = false (PostgreSQL only; other dialects have none)."""
+    if bind.dialect.name != "postgresql":
+        return False
+    valid = bind.execute(
+        sa.text(
+            "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :name"
+        ),
+        {"name": INDEX},
+    ).scalar()
+    return valid is False
 
 
 def downgrade() -> None:

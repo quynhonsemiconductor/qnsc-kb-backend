@@ -107,8 +107,9 @@ readable by the API's role. This secret is referenced only by the **worker** con
 No task role in the stack can read any secret. One value, one write: the key and the certificate cannot drift apart,
 and there is no bundle JSON to merge or to clobber.
 
-The secret's **container** is created by Terraform as soon as the stack is applied (empty, without a version); you
-only write the value. The deploy fails by name until you do (see below).
+The secret's **container** is created by Terraform as soon as the stack is applied (empty, without a version), in
+every environment that is not the in-memory fake, **including develop while it is still on SES**; you only write the
+value. Nothing is injected or granted until `mail_graph_client_id` is set. The deploy fails by name until you do (see below).
 
 **Nothing secret goes on a command line.** Command lines are visible in the process list and saved in shell
 history. The value goes in through a pipe (`file:///dev/stdin`):

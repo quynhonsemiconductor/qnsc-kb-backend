@@ -45,9 +45,11 @@ def test_the_mail_credential_is_not_a_key_of_the_shared_bundle():
     assert 'module.secrets.secret_arns["mail-graph' not in STACK
 
 
-def test_the_mail_credential_is_a_standalone_secret_created_whenever_the_provider_is_graph():
+def test_the_mail_credential_is_a_standalone_secret_created_before_the_client_id_is_set():
     secret = block(STACK, 'resource "aws_secretsmanager_secret" "mail_graph"')
-    assert 'count = var.email_provider == "graph" ? 1 : 0' in secret
+    assert "count = local.mail_secret_exists ? 1 : 0" in secret
+    assert 'mail_secret_exists = var.email_provider != "fake"' in STACK  # develop is "ses" until its client id is set
+    assert "count = local.mail_secret_exists ? 1 : 0" in block(STACK, 'resource "aws_secretsmanager_secret_policy" "mail_graph"')
     assert 'name                    = "${var.product}/${var.env}/mail-graph-certificate"' in secret
     assert "kms_key_id" in secret
     # the container is not gated on the client id (the owner must be able to put the value first); injection is

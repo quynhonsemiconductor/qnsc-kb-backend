@@ -388,7 +388,8 @@ def test_a_client_id_without_the_rest_is_fatal(monkeypatch, missing, needle):
     absent, or the whole thing empty, is fatal for a worker that was told to use the mail app."""
     cert, key = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----", "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----"
     pem = {"certificate": key, "key": cert, "both": ""}.get(missing, key + "\n" + cert)
-    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_PEM=pem)
+    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_PEM=pem,
+                  MICROSOFT_TENANT_ID=TENANT)
     if missing == "MICROSOFT_GRAPH_SENDER":
         values["MICROSOFT_GRAPH_SENDER"] = ""
     monkeypatch.setattr(email, "settings", settings_for(**values))
@@ -428,7 +429,7 @@ def test_the_pem_secret_never_appears_in_a_repr_or_a_dump():
 def test_a_complete_configuration_has_no_problems(monkeypatch):
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT,
                                                         MICROSOFT_GRAPH_SENDER=SENDER,
-                                                        MAIL_GRAPH_PEM="-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"))
+                                                        MICROSOFT_TENANT_ID=TENANT, MAIL_GRAPH_PEM="-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"))
     assert email.configuration_problems() == ([], False)
 
 
@@ -628,3 +629,20 @@ def test_the_check_script_fails_on_any_role_claim(tmp_path, monkeypatch, capsys,
     assert asyncio.run(script.run(args)) == expected_exit
     out = capsys.readouterr().out
     assert ("FAIL  SCOPE" in out) == bool(roles)
+
+
+# Non-GUID values ("qnsc.vn") become "not pinned" with #218 (GUID shape); add them to this list once it is on main.
+@pytest.mark.parametrize("tenant", ["", "common", "organizations", "consumers"])
+def test_a_client_id_without_a_pinned_tenant_is_fatal_for_the_worker(monkeypatch, tenant):
+    """Otherwise every token request fails at the config stage and stops every batch for ever; refuse at start."""
+    pem = "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT,
+                                                        MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_PEM=pem,
+                                                        MICROSOFT_TENANT_ID=tenant))
+    fatal, unconfigured = email.configuration_problems()
+    assert unconfigured is False and len(fatal) == 1 and "MICROSOFT_TENANT_ID" in fatal[0]
+
+
+def test_no_client_id_needs_no_tenant_to_start(monkeypatch):
+    monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MICROSOFT_TENANT_ID=""))
+    assert email.configuration_problems() == ([], True)

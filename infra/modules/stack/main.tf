@@ -65,6 +65,12 @@ locals {
   // and the next release failing the same way). Order of the owner's steps: the mail secret's value first, THEN the client id.
   mail_graph_enabled = var.email_provider == "graph" && var.mail_graph_client_id != ""
 
+  // The secret CONTAINER and its resource policy exist for every provider that is not the in-memory fake, NOT only
+  // once the client id is set. Develop is on "ses" until its client id is set, and the runbook tells the owner to put
+  // the value first: put-secret-value on a secret that does not exist yet fails. The injection and the worker's IAM
+  // grant stay gated on mail_graph_enabled, so an empty container references nothing and grants nothing.
+  mail_secret_exists = var.email_provider != "fake"
+
   ecr_base         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
   ecr_api_url      = "${local.ecr_base}/${var.product}-api:${var.image_tag}"
   ecr_worker_url   = "${local.ecr_base}/${var.product}-worker:${var.image_tag}"
@@ -419,12 +425,13 @@ resource "aws_secretsmanager_secret_version" "tunnel_token" {
 // this stack can read any secret (task_secret_arns is never passed to ecs-service), so application code, which
 // runs as the task role, cannot read it either.
 //
-// The CONTAINER is created whenever the provider is graph, empty and without a version, so the owner can put the
+// The CONTAINER is created whenever the provider is not the in-memory fake (develop is still "ses" until its client id
+// is set, and the owner writes the value before that), empty and without a version, so the owner can put the
 // value BEFORE setting mail_graph_client_id; it is injected only once that is set (mail_graph_enabled). The value
 // never enters Terraform state. The deploy preflight (ci backend-deploy) lists this secret's versions on every
 // deploy and fails by NAME if it holds none: that is the per-secret check the bundle's keys never had.
 resource "aws_secretsmanager_secret" "mail_graph" {
-  count = var.email_provider == "graph" ? 1 : 0
+  count = local.mail_secret_exists ? 1 : 0
 
   name                    = "${var.product}/${var.env}/mail-graph-certificate"
   description             = "Mail app credential for Microsoft Graph: private key and certificate in ONE PEM (MAIL_GRAPH_PEM). Worker only. Value is set out of band: docs/runbooks/email-graph.md."
@@ -439,7 +446,7 @@ resource "aws_secretsmanager_secret" "mail_graph" {
 // outside AWS. put-secret-value, describe-secret and list-secret-version-ids are not denied, so the owner can
 // still write it, rotate it and see that it has a version. To read it for a break-glass, delete this policy first.
 resource "aws_secretsmanager_secret_policy" "mail_graph" {
-  count = var.email_provider == "graph" ? 1 : 0
+  count = local.mail_secret_exists ? 1 : 0
 
   secret_arn = aws_secretsmanager_secret.mail_graph[0].arn
   policy = jsonencode({

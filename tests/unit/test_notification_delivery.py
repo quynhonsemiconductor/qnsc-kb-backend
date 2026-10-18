@@ -20,8 +20,13 @@ from src.workers import tasks
 
 
 class FakeSession:
-    def __init__(self, rows):
-        self.rows, self.statements, self.committed = rows, [], False
+    """``rows`` is what the SELECT returns (the first 100 deliverable rows); ``others`` are deliverable rows beyond
+    that batch. An UPDATE on notification_queue is compiled to Postgres SQL, recorded, and APPLIED to every row it
+    would match (its WHERE is asserted separately), so a test can say which rows ended up deferred."""
+
+    def __init__(self, rows, others=()):
+        self.rows, self.others = rows, list(others)
+        self.statements, self.updates, self.committed = [], [], False
 
     async def __aenter__(self):
         return self
@@ -31,6 +36,15 @@ class FakeSession:
 
     async def execute(self, statement):
         self.statements.append(statement)
+        if statement.is_update:
+            compiled = statement.compile(dialect=postgresql.dialect())
+            self.updates.append(str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})))
+            moments = sorted(v for v in compiled.params.values() if isinstance(v, datetime))
+            earliest_default, until = moments[0], moments[-1]  # coalesce(col, now) and the deferral target
+            for r in [*self.rows, *self.others]:
+                if r.type == "email" and r.status in ("pending", "failed"):
+                    r.next_attempt_at = max(r.next_attempt_at or earliest_default, until)
+            return SimpleNamespace()
         return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.rows)))
 
     async def commit(self):
@@ -58,8 +72,8 @@ def row(to, *, attempts=0, age=timedelta(minutes=5)):
 
 @pytest.fixture
 def run(monkeypatch):
-    def go(rows, outcomes):
-        session, sender = FakeSession(rows), ScriptedSender(outcomes)
+    def go(rows, outcomes, others=()):
+        session, sender = FakeSession(rows, others), ScriptedSender(outcomes)
         monkeypatch.setattr(tasks, "SessionLocal", lambda: session)
 
         async def no_context(*a, **k):
@@ -195,3 +209,49 @@ def test_a_provider_that_must_not_run_here_is_an_error_not_a_crash(monkeypatch):
     with structlog.testing.capture_logs() as logs:
         tasks.deliver_notification_queue()
     assert session.statements == [] and any(e["event"] == "Mail is not configured" for e in logs)
+
+
+# ── a stopped batch defers EVERY deliverable row, not only the one that failed ──────────────────
+@pytest.mark.parametrize("failure,wait_at_least", [
+    (err(429, retry_after=600), 590),
+    (err(403), 14 * 60),
+    (err(401, stage="token"), 25),
+])
+def test_a_stopped_batch_defers_every_email_row_including_those_beyond_the_batch(run, failure, wait_at_least):
+    """Before: only the failing row got next_attempt_at; the other 99 stayed NULL and were hit again 30 s later,
+    forever, through the Retry-After / 15-minute wait that was meant to stop exactly that."""
+    batch = [row(f"{n}@x") for n in range(100)]
+    beyond = [row(f"b{n}@x") for n in range(50)]  # deliverable, but past LIMIT 100
+    session, sender, _ = run(batch, {"0@x": failure}, others=beyond)
+
+    assert sender.calls == ["0@x"]  # the batch stopped
+    now = datetime.utcnow()
+    for r in [*batch, *beyond]:
+        assert r.next_attempt_at is not None, r.payload["to"]
+        assert (r.next_attempt_at - now).total_seconds() >= wait_at_least - 5, r.payload["to"]
+    assert all(r.attempts == 0 for r in [*batch, *beyond])  # attempts untouched
+    assert len(session.updates) == 1  # one UPDATE, not a row-by-row loop
+
+
+def test_the_deferral_never_shortens_a_longer_existing_wait_and_skips_dead_and_other_types(run):
+    longer = row("l@x")
+    longer.next_attempt_at = datetime.utcnow() + timedelta(hours=2)
+    dead, sent, slack = row("d@x"), row("s@x"), row("k@x")
+    dead.status, sent.status, slack.type = "dead", "sent", "slack"
+    first = row("a@x")
+    session, _, _ = run([first, longer], {"a@x": err(429, retry_after=60)}, others=[dead, sent, slack])
+
+    assert (longer.next_attempt_at - datetime.utcnow()).total_seconds() > 2 * 3600 - 5  # greatest(), not overwrite
+    assert dead.next_attempt_at is None and sent.next_attempt_at is None and slack.next_attempt_at is None
+    sql = session.updates[0]
+    assert "greatest(coalesce(notification_queue.next_attempt_at" in sql
+    assert "notification_queue.type = 'email'" in sql and "notification_queue.status IN ('pending', 'failed')" in sql
+    assert "attempts" not in sql  # attempts are not touched
+    # the WHERE is exactly these two conditions: no id, no created_at, nothing that narrows it to a subset
+    assert sql.strip().endswith("WHERE notification_queue.type = 'email' AND notification_queue.status IN ('pending', 'failed')")
+
+
+def test_a_successful_or_message_level_pass_runs_no_deferral(run):
+    ok, bad = row("ok@x"), row("bad@x")
+    session, _, _ = run([ok, bad], {"bad@x": err(400)})
+    assert session.updates == []

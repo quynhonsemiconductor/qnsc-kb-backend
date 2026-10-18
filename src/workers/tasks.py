@@ -5,7 +5,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Any
-from sqlalchemy import JSON, DateTime, Uuid, delete, exists, literal, select, update
+from sqlalchemy import JSON, DateTime, Uuid, delete, exists, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from celery.signals import worker_init, worker_ready, worker_process_init, task_prerun, task_failure
@@ -323,6 +323,7 @@ def deliver_notification_queue() -> None:
                     if not stops:
                         row.attempts += 1  # an outage must not use up the attempts of rows it never let us try
                     permanent = bool(getattr(exc, "permanent", False))
+                    wait_seconds = max(mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0))
                     created = row.created_at or datetime.utcnow()
                     too_old = datetime.utcnow() - created > MAIL_MAX_AGE
                     if permanent or too_old:
@@ -338,8 +339,8 @@ def deliver_notification_queue() -> None:
                         )
                     else:
                         row.status = "failed" if row.attempts else row.status
-                        wait = max(mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0))
-                        row.next_attempt_at = datetime.utcnow() + timedelta(seconds=wait)
+                        wait_seconds = max(mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0))
+                        row.next_attempt_at = datetime.utcnow() + timedelta(seconds=wait_seconds)
                     if getattr(exc, "sender_refused", False):
                         # The scope is missing or still propagating (up to ~2 h), or the mailbox is missing or not
                         # REST-enabled. A human has to look; the alarm watches this line.
@@ -350,9 +351,24 @@ def deliver_notification_queue() -> None:
                             request_id=getattr(exc, "request_id", None),
                         )
                     if stops:
-                        # Credentials, configuration, throttling or a refused sender: every remaining row would
-                        # fail the same way. Leave them untouched for the next pass.
-                        logger.warning("Stopping the mail batch", reason=row.last_error)
+                        # Credentials, configuration, throttling or a refused sender: every row would fail the same
+                        # way. Defer EVERY deliverable email row, not just this one, or the other rows (next_attempt_at
+                        # NULL) would be picked up again in 30 s and the sender hit forever, through the very
+                        # Retry-After or 15-minute wait that was meant to stop that. One UPDATE; attempts untouched.
+                        until = datetime.utcnow() + timedelta(seconds=wait_seconds)
+                        await db.execute(
+                            update(NotificationQueue)
+                            .where(
+                                NotificationQueue.type == "email",
+                                NotificationQueue.status.in_(["pending", "failed"]),
+                            )
+                            .values(
+                                next_attempt_at=func.greatest(
+                                    func.coalesce(NotificationQueue.next_attempt_at, datetime.utcnow()), until
+                                )
+                            )
+                        )
+                        logger.warning("Stopping the mail batch", reason=row.last_error, deferred_until=until.isoformat())
                         break
             await db.commit()
 

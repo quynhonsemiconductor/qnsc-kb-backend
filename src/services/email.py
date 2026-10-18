@@ -79,8 +79,10 @@ class MailSendError(RuntimeError):
 
     ``stage`` says WHERE it failed, because the right response differs: ``config`` and ``token`` failures affect
     every message, so the delivery loop stops the batch instead of failing each row in turn; ``send`` failures
-    belong to one message. ``permanent`` is True for statuses no retry can fix (a malformed message, a mailbox the
-    app may not send as, a mailbox that does not exist); ``retry_after`` is the server's own pacing for 429/503.
+    belong to one message. ``permanent`` is True only for statuses no retry can fix because the MESSAGE is the problem
+    (400 malformed, 413 too large). 403 and 404 at the send stage are NOT permanent: they are the SENDER being
+    refused (``sender_refused``: scope missing or propagating, mailbox missing) and stop the batch. ``retry_after``
+    is the server's own pacing for 429/503.
     """
 
     # What no retry can fix because the MESSAGE is the problem: malformed (400) or too large (413).
@@ -412,6 +414,10 @@ def configuration_problems() -> tuple[list[str], bool]:
         return [], False
     if not (settings.MAIL_GRAPH_CLIENT_ID or "").strip():
         return [], True
+    if settings.microsoft_tenant is None:
+        # Without a pinned tenant every token request fails at the config stage and stops every batch for ever.
+        # Say so once, at start, instead.
+        return ["MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)"], False
     cert_pem, key_pem = _pems()
     required = {
         "MICROSOFT_GRAPH_SENDER": settings.MICROSOFT_GRAPH_SENDER,
