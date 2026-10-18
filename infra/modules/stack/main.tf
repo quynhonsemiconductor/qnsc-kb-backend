@@ -410,11 +410,38 @@ resource "aws_secretsmanager_secret" "tunnel_token" {
   tags = local.tags
 }
 
-resource "aws_secretsmanager_secret_version" "tunnel_token" {
+# The connector token's VALUE, written at apply time and never held as a Terraform attribute.
+#
+# The version resource that used to hold it read the value on every refresh, and that needs
+# secretsmanager:GetSecretValue on the plan role. The plan role must not have it, so the
+# container above stays managed here and this resource writes the token into a new version
+# when it changes (a tunnel recreate changes the hash). No plan reads a secret value.
+#
+# `removed` forgets the old version resource from state WITHOUT destroying the secret's current
+# version (lifecycle.destroy = false), so the first apply after this change deletes nothing.
+removed {
+  from = aws_secretsmanager_secret_version.tunnel_token
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+resource "terraform_data" "tunnel_token_value" {
   count = var.tunnel_enabled && var.cloudflare_account_id != "" ? 1 : 0
 
-  secret_id     = aws_secretsmanager_secret.tunnel_token[0].id
-  secret_string = module.tunnel[0].token
+  # A hash, so the token itself never lands in state or in a plan.
+  triggers_replace = sha256(module.tunnel[0].token)
+
+  # The token goes in through the environment and stdin, never argv, and is never echoed. Only the
+  # new version id is printed.
+  provisioner "local-exec" {
+    environment = {
+      TUNNEL_TOKEN = module.tunnel[0].token
+      SECRET_ID    = aws_secretsmanager_secret.tunnel_token[0].id
+    }
+    command = "set -eu; command -v aws >/dev/null || { echo 'aws CLI missing on the runner' >&2; exit 1; }; printf '%s' \"$TUNNEL_TOKEN\" | aws secretsmanager put-secret-value --region ${var.region} --secret-id \"$SECRET_ID\" --secret-string file:///dev/stdin --query VersionId --output text"
+  }
 }
 
 // ── The mail credential: a standalone secret, readable only by the worker's execution role ──────────────────
