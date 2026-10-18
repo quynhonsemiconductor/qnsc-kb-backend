@@ -70,17 +70,29 @@ variable "microsoft_client_id" {
 
 variable "microsoft_graph_sender" {
   type        = string
+  default     = "noreply-kb@qnsc.vn"
+  description = <<-EOT
+    The mailbox application email is sent FROM in production: a shared mailbox, no licence. Production's mail
+    Entra app is scoped by Exchange RBAC to this mailbox only, and develop has a separate mailbox and app
+    (noreply-kb-dev@qnsc.vn); each must get 403 when sending as the other
+    (docs/runbooks/email-graph.md, step 8). Change it to the KB shared mailbox the owner names.
+
+    A "-dev@" address is refused here: production must never send as a development mailbox either.
+  EOT
+
+  validation {
+    condition     = !can(regex("-dev@", lower(var.microsoft_graph_sender)))
+    error_message = "production's microsoft_graph_sender must not be a development mailbox (noreply-<product>-dev@...)."
+  }
+}
+variable "mail_graph_client_id" {
+  type        = string
   default     = ""
   description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
-
-    Empty means outbound mail is DEAD, silently: ENVIRONMENT is pinned to "production", so
-    the development FakeEmailSender is never selected and the Graph sender raises before any
-    HTTP call. Invitations and password resets queue and retry every 30 seconds forever
-    without arriving, and validate_production() does not catch it.
-
-    Requires the mailbox to exist in the tenant and the Entra app to hold Mail.Send
-    application permission with admin consent.
+    Application (client) ID of this environment's mail Entra app (a public identifier). EMPTY until the owner
+    has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
+    set only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret qnsc-kb/prod/mail-graph-certificate.
+    While empty, nothing mail-related is injected; the worker logs "Mail is not configured" and an alarm fires once it is running.
   EOT
 }
 
