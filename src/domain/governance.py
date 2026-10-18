@@ -207,18 +207,23 @@ class GovernanceService:
             user, "article.publish", requested_scope="global"
         )
 
-    async def list_drafts(
-        self, user: User, status: str | None = None
-    ) -> Sequence[PendingDraft]:
-        # No assignment filter for identities that `_can_approve_draft` lets decide ANY
-        # draft. Filtering them to "unassigned or mine" hid a pending draft from everyone
-        # who could act on it: `submit_draft` applies the department's `approver_rules`
-        # automatically, so an upload could be assigned on the way in and then appear in
-        # no queue view at all -- not awaiting approval, not approved, not rejected, while
-        # the row was still `pending`. A reviewer scoped to the department still saw it
-        # through the dept clause below, so the identity with MORE authority saw less.
+    def _draft_queue_scope(self, user: User) -> dict:
+        """The repository arguments describing what this identity may see.
+
+        Resolved in ONE place so the page and its total can never be computed from
+        different predicates. A total that counted rows the caller may not see would
+        leak the existence of another department's drafts.
+
+        No assignment filter for identities that `_can_approve_draft` lets decide ANY
+        draft. Filtering them to "unassigned or mine" hid a pending draft from everyone
+        who could act on it: `submit_draft` applies the department's `approver_rules`
+        automatically, so an upload could be assigned on the way in and then appear in
+        no queue view at all -- not awaiting approval, not approved, not rejected, while
+        the row was still `pending`. A reviewer scoped to the department still saw it
+        through the dept clause below, so the identity with MORE authority saw less.
+        """
         if self._is_global_publisher(user):
-            return await self.gov_repo.list_drafts(status)
+            return {}
         can_company_review = any(
             AuthorizationService.has_permission(user, key, requested_scope="company")
             for key in ("article.review", "article.publish", "governance.read")
@@ -232,26 +237,47 @@ class GovernanceService:
             # draft in their company, so an assignment made by an approver rule must not
             # remove one from their queue. Scoped to the tenant, never across it.
             if self._is_company_governance_lead(user):
-                return await self.gov_repo.list_drafts(status, user.company_domain)
+                return {"company_domain": user.company_domain}
             member_departments = AuthorizationService.member_department_names(user)
             if user.dept:
                 member_departments.add(user.dept)
-            member_department_ids = {
-                str(department.id)
-                for department in getattr(user, "departments", [])
-                if getattr(department, "active", True)
-                and getattr(department, "company_domain", user.company_domain)
-                == user.company_domain
+            return {
+                "company_domain": user.company_domain,
+                "depts": sorted(member_departments),
+                "assigned_approver_id": user.id,
             }
-            return await self.gov_repo.list_drafts(
-                status,
-                user.company_domain,
-                depts=sorted(member_departments),
-                assigned_approver_id=user.id,
-            )
         raise HTTPException(
             status_code=403, detail="Not authorized to view the approval queue"
         )
+
+    async def list_drafts(
+        self,
+        user: User,
+        status: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        search: str | None = None,
+    ) -> Sequence[PendingDraft]:
+        scope = self._draft_queue_scope(user)
+        return await self.gov_repo.list_drafts(
+            status, **scope, limit=limit, offset=offset, search=search
+        )
+
+    async def count_drafts(
+        self, user: User, status: str | None = None, *, search: str | None = None
+    ) -> int:
+        """Total drafts this identity may see, for the same scope `list_drafts` pages.
+
+        With `search`, the total of the rows that search matches inside that scope: a
+        search can narrow what the caller sees but never widen it, and the count must
+        describe the same rows the page is cut from.
+        """
+        scope = self._draft_queue_scope(user)
+        counter = getattr(self.gov_repo, "count_drafts", None)
+        if counter is None:  # Lightweight unit-test repository compatibility.
+            return len(await self.gov_repo.list_drafts(status, **scope, search=search))
+        return await counter(status, **scope, search=search)
 
     async def submit_draft(
         self, user: User, draft_id: uuid.UUID, reason: str | None = None

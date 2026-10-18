@@ -715,7 +715,10 @@ app.add_middleware(
     # That silently broke the whole point of the id: it is the key the operator pastes
     # into /governance/request-failures?request_id=... to find the traceback for the
     # failure a user just reported. A header the client cannot read cannot be reported.
-    expose_headers=["X-Request-ID", "Retry-After"],
+    # X-Total-Count for the same reason: the pending-drafts queue reports its authorized
+    # total there so a client can page, and the frontend is a different origin. Omitted,
+    # the paging control has no idea how many pages exist.
+    expose_headers=["X-Request-ID", "Retry-After", "X-Total-Count"],
 )
 
 

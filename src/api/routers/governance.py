@@ -402,14 +402,46 @@ async def verify_review_deadlines(
 
 @router.get("/pending-drafts")
 async def list_pending_drafts(
+    response: Response,
     status: str | None = Query(None),
+    limit: int = Query(
+        GovernanceRepository.DRAFT_PAGE_LIMIT,
+        ge=1,
+        le=GovernanceRepository.DRAFT_PAGE_LIMIT,
+    ),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(None, max_length=200),
     current_user: User = Depends(require_permission("governance.read")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    """One page of the review queue, with the authorized total in `X-Total-Count`.
+
+    The body stays a bare JSON array. An envelope would have been tidier, but the
+    frontend reads this response as a list today and the two repositories do not deploy
+    together, so the total travels in a header instead of changing the shape. A caller
+    that sends no paging arguments gets what it always got: the newest 500.
+
+    The previous hard cap of 500 rows was not a page -- it was a silent truncation with
+    nothing reporting it. With more than 500 pending drafts the oldest appeared in NO tab
+    of the UI, and the count shown stayed at 500 however many were added. Oldest,
+    because the order is newest-first, which is exactly the set most likely to be stuck
+    and in need of attention.
+
+    `search` matches title, source reference and department, ignoring case and accents,
+    and applies to the whole queue rather than the rows already loaded in a browser. The
+    total in the header is the total of the rows it matches.
+    """
     gov_repo = GovernanceRepository(db)
     art_repo = ArticleRepository(db)
     service = GovernanceService(gov_repo, art_repo)
-    drafts = await service.list_drafts(current_user, status)
+    drafts = await service.list_drafts(
+        current_user, status, limit=limit, offset=offset, search=search
+    )
+    # Counted under the SAME authorization scope as the page: see
+    # GovernanceService._draft_queue_scope.
+    response.headers["X-Total-Count"] = str(
+        await service.count_drafts(current_user, status, search=search)
+    )
     return [
         _draft_response(draft, service, current_user, include_content=False)
         for draft in drafts
