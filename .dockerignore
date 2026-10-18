@@ -23,3 +23,19 @@ tests/
 docs/
 evaluation/
 *.log
+
+# Not read by anything inside a container. They changed on most commits, which invalidated the final
+# `COPY . .` layer for no reason (only the layer, but that layer is the one that is pushed every build).
+.github/
+infra/
+.dockerignore
+Dockerfile
+docker-compose*.yml
+trivy.yaml
+renovate.json
+release-please-config.json
+pytest.ini
+.venv/
+venv/
+node_modules/
+*.md

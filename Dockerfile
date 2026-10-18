@@ -6,61 +6,73 @@
 # (quynhonsemiconductor/ci .github/workflows/backend-deploy.yml) builds each service by passing
 # `build-target` against ONE Dockerfile and has no per-service dockerfile input.
 #
-# TWO RULES SHAPE THIS FILE, both learned the expensive way:
+# WHAT SHIPS, AND WHY THE IMAGES ARE SMALL (ECR bills per GB stored, per image):
 #
-#   1. Application code is copied LAST, per target. Docker invalidates every layer above
-#      a changed one, so anything large must sit below the thing that changes on every
-#      commit. `COPY . .` used to sit under the model bake, so each commit stored a fresh
-#      2.3 GB layer — 81.6 GB of ECR across 21 builds.
+#   1. A shipped image is: the base, ONE virtualenv, the embedding export, the application. Nothing that built
+#      them. Compilers, libpq-dev and poetry itself (and poetry's own ~40 dependencies) live in the build stages
+#      only: poetry used to be pip-installed into the same /usr/local the runtime copied wholesale.
+#   2. Each target carries only what it runs.
+#        migrator  main
+#        api       main + onnx    (embeds the search query with ONNX Runtime; extracts uploads)
+#        worker    main + onnx + ocr (paddle is ~1 GB and only the worker reads scanned files)
+#      The `ml` group (torch, sentence-transformers, transformers, scipy, scikit-learn: ~0.8 GB installed) is NOT
+#      installed. EMBEDDING_RUNTIME defaults to onnx and docs/embedding-runtime-onnx.md records that the ml group
+#      left the images; the Dockerfile had not caught up with that. The torch backend survives in a local checkout
+#      (`poetry install --with ml`); EMBEDDING_RUNTIME=torch in a shipped image raises a clear EmbeddingUnavailable.
+#   3. Every layer is written ONCE. A runtime stage that COPYs a venv and a later stage that COPYs a bigger venv
+#      over it keeps both in the image (a layer cannot delete what a lower layer holds): that was 434 MB of
+#      main-group libraries stored twice in api and worker. The targets now branch from a common base and each
+#      copies exactly one venv.
+#   4. The embedding export is downloaded in its own stage and only the two/three files the loader reads are
+#      copied out. hf_hub_download keeps a cache copy of every file AND the old RUN then copied it again, so the
+#      weights were stored twice (a 4.5 GB layer for 2.2 GB of weights).
 #
-#   2. Each target carries only what it runs. paddle is ~1 GB and only the worker extracts
-#      text from scanned files, so the OCR stack stops at the worker. The embedding stack
-#      (ONNX Runtime + weights) reaches BOTH api and worker, because EMBEDDING_MODEL is a local
-#      model and the api embeds the search query on every search — that is the deliberate
-#      cost of not sending text to a hosted embedder. The migrator gets neither.
+# TWO RULES SHAPE THE ORDER, both learned the expensive way:
 #
-#      The two do NOT carry the same weights. The worker writes every stored vector and so
-#      keeps the fp32 export; the api only embeds a question, and gets an int8 export ~4x
-#      smaller (see `embedding-int8`). Build the api with `--build-arg API_EMBEDDING=fp32`
-#      to get the fp32 export back.
+#   A. Application code is copied LAST, per target. Docker invalidates every layer above a changed one, so
+#      anything large must sit below the thing that changes on every commit. `COPY . .` used to sit under the
+#      model bake, so each commit stored a fresh 2.3 GB layer.
+#   B. The embedding stack (ONNX Runtime + weights) reaches BOTH api and worker, because EMBEDDING_MODEL is a
+#      local model and the api embeds the search query on every search. The migrator gets neither.
 #
 # Build:
 #   docker build --target api      -t qnsc-kb-api .
 #   docker build --target worker   -t qnsc-kb-worker .
 #   docker build --target migrator -t qnsc-kb-migrator .
 #
-# The embedding export is baked by default and SHOULD be: the ONNX loader reads it from
-# disk and has no runtime download path, so an unbaked image cannot embed at all — it
-# serves /health and then falls back to keyword-only search on every query. Pass
-# BAKE_EMBEDDING_MODEL=false only where that is intended, i.e. CI proving the image
-# builds. The arg used to be documented as BAKE_EMBEDDING_ONNX, which this file never
-# declared, so the flag silently did nothing wherever it was passed.
+# The embedding export is baked by default and SHOULD be: the ONNX loader reads it from disk and has no runtime
+# download path, so an unbaked image cannot embed at all - it serves /health and then falls back to keyword-only
+# search on every query. Pass BAKE_EMBEDDING_MODEL=false only where that is intended, i.e. CI proving the image
+# builds.
 
-# Build args that must exist before the first FROM, either because a FROM line uses them or
-# because more than one stage needs the same default.
-#
-# EMBEDDING_MODEL is declared HERE, once, with its default, and re-declared WITHOUT a default
-# in each stage that reads it. Two defaults would be two places to forget when the model
-# changes, and tests/unit/test_embedding_config_matches_image.py pins this line against the
-# Terraform and the code default.
+# The model, named ONCE; stages redeclare `ARG EMBEDDING_MODEL` without a default and inherit this one.
 ARG EMBEDDING_MODEL=intfloat/multilingual-e5-large-instruct
 
-# Which export the api image serves queries from: `int8` (default) or `fp32`. The deploy
-# pipeline passes no build args, so the default IS production. Rolling back is a rebuild with
-# `fp32`, not a code change.
+# The commit of that model repo the build downloads. A moving branch would let the Hub's owner change the weights
+# under a corpus that is already embedded with the old ones, and nothing would raise: the vectors would just stop
+# matching. Bump it deliberately, with the model.
+ARG EMBEDDING_REVISION=274baa43b0e13e37fafa6428dbc7938e62e5c439
+
+# Which export the api image serves queries from: `int8` (default) or `fp32`. The deploy pipeline passes no build
+# args, so the default IS production. Rolling back is a rebuild with `fp32`, not a code change. The worker always
+# writes fp32 vectors (see scripts/quantize_embedding.py for why the split is safe only while it stays a split).
 ARG API_EMBEDDING=int8
 
 # ---------------------------------------------------------------------------
-# deps — the runtime dependency set every target shares. build-essential and libpq-dev
-# stay here and never reach a shipped image.
-#
-# 3.13, NOT 3.14 — and this is a ceiling, not a lag. paddlepaddle 3.3.1 publishes
-# cp39 through cp313 and no cp314, so the worker target (the only one carrying OCR)
-# cannot resolve its dependency set on 3.14 at all: `poetry install --only main,ml,ocr`
-# fails outright. The bump to 3.14-slim went in anyway and backend-ci has been failing
-# on main since. Raise this only once paddlepaddle ships a cp314 wheel.
+# python-base - the one place the interpreter image is named, pinned by digest so a rebuild cannot change it
+# underneath us (Renovate keeps the digest current). 3.13, NOT 3.14 - and this is a ceiling, not a lag.
+# paddlepaddle 3.3.1 publishes cp39 through cp313 and no cp314, so the worker target cannot resolve its dependency
+# set on 3.14 at all. Raise this only once paddlepaddle ships a cp314 wheel.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim AS deps
+FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS python-base
+
+# ---------------------------------------------------------------------------
+# builder - compilers and poetry. Never shipped.
+#
+# poetry gets its own venv (/opt/poetry) and installs INTO /opt/venv through VIRTUAL_ENV, so none of poetry's
+# dependencies end up in the environment that ships.
+# ---------------------------------------------------------------------------
+FROM python-base AS builder
 
 WORKDIR /app
 
@@ -69,235 +81,70 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    POETRY_VIRTUALENVS_CREATE=false \
+    POETRY_NO_INTERACTION=1
+
+RUN python -m venv /opt/poetry && \
+    /opt/poetry/bin/pip install --no-cache-dir poetry && \
+    python -m venv /opt/venv
+
 COPY pyproject.toml poetry.lock ./
-RUN pip install --no-cache-dir poetry && \
-    poetry config virtualenvs.create false && \
-    poetry install --no-root --only main
+
+# `--only` is an exhaustive list, so each target names EVERY group it needs: `--only main,ocr` would resolve
+# without onnx, and the worker would ship paddle and no embedding runtime.
+
+# migrator
+FROM builder AS deps
+RUN /opt/poetry/bin/poetry install --no-root --only main
+
+# api: ONNX Runtime + tokenizers. Not optional in practice: the api embeds the search query in-process, and the
+# failure without it is a lazy import inside the model singleton, invisible until the first search.
+FROM builder AS deps-onnx
+RUN /opt/poetry/bin/poetry install --no-root --only main,onnx
+
+# worker: the same, plus OCR. src/domain/source_extraction.py imports paddle INSIDE the functions that use it, so
+# an image without it serves every other path and fails loudly only if asked to OCR - which the api never is.
+FROM builder AS deps-onnx-ocr
+RUN /opt/poetry/bin/poetry install --no-root --only main,onnx,ocr
 
 # ---------------------------------------------------------------------------
-# deps-ml — the same, plus ONNX Runtime and Transformers. api and worker.
-#
-# Not optional in practice: EMBEDDING_MODEL defaults to intfloat/multilingual-e5-small
-# (src/core/config.py), and src/lib/embeddings/__init__.py loads it in-process. Without
-# this group the api answers /health and then raises on the first search, because the
-# failure is a lazy import inside the model singleton rather than anything visible at
-# startup.
+# hub - huggingface_hub and nothing else, so downloading the 2.2 GB export does not depend on the application's
+# lockfile: a poetry.lock change re-runs the builder stages, not this one. Pinned to the version poetry.lock
+# resolves, because this stage is outside it.
 # ---------------------------------------------------------------------------
-FROM deps AS deps-ml
+FROM python-base AS hub
 
-# `--only main,ml`, NOT `--only main --with ml`. `--only` is an exhaustive list, so
-# combining the two silently installs main alone.
-RUN poetry install --no-root --only main,ml
+RUN pip install --no-cache-dir "huggingface_hub==1.27.0"
 
 # ---------------------------------------------------------------------------
-# deps-ml-ocr — the same again, plus the OCR stack. Worker only.
+# model - the fp32 embedding export, downloaded where its cache is thrown away. The WORKER's, and the api's when
+# built with API_EMBEDDING=fp32.
 #
-# src/domain/source_extraction.py imports paddle INSIDE the functions that use it, so an
-# image without it serves every other path normally and fails loudly only if asked to
-# OCR — which the api never is.
+# The loader (src/lib/embeddings/local_onnx.py) reads EMBEDDING_ONNX_DIR and wants model.onnx and tokenizer.json,
+# plus model.onnx_data when the model's fp32 graph exceeds protobuf's 2 GB limit (true for
+# multilingual-e5-large-instruct). The model publishes its own ONNX export, so no optimum step and no torch.
+#
+# fp32, NOT a qint8 variant, for everything that WRITES vectors: quantisation moves them (cosine 0.972-0.987 against
+# the reference in this repo's parity gate), and a corpus embedded slightly off the space its queries are embedded in
+# degrades retrieval silently. The api alone serves queries from int8 (embedding-int8 below).
+#
+# HF_HOME points at /tmp so the Hub cache (a second copy of every file) stays in this stage and is not shipped.
+# File mtimes are set to the epoch so the COPY layer has the same digest on every rebuild: registry layers are
+# content-addressed, and an unchanged 2.2 GB layer should be stored once, not once per build.
+#
+# NOTE for anyone editing the python -c: it collapses every backslash-continued line into ONE logical line, so only
+# constructs valid as a single line survive (list comprehensions yes; try/except or an `if:` block no).
 # ---------------------------------------------------------------------------
-FROM deps-ml AS deps-ml-ocr
-
-# Same rule as above, and the list must name EVERY group the worker needs, not just the
-# one being added: `--only main,ocr` here resolves without ml, so the worker would ship
-# paddle and no ONNX embedding runtime and fail on the first chunk it tried to embed.
-RUN poetry install --no-root --only main,ml,ocr
-
-# ---------------------------------------------------------------------------
-# runtime — common base. NO application code: see rule 1 above.
-# ---------------------------------------------------------------------------
-# Kept in step with the deps stage above, including its 3.13 ceiling.
-FROM python:3.13-slim AS runtime
-
-# Debian security updates for the base image's own packages, applied in the stage every
-# scanned stage derives from (api, worker, migrator).
-#
-# Trivy's CRITICAL gate blocks on base-image CVEs, not just ours: run 34751584705 failed
-# on three perl-base advisories (CVE-2026-13221, CVE-2026-8376, CVE-2026-42496) fixed in
-# 5.40.1-6+deb13u1, with zero findings in our Python dependencies. python:3.13-slim ships
-# whatever Debian had at ITS build time, so this recurs whenever an advisory lands before
-# the upstream tag is rebuilt — a base image bump cannot be the fix.
-#
-# `upgrade`, not `dist-upgrade`: security patches within the pinned Debian release only,
-# never a release upgrade that could swap out the interpreter this stage is built around.
-RUN apt-get update && \
-    apt-get upgrade -y --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    # /app must be importable, not merely the working directory. Running a script BY
-    # PATH (`python scripts/bootstrap_db_role.py`) puts /app/scripts on sys.path — not
-    # /app — so `import src.core.config` raises ModuleNotFoundError. uvicorn and celery
-    # hide this because they import by module name from the CWD, so the failure appeared
-    # only in the migrator, only once deployed.
-    PYTHONPATH=/app
-
-# Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
-# The interpreter version lives in the FROM tag, which dependabot bumps on its own;
-# a hardcoded path silently stops matching it. That is exactly what happened when the
-# base moved to 3.14 while these lines still said 3.11 — the build died on
-# "/usr/local/lib/python3.11/site-packages: not found" and main has been red since.
-# Both stages derive from the same base image, so this overlays like-for-like.
-COPY --from=deps /usr/local/lib/ /usr/local/lib/
-COPY --from=deps /usr/local/bin /usr/local/bin
-
-RUN useradd --create-home --uid 10001 appuser && \
-    mkdir -p /app/storage/sources /app/storage/connectors && \
-    chown -R appuser:appuser /app
-
-# ---------------------------------------------------------------------------
-# runtime-ml-base — what the api and the worker share: the runtime stage plus the Python
-# libraries (ONNX Runtime, Transformers). NO weights; each branch below adds its own, the
-# worker's fp32 export in `runtime-ml` and the api's int8 export in `runtime-ml-int8`. The
-# notes that follow are about the weights and apply to both.
-#
-# BAKING THE ONNX ASSETS IS THE POINT. The runtime downloads them on first use, so an
-# unbaked image pays ~2.3 GB and several minutes on the first search AFTER the task is
-# already serving traffic — repeatedly, on every replacement. Baked, it is paid once at
-# build time. Local builds pass BAKE_EMBEDDING_MODEL=false and use the developer's own
-# cache instead of storing another copy per rebuild.
-#
-# HF_HOME is set for BOTH build and run so the two agree on where the weights are; a
-# mismatch silently re-downloads at runtime and looks like the bake never happened. It
-# sits under /opt rather than the home directory because the deploy may run this as a
-# different uid.
-#
-# This layer is above every `COPY . .` on purpose — see rule 1.
-# ---------------------------------------------------------------------------
-FROM runtime AS runtime-ml-base
-
-# Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
-# The interpreter version lives in the FROM tag, which dependabot bumps on its own;
-# a hardcoded path silently stops matching it. That is exactly what happened when the
-# base moved to 3.14 while these lines still said 3.11 — the build died on
-# "/usr/local/lib/python3.11/site-packages: not found" and main has been red since.
-# Both stages derive from the same base image, so this overlays like-for-like.
-COPY --from=deps-ml /usr/local/lib/ /usr/local/lib/
-COPY --from=deps-ml /usr/local/bin /usr/local/bin
-
-ENV HF_HOME=/opt/huggingface
-ENV EMBEDDING_ONNX_DIR=/opt/embedding-onnx
-
-# ---------------------------------------------------------------------------
-# embedding-int8 — BUILD ONLY, never shipped. Produces the export the api serves search
-# queries from; /opt/embedding-int8 is the one directory the api image copies out.
-#
-# Built on deps-ml so onnxruntime, tokenizers and huggingface_hub are the versions in
-# poetry.lock, which is what the shipped image will load the result with. `onnx` is the
-# one extra: it rewrites the graph and is not a runtime dependency, so it is installed
-# here and goes nowhere. Pinned because it is not in the lock.
-#
-# scripts/quantize_embedding.py explains the recipe and why it is this one, and fails the
-# build when the export is too big or drifts too far from fp32 — a degraded query vector
-# raises nothing at runtime, so the build is the only place that can refuse it.
-#
-# BAKE_EMBEDDING_MODEL=false leaves the directory empty and downloads nothing: that is what
-# CI's image build passes, so CI proves the stage graph builds but NOT the quantisation
-# itself. That runs only where the weights are actually baked.
-#
-# Editing scripts/quantize_embedding.py re-runs this stage and re-downloads ~2.3 GB;
-# the app code never invalidates it.
-# ---------------------------------------------------------------------------
-FROM deps-ml AS embedding-int8
+FROM hub AS model
 
 ARG BAKE_EMBEDDING_MODEL=true
 ARG EMBEDDING_MODEL
-ENV HF_HOME=/opt/huggingface
+ARG EMBEDDING_REVISION
+ENV HF_HOME=/tmp/hf \
+    EMBEDDING_ONNX_DIR=/opt/embedding-export
 
-RUN pip install --no-cache-dir "onnx==1.23.2"
-
-COPY scripts/quantize_embedding.py /opt/quantize_embedding.py
-
-# Same Hub-speed levers and optional token secret as the fp32 bake below; see the notes there.
-RUN --mount=type=secret,id=hf_token,required=false \
-    mkdir -p /opt/embedding-int8 && \
-    if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
-        export HF_XET_HIGH_PERFORMANCE=1 && \
-        if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi && \
-        python /opt/quantize_embedding.py \
-            --download "$EMBEDDING_MODEL" \
-            --fp32-dir /opt/embedding-fp32 \
-            --out-dir /opt/embedding-int8; \
-    fi
-
-# ---------------------------------------------------------------------------
-# runtime-ml-int8 — the api's base by default: the shared libraries plus the int8 export.
-# ---------------------------------------------------------------------------
-FROM runtime-ml-base AS runtime-ml-int8
-
-COPY --from=embedding-int8 --chown=appuser:appuser /opt/embedding-int8 /opt/embedding-onnx
-
-# ---------------------------------------------------------------------------
-# runtime-ml — the shared libraries plus the fp32 export. The worker's base, and the api's
-# when built with API_EMBEDDING=fp32.
-# ---------------------------------------------------------------------------
-FROM runtime-ml-base AS runtime-ml
-
-ARG BAKE_EMBEDDING_MODEL=true
-ARG EMBEDDING_MODEL
-
-# Materialise the export where the loader actually looks. This used to snapshot `onnx/*`
-# into the HF cache, but src/lib/embeddings/local_onnx.py reads EMBEDDING_ONNX_DIR and
-# wants exactly two files, model.onnx and tokenizer.json, so nothing ever bridged the
-# two and /opt/embedding-onnx did not exist in any image. That is why every search
-# logged "Error generating local BGE embedding; continuing with keyword search".
-#
-# The model publishes its own ONNX export, so no optimum-cli step and no torch is needed
-# anywhere — the build downloads two (sometimes three, see below) files.
-#
-# fp32 (`onnx/model.onnx`), NOT one of the qint8 variants, even though those are smaller
-# and faster on CPU. Quantisation moves the vectors: this repo's own parity gate measured
-# int8 at cosine 0.972-0.987 against the reference, and a query embedded slightly off the
-# space its documents were embedded in degrades retrieval silently. Consistency wins.
-#
-# `onnx/model.onnx_data`: fetched ONLY IF `list_repo_files` says the repo actually has
-# it. A model whose fp32 ONNX graph exceeds protobuf's 2GB limit — true for
-# multilingual-e5-large-instruct, NOT true for the smaller e5-small this previously baked
-# — splits its weights into this sibling file, which onnxruntime loads automatically as
-# long as it sits next to model.onnx under the same name. Missing it is not a load-time
-# error you would immediately connect to this cause: onnxruntime fails deep inside
-# InferenceSession() with a path error naming the missing external-data file, not
-# anything mentioning the Dockerfile or the bake step.
-#
-# NOTE for anyone editing this RUN line: `python -c` collapses every backslash-continued
-# line here into ONE logical line before Python ever parses it, so only constructs valid
-# as a single line survive -- a list comprehension (as both statements below use, the
-# second with an `if` FILTER clause standing in for a conditional) works; `try/except` or
-# an `if:` block does not, because Python's grammar will not let a compound statement
-# follow a `;`-separated simple statement on the same logical line. An earlier version of
-# this line used try/except and failed the build with a SyntaxError only once
-# BAKE_EMBEDDING_MODEL actually ran a model through it.
-# Two speed levers on top of the download itself, neither of which touches WHAT gets
-# downloaded or WHEN this layer reruns (that is a build-cache question -- see this repo's
-# CI, which sidesteps the whole bake with BAKE_EMBEDDING_MODEL=false and caches everything
-# else via `type=gha`; the deploy pipeline's own cache policy is decided in the shared
-# `quynhonsemiconductor/ci` reusable workflow, not here):
-#
-# - `HF_XET_HIGH_PERFORMANCE=1`: huggingface_hub 1.x already transfers through Xet (the
-#   `hf_xet` package below is pulled in as its own dependency, no install step needed) --
-#   this flag turns on Xet's more aggressive concurrency/chunking rather than switching on
-#   acceleration that was otherwise off. `HF_HUB_ENABLE_HF_TRANSFER` -- the older lever,
-#   worth knowing about only so nobody re-adds it -- is a no-op on this version: it warns
-#   "hf_transfer is not used anymore" and does nothing, because Xet replaced it.
-#
-# - `HF_TOKEN` via a build secret, not an ARG or ENV: a secret mount exists only for this
-#   RUN's own execution and is never written to a layer or `docker history`; an ARG is
-#   baked into image metadata forever. `required=false` so a build with nothing passed
-#   (every local build, and CI's BAKE_EMBEDDING_MODEL=false build) still succeeds exactly
-#   as before -- anonymous download of a public model.
-#
-#   Measured in this repo (a real build, not a claim from documentation): anonymous, no
-#   HF_TOKEN, no HF_XET_HIGH_PERFORMANCE — 61s for the 2.2 GB export. The Hub's own
-#   download warning states unauthenticated requests get lower rate limits AND SLOWER
-#   TRANSFER under Xet specifically (unlike the old CDN-blob path, where a public repo's
-#   bytes were not gated behind auth at all) -- so unlike a stale assumption carried over
-#   from that older mechanism, a token is worth passing here for real, not just as
-#   rate-limit insurance. To use it: `docker build --secret id=hf_token,env=HF_TOKEN ...`
-#   locally, or a `secrets:` entry on whatever `docker/build-push-action` step actually
-#   builds the deploy image (that step lives in `quynhonsemiconductor/ci`, not this repo).
 RUN --mount=type=secret,id=hf_token,required=false \
     mkdir -p "$HF_HOME" "$EMBEDDING_ONNX_DIR" && \
     if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
@@ -307,85 +154,120 @@ RUN --mount=type=secret,id=hf_token,required=false \
 from huggingface_hub import hf_hub_download, list_repo_files; \
 import shutil, os; \
 target = os.environ['EMBEDDING_ONNX_DIR']; \
-[shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', name), os.path.join(target, os.path.basename(name))) \
+[shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', name, revision='${EMBEDDING_REVISION}'), os.path.join(target, os.path.basename(name))) \
  for name in ('onnx/model.onnx', 'tokenizer.json')]; \
-[shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', 'onnx/model.onnx_data'), os.path.join(target, 'model.onnx_data')) \
- for _ in [0] if 'onnx/model.onnx_data' in list_repo_files('${EMBEDDING_MODEL}')]"; \
+[shutil.copyfile(hf_hub_download('${EMBEDDING_MODEL}', 'onnx/model.onnx_data', revision='${EMBEDDING_REVISION}'), os.path.join(target, 'model.onnx_data')) \
+ for _ in [0] if 'onnx/model.onnx_data' in list_repo_files('${EMBEDDING_MODEL}', revision='${EMBEDDING_REVISION}')]"; \
     fi && \
-    chown -R appuser:appuser "$HF_HOME" "$EMBEDDING_ONNX_DIR"
+    rm -rf "$HF_HOME" && \
+    find "$EMBEDDING_ONNX_DIR" -exec touch -h -d @0 {} +
 
 # ---------------------------------------------------------------------------
-# runtime-ml-ocr — the worker's base: the above, plus paddle.
-# ---------------------------------------------------------------------------
-FROM runtime-ml AS runtime-ml-ocr
-
-# Copied as the whole lib tree, not as /usr/local/lib/python3.NN/site-packages.
-# The interpreter version lives in the FROM tag, which dependabot bumps on its own;
-# a hardcoded path silently stops matching it. That is exactly what happened when the
-# base moved to 3.14 while these lines still said 3.11 — the build died on
-# "/usr/local/lib/python3.11/site-packages: not found" and main has been red since.
-# Both stages derive from the same base image, so this overlays like-for-like.
-COPY --from=deps-ml-ocr /usr/local/lib/ /usr/local/lib/
-COPY --from=deps-ml-ocr /usr/local/bin /usr/local/bin
-
-# paddle links against the GNU OpenMP runtime, and paddleocr's opencv against the X11
-# and GL client libraries. None of them are Python packages, so copying site-packages
-# out of the deps stage does not bring them: the deps stage got them from
-# build-essential, which deliberately never reaches a shipped image.
+# embedding-int8 - the api's export: the same model quantised, so a search query is embedded in ~55 ms and ~700 MB
+# instead of ~200 ms and ~1.6 GB. The api embeds ONE short question per search; the worker embeds every chunk that
+# is stored, and an int8 vector written into the same column as fp32 ones would degrade retrieval without raising.
+# So this stage reaches the api only, and nothing here reaches the worker.
 #
-# The result was an image that BUILT and then raised
-# `ImportError: libgomp.so.1: cannot open shared object file` the first time anything
-# imported paddle. src/domain/source_extraction.py imports it lazily, so the worker
-# started clean and only failed on the first scanned document — in production, where
-# a build-only CI job could never have seen it.
-RUN apt-get update && apt-get install -y --no-install-recommends     libgomp1     libglib2.0-0     libgl1     && rm -rf /var/lib/apt/lists/*
+# FROM deps-onnx, not a torch-carrying stage: quantising needs onnxruntime (quantize_dynamic), tokenizers, numpy
+# and huggingface_hub, all in the onnx group, plus `onnx` itself, installed here and discarded with the stage. The
+# download and the quantisation run only when baking is on (CI builds with BAKE_EMBEDDING_MODEL=false).
+# ---------------------------------------------------------------------------
+FROM deps-onnx AS embedding-int8
+
+ARG BAKE_EMBEDDING_MODEL=true
+ARG EMBEDDING_MODEL
+ARG EMBEDDING_REVISION
+ENV HF_HOME=/tmp/hf
+
+RUN pip install --no-cache-dir "onnx==1.23.2"
+
+COPY scripts/quantize_embedding.py /opt/quantize_embedding.py
+
+# Same Hub-speed lever and optional token secret as the fp32 download above.
+RUN --mount=type=secret,id=hf_token,required=false \
+    mkdir -p /opt/embedding-export && \
+    if [ "$BAKE_EMBEDDING_MODEL" = "true" ]; then \
+        export HF_XET_HIGH_PERFORMANCE=1 && \
+        if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi && \
+        python /opt/quantize_embedding.py \
+            --download "$EMBEDDING_MODEL" \
+            --revision "$EMBEDDING_REVISION" \
+            --fp32-dir /opt/embedding-fp32 \
+            --out-dir /opt/embedding-export; \
+    fi && \
+    rm -rf "$HF_HOME" /opt/embedding-fp32 && \
+    find /opt/embedding-export -exec touch -h -d @0 {} +
+
+# embedding-fp32 is the model stage under the name the api's switch uses; api-embedding is whichever one
+# API_EMBEDDING selects. COPY --from cannot expand a build arg, FROM can.
+FROM model AS embedding-fp32
+
+FROM embedding-${API_EMBEDDING} AS api-embedding
 
 # ---------------------------------------------------------------------------
-# runtime-ml-fp32 — an alias, so `api` can pick its base by name: `runtime-ml-${API_EMBEDDING}`
-# resolves to this one or to `runtime-ml-int8`. It adds nothing of its own.
+# runtime-base - the shipped base. NO libraries and NO application code.
+#
+# Debian security updates for the base image's own packages, applied in the stage every shipped image derives
+# from. Trivy's CRITICAL gate blocks on base-image CVEs, not just ours (run 34751584705 failed on three perl-base
+# advisories with zero findings in our Python dependencies); python:3.13-slim ships whatever Debian had at ITS
+# build time, so this recurs whenever an advisory lands before the upstream tag is rebuilt.
+# `upgrade`, not `dist-upgrade`: patches within the pinned release only.
 # ---------------------------------------------------------------------------
-FROM runtime-ml AS runtime-ml-fp32
+FROM python-base AS runtime-base
+
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# /opt/venv/bin first: uvicorn, celery and alembic are console scripts of the venv, and `python` must be the venv's.
+# HF_HOME is where the compose file mounts a developer's own model cache; the baked export is EMBEDDING_ONNX_DIR.
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/opt/huggingface \
+    EMBEDDING_ONNX_DIR=/opt/embedding-onnx \
+    # /app must be importable, not merely the working directory. Running a script BY PATH
+    # (`python scripts/bootstrap_db_role.py`) puts /app/scripts on sys.path - not /app - so
+    # `import src.core.config` raises ModuleNotFoundError. uvicorn and celery hide this because they import by
+    # module name from the CWD, so the failure appeared only in the migrator, only once deployed.
+    PYTHONPATH=/app
+
+RUN useradd --create-home --uid 10001 appuser && \
+    mkdir -p /app/storage/sources /app/storage/connectors "$HF_HOME" && \
+    chown -R appuser:appuser /app "$HF_HOME"
 
 # ---------------------------------------------------------------------------
-# api — FastAPI under uvicorn.
-#
-# Carries the embedding stack but NOT OCR: main.py preloads the model at startup so no
-# request pays for loading it, and the api never extracts text from a scanned file.
-#
-# The weights are the int8 export unless API_EMBEDDING=fp32. That is safe only because the
-# api embeds QUERIES and the worker writes every stored vector (JOB_MODE=celery in every
-# deployed environment): an int8 query against fp32 chunks moves each score by ~0.002 on
-# average. An api that indexed would write int8 vectors beside fp32 ones, so if the api ever
-# starts indexing in-process, build it with API_EMBEDDING=fp32.
-#
-# Deliberately NO entrypoint running Alembic. That is right for a single-VPS compose and
-# wrong for ECS, where every task would run it — a deploy or a scale-out firing N
-# concurrent migrations against one database. Migrations belong to the `migrator` target,
-# which the pipeline runs once, before rolling any service.
+# targets. Order inside each: libraries, then the (identical-digest) model, then code last (rule A).
 # ---------------------------------------------------------------------------
-FROM runtime-ml-${API_EMBEDDING} AS api
+FROM runtime-base AS api
 
+COPY --from=deps-onnx /opt/venv /opt/venv
+COPY --from=api-embedding /opt/embedding-export /opt/embedding-onnx
 COPY --chown=appuser:appuser . .
 
 USER appuser
 
 EXPOSE 8000
 
-# Liveness only — /health/live answers 200 without touching a dependency. Never point
-# this at /health/ready: a dependency-coupled probe here restarts the task whenever the
-# database or cache blips, turning a hiccup into an outage. Readiness is checked once,
-# after the roll, by the deploy pipeline.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"
 
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
-# ---------------------------------------------------------------------------
-# worker — Celery worker, and the image `celery beat` runs from with its own command.
-# Beat is a singleton and must never be scaled past one replica.
-# ---------------------------------------------------------------------------
-FROM runtime-ml-ocr AS worker
+FROM runtime-base AS worker
 
+# paddle's native dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    libglib2.0-0 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=deps-onnx-ocr /opt/venv /opt/venv
+COPY --from=model /opt/embedding-export /opt/embedding-onnx
 COPY --chown=appuser:appuser . .
 
 USER appuser
@@ -415,14 +297,9 @@ CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
      "--concurrency=1", \
      "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
 
-# ---------------------------------------------------------------------------
-# migrator — one-shot: ensure the least-privilege app role exists, then migrate.
-#
-# Built from `runtime`: migrations/env.py imports src.models for target_metadata and
-# nothing that touches embeddings or OCR.
-# ---------------------------------------------------------------------------
-FROM runtime AS migrator
+FROM runtime-base AS migrator
 
+COPY --from=deps /opt/venv /opt/venv
 COPY --chown=appuser:appuser . .
 
 USER appuser

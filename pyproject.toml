@@ -73,15 +73,13 @@ optional = true
 paddlepaddle = "^3.0.0"
 paddleocr = "^3.0.0"
 
-# Local embedding models. Optional to poetry, but REQUIRED in practice: the default
-# EMBEDDING_MODEL (BAAI/bge-m3) is loaded in-process, by the worker to embed chunks and by
-# the API to embed the search query. Both the api and worker image targets install it, and
-# a local checkout needs it too:
+# LOCAL ONLY. torch, sentence-transformers and transformers: the reference implementation the
+# ONNX parity gate (tests/unit/test_embedding_backends.py) compares against, the torch rollback
+# backend (EMBEDDING_RUNTIME=torch) and the optional cross-encoder reranker. NO image installs
+# it: the shipped images embed with ONNX Runtime (the `onnx` group below) and are ~0.8 GB smaller
+# without it. A rollback to torch is an older image tag, not a flag. In a checkout:
 #
 #   poetry install --with ml
-#
-# It stays a group rather than a main dependency so the migrator image — which touches
-# neither embeddings nor OCR — is not made to carry torch.
 [tool.poetry.group.ml]
 optional = true
 

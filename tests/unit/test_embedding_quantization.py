@@ -108,14 +108,13 @@ def test_every_stage_reference_resolves_to_an_earlier_stage(api_embedding):
 def test_the_api_serves_int8_by_default():
     api = _chain("api")
     assert "embedding-int8" in api
-    assert "runtime-ml-int8" in api
-    assert "runtime-ml" not in api, "the api would carry the fp32 export as well, and gain nothing"
+    assert "model" not in api and "embedding-fp32" not in api, "the api would carry the fp32 export as well, and gain nothing"
 
 
 def test_the_api_can_fall_back_to_fp32():
     """Rollback is a rebuild with this arg; it must keep working."""
     api = _chain("api", API_EMBEDDING="fp32")
-    assert "runtime-ml" in api
+    assert "embedding-fp32" in api and "model" in api
     assert "embedding-int8" not in api
 
 
@@ -123,14 +122,19 @@ def test_the_api_can_fall_back_to_fp32():
 def test_the_worker_always_writes_fp32_vectors(api_embedding):
     """The switch is named API_EMBEDDING because it must never reach the worker."""
     worker = _chain("worker", API_EMBEDDING=api_embedding)
-    assert "runtime-ml" in worker
-    assert "embedding-int8" not in worker
-    assert "runtime-ml-int8" not in worker
+    assert "model" in worker
+    assert not {"embedding-int8", "api-embedding", "embedding-fp32"} & worker
+
+
+def test_the_quantise_stage_needs_no_torch():
+    """Quantising needs onnxruntime, tokenizers, numpy and huggingface_hub: the onnx group, not the ml group."""
+    assert "deps-onnx" in _chain("embedding-int8")
+    assert not {"deps-ml", "deps-ml-ocr"} & _chain("embedding-int8")
 
 
 def test_the_migrator_carries_no_embedding_weights():
     migrator = _chain("migrator")
-    assert not {"embedding-int8", "runtime-ml", "runtime-ml-int8", "runtime-ml-base"} & migrator
+    assert not {"embedding-int8", "embedding-fp32", "api-embedding", "model", "hub"} & migrator
 
 
 def test_the_embedding_model_default_is_declared_once_before_the_first_from():
