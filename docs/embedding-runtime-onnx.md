@@ -146,9 +146,12 @@ that is stored. So the api image bakes an int8 export (`scripts/quantize_embeddi
 so there is no re-embed and no `EMBEDDING_VERSION` bump. Rollback is rebuilding the api with
 `--build-arg API_EMBEDDING=fp32`.
 
-Measured with one thread as in the deployed tasks, on a 12-thread AMD laptop running
-Windows — not on Fargate, so absolute times and RSS are indicative; the ratios are the
-finding. The shipped recipe and fp32 were run on the onnxruntime in `poetry.lock` (1.29.0);
+Measured on a 12-thread AMD laptop running Windows — not on Fargate, so absolute times and
+RSS are indicative; the ratios are the finding. The table below is ONE thread. **The deployed
+tasks run TWO**: `EMBEDDING_ONNX_THREADS` defaults to 2 in `config.py` and Terraform does not
+set it. This section first said one thread was "as in the deployed tasks"; that was wrong,
+and the two-thread numbers are given under the table. The shipped recipe and fp32 were run
+on the onnxruntime in `poetry.lock` (1.29.0);
 the MatMul-only and int4 rows come from an earlier run of the same session on 1.31.0, and
 the fp32 times span both:
 
@@ -159,6 +162,15 @@ int8, MatMul only          1,331 MB     701 MB      -          ~0.9 s           
 int8 + Gather, per-channel
   + reduce_range (this PR)   562 MB     700 MB     55 ms        ~1.0 s                0.995
 int4 (MatMulNBits)           447 MB     600 MB    217 ms        2.5 s                 0.981
+```
+
+The same fp32 and shipped-recipe exports at **two threads**, the deployed setting (onnxruntime
+1.29.0, same machine). The ratios hold, so the conclusions above do not change:
+
+```
+                         RSS      one query   one 512-token chunk
+fp32                   1,619 MB     87 ms          1.30 s
+int8 (this change)       701 MB     30 ms          0.48 s      (2.9x and 2.7x faster)
 ```
 
 - **The "roughly 600 MB" above was only reachable by quantising the embedding table too, and

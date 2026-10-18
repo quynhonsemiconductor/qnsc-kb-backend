@@ -9,7 +9,10 @@
 // It has no users. Both services sit at zero tasks, the cache does not exist, and the
 // database is stopped between weekly maintenance windows. That is a deliberate,
 // documented posture with an end date — not a half-finished environment — and it is
-// what keeps production at roughly $4/mo instead of ~$127 while nobody is using it.
+// what keeps production at roughly $4/mo instead of what it costs once it is serving. The
+// ~$127 that used to stand here predates sizing production the same as develop (see Sizing
+// below); that sync adds roughly $85/mo at go-live (an estimate from list prices, not a
+// bill) — re-estimate before go-live rather than trusting either number.
 //
 // Everything durable is ALREADY on: 30-day backups, deletion protection, a 30-day
 // secret recovery window, 90-day logs. Those cost little and are the settings that are
@@ -29,8 +32,8 @@
 //   3. worker = { min_count = 1 }              leave max_count at 1 — beat is a singleton
 //   4. remove idle_schedule entirely            (this also ARMS the sustained worker alarm, which exists
 //                                                only while idle_schedule is null)
-//   5. rds.instance_class → db.t4g.small at minimum; re-measure against the real corpus
-//      before settling, because the HNSW index is what grows
+//   5. rds.instance_class is already db.t4g.small, the same as develop; re-measure against
+//      the real corpus before settling, because the HNSW index is what grows
 //
 // (1) and (2) are coupled by the stack module's `cache_required_for_jobs` check: the
 // cache is the Celery broker, so tasks running without it do no background work at all.
@@ -120,28 +123,29 @@ module "stack" {
   tunnel_enabled = true
 
   // ── Sizing ─────────────────────────────────────────────────────────────────
-  // Larger than develop because production serves real queries, but the FLOORS are 0
-  // until go-live — see the checklist above. The numbers below are what one task costs
-  // when the floor is raised, not what is running today.
+  // THE SAME compute as develop — api and worker cpu/memory, and the database class — on
+  // purpose. Production has never run, so nothing here has been measured, and develop is the
+  // only environment these numbers come from (the evidence is in develop/main.tf). Sizing
+  // the two apart had production running numbers nobody had observed: the api at 1 vCPU
+  // while EMBEDDING_ONNX_THREADS defaults to 2 (config.py ties it to the task's cpu), and a
+  // db.t4g.micro that develop had already outgrown on the same schema.
+  // tests/unit/test_environments_share_one_shape.py pins these pairs equal, so change a
+  // number in both files or in neither.
+  //
+  // What stays different is policy, not size: the FLOORS are 0 until go-live (see the
+  // checklist above), the api stays OFF Spot, storage ceilings, and the durability settings
+  // below. When develop's api is re-sized from measured memory (it carries the int8 export
+  // now, so it is probably over-provisioned), re-size this one in the same change.
   //
   // The api stays OFF Spot even after go-live: a Spot interruption is a dropped request
   // and a broken response mid-answer. The worker takes Spot deliberately — Celery
   // redelivers an interrupted task, so an interruption costs time rather than work.
   api = {
-    // Raised to carry the ClamAV sidecar (256 CPU / 2048 MB carved out), leaving the
-    // api the 512/4096 it had before. NOTE: clamd is per TASK, so at max_count 6 this
-    // is up to 12 GB of duplicated signature database — the point at which one clamd
+    // NOTE: clamd is per TASK (256 CPU / 2048 MB carved out of each), so at max_count 6
+    // this is up to 12 GB of duplicated signature database — the point at which one clamd
     // behind Service Connect becomes the cheaper shape.
-    // The embedding model is local and the API loads it to embed the search query, so the
-    // api container needs room for it on top of clamd's 2048. This was originally sized
-    // for BAAI/bge-m3 (~2.27 GB of fp32 weights), which no image ever actually carried —
-    // it then ran e5-small/MiniLM (both far smaller), making this headroom generous
-    // rather than tight. multilingual-e5-large-instruct (see embedding_model below) is
-    // back in bge-m3's weight class (~2.24 GB fp32), so this sizing is right-sized again,
-    // not just generous — measure actual task memory after the swap before assuming
-    // there is still slack to shrink it.
-    cpu                = 1024
-    memory             = 6144
+    cpu                = 2048
+    memory             = 8192
     min_count          = 0
     max_count          = 6
     enable_autoscaling = false
@@ -154,10 +158,11 @@ module "stack" {
   // every scheduled job. Splitting beat into its own service is the prerequisite for
   // scaling the worker horizontally, and the stack module's validation enforces it.
   worker = {
-    // The worker loads the same model to embed chunks, alongside clamav (1024), beat
-    // (256) and PaddleOCR per scanned file.
-    cpu                = 2048
-    memory             = 6144
+    // The worker loads the model to embed chunks, alongside clamav (2048), beat (256) and
+    // PaddleOCR per scanned file. Develop raised it to this after 3 days of memory
+    // averaging 96.6% and peaking at 98%; see develop/main.tf.
+    cpu                = 4096
+    memory             = 8192
     min_count          = 0
     max_count          = 1
     enable_autoscaling = false
@@ -167,13 +172,14 @@ module "stack" {
   rds = {
     engine_version = "16"
 
-    // t4g.micro TODAY because the database is empty and stopped. This is the single
-    // most likely thing on this page to be wrong at go-live: migration 20260802_03
-    // builds an HNSW index, whose construction cost scales with the corpus, and 1 GB of
-    // RAM will not hold one for a real document set. Measure against real content and
-    // raise it — an under-sized instance shows up as ingestion timeouts, not as an
-    // obvious out-of-memory error.
-    instance_class           = "db.t4g.micro"
+    // db.t4g.small, the same as develop, where a t4g.micro was measured over three days at
+    // 102-178 MB FreeableMemory with a CPU credit balance that never rebuilt (see
+    // develop/main.tf). Still the single most likely thing on this page to be wrong at
+    // go-live: migration 20260802_03 builds an HNSW index, whose construction cost scales
+    // with the corpus, and 2 GB of RAM may not hold one for a real document set. Measure
+    // against real content and raise it — an under-sized instance shows up as ingestion
+    // timeouts, not as an obvious out-of-memory error.
+    instance_class           = "db.t4g.small"
     allocated_storage_gb     = 30
     max_allocated_storage_gb = 500
 
@@ -237,6 +243,9 @@ module "stack" {
   // so a mismatch returns nonsense rather than erroring.
   embedding_model   = "intfloat/multilingual-e5-large-instruct"
   embedding_version = "e5-large-instruct-v1"
+  // Stated rather than left to the module default, so the two environments cannot drift on
+  // it if that default ever moves. Same value develop sets.
+  embedding_runtime = "onnx"
 
   alarm_emails           = var.alarm_emails
   cloudflare_account_id  = var.cloudflare_account_id

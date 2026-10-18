@@ -375,9 +375,12 @@ variable "embedding_runtime" {
   default     = "onnx"
   description = <<-EOT
     HOW the embedding model executes — orthogonal to embedding_model. "onnx" runs the
-    weights on the fp32 ONNX export baked into the image; parity against the torch
-    reference was proven at cosine 1.000000 by tests/unit/test_embedding_backends.py,
-    and int8 was measured and rejected (0.908-0.987 against the gate's 0.999). The
+    ONNX export baked into the image: fp32 in the worker, which writes every stored
+    vector (parity against the torch reference was proven at cosine 1.000000 by
+    tests/unit/test_embedding_backends.py), and int8 in the api, which only embeds a
+    search query against those stored fp32 vectors — see docs/embedding-runtime-onnx.md
+    for why that split is safe and what was measured. int8 for the WORKER too stays
+    rejected: it would change every stored vector. The
     default is onnx because NO SHIPPED IMAGE INSTALLS THE ML GROUP — an environment
     that sets "torch" gets a clean EmbeddingUnavailable at load, since the torch
     backend now exists only in a local checkout with `poetry install --with ml`,
