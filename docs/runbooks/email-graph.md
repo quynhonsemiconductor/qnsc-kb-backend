@@ -11,7 +11,7 @@ prove it.
 | Shared mailbox | `noreply-kb-dev@qnsc.vn` | `noreply-kb@qnsc.vn` |
 | Entra app (a "Service app") | `KB Dev Service` | `KB Prod Service` |
 | Exchange management scope | `KB mail sender (develop)` -> the dev mailbox only | `KB mail sender (prod)` -> the prod mailbox only |
-| Mail credential (standalone secret) | `qnsc-kb/develop/mail-graph-certificate` | `qnsc-kb/prod/mail-graph-certificate` |
+| Mail credential (standalone secret) | `qnsc-kb/develop/mail-graph-certificate` | `qnsc-kb/production/mail-graph-certificate` |
 | Terraform | `infra/live/develop/variables.tf` | `infra/live/prod/variables.tf` |
 | Local | `EMAIL_PROVIDER=console` (the `.env.example` default): no mailbox, no app | |
 
@@ -146,7 +146,7 @@ copy in an encrypted location (the team password manager, or an encrypted disk i
 AWS, because AWS will not give it back. Do not rely on `shred` or `rm -P`: on APFS and SSDs they do not overwrite
 the blocks, so they give a false sense of having erased it. Keep the `.crt` and the expiry date. Each environment
 has **its own** pair and its own secret: develop's in `qnsc-kb/develop/mail-graph-certificate`, production's in
-`qnsc-kb/prod/mail-graph-certificate`.
+`qnsc-kb/production/mail-graph-certificate`.
 
 Break-glass: to read the value back, an administrator first deletes the secret's resource policy
 (`aws secretsmanager delete-resource-policy`); Terraform restores it on the next apply.
