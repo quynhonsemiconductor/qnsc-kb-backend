@@ -56,7 +56,7 @@ ARG API_EMBEDDING=int8
 #
 # 3.13, NOT 3.14 — and this is a ceiling, not a lag. paddlepaddle 3.3.1 publishes
 # cp39 through cp313 and no cp314, so the worker target (the only one carrying OCR)
-# cannot resolve its dependency set on 3.14 at all: `poetry install --only main,ml,ocr`
+# cannot resolve its dependency set on 3.14 at all: `poetry install --only main,onnx,ocr`
 # fails outright. The bump to 3.14-slim went in anyway and backend-ci has been failing
 # on main since. Raise this only once paddlepaddle ships a cp314 wheel.
 # ---------------------------------------------------------------------------
@@ -75,19 +75,32 @@ RUN pip install --no-cache-dir poetry && \
     poetry install --no-root --only main
 
 # ---------------------------------------------------------------------------
-# deps-ml — the same, plus ONNX Runtime and Transformers. api and worker.
+# deps-ml — the same, plus what the ONNX embedding runtime needs. api and worker.
+# (The stage keeps the name it had when it installed the `ml` group.)
 #
-# Not optional in practice: EMBEDDING_MODEL defaults to intfloat/multilingual-e5-small
-# (src/core/config.py), and src/lib/embeddings/__init__.py loads it in-process. Without
-# this group the api answers /health and then raises on the first search, because the
-# failure is a lazy import inside the model singleton rather than anything visible at
-# startup.
+# The `onnx` group, NOT `ml`. `ml` is sentence-transformers and torch: the PyTorch reference
+# backend, 21 more packages and roughly 0.8 GB of site-packages by the team's own measurement
+# (docs/embedding-runtime-onnx.md: torch 695 MB, scipy 83, transformers 53), none of which the
+# deployed runtime imports — src/lib/embeddings/local_onnx.py needs onnxruntime, tokenizers
+# and huggingface_hub, and `onnx` supplies exactly those (onnxruntime also arrives through
+# `main`). PR #54 dropped `ml` from the images on that reasoning and a later rewrite of this
+# file put it back, while the docs and infra/modules/stack/variables.tf kept saying it was gone.
+#
+# Not optional: the api answers /health and then raises on the first search without them,
+# because the failure is a lazy import inside the model singleton rather than anything
+# visible at startup.
+#
+# What leaves with `ml`: EMBEDDING_RUNTIME=torch, and the cross-encoder reranker
+# (CROSS_ENCODER_RERANKER_ENABLED, off by default and set by no Terraform or compose file).
+# Turning the reranker on in a deployed environment needs `ml` back in the image AND its model
+# baked, which this image does not do either; src/rag/cross_encoder.py fails loudly and the
+# search falls back to the lexical scorer if the flag is set without it.
 # ---------------------------------------------------------------------------
 FROM deps AS deps-ml
 
-# `--only main,ml`, NOT `--only main --with ml`. `--only` is an exhaustive list, so
+# `--only main,onnx`, NOT `--only main --with onnx`. `--only` is an exhaustive list, so
 # combining the two silently installs main alone.
-RUN poetry install --no-root --only main,ml
+RUN poetry install --no-root --only main,onnx
 
 # ---------------------------------------------------------------------------
 # deps-ml-ocr — the same again, plus the OCR stack. Worker only.
@@ -99,9 +112,9 @@ RUN poetry install --no-root --only main,ml
 FROM deps-ml AS deps-ml-ocr
 
 # Same rule as above, and the list must name EVERY group the worker needs, not just the
-# one being added: `--only main,ocr` here resolves without ml, so the worker would ship
-# paddle and no ONNX embedding runtime and fail on the first chunk it tried to embed.
-RUN poetry install --no-root --only main,ml,ocr
+# one being added: `--only main,ocr` here resolves without onnx, so the worker would ship
+# paddle and no tokenizers or huggingface_hub and fail on the first chunk it tried to embed.
+RUN poetry install --no-root --only main,onnx,ocr
 
 # ---------------------------------------------------------------------------
 # runtime — common base. NO application code: see rule 1 above.

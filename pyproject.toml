@@ -73,15 +73,13 @@ optional = true
 paddlepaddle = "^3.0.0"
 paddleocr = "^3.0.0"
 
-# Local embedding models. Optional to poetry, but REQUIRED in practice: the default
-# EMBEDDING_MODEL (BAAI/bge-m3) is loaded in-process, by the worker to embed chunks and by
-# the API to embed the search query. Both the api and worker image targets install it, and
-# a local checkout needs it too:
+# The PyTorch reference backend (EMBEDDING_RUNTIME=torch, and the parity test that proves
+# the ONNX export against it) and the cross-encoder reranker (CROSS_ENCODER_RERANKER_ENABLED).
+# NOT installed in any shipped image: the deployed runtime is ONNX and the images install the
+# `onnx` group below, which is ~0.8 GB of torch/scipy/transformers lighter. A local checkout
+# that needs any of the above installs it:
 #
 #   poetry install --with ml
-#
-# It stays a group rather than a main dependency so the migrator image — which touches
-# neither embeddings nor OCR — is not made to carry torch.
 [tool.poetry.group.ml]
 optional = true
 
