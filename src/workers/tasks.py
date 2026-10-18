@@ -265,6 +265,7 @@ def prune_operational_metrics() -> None:
 MAIL_MAX_AGE = timedelta(hours=24)
 MAIL_BACKOFF_BASE_SECONDS = 30
 MAIL_BACKOFF_CAP_SECONDS = 3600
+MAIL_STAGE_FAILURE_FLOOR_SECONDS = 300
 
 
 def mail_backoff_seconds(attempts: int) -> int:
@@ -323,7 +324,12 @@ def deliver_notification_queue() -> None:
                     if not stops:
                         row.attempts += 1  # an outage must not use up the attempts of rows it never let us try
                     permanent = bool(getattr(exc, "permanent", False))
-                    wait_seconds = max(mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0))
+                    # Config and token failures are not charged to the row, so its backoff would sit at 30 s for ever:
+                    # give them a floor, so a persistent outage of the credential is retried every 5 minutes, not 30 s.
+                    stage_floor = MAIL_STAGE_FAILURE_FLOOR_SECONDS if getattr(exc, "stage", "send") in {"config", "token"} else 0
+                    wait_seconds = max(
+                        mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0), stage_floor
+                    )
                     created = row.created_at or datetime.utcnow()
                     too_old = datetime.utcnow() - created > MAIL_MAX_AGE
                     if permanent or too_old:
@@ -339,7 +345,6 @@ def deliver_notification_queue() -> None:
                         )
                     else:
                         row.status = "failed" if row.attempts else row.status
-                        wait_seconds = max(mail_backoff_seconds(max(row.attempts, 1)), int(getattr(exc, "minimum_wait", 0) or 0))
                         row.next_attempt_at = datetime.utcnow() + timedelta(seconds=wait_seconds)
                     if getattr(exc, "sender_refused", False):
                         # The scope is missing or still propagating (up to ~2 h), or the mailbox is missing or not
@@ -355,6 +360,10 @@ def deliver_notification_queue() -> None:
                         # way. Defer EVERY deliverable email row, not just this one, or the other rows (next_attempt_at
                         # NULL) would be picked up again in 30 s and the sender hit forever, through the very
                         # Retry-After or 15-minute wait that was meant to stop that. One UPDATE; attempts untouched.
+                        # SessionLocal has autoflush=False: without this the UPDATE sees the table as it was BEFORE this
+                        # batch, so a row marked sent/dead earlier in the batch would get a stray next_attempt_at and a
+                        # row that failed normally earlier would have its longer backoff shortened by greatest().
+                        await db.flush()
                         until = datetime.utcnow() + timedelta(seconds=wait_seconds)
                         await db.execute(
                             update(NotificationQueue)

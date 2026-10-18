@@ -631,8 +631,7 @@ def test_the_check_script_fails_on_any_role_claim(tmp_path, monkeypatch, capsys,
     assert ("FAIL  SCOPE" in out) == bool(roles)
 
 
-# Non-GUID values ("qnsc.vn") become "not pinned" with #218 (GUID shape); add them to this list once it is on main.
-@pytest.mark.parametrize("tenant", ["", "common", "organizations", "consumers"])
+@pytest.mark.parametrize("tenant", ["", "common", "organizations", "consumers", "qnsc.vn", "not-a-guid"])
 def test_a_client_id_without_a_pinned_tenant_is_fatal_for_the_worker(monkeypatch, tenant):
     """Otherwise every token request fails at the config stage and stops every batch for ever; refuse at start."""
     pem = "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"

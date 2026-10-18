@@ -21,18 +21,30 @@ from src.workers import tasks
 
 class FakeSession:
     """``rows`` is what the SELECT returns (the first 100 deliverable rows); ``others`` are deliverable rows beyond
-    that batch. An UPDATE on notification_queue is compiled to Postgres SQL, recorded, and APPLIED to every row it
-    would match (its WHERE is asserted separately), so a test can say which rows ended up deferred."""
+    that batch.
+
+    It models the two facts that matter for the deferral UPDATE, both true of the real ``SessionLocal``
+    (autoflush=False, ORM-enabled UPDATE with synchronize_session): the UPDATE sees only what has been FLUSHED, not
+    the in-memory changes made earlier in the batch, and it then overwrites the in-memory attribute of every row it
+    matched. ``db`` is the table as the database holds it; ``flush()`` copies the rows' pending state into it.
+    The UPDATE is compiled to Postgres SQL (recorded in ``updates``) and its WHERE is asserted separately.
+    """
 
     def __init__(self, rows, others=()):
         self.rows, self.others = rows, list(others)
-        self.statements, self.updates, self.committed = [], [], False
+        self.db = {id(r): {"status": r.status, "next": r.next_attempt_at, "type": r.type} for r in [*self.rows, *self.others]}
+        self.statements, self.updates, self.committed, self.flushes = [], [], False, 0
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
         return False
+
+    async def flush(self):
+        self.flushes += 1
+        for r in [*self.rows, *self.others]:
+            self.db[id(r)].update(status=r.status, next=r.next_attempt_at)
 
     async def execute(self, statement):
         self.statements.append(statement)
@@ -42,8 +54,10 @@ class FakeSession:
             moments = sorted(v for v in compiled.params.values() if isinstance(v, datetime))
             earliest_default, until = moments[0], moments[-1]  # coalesce(col, now) and the deferral target
             for r in [*self.rows, *self.others]:
-                if r.type == "email" and r.status in ("pending", "failed"):
-                    r.next_attempt_at = max(r.next_attempt_at or earliest_default, until)
+                d = self.db[id(r)]
+                if d["type"] == "email" and d["status"] in ("pending", "failed"):
+                    d["next"] = max(d["next"] or earliest_default, until)
+                    r.next_attempt_at = d["next"]  # synchronize_session: the in-memory value is replaced
             return SimpleNamespace()
         return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.rows)))
 
@@ -215,7 +229,7 @@ def test_a_provider_that_must_not_run_here_is_an_error_not_a_crash(monkeypatch):
 @pytest.mark.parametrize("failure,wait_at_least", [
     (err(429, retry_after=600), 590),
     (err(403), 14 * 60),
-    (err(401, stage="token"), 25),
+    (err(401, stage="token"), 295),  # config/token failures wait at least 5 minutes, not 30 s
 ])
 def test_a_stopped_batch_defers_every_email_row_including_those_beyond_the_batch(run, failure, wait_at_least):
     """Before: only the failing row got next_attempt_at; the other 99 stayed NULL and were hit again 30 s later,
@@ -255,3 +269,40 @@ def test_a_successful_or_message_level_pass_runs_no_deferral(run):
     ok, bad = row("ok@x"), row("bad@x")
     session, _, _ = run([ok, bad], {"bad@x": err(400)})
     assert session.updates == []
+
+
+# ── the UPDATE must see this batch: SessionLocal has autoflush=False ────────────────────────────
+def test_the_deferral_does_not_shorten_a_backoff_set_earlier_in_the_same_batch(run):
+    """A 500 at attempts 8 earns 3600 s; a later 429 with Retry-After 120 stops the batch. Without a flush first,
+    the UPDATE saw the old table (next_attempt_at NULL) and replaced the 3600 s with 120."""
+    sent = row("ok@x")
+    long_backoff = row("slow@x", attempts=7)
+    stopper = row("stop@x")
+    session, _, _ = run([sent, long_backoff, stopper], {"slow@x": err(500), "stop@x": err(429, retry_after=120)})
+
+    assert session.flushes == 1
+    assert 3590 <= (long_backoff.next_attempt_at - datetime.utcnow()).total_seconds() <= 3600
+    assert long_backoff.attempts == 8
+
+
+def test_a_row_sent_or_killed_earlier_in_the_batch_gets_no_stray_deferral(run):
+    sent, dead, stopper = row("ok@x"), row("bad@x"), row("stop@x")
+    run([sent, dead, stopper], {"bad@x": err(400), "stop@x": err(429, retry_after=120)})
+
+    assert sent.status == "sent" and sent.next_attempt_at is None
+    assert dead.status == "dead" and dead.next_attempt_at is None
+
+
+def test_a_persistent_token_failure_escalates_past_30_seconds_on_a_fresh_row(run):
+    fresh = row("a@x")
+    run([fresh], {"a@x": err(401, stage="token")})
+    assert (fresh.next_attempt_at - datetime.utcnow()).total_seconds() >= tasks.MAIL_STAGE_FAILURE_FLOOR_SECONDS - 5
+    assert fresh.attempts == 0
+
+    config = row("c@x")
+    run([config], {"c@x": err(0, stage="config")})
+    assert (config.next_attempt_at - datetime.utcnow()).total_seconds() >= tasks.MAIL_STAGE_FAILURE_FLOOR_SECONDS - 5
+
+    transient = row("t@x")
+    run([transient], {"t@x": err(500)})
+    assert (transient.next_attempt_at - datetime.utcnow()).total_seconds() < 60  # the floor is for stage failures only
