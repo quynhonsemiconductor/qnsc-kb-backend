@@ -497,7 +497,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # BAKE_EMBEDDING_MODEL=false: this job proves the Dockerfile BUILDS, and baking
       # ~2.3 GB of weights into the api and worker images would push that through the
@@ -509,7 +509,7 @@ jobs:
       # builds (and every PR's `cache-from`, which falls back to main's) depend on. PRs still READ the cache; a PR's later pushes
       # reuse main's layers. An empty `cache-to` is "do not export".
       - name: Build api image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: api
@@ -522,7 +522,7 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=api' || '' }}
 
       - name: Build worker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: worker
@@ -540,7 +540,7 @@ jobs:
           image-ref: qnsc-kb-api:scan
 
       - name: Build migrator image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: migrator
