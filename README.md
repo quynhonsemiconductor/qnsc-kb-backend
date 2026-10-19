@@ -1,6 +1,6 @@
 # QNSC Knowledge Base Backend
 
-FastAPI-based backend application for QNSC Knowledge Base, utilizing pgvector for hybrid RAG search, Celery for asynchronous processing, and Valkey (Redis protocol) for caching, the engine production runs on ElastiCache.
+FastAPI-based backend application for QNSC Knowledge Base, utilizing pgvector for hybrid RAG search, Celery for asynchronous processing, and Valkey (Redis protocol) as the Celery broker and result backend, and for the shared login rate limiter. The engine is the one production runs on ElastiCache; production's Valkey node is currently disabled.
 
 ## Run it locally (Docker, from a clean clone)
 
@@ -36,6 +36,10 @@ same commands. On Apple Silicon this works as-is: the worker runs from the API i
 To run a second copy beside this one (a second checkout, or a branch you keep running), set in `.env`: `COMPOSE_PROJECT_NAME=qnsc-kb-2`
 (it prefixes the containers and volumes), and free values for `KB_DB_PORT`, `KB_REDIS_PORT` and `KB_API_PORT`. The containers reach each other
 by service name, so nothing else changes. Then run the same commands. The frontend's dev server still needs its own port (see that repository).
+
+The second copy's frontend must also be allowed by this backend: in its `.env`, set `CORS_ORIGINS` and `FRONTEND_URL` to the second
+frontend origin, e.g. `http://127.0.0.1:5174` (the frontend README explains why 127.0.0.1). Cookies are per host, not per port, so
+`localhost:5173` and `localhost:5174` share one cookie jar: open the second frontend as `127.0.0.1`, or use another browser profile.
 
 ### Sign in
 
