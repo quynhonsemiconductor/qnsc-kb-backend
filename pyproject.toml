@@ -109,6 +109,7 @@ pytest = "^9.1.0"
 pytest-asyncio = "^1.4.0"
 black = "^26.0.0"
 mypy = "^1.10.0"
+celery-types = "^0.26.0"
 
 [tool.mypy]
 # `src/` is the import root, and `src` is a package. Without this mypy resolves src/api/deps.py as both `api.deps`
