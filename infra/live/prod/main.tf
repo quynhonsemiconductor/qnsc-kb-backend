@@ -11,7 +11,7 @@
 // documented posture with an end date — not a half-finished environment — and it is
 // what keeps production at roughly $4/mo instead of what it costs once it is serving. The
 // ~$127 that used to stand here predates sizing production the same as develop (see Sizing
-// below); that sync adds roughly $85/mo at go-live (an estimate from list prices, not a
+// below); that sync adds roughly $70/mo at go-live (an estimate from list prices, not a
 // bill) — re-estimate before go-live rather than trusting either number.
 //
 // Everything durable is ALREADY on: 30-day backups, deletion protection, a 30-day
@@ -144,8 +144,12 @@ module "stack" {
     // NOTE: clamd is per TASK (256 CPU / 2048 MB carved out of each), so at max_count 6
     // this is up to 12 GB of duplicated signature database — the point at which one clamd
     // behind Service Connect becomes the cheaper shape.
+    //
+    // 4096, the same as develop, which measured it: see the comment on develop's api block.
+    // This one is on-demand, so the 4 GB saved is worth roughly $16/mo once it is serving
+    // (an estimate from list prices, not a bill).
     cpu                = 2048
-    memory             = 8192
+    memory             = 4096
     min_count          = 0
     max_count          = 6
     enable_autoscaling = false
