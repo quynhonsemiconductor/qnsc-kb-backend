@@ -19,6 +19,7 @@ guards those against being "synced" away by accident.
 Like test_embedding_config_matches_image.py these read the source files as text: the bug was
 a mismatch BETWEEN files, so reading one of them twice would prove nothing.
 """
+
 from __future__ import annotations
 
 import re
@@ -33,7 +34,9 @@ ENVIRONMENTS = ("develop", "prod")
 
 
 def _tf(environment: str) -> str:
-    return (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+    return (REPO / "infra" / "live" / environment / "main.tf").read_text(
+        encoding="utf-8"
+    )
 
 
 def _block(environment: str, name: str) -> str:
@@ -59,7 +62,9 @@ def _setting_default(name: str):
     return Settings.model_fields[name].default
 
 
-COMPOSE_PRODUCTION = (REPO / "docker-compose.production.yml").read_text(encoding="utf-8")
+COMPOSE_PRODUCTION = (REPO / "docker-compose.production.yml").read_text(
+    encoding="utf-8"
+)
 ENV_EXAMPLE = (REPO / ".env.example").read_text(encoding="utf-8")
 
 
@@ -77,16 +82,22 @@ def test_both_environments_size_each_service_the_same(service, key):
 
 
 def test_both_environments_use_the_same_database_class():
-    classes = {env: _value(_block(env, "rds"), "instance_class") for env in ENVIRONMENTS}
+    classes = {
+        env: _value(_block(env, "rds"), "instance_class") for env in ENVIRONMENTS
+    }
     assert len(set(classes.values())) == 1, classes
 
 
-@pytest.mark.parametrize("key", ["embedding_model", "embedding_version", "embedding_runtime"])
+@pytest.mark.parametrize(
+    "key", ["embedding_model", "embedding_version", "embedding_runtime"]
+)
 def test_both_environments_state_the_same_embedding_setting(key):
     """embedding_runtime is stated in BOTH, not left to the module default in one of them:
     a default that moves would otherwise move one environment and not the other."""
     values = {env: _top_level(env, key) for env in ENVIRONMENTS}
-    assert None not in values.values(), f"{key} is not stated in every environment: {values}"
+    assert (
+        None not in values.values()
+    ), f"{key} is not stated in every environment: {values}"
     assert len(set(values.values())) == 1, values
 
 
@@ -104,12 +115,12 @@ def test_syncing_size_did_not_touch_production_policy():
     """Pinning compute equal must not drag the durability and cost-posture settings along."""
     prod_rds = _block("prod", "rds")
     assert _value(prod_rds, "deletion_protection") == "true"
-    assert int(_value(prod_rds, "backup_retention_days")) >= 30, (
-        "single-AZ is only safe with 30-day point-in-time recovery; see the comment in prod/main.tf"
-    )
-    assert _value(_block("prod", "api"), "use_spot") == "false", (
-        "a Spot interruption is a dropped request and a broken response mid-answer"
-    )
+    assert (
+        int(_value(prod_rds, "backup_retention_days")) >= 30
+    ), "single-AZ is only safe with 30-day point-in-time recovery; see the comment in prod/main.tf"
+    assert (
+        _value(_block("prod", "api"), "use_spot") == "false"
+    ), "a Spot interruption is a dropped request and a broken response mid-answer"
     # Production idles until go-live: floors stay at zero here.
     assert _value(_block("prod", "api"), "min_count") == "0"
     assert _value(_block("prod", "worker"), "min_count") == "0"
@@ -123,7 +134,10 @@ def _compose_defaults(variable: str) -> set[str]:
 
 
 def test_compose_production_defaults_to_the_model_the_terraform_runs():
-    for variable, key in (("EMBEDDING_MODEL", "embedding_model"), ("EMBEDDING_VERSION", "embedding_version")):
+    for variable, key in (
+        ("EMBEDDING_MODEL", "embedding_model"),
+        ("EMBEDDING_VERSION", "embedding_version"),
+    ):
         defaults = _compose_defaults(variable)
         assert defaults == {_top_level("prod", key)}, (
             f"{variable} defaults to {defaults} in docker-compose.production.yml but prod "
@@ -133,9 +147,15 @@ def test_compose_production_defaults_to_the_model_the_terraform_runs():
 
 
 def test_compose_production_matches_the_code_defaults_for_the_token_window_and_pooling():
-    assert _compose_defaults("EMBEDDING_MAX_TOKENS") == {str(_setting_default("EMBEDDING_MAX_TOKENS"))}
-    assert _compose_defaults("EMBEDDING_ONNX_POOLING") == {_setting_default("EMBEDDING_ONNX_POOLING")}
-    assert _compose_defaults("EMBEDDING_RUNTIME") == {_top_level("prod", "embedding_runtime")}
+    assert _compose_defaults("EMBEDDING_MAX_TOKENS") == {
+        str(_setting_default("EMBEDDING_MAX_TOKENS"))
+    }
+    assert _compose_defaults("EMBEDDING_ONNX_POOLING") == {
+        _setting_default("EMBEDDING_ONNX_POOLING")
+    }
+    assert _compose_defaults("EMBEDDING_RUNTIME") == {
+        _top_level("prod", "embedding_runtime")
+    }
 
 
 def test_compose_production_worker_embeds_one_article_at_a_time():
@@ -171,4 +191,12 @@ def _env_example(name: str) -> str:
 def test_env_example_embeds_the_way_the_deployed_code_does(name):
     """A local run should embed with what the deployed tasks use. EMBEDDING_ONNX_THREADS was
     1 here for a 0.5 vCPU task while the code default, which production runs, is 2."""
+    if name == "EMBEDDING_MODEL":
+        # The active local default is the deterministic mock (no model, no network). The real model is the documented
+        # opt-in, and that one must be the model the deployed tasks run.
+        assert _env_example(name) == "mock"
+        assert (
+            f'EMBEDDING_MODEL="{_setting_default(name)}"' in ENV_EXAMPLE
+        ), "the documented real EMBEDDING_MODEL in .env.example is not the deployed model"
+        return
     assert _env_example(name) == str(_setting_default(name))

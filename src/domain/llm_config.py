@@ -1,4 +1,5 @@
 """Persisted and runtime configuration for the workspace LLM provider."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -75,13 +76,24 @@ def get_runtime_config() -> RuntimeLLMConfig | None:
 
 
 async def load_runtime_config(db: AsyncSession) -> None:
-    result = await db.execute(select(LLMProviderConfig).where(LLMProviderConfig.config_key == "workspace"))
+    result = await db.execute(
+        select(LLMProviderConfig).where(LLMProviderConfig.config_key == "workspace")
+    )
     row = result.scalar_one_or_none()
     if row is None:
-        set_runtime_config(None)
+        # No provider saved in the admin screen. In development, GEMINI_MODEL=mock selects the deterministic local
+        # provider; otherwise nothing is configured and every AI call says so.
+        if settings.uses_mock_llm:
+            set_runtime_config(RuntimeLLMConfig("mock", "mock", "mock://local", "mock"))
+        else:
+            set_runtime_config(None)
         return
     key = decrypt_api_key(row.encrypted_api_key)
-    set_runtime_config(RuntimeLLMConfig(row.provider, row.model, row.base_url.rstrip("/"), key) if row.enabled and key else None)
+    set_runtime_config(
+        RuntimeLLMConfig(row.provider, row.model, row.base_url.rstrip("/"), key)
+        if row.enabled and key
+        else None
+    )
 
 
 def public_config(row: LLMProviderConfig | None) -> dict:
