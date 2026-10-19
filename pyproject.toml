@@ -115,6 +115,11 @@ mypy = "^1.10.0"
 # and `src.api.deps` and stops before checking anything.
 explicit_package_bases = true
 
+[[tool.mypy.overrides]]
+# celery 5.4 ships no py.typed marker and typeshed has no stubs for it, so every import is untyped.
+module = ["celery", "celery.*"]
+ignore_missing_imports = true
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

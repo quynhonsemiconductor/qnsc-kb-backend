@@ -4,7 +4,7 @@ import structlog
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from typing import Any
+from typing import Any, TypeGuard, cast
 from sqlalchemy import (
     JSON,
     DateTime,
@@ -16,6 +16,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from celery.signals import (
@@ -637,7 +638,11 @@ def escalate_overdue_drafts() -> None:
                 else {}
             )
             for draft in drafts:
-                for user_id in {draft.created_by, draft.assigned_approver_id} - {None}:
+                for user_id in {
+                    uid
+                    for uid in (draft.created_by, draft.assigned_approver_id)
+                    if uid is not None
+                }:
                     recipient = users.get(user_id)
                     if not recipient:
                         continue
@@ -671,7 +676,9 @@ def escalate_overdue_drafts() -> None:
                         == str(draft.id),
                     )
                     await db.execute(
-                        NotificationQueue.__table__.insert().from_select(
+                        cast(Table, NotificationQueue.__table__)
+                        .insert()
+                        .from_select(
                             [
                                 "id",
                                 "recipient_user_id",
@@ -764,7 +771,9 @@ def cleanup_orphaned_source_objects() -> int:
     return sync_run(_run_orphan_source_cleanup())
 
 
-def _draft_accepts_restructure_result(draft: PendingDraft | None) -> bool:
+def _draft_accepts_restructure_result(
+    draft: PendingDraft | None,
+) -> TypeGuard[PendingDraft]:
     return bool(
         draft and draft.status == "pending" and draft.restructure_status == "processing"
     )
