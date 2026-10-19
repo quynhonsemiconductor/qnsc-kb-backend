@@ -95,3 +95,61 @@ def test_openai_multimodal_payload_contains_only_bounded_data_urls(monkeypatch):
     assert image["type"] == "image_url"
     assert image["image_url"]["url"].startswith("data:image/png;base64,")
     assert "http" not in image["image_url"]["url"]
+
+
+def test_evidence_preview_reaches_the_model_when_a_figure_is_selected(monkeypatch):
+    # Regression: ai_service used asyncio.to_thread without importing asyncio. The NameError sat inside the
+    # function's broad except, so visual evidence silently fell back to text on every request.
+    from src.domain import ai_service
+
+    article_id = "11111111-1111-4111-8111-111111111111"
+    evidence_id = "22222222-2222-4222-8222-222222222222"
+    row = SimpleNamespace(
+        DocumentEvidence=SimpleNamespace(page_number=1, bounding_box=[0, 0, 1, 1]),
+        DocumentSource=SimpleNamespace(
+            storage_key="sources/a.pdf", original_filename="a.pdf"
+        ),
+    )
+
+    class Result:
+        def first(self):
+            return row
+
+    class Db:
+        async def execute(self, statement):
+            return Result()
+
+    sent = {}
+
+    async def fake_complete_multimodal(system, user_text, images, **kwargs):
+        sent["images"] = images
+        return "the figure shows a bar chart", 3, "model", "provider"
+
+    monkeypatch.setattr(settings, "EVIDENCE_VISION_ENABLED", True)
+    monkeypatch.setattr(ai_service, "_is_visual_question", lambda question: True)
+    monkeypatch.setattr(
+        ai_service.ArticleRepository,
+        "_authorized_article_filters",
+        staticmethod(lambda user: []),
+    )
+    monkeypatch.setattr(ai_service, "load_source", lambda storage_key: b"%PDF")
+    monkeypatch.setattr(ai_service, "render_evidence_preview", lambda *args: b"\x89PNG")
+    monkeypatch.setattr(ai_service, "complete_multimodal", fake_complete_multimodal)
+
+    context = [
+        {
+            "source_id": "C1",
+            "article_id": article_id,
+            "evidence": {"id": evidence_id, "kind": "figure"},
+        }
+    ]
+
+    description, status = asyncio.run(
+        ai_service._visual_evidence_context(
+            Db(), SimpleNamespace(id="u1"), "what does the figure show?", context
+        )
+    )
+
+    assert status == "analyzed"
+    assert description == "the figure shows a bar chart"
+    assert sent["images"] == [("image/png", b"\x89PNG")]
