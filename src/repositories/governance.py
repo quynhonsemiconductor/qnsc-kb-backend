@@ -13,6 +13,23 @@ from src.models.ai import AiUsageLog
 from src.models.user import User, Department
 from src.domain.rbac import AuthorizationService
 
+
+#: The LIKE escape character. `!`, not the conventional backslash: a backslash inside an SQL
+#: string literal means different things depending on the server's
+#: `standard_conforming_strings`, and SQLAlchemy renders it differently before and after it
+#: has asked. `!` is the same everywhere, so this cannot depend on a server setting.
+_LIKE_ESCAPE = "!"
+
+
+def _escape_like(term: str) -> str:
+    """Make user text safe inside a LIKE pattern that declares `_LIKE_ESCAPE` as its escape."""
+    return (
+        term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", f"{_LIKE_ESCAPE}%")
+        .replace("_", f"{_LIKE_ESCAPE}_")
+    )
+
+
 class GovernanceRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -90,29 +107,128 @@ class GovernanceRepository:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_drafts(self, status: str | None = None, company_domain: str | None = None, dept: str | None = None, depts: Sequence[str] | None = None, assigned_approver_id: uuid.UUID | None = None) -> Sequence[PendingDraft]:
-        # The review inbox needs queue metadata, not three complete copies of every
-        # document. At the 500-row cap those text columns made one poll return 18.7 MB,
-        # and a single stuck job caused the browser to repeat that request every four
-        # seconds. Keep list queries light; the detail endpoint loads content on demand.
-        stmt = select(PendingDraft).options(*self._draft_inbox_options())
+    #: The largest page the queue endpoint will serve, and also its default so an
+    #: un-paginated caller sees exactly what it saw before paging existed.
+    #:
+    #: The review inbox needs queue metadata, not three complete copies of every
+    #: document. At this row count those text columns made one poll return 18.7 MB, and
+    #: a single stuck job caused the browser to repeat that request every four seconds.
+    #: `_draft_inbox_options` fixed the payload; this bounds the row count, so one
+    #: request can never be heavier than the response that caused that incident.
+    DRAFT_PAGE_LIMIT = 500
+
+    @staticmethod
+    def _draft_scope_filters(
+        status: str | None = None,
+        company_domain: str | None = None,
+        dept: str | None = None,
+        depts: Sequence[str] | None = None,
+        assigned_approver_id: uuid.UUID | None = None,
+        search: str | None = None,
+    ) -> list:
+        """Build the queue's WHERE clauses once, for both the page and its total.
+
+        Shared deliberately: a count computed from different predicates than the list
+        would report rows the caller cannot see, which for a department-scoped reviewer
+        means leaking the existence of another department's drafts. `search` is part of
+        that: it narrows within the caller's scope and can never widen it.
+        """
+        filters = []
+        if search and search.strip():
+            # Matches title, source reference and department, ignoring case and accents:
+            # a reviewer typing "quy trinh" must find "Quy trình". `immutable_unaccent` is
+            # the wrapper from migration 58, which is what makes the expression usable in
+            # an index later if this table ever needs one. The term is escaped because it
+            # is user text going into a LIKE: "50%" must mean those three characters, not
+            # "50 followed by anything".
+            pattern = func.immutable_unaccent(f"%{_escape_like(search.strip())}%")
+            filters.append(
+                or_(
+                    *(
+                        func.immutable_unaccent(column).ilike(
+                            pattern, escape=_LIKE_ESCAPE
+                        )
+                        for column in (
+                            PendingDraft.title,
+                            PendingDraft.source_ref,
+                            PendingDraft.dept,
+                        )
+                    )
+                )
+            )
         if status:
-            stmt = stmt.where(PendingDraft.status == status)
+            filters.append(PendingDraft.status == status)
         if company_domain:
-            stmt = stmt.where(PendingDraft.company_domain == company_domain)
+            filters.append(PendingDraft.company_domain == company_domain)
         if depts:
-            stmt = stmt.where(PendingDraft.dept.in_(list(depts)))
+            filters.append(PendingDraft.dept.in_(list(depts)))
         elif dept:
-            stmt = stmt.where(PendingDraft.dept == dept)
+            filters.append(PendingDraft.dept == dept)
         if assigned_approver_id:
-            assignment_scope = (PendingDraft.assigned_approver_id.is_(None)) | (PendingDraft.assigned_approver_id == assigned_approver_id)
+            assignment_scope = (PendingDraft.assigned_approver_id.is_(None)) | (
+                PendingDraft.assigned_approver_id == assigned_approver_id
+            )
             if depts:
                 assignment_scope = assignment_scope | PendingDraft.dept.in_(list(depts))
-            stmt = stmt.where(assignment_scope)
+            filters.append(assignment_scope)
+        return filters
+
+    async def list_drafts(
+        self,
+        status: str | None = None,
+        company_domain: str | None = None,
+        dept: str | None = None,
+        depts: Sequence[str] | None = None,
+        assigned_approver_id: uuid.UUID | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        search: str | None = None,
+    ) -> Sequence[PendingDraft]:
+        """One page of the review queue, newest first.
+
+        ORDERING IS PART OF THE CONTRACT. Paging with OFFSET is only correct under a
+        TOTAL order, and `created_at` is not unique -- bulk uploads land many rows in the
+        same transaction, and several here share a timestamp to the microsecond. Two rows
+        the database is free to return in either order can then straddle a page boundary,
+        so one is served twice and another never appears at all. `id` is the primary key,
+        so appending it makes the order total and the paging exact.
+        """
+        stmt = select(PendingDraft).options(*self._draft_inbox_options())
+        for condition in self._draft_scope_filters(
+            status, company_domain, dept, depts, assigned_approver_id, search
+        ):
+            stmt = stmt.where(condition)
+        page_size = self.DRAFT_PAGE_LIMIT if limit is None else limit
         result = await self.db.execute(
-            stmt.order_by(PendingDraft.created_at.desc()).limit(500)
+            stmt.order_by(PendingDraft.created_at.desc(), PendingDraft.id.desc())
+            .limit(page_size)
+            .offset(max(0, offset))
         )
         return result.scalars().all()
+
+    async def count_drafts(
+        self,
+        status: str | None = None,
+        company_domain: str | None = None,
+        dept: str | None = None,
+        depts: Sequence[str] | None = None,
+        assigned_approver_id: uuid.UUID | None = None,
+        *,
+        search: str | None = None,
+    ) -> int:
+        """Total rows matching the same scope `list_drafts` would page through.
+
+        A SQL count, not `len()` of a fetch: the whole point is to report a total larger
+        than one page without transferring it. It takes the same `search`, so the total
+        describes the rows being paged rather than the whole queue.
+        """
+        stmt = select(func.count(PendingDraft.id))
+        for condition in self._draft_scope_filters(
+            status, company_domain, dept, depts, assigned_approver_id, search
+        ):
+            stmt = stmt.where(condition)
+        return int(await self.db.scalar(stmt) or 0)
 
     async def count_pending_for_user(self, user: User) -> int:
         """Count only review items that are actually awaiting this actor.
