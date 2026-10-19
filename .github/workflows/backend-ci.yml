@@ -140,7 +140,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:0.8.1-pg16
+        image: pgvector/pgvector:0.8.2-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -154,7 +154,7 @@ jobs:
 
       # Valkey, the engine production runs on ElastiCache (same protocol; REDIS_URL unchanged). Service name kept.
       redis:
-        image: valkey/valkey:7.2.14-alpine
+        image: valkey/valkey:8.1.10-alpine
         ports: ['6379:6379']
         options: >-
           --health-cmd "valkey-cli ping"
@@ -269,7 +269,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:0.8.1-pg16
+        image: pgvector/pgvector:0.8.2-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
