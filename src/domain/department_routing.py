@@ -61,7 +61,13 @@ def _major_sections(title: str, markdown: str) -> list[dict[str, Any]]:
         current.append(line)
     if current and "\n".join(current).strip():
         sections.append("\n".join(current).strip())
-    if len(sections) < 2:
+    # Imported here for the same reason as in _llm_section_departments below.
+    from src.core.config import settings
+
+    if len(sections) < 2 or not settings.DOCUMENT_AUTO_SPLIT_ENABLED:
+        # One section: either the document has only one, or splitting is off and the whole
+        # document is routed as one (see DOCUMENT_AUTO_SPLIT_ENABLED). Everything below
+        # builds the candidate the same way either way.
         sections = [markdown.strip()]
 
     candidates: list[dict[str, Any]] = []

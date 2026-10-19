@@ -1,3 +1,4 @@
+from src.core.config import Settings, settings
 from src.domain.document_splitter import split_document_candidates, splitter_metrics
 
 
@@ -51,7 +52,9 @@ Record the incident number before contacting the on-call engineer.
     assert "## Incident response" in candidates[0]["body_md"]
 
 
-def test_splitter_only_splits_exceptionally_long_review_documents():
+def test_splitter_only_splits_exceptionally_long_review_documents(monkeypatch):
+    """The behaviour a deployment gets back by setting DOCUMENT_AUTO_SPLIT_ENABLED."""
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", True)
     text = "# Handbook\n\n" + ("Approved procedure paragraph.\n\n" * 2_000)
 
     candidates = split_document_candidates("Handbook", text, prefer_markdown_sections=True)
@@ -59,3 +62,21 @@ def test_splitter_only_splits_exceptionally_long_review_documents():
     assert len(candidates) == 2
     assert all(len(item["body_md"]) <= 48_000 for item in candidates)
     assert "".join(item["body_md"] for item in candidates).replace("\n", "")
+
+
+def test_auto_split_is_off_unless_asked_for():
+    assert Settings.model_fields["DOCUMENT_AUTO_SPLIT_ENABLED"].default is False
+
+
+def test_a_very_long_document_stays_one_candidate_by_default(monkeypatch):
+    """The same document the test above splits in two. Reviewers read it as one draft, and
+    nothing is lost: the single candidate covers the whole text and its source range."""
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
+    text = "# Handbook\n\n" + ("Approved procedure paragraph.\n\n" * 2_000)
+
+    candidates = split_document_candidates("Handbook", text, prefer_markdown_sections=True)
+
+    assert len(candidates) == 1
+    assert candidates[0]["position"] == 1
+    assert candidates[0]["body_md"] == text.strip()
+    assert (candidates[0]["source_start"], candidates[0]["source_end"]) == (0, len(text.strip()))

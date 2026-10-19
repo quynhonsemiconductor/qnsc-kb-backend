@@ -116,8 +116,19 @@ module "stack" {
     // the same embedding model the worker does. CPU peaked at 100% against a 3.8% average:
     // uploads are scanned synchronously, so those peaks are user-visible latency, not
     // background noise.
+    //
+    // REDUCED 2026-10-18 from 2048/8192 to 2048/4096 (cpu unchanged; 2 vCPU takes 4-16 GB).
+    // Measured in CloudWatch AWS/ECS over 13-18 Oct, the service up around the clock. On the
+    // fp32 export the task held a steady 31.0% of 8192 MB (~2.5 GB), daily maximum 36%; CPU
+    // averaged 0.2-0.6% with daily maxima near 98% — the startup model load and the
+    // synchronous upload scan, which is why cpu stays. Once the api moved to the int8
+    // export (#221) memory fell to 20.5% (1,679 MB), 861 MB lower. At 4096 the old fp32
+    // peak (2.97 GB) would sit at 72%, and ~51% with that 861 MB taken off. The worker is
+    // NOT reduced: its daily CPU maximum reaches 91% of 4 vCPU, and Fargate will not take
+    // 4 vCPU below 8 GB anyway. Only ~1 hour of int8 data existed when this was written, so
+    // watch api MemoryUtilization after the roll; prod/main.tf carries the same pair.
     cpu                = 2048
-    memory             = 8192
+    memory             = 4096
     min_count          = 0
     max_count          = 2
     enable_autoscaling = false

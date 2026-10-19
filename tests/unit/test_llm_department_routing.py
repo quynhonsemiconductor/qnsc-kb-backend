@@ -44,6 +44,14 @@ MARKDOWN = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _splitting_on(monkeypatch):
+    """These cases route the PARTS of a split document, and splitting is off by default
+    (DOCUMENT_AUTO_SPLIT_ENABLED). The file runs with it on to keep covering the path a
+    deployment can switch back to; the default is pinned by the last two tests."""
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", True)
+
+
 @pytest.fixture
 def llm(monkeypatch):
     """Install a fake provider. Returns a setter for what the model replies."""
@@ -217,3 +225,31 @@ def test_the_prompt_carries_the_descriptions_the_model_needs(llm):
     assert "floorplan routing signoff" in prompt
     # Numbers, not UUIDs: a short integer cannot be half-hallucinated into a real id.
     assert "phys" not in prompt
+
+
+def test_with_splitting_off_the_whole_document_is_one_routed_candidate(llm, monkeypatch):
+    """The default. The model is still asked once, about the document as a whole, so the
+    reviewer still gets a department suggestion; it just no longer produces several parts."""
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
+    llm["reply"] = '{"assignments": [{"section": 1, "department": 1}]}'
+
+    routed = _route()
+
+    assert len(routed) == 1
+    assert routed[0]["body_md"] == MARKDOWN.strip()
+    assert routed[0]["department_ids"] == ["phys"]
+    assert llm["calls"] == 1
+
+
+def test_with_splitting_off_a_many_section_document_is_still_routed(llm, monkeypatch):
+    """Twenty sections used to be "re-outlining rather than routing" and skipped the model;
+    as one section it is an ordinary single question, so it is answered."""
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
+    markdown = "".join(f"## Part {i}\nSome text about part {i}.\n\n" for i in range(20))
+    llm["reply"] = '{"assignments": [{"section": 1, "department": 2}]}'
+
+    routed = _route(markdown=markdown)
+
+    assert len(routed) == 1
+    assert routed[0]["department_ids"] == ["dv"]
+    assert llm["calls"] == 1
