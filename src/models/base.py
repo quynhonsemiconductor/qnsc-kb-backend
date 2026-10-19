@@ -3,8 +3,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 import uuid
 
+
 class Base(DeclarativeBase):
     pass
+
 
 class TimestampMixin:
     # Both a Python-side default AND a server default, deliberately.
@@ -25,10 +27,13 @@ class TimestampMixin:
     # A Python-side default puts the value in the INSERT itself, so no RETURNING is
     # emitted and write permission alone is enough. The server default stays for rows
     # written outside the ORM (migrations, psql, the bootstrap scripts).
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        default=datetime.utcnow, server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
         default=datetime.utcnow, server_default=func.now(), onupdate=datetime.utcnow
     )
+
 
 class UUIDPrimaryKeyMixin:
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

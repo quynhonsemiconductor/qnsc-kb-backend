@@ -7,7 +7,6 @@ Create Date: 2026-08-06
 
 from alembic import op
 
-
 revision = "20260806_16"
 down_revision = "20260806_15"
 branch_labels = None
@@ -15,7 +14,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_article_versions_article_version ON article_versions (article_id, version)")
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_article_versions_article_version ON article_versions (article_id, version)"
+    )
 
 
 def downgrade() -> None:

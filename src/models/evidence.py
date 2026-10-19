@@ -1,7 +1,16 @@
 import uuid
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Float, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin

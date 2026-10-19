@@ -17,6 +17,7 @@ flag, the hosted API path normalised by hand, and the two drifted. Normalising a
 unit-length vector is a no-op, so backends may keep their own flag as an optimisation
 without changing the result.
 """
+
 from __future__ import annotations
 
 import math

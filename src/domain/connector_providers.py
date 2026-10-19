@@ -15,6 +15,7 @@ document OneDrive never shared with them. Fail-open, not fail-closed.
 
 So the predicates ask this module instead of comparing strings.
 """
+
 from __future__ import annotations
 
 #: Providers whose ingestion runs through a real remote API.
@@ -79,4 +80,6 @@ def acl_present_key(system: str | None) -> str:
     the fail-closed intersection reads both.
     """
 
-    return "sharepoint_acl_present" if system == "sharepoint" else "provider_acl_present"
+    return (
+        "sharepoint_acl_present" if system == "sharepoint" else "provider_acl_present"
+    )

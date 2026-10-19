@@ -16,6 +16,7 @@ formatting coincidence (two SOPs that both happen to use "Owner: ..." for unrela
 things) is a real failure mode a live approval queue cannot absorb without one. Recording
 without blocking gets the same visibility with none of that risk.
 """
+
 from __future__ import annotations
 
 from typing import Any

@@ -22,15 +22,26 @@ def _missing(table: str, column: str) -> bool:
 
 def upgrade() -> None:
     if _missing("departments", "kind"):
-        op.add_column("departments", sa.Column("kind", sa.String(length=10), nullable=False, server_default="org"))
+        op.add_column(
+            "departments",
+            sa.Column(
+                "kind", sa.String(length=10), nullable=False, server_default="org"
+            ),
+        )
         op.alter_column("departments", "kind", server_default=None)
     if _missing("departments", "contact_email"):
-        op.add_column("departments", sa.Column("contact_email", sa.String(length=255), nullable=True))
+        op.add_column(
+            "departments",
+            sa.Column("contact_email", sa.String(length=255), nullable=True),
+        )
     existing_checks = {
-        item["name"] for item in inspect(op.get_bind()).get_check_constraints("departments")
+        item["name"]
+        for item in inspect(op.get_bind()).get_check_constraints("departments")
     }
     if "ck_departments_kind" not in existing_checks:
-        op.create_check_constraint("ck_departments_kind", "departments", "kind IN ('org', 'access')")
+        op.create_check_constraint(
+            "ck_departments_kind", "departments", "kind IN ('org', 'access')"
+        )
     if os.getenv("ENABLE_RLS", "false").lower() in {"1", "true", "yes"}:
         op.execute("ALTER TABLE invitations ENABLE ROW LEVEL SECURITY")
         op.execute("ALTER TABLE invitations FORCE ROW LEVEL SECURITY")

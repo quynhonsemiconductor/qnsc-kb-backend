@@ -24,6 +24,7 @@ needs positive evidence that a line is furniture rather than content:
 
 Anything that only looks suspicious is kept.
 """
+
 from __future__ import annotations
 
 import math

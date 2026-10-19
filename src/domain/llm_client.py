@@ -113,7 +113,9 @@ async def _guarded_request_target(
     resolved = await validate_public_endpoint_resolution(provider.url)
     parsed = urlsplit(url)
     if (parsed.hostname or "").lower().rstrip(".") != resolved.hostname:
-        raise RuntimeError("The provider request host changed after endpoint validation")
+        raise RuntimeError(
+            "The provider request host changed after endpoint validation"
+        )
     address = f"[{resolved.address}]" if ":" in resolved.address else resolved.address
     # The port has to survive the rewrite. Dropping it was invisible while every custom
     # endpoint was public HTTPS on the default 443, but a locally hosted model listens
@@ -133,10 +135,12 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
     """Test one exact candidate without changing the active runtime configuration."""
     if provider.name == "mock":
         return 0  # the local mock has no endpoint to reach
-    url = _gemini_url(provider, streaming=False) if provider.native_gemini else provider.url
-    request_url, host_headers, extensions = await _guarded_request_target(
-        provider, url
+    url = (
+        _gemini_url(provider, streaming=False)
+        if provider.native_gemini
+        else provider.url
     )
+    request_url, host_headers, extensions = await _guarded_request_target(provider, url)
     payload = _payload(
         provider,
         [
@@ -166,7 +170,9 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
                         "The provider redirected the request; use its final HTTPS Chat Completions endpoint"
                     )
                 if response.status_code in (401, 403):
-                    raise ProviderAuthError("The provider rejected the configured API key")
+                    raise ProviderAuthError(
+                        "The provider rejected the configured API key"
+                    )
                 if response.status_code == 429:
                     raise ProviderRateLimitError(
                         "The provider rate limited the connection test"
@@ -179,7 +185,9 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > 262_144:
-                        raise RuntimeError("The provider response was unexpectedly large")
+                        raise RuntimeError(
+                            "The provider response was unexpectedly large"
+                        )
     except httpx.TimeoutException as exc:
         raise RuntimeError(
             "The provider did not respond before the connection test timed out"
@@ -212,9 +220,8 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
     return latency_ms
 
 
-
 def _gemini_contents(
-    messages: list[dict[str, str]]
+    messages: list[dict[str, str]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     system_message = next(
         (item for item in messages if item.get("role") == "system"), None
@@ -264,7 +271,10 @@ def _payload(
         # failure mode (see the `thinking` flag below).
         if max_tokens is not None:
             generation_config["maxOutputTokens"] = max_tokens
-        payload: dict[str, Any] = {"contents": contents, "generationConfig": generation_config}
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": generation_config,
+        }
         if system_instruction:
             payload["systemInstruction"] = system_instruction
         return payload
@@ -399,7 +409,9 @@ def _extract_usage(data: dict[str, Any]) -> int:
 # ── rate-limit management ────────────────────────────────────────────────────────────────
 # Gates are per event loop: a Celery task runs each coroutine on a fresh loop (`sync_run`), and an asyncio
 # primitive created on one loop cannot be awaited on another.
-_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
 # time.monotonic() before which the provider has asked not to be called again (process-wide, any loop).
 _rate_limited_until = 0.0
 
@@ -452,13 +464,17 @@ async def complete(
     while True:
         remaining = _rate_limited_until - time.monotonic()
         if remaining > 0:
-            if not background or remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS:
+            if (
+                not background
+                or remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS
+            ):
                 raise ProviderRateLimitError(
-                    "The provider asked us to wait; not calling it again yet", retry_after=int(remaining) + 1
+                    "The provider asked us to wait; not calling it again yet",
+                    retry_after=int(remaining) + 1,
                 )
             await asyncio.sleep(remaining + random.uniform(0, 1))
         pause: float | None = None
-        async with (_gate() if background else _NoGate()):
+        async with _gate() if background else _NoGate():
             try:
                 result = await _complete_once(
                     messages,
@@ -475,19 +491,31 @@ async def complete(
                     or wait > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS
                     or rate_retries >= settings.LLM_RATE_LIMIT_MAX_INLINE_RETRIES
                 ):
-                    logger.warning("LLM rate limited; giving up on this call", retry_after=wait, retries=rate_retries)
+                    logger.warning(
+                        "LLM rate limited; giving up on this call",
+                        retry_after=wait,
+                        retries=rate_retries,
+                    )
                     raise
                 rate_retries += 1
                 pause = wait + random.uniform(0, 1)
-                logger.info("LLM rate limited; waiting and retrying", retry_after=wait, attempt=rate_retries)
+                logger.info(
+                    "LLM rate limited; waiting and retrying",
+                    retry_after=wait,
+                    attempt=rate_retries,
+                )
             else:
                 if result[0].strip():
                     return result
                 if empty_retries >= settings.LLM_EMPTY_REPLY_RETRIES:
-                    raise ProviderEmptyReplyError(f"{result[3]} returned an empty reply {empty_retries + 1} times")
+                    raise ProviderEmptyReplyError(
+                        f"{result[3]} returned an empty reply {empty_retries + 1} times"
+                    )
                 empty_retries += 1
                 pause = 1.0 * empty_retries
-                logger.warning("LLM returned an empty reply; retrying", attempt=empty_retries)
+                logger.warning(
+                    "LLM returned an empty reply; retrying", attempt=empty_retries
+                )
         # The gate is released while sleeping, so a waiting call does not hold a slot.
         await asyncio.sleep(pause or 0)
 
@@ -514,12 +542,21 @@ def _mock_completion(messages: list[dict[str, str]]) -> tuple[str, int, str, str
     if "<<<GROUNDED>>>" not in system_and_user:
         text = "[mock: no answer for this call]"
     else:
-        user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+        user = next(
+            (
+                m.get("content", "")
+                for m in reversed(messages)
+                if m.get("role") == "user"
+            ),
+            "",
+        )
         document = re.search(r'<authorized-document id="(C\d{1,3})">', user)
         if document is None:
             text = "<<<GROUNDED>>>\nI could not produce a grounded answer from the authorized Knowledge Base sources."
         else:
-            passage = re.search(r"<untrusted-passage>\n(.*?)\n</untrusted-passage>", user, re.DOTALL)
+            passage = re.search(
+                r"<untrusted-passage>\n(.*?)\n</untrusted-passage>", user, re.DOTALL
+            )
             excerpt = " ".join((passage.group(1) if passage else "").split())[:300]
             text = f"<<<GROUNDED>>>\n[mock answer: local development only] {excerpt} [{document.group(1)}]"
     return text, len(text.split()), "mock", "mock"
@@ -806,7 +843,9 @@ async def complete_multimodal(
     """Complete against bounded, server-selected images; never accepts client URLs."""
     runtime = get_runtime_config()
     if runtime is not None and runtime.provider == "mock":
-        raise RuntimeError("The local mock provider does not read images; leave EVIDENCE_VISION_ENABLED off")
+        raise RuntimeError(
+            "The local mock provider does not read images; leave EVIDENCE_VISION_ENABLED off"
+        )
     # Validate caller-controlled shape before configuration. An unsupported media type is
     # invalid regardless of whether this deployment happens to have a provider configured,
     # and resolving credentials first made this guard impossible to test or reason about.
@@ -815,7 +854,10 @@ async def complete_multimodal(
     allowed_types = {"image/png", "image/jpeg", "image/webp"}
     if any(mime not in allowed_types for mime, _data in images):
         raise ValueError("unsupported evidence image type")
-    if sum(len(data) for _mime, data in images) > settings.EVIDENCE_VISION_MAX_TOTAL_BYTES:
+    if (
+        sum(len(data) for _mime, data in images)
+        > settings.EVIDENCE_VISION_MAX_TOTAL_BYTES
+    ):
         raise ValueError("evidence images exceed the request size limit")
     provider = resolve_provider()
     if provider is None:
@@ -867,9 +909,7 @@ async def complete_multimodal(
             payload["max_tokens"] = max_tokens
         url = provider.url
 
-    request_url, host_headers, extensions = await _guarded_request_target(
-        provider, url
-    )
+    request_url, host_headers, extensions = await _guarded_request_target(provider, url)
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,
@@ -886,7 +926,9 @@ async def complete_multimodal(
                 "The provider redirected the request; configure its final HTTPS endpoint"
             )
         if response.status_code in (400, 404, 415, 422):
-            raise RuntimeError("The configured provider does not support evidence images")
+            raise RuntimeError(
+                "The configured provider does not support evidence images"
+            )
         if response.status_code in (401, 403):
             raise ProviderAuthError("The provider rejected the configured API key")
         if response.status_code == 429:
@@ -896,5 +938,9 @@ async def complete_multimodal(
             )
         response.raise_for_status()
         result = response.json()
-    answer = _extract_gemini_text(result) if provider.native_gemini else _extract_openai_text(result)
+    answer = (
+        _extract_gemini_text(result)
+        if provider.native_gemini
+        else _extract_openai_text(result)
+    )
     return answer, _extract_usage(result), provider.model, provider.name

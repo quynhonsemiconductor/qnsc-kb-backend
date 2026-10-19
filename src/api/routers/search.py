@@ -11,6 +11,7 @@ from src.repositories.feature_flags import FeatureFlagRepository
 
 router = APIRouter()
 
+
 @router.get("")
 async def search(
     q: str = Query("", max_length=4_000, description="Search query string"),
@@ -24,12 +25,12 @@ async def search(
     date_to: datetime | None = Query(None),
     limit: int = Query(5, ge=1, le=20),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ) -> Any:
     chunk_repo = ChunkRepository(db)
     gov_repo = GovernanceRepository(db)
     search_service = SearchService(chunk_repo, gov_repo, FeatureFlagRepository(db))
-    
+
     filters = {}
     if dept:
         filters["dept"] = dept
@@ -49,8 +50,5 @@ async def search(
         filters["date_to"] = date_to
 
     return await search_service.search(
-        user=current_user,
-        query=q,
-        filters=filters,
-        limit=limit
+        user=current_user, query=q, filters=filters, limit=limit
     )

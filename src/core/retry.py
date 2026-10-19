@@ -31,5 +31,5 @@ async def with_exponential_retry(
             last_error = exc
             if attempt == attempts - 1:
                 raise
-            await asyncio.sleep(base_delay * (2 ** attempt))
+            await asyncio.sleep(base_delay * (2**attempt))
     raise last_error or RuntimeError("Retry operation failed")

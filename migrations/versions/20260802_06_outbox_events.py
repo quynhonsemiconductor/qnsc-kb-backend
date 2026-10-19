@@ -1,4 +1,5 @@
 """add durable domain event outbox"""
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
@@ -16,18 +17,29 @@ def upgrade() -> None:
     op.create_table(
         "outbox_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("event_type", sa.String(100), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),
         sa.Column("status", sa.String(30), nullable=False, server_default="pending"),
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("next_attempt_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "next_attempt_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.Column("last_error", sa.Text(), nullable=True),
     )
     op.create_index("ix_outbox_events_event_type", "outbox_events", ["event_type"])
     op.create_index("ix_outbox_events_status", "outbox_events", ["status"])
-    op.create_index("ix_outbox_events_next_attempt_at", "outbox_events", ["next_attempt_at"])
+    op.create_index(
+        "ix_outbox_events_next_attempt_at", "outbox_events", ["next_attempt_at"]
+    )
 
 
 def downgrade() -> None:

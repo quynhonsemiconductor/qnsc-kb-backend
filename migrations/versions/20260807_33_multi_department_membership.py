@@ -3,7 +3,6 @@
 from alembic import op
 import os
 
-
 revision = "20260807_33"
 down_revision = "20260807_32"
 branch_labels = None
@@ -74,7 +73,9 @@ def upgrade() -> None:
         """)
         op.execute("ALTER TABLE article_departments ENABLE ROW LEVEL SECURITY")
         op.execute("ALTER TABLE article_departments FORCE ROW LEVEL SECURITY")
-        op.execute("DROP POLICY IF EXISTS tenant_article_departments ON article_departments")
+        op.execute(
+            "DROP POLICY IF EXISTS tenant_article_departments ON article_departments"
+        )
         op.execute("""
             CREATE POLICY tenant_article_departments ON article_departments USING (
                 current_setting('app.global_admin', true) = 'true'
@@ -90,7 +91,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if os.getenv("ENABLE_RLS", "false").lower() in {"1", "true", "yes"}:
-        op.execute("DROP POLICY IF EXISTS tenant_article_departments ON article_departments")
+        op.execute(
+            "DROP POLICY IF EXISTS tenant_article_departments ON article_departments"
+        )
         op.execute("DROP POLICY IF EXISTS tenant_user_departments ON user_departments")
     op.drop_table("article_departments")
     op.drop_table("user_departments")

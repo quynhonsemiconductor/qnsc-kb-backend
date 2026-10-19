@@ -40,7 +40,6 @@ import sqlalchemy as sa
 
 from src.core.config import settings
 
-
 revision = "20260912_77"
 down_revision = "20260911_76"
 branch_labels = None
@@ -97,7 +96,9 @@ def upgrade() -> None:
 
     # HNSW indexes are bound to the column width and block the ALTER.
     op.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX}")
-    op.execute(f"ALTER TABLE article_chunks ALTER COLUMN embedding TYPE vector({target})")
+    op.execute(
+        f"ALTER TABLE article_chunks ALTER COLUMN embedding TYPE vector({target})"
+    )
     op.execute(
         f"CREATE INDEX IF NOT EXISTS {HNSW_INDEX} ON article_chunks "
         "USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL"

@@ -3,7 +3,15 @@ from typing import Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from src.models.ops import Connector, ConnectorJob, NotificationQueue, DeadLetterJob, EvalQuestion, EvalRun
+from src.models.ops import (
+    Connector,
+    ConnectorJob,
+    NotificationQueue,
+    DeadLetterJob,
+    EvalQuestion,
+    EvalRun,
+)
+
 
 class OpsRepository:
     def __init__(self, db: AsyncSession):
@@ -17,13 +25,13 @@ class OpsRepository:
         return conn
 
     async def get_connector(self, conn_id: uuid.UUID) -> Connector | None:
-        result = await self.db.execute(
-            select(Connector).where(Connector.id == conn_id)
-        )
+        result = await self.db.execute(select(Connector).where(Connector.id == conn_id))
         return result.scalar_one_or_none()
 
     async def list_connectors(self) -> Sequence[Connector]:
-        result = await self.db.execute(select(Connector).order_by(Connector.created_at.desc()))
+        result = await self.db.execute(
+            select(Connector).order_by(Connector.created_at.desc())
+        )
         return result.scalars().all()
 
     # Jobs
@@ -35,7 +43,9 @@ class OpsRepository:
 
     async def get_job(self, job_id: uuid.UUID) -> ConnectorJob | None:
         result = await self.db.execute(
-            select(ConnectorJob).where(ConnectorJob.id == job_id).options(selectinload(ConnectorJob.connector))
+            select(ConnectorJob)
+            .where(ConnectorJob.id == job_id)
+            .options(selectinload(ConnectorJob.connector))
         )
         return result.scalar_one_or_none()
 
@@ -70,7 +80,9 @@ class OpsRepository:
         return result.scalars().all()
 
     async def get_eval_question(self, question_id: uuid.UUID) -> EvalQuestion | None:
-        result = await self.db.execute(select(EvalQuestion).where(EvalQuestion.id == question_id))
+        result = await self.db.execute(
+            select(EvalQuestion).where(EvalQuestion.id == question_id)
+        )
         return result.scalar_one_or_none()
 
     async def create_eval_run(self, er: EvalRun) -> EvalRun:

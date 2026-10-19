@@ -20,6 +20,7 @@ Checks, each printed as PASS or FAIL (exit status 1 on any FAIL):
 
 Nothing here prints the key, the certificate, or the token. The mail it sends is a plain test message.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -68,16 +69,26 @@ async def run(args: argparse.Namespace) -> int:
 
     try:
         async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-            token = await email._access_token(client)  # noqa: SLF001 - the point is to exercise the real path
+            token = await email._access_token(
+                client
+            )  # noqa: SLF001 - the point is to exercise the real path
         claims = _claims(token)
         roles = claims.get("roles") or []
-        report("TOKEN", True, f"issued for appid={claims.get('appid') or claims.get('azp')}; "
-               f"roles in the token: {roles or 'none (expected when authority comes from Exchange RBAC only)'}")
+        report(
+            "TOKEN",
+            True,
+            f"issued for appid={claims.get('appid') or claims.get('azp')}; "
+            f"roles in the token: {roles or 'none (expected when authority comes from Exchange RBAC only)'}",
+        )
         if roles:
             # ANY application role means something was consented in Entra, and Entra grants are tenant-wide, so
             # they would make the Exchange scope meaningless. The app should hold no role at all.
-            report("SCOPE", False, f"the token carries application role(s) {roles}: remove every application permission "
-                   "consent from this app in Entra (runbook step 7), or the Exchange scope is meaningless")
+            report(
+                "SCOPE",
+                False,
+                f"the token carries application role(s) {roles}: remove every application permission "
+                "consent from this app in Entra (runbook step 7), or the Exchange scope is meaningless",
+            )
             return 1
     except email.MailSendError as exc:
         report("TOKEN", False, str(exc))
@@ -85,7 +96,11 @@ async def run(args: argparse.Namespace) -> int:
 
     sender = email.MicrosoftGraphEmailSender()
     try:
-        await sender.send(to=args.to, subject="QNSC KB mail check", text="Test message from scripts/graph_mail_check.py.")
+        await sender.send(
+            to=args.to,
+            subject="QNSC KB mail check",
+            text="Test message from scripts/graph_mail_check.py.",
+        )
         report("SEND", True, f"sent as {args.sender} to {args.to} (HTTP 202)")
     except email.MailSendError as exc:
         report("SEND", False, f"{exc} (request-id {exc.request_id})")
@@ -93,28 +108,54 @@ async def run(args: argparse.Namespace) -> int:
     if args.denied_mailbox:
         for denied in args.denied_mailbox:
             try:
-                await sender.send(to=args.to, subject="QNSC KB mail check (must be refused)", text="This must not arrive.",
-                                  mailbox=denied)
-                report("DENIED", False, f"sendMail AS {denied} was ACCEPTED: the app can send as other mailboxes")
+                await sender.send(
+                    to=args.to,
+                    subject="QNSC KB mail check (must be refused)",
+                    text="This must not arrive.",
+                    mailbox=denied,
+                )
+                report(
+                    "DENIED",
+                    False,
+                    f"sendMail AS {denied} was ACCEPTED: the app can send as other mailboxes",
+                )
             except email.MailSendError as exc:
-                report("DENIED", exc.status == 403, f"as {denied}: HTTP {exc.status} {exc.code} (request-id {exc.request_id})"
-                       + ("" if exc.status == 403 else "; expected 403"))
+                report(
+                    "DENIED",
+                    exc.status == 403,
+                    f"as {denied}: HTTP {exc.status} {exc.code} (request-id {exc.request_id})"
+                    + ("" if exc.status == 403 else "; expected 403"),
+                )
     else:
         print("SKIP  DENIED  no --denied-mailbox given; the scope has NOT been proven")
     return 1 if failures else 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--cert", required=True, help="PEM file with the certificate")
     parser.add_argument("--key", required=True, help="PEM file with the private key")
-    parser.add_argument("--sender", required=True, help="the mailbox the app is scoped to")
+    parser.add_argument(
+        "--sender", required=True, help="the mailbox the app is scoped to"
+    )
     parser.add_argument("--to", required=True, help="recipient of the test message")
-    parser.add_argument("--denied-mailbox", action="append", help="a mailbox OUTSIDE the scope (repeatable); sending as it must be refused with 403. Always include the OTHER environment's mailbox")
-    parser.add_argument("--authority", help="override https://login.microsoftonline.com (local fake Microsoft)")
-    parser.add_argument("--graph-api", help="override https://graph.microsoft.com/v1.0 (local fake Microsoft)")
+    parser.add_argument(
+        "--denied-mailbox",
+        action="append",
+        help="a mailbox OUTSIDE the scope (repeatable); sending as it must be refused with 403. Always include the OTHER environment's mailbox",
+    )
+    parser.add_argument(
+        "--authority",
+        help="override https://login.microsoftonline.com (local fake Microsoft)",
+    )
+    parser.add_argument(
+        "--graph-api",
+        help="override https://graph.microsoft.com/v1.0 (local fake Microsoft)",
+    )
     return asyncio.run(run(parser.parse_args()))
 
 

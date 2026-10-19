@@ -1,4 +1,5 @@
 """Small dependency-free async smoke/load test for a running API."""
+
 from __future__ import annotations
 
 import argparse
@@ -15,6 +16,7 @@ async def run(base_url: str, concurrency: int, requests: int) -> dict[str, float
     failures = 0
 
     async with httpx.AsyncClient(base_url=base_url, timeout=10) as client:
+
         async def one() -> None:
             nonlocal failures
             async with semaphore:

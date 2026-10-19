@@ -1,4 +1,5 @@
 """Closed, deterministic analytics over authorized extracted table evidence."""
+
 from __future__ import annotations
 
 import re
@@ -15,7 +16,14 @@ class RowFilter(BaseModel):
 
 class AnalyticsPlan(BaseModel):
     operation: Literal[
-        "count", "sum", "average", "median", "min", "max", "difference", "percentage_change"
+        "count",
+        "sum",
+        "average",
+        "median",
+        "min",
+        "max",
+        "difference",
+        "percentage_change",
     ]
     evidence_id: str = Field(min_length=1, max_length=64)
     column: str | None = Field(default=None, max_length=255)
@@ -62,7 +70,11 @@ def parse_decimal(value: object) -> Decimal:
 
 def _format(value: Decimal) -> str:
     normalized = value.normalize()
-    return format(normalized, "f") if normalized != normalized.to_integral() else str(normalized.quantize(Decimal(1)))
+    return (
+        format(normalized, "f")
+        if normalized != normalized.to_integral()
+        else str(normalized.quantize(Decimal(1)))
+    )
 
 
 def execute_analytics_plan(
@@ -114,7 +126,9 @@ def execute_analytics_plan(
         if plan.operation in {"difference", "percentage_change"}:
             by_row = dict(numeric)
             if plan.left_row not in by_row or plan.right_row not in by_row:
-                raise ValueError("comparison rows are not numeric or do not match filters")
+                raise ValueError(
+                    "comparison rows are not numeric or do not match filters"
+                )
             left, right = by_row[plan.left_row], by_row[plan.right_row]
             if plan.operation == "difference":
                 result = right - left
@@ -123,7 +137,9 @@ def execute_analytics_plan(
                 if left == 0:
                     raise ValueError("percentage change from zero is undefined")
                 result = ((right - left) / abs(left)) * Decimal(100)
-                formula = f"(({_format(right)} - {_format(left)}) / |{_format(left)}|) × 100"
+                formula = (
+                    f"(({_format(right)} - {_format(left)}) / |{_format(left)}|) × 100"
+                )
             operands = [
                 {
                     "label": f"{plan.column} · row {plan.left_row + 1}",
@@ -149,7 +165,11 @@ def execute_analytics_plan(
             elif plan.operation == "median":
                 ordered = sorted(values)
                 middle = len(ordered) // 2
-                result = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / Decimal(2)
+                result = (
+                    ordered[middle]
+                    if len(ordered) % 2
+                    else (ordered[middle - 1] + ordered[middle]) / Decimal(2)
+                )
                 formula = f"MEDIAN({len(values)} values)"
             elif plan.operation == "min":
                 result = min(values)

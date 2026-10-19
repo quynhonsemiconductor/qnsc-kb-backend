@@ -14,6 +14,7 @@ Run on Linux (cgroup v2), in a container limited like the task:
 Measures the embedding session only. PaddleOCR (loaded per file by the worker) and the interpreter's own
 baseline are NOT in these numbers, and that is the biggest unknown for a real `--concurrency 2`.
 """
+
 from __future__ import annotations
 
 import multiprocessing as mp
@@ -41,7 +42,11 @@ def pss_rss_mb(pid: int) -> tuple[float, float]:
 
 
 def cgroup_mb() -> dict[str, float]:
-    out = {"memory.current": round(int(_read("/sys/fs/cgroup/memory.current") or 0) / 2**20, 1)}
+    out = {
+        "memory.current": round(
+            int(_read("/sys/fs/cgroup/memory.current") or 0) / 2**20, 1
+        )
+    }
     for line in _read("/sys/fs/cgroup/memory.stat").splitlines():
         key, _, value = line.partition(" ")
         if key in ("anon", "file", "file_mapped", "shmem"):
@@ -60,7 +65,9 @@ def child(ready, go) -> None:
 
 
 def run(n: int) -> None:
-    ctx = mp.get_context("fork")  # what billiard does: the parent has NOT loaded the model
+    ctx = mp.get_context(
+        "fork"
+    )  # what billiard does: the parent has NOT loaded the model
     base = cgroup_mb()
     ready, go = ctx.Queue(), ctx.Event()
     procs = [ctx.Process(target=child, args=(ready, go)) for _ in range(n)]
@@ -74,8 +81,12 @@ def run(n: int) -> None:
         pss, rss = pss_rss_mb(pid)
         print(f"   pid {pid}: load+first query {seconds}s  RSS {rss} MB  PSS {pss} MB")
     grew = round(after["memory.current"] - base["memory.current"], 1)
-    print(f"   cgroup memory.current grew {grew} MB   (anon {after.get('anon')} MB, file_mapped {after.get('file_mapped')} MB)")
-    print(f"   sum of RSS {round(sum(pss_rss_mb(pid)[1] for pid, _ in infos), 1)} MB, sum of PSS {round(sum(pss_rss_mb(pid)[0] for pid, _ in infos), 1)} MB")
+    print(
+        f"   cgroup memory.current grew {grew} MB   (anon {after.get('anon')} MB, file_mapped {after.get('file_mapped')} MB)"
+    )
+    print(
+        f"   sum of RSS {round(sum(pss_rss_mb(pid)[1] for pid, _ in infos), 1)} MB, sum of PSS {round(sum(pss_rss_mb(pid)[0] for pid, _ in infos), 1)} MB"
+    )
     go.set()
     for p in procs:
         p.join()

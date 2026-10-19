@@ -7,7 +7,6 @@ from typing import Any
 
 from src.core.config import settings
 
-
 # A review candidate is an approval unit, not a retrieval chunk.  Retrieval is
 # split separately after approval, so making candidates as small as the 1,800
 # character index parents turns every AI heading into an unnecessary article.
@@ -67,7 +66,11 @@ def _large_document_candidates(title: str, text: str) -> list[dict[str, Any]]:
 
 
 def split_document_candidates(
-    title: str, text: str, *, prefer_markdown_sections: bool = False, page_texts: list[dict] | None = None
+    title: str,
+    text: str,
+    *,
+    prefer_markdown_sections: bool = False,
+    page_texts: list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     """Return ordered candidates with source character offsets.
 
@@ -83,8 +86,13 @@ def split_document_candidates(
     clean_text = text.strip()
     if not clean_text:
         return []
+
     def position(start: int, end: int, heading: str | None) -> dict[str, Any]:
-        result: dict[str, Any] = {"offset_start": start, "offset_end": end, "section": heading}
+        result: dict[str, Any] = {
+            "offset_start": start,
+            "offset_end": end,
+            "section": heading,
+        }
         if page_texts:
             cursor = 0
             first = last = None
@@ -99,6 +107,7 @@ def split_document_candidates(
             result["page_start"] = first
             result["page_end"] = last or first
         return result
+
     if (
         len(clean_text) <= _MAX_REVIEW_CANDIDATE_CHARS
         or not settings.DOCUMENT_AUTO_SPLIT_ENABLED
@@ -120,7 +129,9 @@ def split_document_candidates(
     # argument remains for call compatibility and has no effect on this rule.
     candidates = _large_document_candidates(title, clean_text)
     for item in candidates:
-        item["source_position"] = position(item["source_start"], item["source_end"], item.get("heading"))
+        item["source_position"] = position(
+            item["source_start"], item["source_end"], item.get("heading")
+        )
     return candidates
 
 

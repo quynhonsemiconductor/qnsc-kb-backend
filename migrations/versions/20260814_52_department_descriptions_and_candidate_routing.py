@@ -8,7 +8,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
-
 revision = "20260814_52"
 down_revision = "20260810_51"
 branch_labels = None
@@ -41,7 +40,9 @@ def upgrade() -> None:
         op.alter_column("departments", "description", server_default=None)
     for column in ("department_ids", "department_suggestions", "proposed_department"):
         if _missing("draft_candidates", column):
-            op.add_column("draft_candidates", sa.Column(column, sa.JSON(), nullable=True))
+            op.add_column(
+                "draft_candidates", sa.Column(column, sa.JSON(), nullable=True)
+            )
 
 
 def downgrade() -> None:

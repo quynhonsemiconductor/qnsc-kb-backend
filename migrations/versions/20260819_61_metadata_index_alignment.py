@@ -9,7 +9,6 @@ and idempotent so Alembic validation is clean on both paths.
 
 from alembic import op
 
-
 revision = "20260819_61"
 down_revision = "20260819_60"
 branch_labels = None

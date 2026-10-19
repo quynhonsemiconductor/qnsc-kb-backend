@@ -4,7 +4,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-
 revision = "20260806_11"
 down_revision = "20260803_10"
 branch_labels = None
@@ -25,10 +24,16 @@ def upgrade() -> None:
         "ALTER TABLE pending_drafts ADD COLUMN IF NOT EXISTS review_note TEXT",
     ):
         op.execute(statement)
-    op.execute("UPDATE pending_drafts p SET company_domain = COALESCE((SELECT u.company_domain FROM users u WHERE u.id = p.created_by), 'local') WHERE p.company_domain IS NULL OR p.company_domain = ''")
+    op.execute(
+        "UPDATE pending_drafts p SET company_domain = COALESCE((SELECT u.company_domain FROM users u WHERE u.id = p.created_by), 'local') WHERE p.company_domain IS NULL OR p.company_domain = ''"
+    )
     op.execute("ALTER TABLE pending_drafts ALTER COLUMN company_domain SET NOT NULL")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_pending_drafts_company_domain ON pending_drafts (company_domain)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_pending_drafts_assigned_approver_id ON pending_drafts (assigned_approver_id)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_pending_drafts_company_domain ON pending_drafts (company_domain)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_pending_drafts_assigned_approver_id ON pending_drafts (assigned_approver_id)"
+    )
 
 
 def downgrade() -> None:

@@ -6,6 +6,7 @@ the `ml` group, so reaching this backend means a local checkout with
 `poetry install --with ml` — which is exactly the situation the parity gate in
 tests/unit/test_embedding_backends.py re-enters when a model change needs re-proving.
 """
+
 from __future__ import annotations
 
 from typing import Any

@@ -20,16 +20,27 @@ engine = create_async_engine(
         "command_timeout": 5,
     },
 )
-SessionLocal = async_sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine, class_=AsyncSession)
+SessionLocal = async_sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+    bind=engine,
+    class_=AsyncSession,
+)
 
 # OAuth2 scheme point to login route
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login", auto_error=False)
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl=f"{settings.API_V1_STR}/auth/login", auto_error=False
+)
+
 
 async def init_db() -> None:
     # Runtime schema creation and ALTER statements are intentionally forbidden.
     # The deployment entrypoint runs Alembic before the application starts.
     if settings.AUTO_CREATE_SCHEMA:
-        raise RuntimeError("AUTO_CREATE_SCHEMA is disabled; run Alembic migrations before starting the application")
+        raise RuntimeError(
+            "AUTO_CREATE_SCHEMA is disabled; run Alembic migrations before starting the application"
+        )
     async with SessionLocal() as db:
         # Startup bootstrap is an internal maintenance operation.  It must
         # remain able to seed roles after production RLS has been migrated.
@@ -42,6 +53,7 @@ async def init_db() -> None:
         # written nothing.
         await ensure_bootstrap_admin(db)
         await load_runtime_config(db)
+
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
@@ -221,7 +233,7 @@ async def get_current_user(
             raise credentials_exception
     except jwt.PyJWTError:
         raise credentials_exception
-        
+
     email = email.strip().lower()
     if "@" not in email:
         raise credentials_exception
@@ -234,7 +246,10 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     if not user.active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been deactivated")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been deactivated",
+        )
     if int(payload.get("av", 0)) != user.auth_version:
         raise credentials_exception
     if not user.roles:
@@ -252,9 +267,16 @@ async def get_current_user(
     )
     return user
 
+
 def require_permission(permission: str, scope: str = "company"):
     def permission_checker(current_user: User = Depends(get_current_user)) -> User:
-        if not AuthorizationService.has_permission(current_user, permission, requested_scope=scope):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing permission: {permission}")
+        if not AuthorizationService.has_permission(
+            current_user, permission, requested_scope=scope
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing permission: {permission}",
+            )
         return current_user
+
     return permission_checker

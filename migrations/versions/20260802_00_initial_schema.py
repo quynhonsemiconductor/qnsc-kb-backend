@@ -24,6 +24,7 @@ DDL here rather than deleting it outright. A forward-migrated database will NOT
 show the failure, so this path has to be exercised from an EMPTY database --
 which is what a fresh production deploy and the CI test job both do.
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -44,10 +45,25 @@ def _create_retired_audience_objects() -> None:
         op.create_table(
             "access_groups",
             sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-            sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
-            sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
             sa.Column("name", sa.String(length=100), nullable=False),
-            sa.Column("company_domain", sa.String(length=255), nullable=False, server_default="local"),
+            sa.Column(
+                "company_domain",
+                sa.String(length=255),
+                nullable=False,
+                server_default="local",
+            ),
             sa.Column("bitmask_position", sa.Integer(), nullable=False),
         )
         op.execute(
