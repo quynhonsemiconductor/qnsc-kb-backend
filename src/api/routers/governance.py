@@ -347,7 +347,7 @@ MANAGED_FEATURE_FLAGS = {
     },
     "rag.cross_encoder_reranker": {
         "label": "Cross-encoder reranker",
-        "description": "Rescore search results with a cross-encoder model after hybrid search, on top of the always-on keyword reranker. Requires the optional 'ml' dependency group and CROSS_ENCODER_RERANKER_ENABLED.",
+        "description": "Rescore search results with a cross-encoder model after hybrid search, on top of the always-on keyword reranker. Needs the optional 'ml' dependency group (torch), which no deployed image installs, so it is unavailable in deployed images and only runs in a local checkout with CROSS_ENCODER_RERANKER_ENABLED set.",
         "default_enabled": settings.CROSS_ENCODER_RERANKER_ENABLED,
     },
 }

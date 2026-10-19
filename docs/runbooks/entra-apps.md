@@ -47,7 +47,7 @@ client id). Nothing is exposed there; it must be set before the first prod deplo
 | Platform | **Web** (server-side code flow with a client secret). Not SPA, not mobile | same |
 | Redirect URIs | `http://localhost:8000/api/v1/auth/entra/callback`, `http://localhost:8000/api/v1/connectors/oauth/callback`, `https://kb-api-dev.qnsc.vn/api/v1/auth/entra/callback`, `https://kb-api-dev.qnsc.vn/api/v1/connectors/oauth/callback` | `https://kb-api.qnsc.vn/api/v1/auth/entra/callback`, `https://kb-api.qnsc.vn/api/v1/connectors/oauth/callback` **only** |
 | Used by | local dev **and** the develop environment | production only |
-| Secrets bundle | `qnsc-kb/develop/app`, key `microsoft-client-secret` | `qnsc-kb/prod/app`, key `microsoft-client-secret` |
+| Secrets bundle | `qnsc-kb/develop/app`, key `microsoft-client-secret` | `qnsc-kb/production/app`, key `microsoft-client-secret` |
 | Terraform | `microsoft_client_id` in `infra/live/develop/variables.tf` | `microsoft_client_id` in `infra/live/prod/variables.tf` |
 
 Production gets **no `localhost` URI**: a production client secret must not be usable from a developer's machine.

@@ -137,14 +137,14 @@ services:
       APP_DATABASE_ROLE: ${APP_DATABASE_USER:-qnsc_app}
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
-      EMBEDDING_VERSION: ${EMBEDDING_VERSION:-minilm-l12-v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large-instruct}
+      EMBEDDING_VERSION: ${EMBEDDING_VERSION:-e5-large-instruct-v1}
       # Stated, not defaulted, so local and production embed identically. ONNX on
-      # CPU only; the pooling and token window belong to THIS model (mean, 128) and
+      # CPU only; the pooling and token window belong to THIS model (mean, 512) and
       # are wrong for any other.
       EMBEDDING_RUNTIME: ${EMBEDDING_RUNTIME:-onnx}
       EMBEDDING_ONNX_POOLING: ${EMBEDDING_ONNX_POOLING:-mean}
-      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS:-128}
+      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS:-512}
       CONNECTOR_WEBHOOK_BASE_URL: ${CONNECTOR_WEBHOOK_BASE_URL:?set CONNECTOR_WEBHOOK_BASE_URL}
       MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}
       MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:?set MICROSOFT_CLIENT_SECRET}
@@ -187,7 +187,7 @@ services:
       dockerfile: Dockerfile
       target: worker
     restart: unless-stopped
-    command: ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
+    command: ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
     environment:
       ENVIRONMENT: production
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
@@ -212,14 +212,14 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
       CONNECTOR_ROOT_PATH: /app/storage/connectors
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
-      EMBEDDING_VERSION: ${EMBEDDING_VERSION:-minilm-l12-v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large-instruct}
+      EMBEDDING_VERSION: ${EMBEDDING_VERSION:-e5-large-instruct-v1}
       # Stated, not defaulted, so local and production embed identically. ONNX on
-      # CPU only; the pooling and token window belong to THIS model (mean, 128) and
+      # CPU only; the pooling and token window belong to THIS model (mean, 512) and
       # are wrong for any other.
       EMBEDDING_RUNTIME: ${EMBEDDING_RUNTIME:-onnx}
       EMBEDDING_ONNX_POOLING: ${EMBEDDING_ONNX_POOLING:-mean}
-      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS:-128}
+      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS:-512}
       CONNECTOR_WEBHOOK_BASE_URL: ${CONNECTOR_WEBHOOK_BASE_URL:?set CONNECTOR_WEBHOOK_BASE_URL}
       MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}
       MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:?set MICROSOFT_CLIENT_SECRET}
@@ -229,6 +229,15 @@ services:
       MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES: ${MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES:-1440}
       MICROSOFT_SHAREPOINT_SITE_IDS: ${MICROSOFT_SHAREPOINT_SITE_IDS:-}
       MICROSOFT_ONEDRIVE_USER_IDS: ${MICROSOFT_ONEDRIVE_USER_IDS:-}
+      # Application email, WORKER ONLY (it is the only caller of get_email_sender()): the certificate and key
+      # never reach the api container. Leave MAIL_GRAPH_CLIENT_ID empty and the worker still starts, logs
+      # "Mail is not configured" on every delivery pass, and sends nothing. Set the client id and it refuses to
+      # start unless the sender, certificate and key are all present. PEMs in an .env file may use literal \n.
+      # docs/runbooks/email-graph.md
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-graph}
+      MICROSOFT_GRAPH_SENDER: ${MICROSOFT_GRAPH_SENDER:-}
+      MAIL_GRAPH_CLIENT_ID: ${MAIL_GRAPH_CLIENT_ID:-}
+      MAIL_GRAPH_PEM: ${MAIL_GRAPH_PEM:-}
       CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: ${CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS:-30}
       CONNECTOR_RECONCILE_INTERVAL_MINUTES: ${CONNECTOR_RECONCILE_INTERVAL_MINUTES:-360}
       CONNECTOR_AUTO_PUBLISH_MODE: ${CONNECTOR_AUTO_PUBLISH_MODE:-governed}
