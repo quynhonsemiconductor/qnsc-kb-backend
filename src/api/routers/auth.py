@@ -1519,6 +1519,13 @@ async def create_managed_user(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    # The schema makes password optional, but register_user needs one: without this check a
+    # create with no password reached get_password_hash(None) and failed with a 500.
+    if user_in.password is None:
+        raise HTTPException(
+            status_code=422,
+            detail="A password is required to create a user",
+        )
     domain = str(user_in.email).lower().rsplit("@", 1)[-1]
     can_manage_globally = _is_global_user_manager(current_user)
     if not can_manage_globally and domain != current_user.company_domain:

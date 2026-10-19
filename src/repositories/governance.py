@@ -370,7 +370,8 @@ class GovernanceRepository:
 
     # Gap Queue
     #: Taken from the column rather than written out, so the two cannot drift apart.
-    _GAP_QUERY_CHARS = Gap.__table__.c.query.type.length
+    # String types have .length; the TypeEngine stub does not declare it.
+    _GAP_QUERY_CHARS = getattr(Gap.__table__.c.query.type, "length")
 
     async def log_gap(
         self, query: str, company_domain: str, dept: str | None = None
@@ -419,7 +420,9 @@ class GovernanceRepository:
         )
         gap_id = (await self.db.execute(statement)).scalar_one()
         await self.db.commit()
-        return await self.db.get(Gap, gap_id)
+        gap = await self.db.get(Gap, gap_id)
+        assert gap is not None  # upserted and committed under this id just above
+        return gap
 
     async def list_gaps(
         self, status: str | None = None, company_domain: str | None = None

@@ -51,9 +51,26 @@ def _strip_terraform_comments(source: str) -> str:
     return re.sub(r"(^|\s)(//|#).*$", r"\1", source, flags=re.M)
 
 
+def _without_provisioners(source: str) -> str:
+    """Drop `provisioner "..." { ... }` blocks. A local-exec `environment` is the environment of that one
+    shell command on the runner, never a container's: it is not a task variable and must not count as one."""
+    kept, cursor = [], 0
+    for match in re.finditer(r'\bprovisioner\s+"[^"]*"\s*\{', source):
+        if match.start() < cursor:  # inside a block already removed
+            continue
+        kept.append(source[cursor : match.start()])
+        depth, i = 1, match.end()
+        while i < len(source) and depth:
+            depth += {"{": 1, "}": -1}.get(source[i], 0)
+            i += 1
+        cursor = i
+    kept.append(source[cursor:])
+    return "".join(kept)
+
+
 def terraform_variable_names(source: str) -> set[str]:
     """Every environment variable a stack module puts in a task: list entries and `environment = { ... }` maps."""
-    source = _strip_terraform_comments(source)
+    source = _without_provisioners(_strip_terraform_comments(source))
     names = set(re.findall(r'name\s*=\s*"([A-Z][A-Z0-9_]+)"\s*,\s*(?:value|secret_arn)', source))
     for match in re.finditer(r"\benvironment\s*=\s*\{", source):
         depth, i = 1, match.end()
@@ -132,3 +149,21 @@ def test_terraform_names_are_found_in_lists_and_in_environment_maps_and_not_in_c
       }
     '''
     assert terraform_variable_names(source) == {"LISTED", "A_SECRET", "MAPPED", "NESTED", "URL"}
+
+
+def test_a_provisioner_environment_is_not_a_task_variable_but_a_task_map_next_to_it_still_is():
+    source = '''
+      resource "terraform_data" "writer" {
+        provisioner "local-exec" {
+          environment = {
+            TUNNEL_TOKEN = module.tunnel[0].token
+            SECRET_ID    = aws_secretsmanager_secret.x[0].id
+          }
+          command = "set -eu; { echo ok; }; printf '%s' \\"$TUNNEL_TOKEN\\" | aws secretsmanager put-secret-value"
+        }
+      }
+      environment = {
+        REAL_TASK_VAR = "1"
+      }
+    '''
+    assert terraform_variable_names(source) == {"REAL_TASK_VAR"}

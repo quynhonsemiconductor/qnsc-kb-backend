@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from alembic.config import Config
@@ -50,7 +51,11 @@ def test_production_compose_is_explicitly_hardened():
     dev_compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     # No service has an entrypoint script any more: docker/entrypoint.sh is gone and
     # each service states its own `command`, so nothing can run migrations on start.
-    assert "entrypoint:" not in dev_compose
+    # Scoped to the app services: garage-init is a one-shot that runs its setup script through an entrypoint, by design.
+    for name in ("api", "worker", "beat", "migrator"):
+        block = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  \S|\Z)", dev_compose)
+        assert block, f"{name} is not a service in the dev compose"
+        assert "entrypoint" not in block.group(1), f"{name} must not run migrations from an entrypoint"
     assert "AUTO_CREATE_SCHEMA=false" in dev_compose
     # Dev needs the same migrator, behind the same profile. Without it there was no
     # compose path to apply a migration at all, so a new table surfaced only as

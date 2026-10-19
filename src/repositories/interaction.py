@@ -1,5 +1,6 @@
 import uuid
-from typing import Sequence
+from typing import Any, Sequence, cast
+from sqlalchemy.engine import CursorResult
 from sqlalchemy import select, delete, and_, exists, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -154,7 +155,7 @@ class InteractionRepository:
             delete(Bookmark).where(*self._authorized_bookmark_filters(user, article_id))
         )
         await self.db.commit()
-        return result.rowcount > 0
+        return cast(CursorResult[Any], result).rowcount > 0
 
     async def get_bookmarks(self, user: User) -> Sequence[Article]:
         result = await self.db.execute(

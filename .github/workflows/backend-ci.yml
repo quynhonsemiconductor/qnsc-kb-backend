@@ -389,7 +389,7 @@ jobs:
   # reach, a port another stack owns), or a service reports unhealthy forever. This boots the real compose
   # stack (db, redis, migrator, api, worker, beat) from `.env.example` and proves the health endpoint
   # and one authenticated call, so that drift fails a pull request instead of the next person's afternoon.
-  # LocalStack is part of the stack: uploads go to its bucket, and its healthcheck proves the bucket's CORS too.
+  # Garage is part of the stack: uploads go to its bucket, and garage-init proves the bucket and its CORS before the API starts.
   #
   # NOT proven here: the real embedding model. The ~2.3 GB bake is skipped (KB_BAKE_EMBEDDING_MODEL=false)
   # and EMBEDDING_MODEL is set to `mock`, so search quality is untested; that path has its own tests and the
@@ -416,7 +416,7 @@ jobs:
           echo 'KB_BAKE_EMBEDDING_MODEL=false' >> .env
 
       - name: Start Postgres and Redis
-        run: docker compose up -d --build --wait db redis localstack
+        run: docker compose up -d --build --wait db redis garage garage-init
 
       - name: Migrate
         run: docker compose --profile migrate run --rm migrator
@@ -448,6 +448,21 @@ jobs:
           token="$(python3 -c 'import json; print(json.load(open("login.json"))["access_token"])')"
           curl -fsS -H "Authorization: Bearer $token" http://localhost:8000/api/v1/auth/me -o me.json
           python3 -c 'import json; d=json.load(open("me.json")); print("signed in as", d["email"], d["role"]); assert d["role"] == "Admin"'
+
+      - name: Presigned upload through Garage (signature, host and region, end to end)
+        # The browser's path, without a browser: the API signs a PUT for the public endpoint, curl sends it to that
+        # host, and the object is read back with a presigned GET. A wrong signing version, signature host or region fails
+        # here, not in a user's upload.
+        run: |
+          set -euo pipefail
+          key="s3://qnsc-kb-sources-local/qnsc-sources/ci/proof-$GITHUB_RUN_ID.txt"
+          put_url="$(docker compose exec -T api python -c "from src.domain import source_storage as s; print(s.create_presigned_source_url('$key', operation='put_object'))")"
+          get_url="$(docker compose exec -T api python -c "from src.domain import source_storage as s; print(s.create_presigned_source_url('$key', operation='get_object'))")"
+          printf 'garage proof %s\n' "$GITHUB_RUN_ID" > proof.txt
+          status="$(curl -sS -o put.out -w '%{http_code}' -X PUT -H 'Content-Type: text/plain' --data-binary @proof.txt "$put_url")"
+          test "$status" = "200" || { echo "::error::presigned PUT answered $status"; cat put.out; exit 1; }
+          curl -fsS "$get_url" -o got.txt
+          cmp proof.txt got.txt && echo "presigned PUT and GET round-trip through Garage"
 
       - name: The worker answers and beat is scheduling
         run: |

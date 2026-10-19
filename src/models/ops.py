@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import uuid
 from datetime import datetime
 from sqlalchemy import (
@@ -15,6 +16,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from src.models.user import User
 
 
 class Connector(Base, UUIDPrimaryKeyMixin, TimestampMixin):

@@ -1,4 +1,4 @@
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Any, ClassVar
 from urllib.parse import quote, urlparse
@@ -9,6 +9,12 @@ import re
 # is exactly why validate_production refuses to start with it. Defined here rather than
 # beside the bootstrap code so that check has no import cycle to reach it.
 DEVELOPMENT_DEFAULT_PASSWORD = "Admin123@"
+# The fixed key pair the local Garage node imports (docker-compose.yml garage-init, .env.example). It is published in this
+# repository so a fresh clone can start, so a deployed environment must never run with it.
+LOCAL_GARAGE_ACCESS_KEY_ID = "GK000000000000000000000001"
+LOCAL_GARAGE_SECRET_ACCESS_KEY = (
+    "0000000000000000000000000000000000000000000000000000000000000000"
+)
 
 
 def is_local_object_endpoint(value: str | None) -> bool:
@@ -26,7 +32,7 @@ def is_local_object_endpoint(value: str | None) -> bool:
     hostname = (parsed.hostname or "").lower()
     return (
         parsed.scheme == "http"
-        and hostname in {"localhost", "127.0.0.1", "localstack"}
+        and hostname in {"localhost", "127.0.0.1", "garage"}
         and port is not None
         and not parsed.username
         and not parsed.password
@@ -135,6 +141,18 @@ class Settings(BaseSettings):
     # The deterministic local answer provider. `mock` is honoured only in a development environment, and only when no
     # provider is saved in the admin screen. Refused elsewhere (validate_production).
     LLM_PROVIDER: str = ""
+
+    @field_validator("LLM_PROVIDER")
+    @classmethod
+    def _only_the_local_answer_switch(cls, value: str) -> str:
+        # The only meaning this setting has is the local `mock` switch. Any other name would be silently ignored, so
+        # a typo or a leftover provider name fails at start instead.
+        if value.strip().lower() not in {"", "mock"}:
+            raise ValueError(
+                "LLM_PROVIDER accepts only 'mock' (local development); save real providers in Admin > AI provider"
+            )
+        return value
+
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
     LLM_TIMEOUT_SECONDS: float = 90.0
@@ -886,7 +904,7 @@ class Settings(BaseSettings):
 
     @property
     def allows_local_object_endpoints(self) -> bool:
-        """Whether S3 may be reached over plain HTTP on this machine (LocalStack/MinIO). Development only, no opt-in flag."""
+        """Whether S3 may be reached over plain HTTP on this machine (the local Garage node). Development only, no opt-in flag."""
         return self.is_development_environment
 
     @property
@@ -921,6 +939,14 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "EMBEDDING_MODEL=mock is for local development only; set the deployed embedding model"
             )
+        # The local Garage key pair is published in this repository, so it must never sign requests for a deployed environment.
+        if (self.R2_ACCESS_KEY_ID or "").strip() == LOCAL_GARAGE_ACCESS_KEY_ID or (
+            self.R2_SECRET_ACCESS_KEY or ""
+        ).strip() == LOCAL_GARAGE_SECRET_ACCESS_KEY:
+            raise RuntimeError(
+                "R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY are the published local Garage key; set this deployment's own R2 keys"
+            )
+
         if (self.S3_PUBLIC_ENDPOINT_URL or "").strip():
             raise RuntimeError(
                 "S3_PUBLIC_ENDPOINT_URL is for local development only; unset it in this environment"
