@@ -42,3 +42,17 @@ def test_valkey_image_is_one_exact_version_in_compose_and_every_workflow():
             assert (
                 image == pinned[0]
             ), f"{workflow.name} pins {image}, compose pins {pinned[0]}"
+
+
+def test_develop_rds_major_equals_the_compose_postgres_major():
+    # The compose stack runs PostgreSQL through the pgvector image, so its major is the pgvector tag's "-pgNN".
+    terraform = (ROOT / "infra" / "live" / "develop" / "main.tf").read_text(
+        encoding="utf-8"
+    )
+    develop = re.search(r'rds = \{[\s\S]*?engine_version\s*=\s*"(\d+)"', terraform)
+    compose = re.search(
+        r"pgvector/pgvector:\d+\.\d+\.\d+-pg(\d+)$", _compose(), flags=re.MULTILINE
+    )
+    assert develop is not None
+    assert compose is not None
+    assert develop.group(1) == compose.group(1)

@@ -162,12 +162,14 @@ variable "rds" {
     backup_retention_days    = number
     monitoring_interval      = optional(number, 0)
     engine_version           = optional(string, "16")
+    allow_major_version_upgrade = optional(bool, false)
+    apply_immediately           = optional(bool, false)
   })
 
   description = <<-EOT
-    Postgres settings. engine_version defaults to "16" rather than the rds module's
-    own default, to match the pgvector/pgvector:pg16 image this application is
-    developed and tested against.
+    Postgres settings. engine_version defaults to "16" rather than the rds module's own default: production
+    still runs 16 and says so explicitly. Develop moves to 18 (see live/develop); the pgvector image is
+    pgvector/pgvector:0.8.2-pg18 (docker-compose.yml, CI).
 
     Sizing note: migration 20260802_03 builds an HNSW index over the embedding column.
     HNSW construction is memory-hungry and scales with corpus size, so an instance

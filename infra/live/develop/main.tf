@@ -167,7 +167,13 @@ module "stack" {
   }
 
   rds = {
-    engine_version = "16" // matches the pgvector/pgvector:pg16 image used in development
+    // PostgreSQL 16 -> 18 in place, for the one apply that performs the upgrade. Major pin "18" with auto
+    // minor upgrades on. allow_major_version_upgrade and apply_immediately are required together (a
+    // precondition in tf-modules enforces it). Set both back to false in the follow-up PR once verified.
+    // The migration 20261019_84 then moves pgvector to the server default.
+    engine_version              = "18"
+    allow_major_version_upgrade = true
+    apply_immediately           = true
     // RAISED 2026-09-14 from db.t4g.micro. Measured over three days:
     //
     //   FreeableMemory     102-178 MB   on a 1 GB instance

@@ -311,7 +311,7 @@ module "secrets" {
 // and 20260806_13, which is why the migrator connects as the MASTER user — creating an
 // extension is not something the least-privilege application role may do.
 module "rds" {
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/rds?ref=rds-v2.3.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/rds?ref=rds-v2.4.0"
 
   identifier        = local.name
   subnet_ids        = data.terraform_remote_state.runtime.outputs.data_subnet_ids
@@ -326,6 +326,10 @@ module "rds" {
   deletion_protection      = var.rds.deletion_protection
   backup_retention_days    = var.rds.backup_retention_days
   monitoring_interval      = var.rds.monitoring_interval
+
+  # Major upgrade controls. Both default off; set together for the one apply that performs the upgrade.
+  allow_major_version_upgrade = var.rds.allow_major_version_upgrade
+  apply_immediately           = var.rds.apply_immediately
 
   tags = local.tags
 }
