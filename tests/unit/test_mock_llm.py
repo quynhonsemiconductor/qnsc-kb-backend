@@ -138,3 +138,15 @@ def test_production_refuses_the_mock_llm(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
     with pytest.raises(RuntimeError, match="LLM_PROVIDER=mock is for local development only"):
         settings.validate_production()
+
+
+def test_llm_provider_accepts_only_the_local_switch():
+    # The setting has one meaning, the local mock switch. Any other name would be silently ignored, so it fails at start.
+    from pydantic import ValidationError
+
+    from src.core.config import Settings
+
+    for value in ("", "mock", "MOCK"):
+        assert Settings(LLM_PROVIDER=value).LLM_PROVIDER == value
+    with pytest.raises(ValidationError, match="accepts only 'mock'"):
+        Settings(LLM_PROVIDER="groq")

@@ -58,30 +58,41 @@ services:
       timeout: 5s
       retries: 5
 
-  # Local stand-in for the Cloudflare R2 source bucket (see scripts/localstack/01-bootstrap.sh). The app containers reach it
-  # as localstack:4566; the browser reaches the presigned URLs at localhost:${LOCALSTACK_HOST_PORT}.
-  localstack:
-    image: localstack/localstack:4.14
+  # Local stand-in for the Cloudflare R2 source bucket: one Garage node with a named volume, so uploads survive a restart
+  # (LocalStack's community edition does not). The app containers reach it as garage:3900; the browser reaches presigned
+  # URLs at localhost:${STORAGE_HOST_PORT}. Its setup runs once in garage-init, which also proves the bucket and CORS.
+  garage:
+    image: dxflrs/garage:v1.3.1
     ports:
-      - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4570}:4566"
-    environment:
-      AWS_DEFAULT_REGION: ap-southeast-1
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      PERSISTENCE: 1
-      WEB_ORIGINS: http://localhost:${FRONTEND_DEV_PORT:-5173},http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
-      WEB_ORIGIN_LOOPBACK: http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+      - "127.0.0.1:${STORAGE_HOST_PORT:-4570}:3900"
     volumes:
-      - localstackdata:/var/lib/localstack
-      - ./scripts/localstack:/etc/localstack/init/ready.d:ro
+      - ./docker/garage/garage.toml:/etc/garage.toml:ro
+      - garagemeta:/var/lib/garage/meta
+      - garagedata:/var/lib/garage/data
     healthcheck:
-      # Healthy means the init hook has run: the bucket exists AND its CORS allows the loopback frontend origin.
-      test: ["CMD-SHELL", "awslocal s3api head-bucket --bucket qnsc-kb-sources-local && awslocal s3api get-bucket-cors --bucket qnsc-kb-sources-local | grep -qF \"$$WEB_ORIGIN_LOOPBACK\""]
-      interval: 10s
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 15s
+      retries: 20
+      start_period: 5s
     mem_limit: 512m
+
+  garage-init:
+    image: amazon/aws-cli:2.17.50
+    entrypoint: ["/bin/bash", "/init/init.sh"]
+    depends_on:
+      garage:
+        condition: service_healthy
+    environment:
+      GARAGE_ADMIN_TOKEN: local-dev-garage-admin-token-not-a-secret
+      STORAGE_ACCESS_KEY_ID: GK000000000000000000000001
+      # Quoted on purpose: an unquoted all-zero scalar is read by YAML as the integer 0, and Garage then gets "0".
+      STORAGE_SECRET_ACCESS_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      SOURCE_STORAGE_BUCKET: qnsc-kb-sources-local
+      WEB_ORIGINS: http://localhost:${FRONTEND_DEV_PORT:-5173},http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+    volumes:
+      - ./scripts/garage:/init:ro
+    restart: "no"
 
   api:
     build:
@@ -89,8 +100,8 @@ services:
       dockerfile: Dockerfile
       target: api
       args:
-        # KB_BAKE_EMBEDDING_MODEL=false skips the ~2.3 GB bake; CI's quickstart job does that and runs
-        # with EMBEDDING_MODEL=mock to prove the stack boots. Leave it unset for real local work.
+        # KB_BAKE_EMBEDDING_MODEL=false skips the ~2.3 GB bake. .env.example sets it false, because mock embeddings need no
+        # model; set it true only together with the real model (see EMBEDDING_MODEL in .env.example).
         #
         # Baked, because the ONNX loader reads the export from disk and has no runtime
         # download path: unbaked, this container cannot embed at all and every search
@@ -122,11 +133,11 @@ services:
     mem_limit: 4g
     mem_reservation: 512m
     environment:
-      - S3_ENDPOINT_URL=http://localstack:4566
-      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - S3_ENDPOINT_URL=http://garage:3900
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${STORAGE_HOST_PORT:-4570}
       - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
-      - R2_ACCESS_KEY_ID=test
-      - R2_SECRET_ACCESS_KEY=test
+      - R2_ACCESS_KEY_ID=GK000000000000000000000001
+      - R2_SECRET_ACCESS_KEY=0000000000000000000000000000000000000000000000000000000000000000
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       # Explicit, because the Settings default is now `production`: unset, this stack
@@ -151,8 +162,8 @@ services:
       # local testing.
       - RAG_ALLOW_EXTENDED_ON_REFUSAL=true
     depends_on:
-      localstack:
-        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -209,11 +220,11 @@ services:
     mem_limit: 4g
     mem_reservation: 512m
     environment:
-      - S3_ENDPOINT_URL=http://localstack:4566
-      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - S3_ENDPOINT_URL=http://garage:3900
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${STORAGE_HOST_PORT:-4570}
       - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
-      - R2_ACCESS_KEY_ID=test
-      - R2_SECRET_ACCESS_KEY=test
+      - R2_ACCESS_KEY_ID=GK000000000000000000000001
+      - R2_SECRET_ACCESS_KEY=0000000000000000000000000000000000000000000000000000000000000000
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
@@ -255,8 +266,8 @@ services:
       - TOKENIZERS_PARALLELISM=false
       - MALLOC_ARENA_MAX=2
     depends_on:
-      localstack:
-        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -285,11 +296,11 @@ services:
     mem_limit: 256m
     mem_reservation: 64m
     environment:
-      - S3_ENDPOINT_URL=http://localstack:4566
-      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - S3_ENDPOINT_URL=http://garage:3900
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${STORAGE_HOST_PORT:-4570}
       - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
-      - R2_ACCESS_KEY_ID=test
-      - R2_SECRET_ACCESS_KEY=test
+      - R2_ACCESS_KEY_ID=GK000000000000000000000001
+      - R2_SECRET_ACCESS_KEY=0000000000000000000000000000000000000000000000000000000000000000
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
@@ -313,8 +324,8 @@ services:
       - OMP_NUM_THREADS=1
       - MALLOC_ARENA_MAX=2
     depends_on:
-      localstack:
-        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -370,4 +381,5 @@ volumes:
   pgdata:
   redisdata:
   hfcache:
-  localstackdata:
+  garagemeta:
+  garagedata:

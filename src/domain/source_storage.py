@@ -249,6 +249,7 @@ def _s3_client(*, presign: bool = False) -> Any:
         raise RuntimeError("A Cloudflare R2 endpoint is required for object storage")
     try:
         import boto3
+        from botocore.config import Config
     except ImportError as exc:
         raise RuntimeError("boto3 is required for S3-backed source storage") from exc
     kwargs: dict[str, Any] = {
@@ -269,6 +270,13 @@ def _s3_client(*, presign: bool = False) -> Any:
         "region_name": "us-east-1" if local_ok else "auto",
         "endpoint_url": endpoint_url,
     }
+    # SigV4 for every endpoint: botocore presigns SigV2 (AWSAccessKeyId/Expires/Signature) for some
+    # setups, which Garage refuses as anonymous. Path-style only for the local emulator, which has no
+    # virtual-host DNS; R2 keeps its default addressing.
+    kwargs["config"] = Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "path"} if local_ok else {},
+    )
     kwargs.update(
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
