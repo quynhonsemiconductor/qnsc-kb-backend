@@ -214,6 +214,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      pull-requests: read # destructive-guard reads the labels of the release PR
       id-token: write # mandatory for the OIDC AssumeRole
 
     steps:
@@ -235,15 +236,39 @@ jobs:
         working-directory: infra/live/prod
         run: tofu validate
 
-      - name: tofu apply
+      # Plan, then apply THAT PLAN. The old single apply planned and applied in one step, so nothing read the plan
+      # before it ran: a destroy of a secret or database went through a tag with no stop.
+      - name: tofu plan (saved as tfplan)
         working-directory: infra/live/prod
-        run: tofu apply -input=false -auto-approve
+        run: tofu plan -input=false -out=tfplan
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           # Pin the prod image to the exact release tag that triggered this apply, so an
           # infra apply never resets the task definition to :latest.
           TF_VAR_image_tag: ${{ github.ref_name }}
+
+      # TASK 0.3 / §17b: refuse a prod plan that destroys or replaces a database, secret, parameter group or target
+      # group unless the stack's .allow-data-destroy names that address with a reason. It reads the saved plan, so it
+      # judges exactly what the next step applies.
+      - name: plan-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/plan-guard@v1
+        with:
+          plan-file: tfplan
+          working-directory: infra/live/prod
+
+      # Refuse a saved plan that DELETES or REPLACES a DNS, edge, mail-identity, certificate or key resource (the
+      # 2026-10-09 outage) unless this run is allowed to: the PR being merged carries the label `allow-dns-destroy`.
+      # Reads the labels of the PR behind the tag, so it needs `pull-requests: read` on this job.
+      - name: destructive-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/destructive-guard@v1
+        with:
+          working-directory: infra/live/prod
+          plan-file: tfplan
+
+      - name: tofu apply (the saved plan)
+        working-directory: infra/live/prod
+        run: tofu apply -input=false tfplan
 
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: app-token
