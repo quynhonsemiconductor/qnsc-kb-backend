@@ -170,7 +170,7 @@ module "stack" {
     // PostgreSQL 16 -> 18 in place, for the one apply that performs the upgrade. Major pin "18" with auto
     // minor upgrades on. allow_major_version_upgrade and apply_immediately are required together (a
     // precondition in tf-modules enforces it). Set both back to false in the follow-up PR once verified.
-    // The migration 20261019_84 then moves pgvector to the server default.
+    // The migration 20261019_85 then moves pgvector to the server default (20261019_84 rewrites immutable_unaccent first).
     engine_version              = "18"
     allow_major_version_upgrade = true
     apply_immediately           = true

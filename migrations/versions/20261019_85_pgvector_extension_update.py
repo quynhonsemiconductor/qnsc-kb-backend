@@ -13,8 +13,8 @@ Downgrade is not provided: an extension version cannot be reverted in place. Res
 
 from alembic import op
 
-revision = "20261019_84"
-down_revision = "20261018_83"
+revision = "20261019_85"
+down_revision = "20261019_84"
 branch_labels = None
 depends_on = None
 
