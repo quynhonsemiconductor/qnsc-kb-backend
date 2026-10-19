@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.core.config import settings
+
 
 # A review candidate is an approval unit, not a retrieval chunk.  Retrieval is
 # split separately after approval, so making candidates as small as the 1,800
@@ -69,9 +71,14 @@ def split_document_candidates(
 ) -> list[dict[str, Any]]:
     """Return ordered candidates with source character offsets.
 
-    A candidate is normally the entire formatted document.  Its later index
+    A candidate is the entire formatted document.  Its later index
     representation is chunked independently, so review must not inherit the
     small parent/child retrieval boundaries.
+
+    Automatic splitting of an unusually long document is OFF by default
+    (``DOCUMENT_AUTO_SPLIT_ENABLED``): it sent the draft to a "Review sections" step that
+    reviewers found more process than the review needed. The splitting code below is
+    kept, and switched back on by that setting.
     """
     clean_text = text.strip()
     if not clean_text:
@@ -92,7 +99,10 @@ def split_document_candidates(
             result["page_start"] = first
             result["page_end"] = last or first
         return result
-    if len(clean_text) <= _MAX_REVIEW_CANDIDATE_CHARS:
+    if (
+        len(clean_text) <= _MAX_REVIEW_CANDIDATE_CHARS
+        or not settings.DOCUMENT_AUTO_SPLIT_ENABLED
+    ):
         candidate_title, heading = _candidate_title(clean_text, 1, title)
         return [
             {
@@ -144,6 +154,10 @@ def splitter_metrics(documents: list[tuple[str, str]]) -> dict[str, Any]:
         "article_count": article_count,
         "manual_correction_count": manual_correction_count,
         "manual_correction_share": (manual_correction_count / count) if count else 0.0,
-        "rule": "one formatted review document up to 48,000 characters; exceptionally long documents split at broad paragraph boundaries",
+        "rule": (
+            "one formatted review document up to 48,000 characters; exceptionally long documents split at broad paragraph boundaries"
+            if settings.DOCUMENT_AUTO_SPLIT_ENABLED
+            else "one formatted review document; automatic splitting is off (DOCUMENT_AUTO_SPLIT_ENABLED)"
+        ),
         "documents": rows,
     }

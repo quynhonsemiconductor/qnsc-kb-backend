@@ -605,6 +605,16 @@ class Settings(BaseSettings):
     # Short on purpose. This runs inside document ingest, once per document, and a slow
     # provider must cost a suggestion rather than the import.
     DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # Whether a document is cut into several review candidates. OFF: every document is ONE
+    # candidate, so one draft and one approval. ON restores the earlier behaviour: an upload
+    # over 48,000 characters is split at paragraph boundaries (document_splitter.py), and a
+    # connector import is split at every `##` heading with each part routed to a department
+    # (department_routing.py), which sends the draft to the "Review sections" page and
+    # commits it into child drafts. Turned off 2026-10-18 at the product owner's request:
+    # reviewing parts and then committing them was more process than the review needed.
+    # Drafts that were ALREADY split keep their candidates and stay reviewable either way,
+    # and the department suggestion is still made, for the document as a whole.
+    DOCUMENT_AUTO_SPLIT_ENABLED: bool = False
     # Master switch for the tenant Knowledge Graph. Keep it off while the product focuses
     # on document retrieval/review: this also prevents publish-time entity extraction from
     # spending an LLM request. Microsoft Graph connectors/email are unrelated and remain on.

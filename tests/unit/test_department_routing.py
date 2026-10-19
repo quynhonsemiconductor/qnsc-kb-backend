@@ -4,7 +4,19 @@ import pytest
 from pydantic import ValidationError
 
 from src.api.routers.auth import DepartmentInput
+from src.core.config import settings
 from src.domain.department_routing import route_document_candidates, suggest_departments
+
+
+@pytest.fixture(autouse=True)
+def _splitting_on(monkeypatch):
+    """Most cases here are about how a document is split by owning department.
+
+    That splitting is off by default (DOCUMENT_AUTO_SPLIT_ENABLED), so the file runs with
+    it on to keep covering the path a deployment can switch back to; the default is
+    pinned by `test_by_default_a_document_is_never_split_across_departments`.
+    """
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", True)
 
 
 def test_department_creation_requires_a_short_description():
@@ -192,3 +204,26 @@ Employee benefits policies.
         ["engineering-id"],
         ["people-id"],
     ]
+
+
+def test_by_default_a_document_is_never_split_across_departments(monkeypatch):
+    """Two sections owned by different departments used to become two candidates, which sent
+    the draft to "Review sections". With splitting off it is one candidate, routed as a whole."""
+    monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
+    departments = _two_departments()
+    markdown = """# Company handbook
+
+## Release process
+Engineering release standards and technical operations.
+
+## Benefits
+Employee benefits and workplace policies.
+"""
+
+    candidates = route_document_candidates("Company handbook", markdown, departments)
+
+    assert len(candidates) == 1
+    assert candidates[0]["position"] == 1
+    assert candidates[0]["body_md"] == markdown.strip()
+    assert "## Release process" in candidates[0]["body_md"]
+    assert "## Benefits" in candidates[0]["body_md"]
