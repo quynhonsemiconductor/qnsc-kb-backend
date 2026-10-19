@@ -154,14 +154,14 @@ variable "worker" {
 
 variable "rds" {
   type = object({
-    instance_class           = string
-    allocated_storage_gb     = number
-    max_allocated_storage_gb = number
-    multi_az                 = bool
-    deletion_protection      = bool
-    backup_retention_days    = number
-    monitoring_interval      = optional(number, 0)
-    engine_version           = optional(string, "16")
+    instance_class              = string
+    allocated_storage_gb        = number
+    max_allocated_storage_gb    = number
+    multi_az                    = bool
+    deletion_protection         = bool
+    backup_retention_days       = number
+    monitoring_interval         = optional(number, 0)
+    engine_version              = optional(string, "16")
     allow_major_version_upgrade = optional(bool, false)
     apply_immediately           = optional(bool, false)
   })
