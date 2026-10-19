@@ -104,7 +104,7 @@ class AIRepository:
         question: str,
         *,
         retry_failed: bool = False,
-    ) -> AiMessage:
+    ) -> AiMessage | None:
         """Append a question, or reopen exactly the latest failed turn.
 
         A retry removes only the failed assistant response and retains its user question.
