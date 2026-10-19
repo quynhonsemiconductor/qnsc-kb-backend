@@ -96,3 +96,24 @@ def test_the_garage_secret_is_quoted_so_yaml_keeps_it_a_string():
     # An all-zero scalar without quotes is an integer to YAML: garage-init then imported the key "0" and Garage refused it.
     compose = _read("docker-compose.yml")
     assert re.search(r'(?m)^      STORAGE_SECRET_ACCESS_KEY: "[0-9a-f]{64}"$', compose)
+
+
+    healthcheck = compose.split("healthcheck:", 1)[1].split("volumes:", 1)[0] if "healthcheck:" in compose else ""
+    assert "get-bucket-cors" in compose.split("localstack:", 1)[1].split("otel:", 1)[0]
+    assert "head-bucket" in healthcheck or "head-bucket" in compose
+    # Failures are loud: the hook never swallows a create or CORS error.
+    assert "|| true" not in bootstrap
+
+
+def test_no_app_service_runs_migrations_from_an_entrypoint_and_the_schema_is_not_auto_created():
+    # Migrations run only through the `migrator` image target, behind the `migrate` profile, so a scaled-out API or worker
+    # cannot fire N concurrent migrations on start. garage-init is a one-shot that runs its setup script by design, so the
+    # check is scoped to the app services.
+    compose = _read("docker-compose.yml")
+    for name in ("api", "worker", "beat", "migrator"):
+        block = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  \S|\Z)", compose)
+        assert block, f"{name} is not a service in the dev compose"
+        assert "entrypoint" not in block.group(1), f"{name} must not run migrations from an entrypoint"
+    assert "AUTO_CREATE_SCHEMA=false" in compose
+    assert "target: migrator" in compose
+    assert 'profiles: ["migrate"]' in compose
