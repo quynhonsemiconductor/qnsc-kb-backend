@@ -417,11 +417,13 @@ resource "aws_secretsmanager_secret" "tunnel_token" {
 # container above stays managed here and this resource writes the token into a new version
 # when it changes (a tunnel recreate changes the hash). No plan reads a secret value.
 #
-# The version resource that held the value is no longer declared here. Its state entry must go once per
-# environment, before the first plan of this change, with `tofu state rm` (the owner runs it; the secret
-# itself is not touched): a plan refreshes a resource that is still in state, and that refresh reads the
-# value, which the plan role may not do. A `removed` block does not avoid that refresh (it forgets on
-# apply, after plan has already read).
+# The version resource that held the value is forgotten here, not destroyed. A bare `removed` block
+# (OpenTofu 1.9: no `lifecycle` inside it; it forgets by default) takes the old version out of state on
+# apply, and leaves the secret's current version alone. Without it, the removal would plan a DESTROY of
+# the version, which can strip the AWSCURRENT stage the sidecar reads.
+removed {
+  from = aws_secretsmanager_secret_version.tunnel_token
+}
 
 resource "terraform_data" "tunnel_token_value" {
   count = var.tunnel_enabled && var.cloudflare_account_id != "" ? 1 : 0
