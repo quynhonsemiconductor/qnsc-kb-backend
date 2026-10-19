@@ -66,13 +66,14 @@ services:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       PERSISTENCE: 1
-      WEB_ORIGIN: http://localhost:${FRONTEND_DEV_PORT:-5173}
+      WEB_ORIGINS: http://localhost:${FRONTEND_DEV_PORT:-5173},http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+      WEB_ORIGIN_LOOPBACK: http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
     volumes:
       - localstackdata:/var/lib/localstack
       - ./scripts/localstack:/etc/localstack/init/ready.d:ro
     healthcheck:
-      # Healthy means the init hook has run: the source bucket exists.
-      test: ["CMD", "awslocal", "s3api", "head-bucket", "--bucket", "qnsc-kb-sources-local"]
+      # Healthy means the init hook has run: the bucket exists AND its CORS allows the loopback frontend origin.
+      test: ["CMD-SHELL", "awslocal s3api head-bucket --bucket qnsc-kb-sources-local && awslocal s3api get-bucket-cors --bucket qnsc-kb-sources-local | grep -qF \"$$WEB_ORIGIN_LOOPBACK\""]
       interval: 10s
       timeout: 5s
       retries: 10

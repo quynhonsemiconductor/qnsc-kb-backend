@@ -11,11 +11,7 @@ import re
 from typing import Any
 from pathlib import Path
 
-from src.core.config import (
-    is_cloudflare_r2_endpoint,
-    is_local_object_endpoint,
-    settings,
-)
+from src.core.config import is_cloudflare_r2_endpoint, is_local_object_endpoint, settings
 
 #: Types a browser may be handed for an ORIGINAL upload, chosen for being inert as
 #: documents: images cannot script, a PDF is drawn by the browser's own isolated viewer,
@@ -242,9 +238,7 @@ def _s3_client(*, presign: bool = False) -> Any:
             if account_or_endpoint.startswith(("https://", "http://"))
             else f"https://{account_or_endpoint}.r2.cloudflarestorage.com"
         )
-    local_ok = settings.allows_local_object_endpoints and is_local_object_endpoint(
-        endpoint_url
-    )
+    local_ok = settings.allows_local_object_endpoints and is_local_object_endpoint(endpoint_url)
     if not endpoint_url or not (is_cloudflare_r2_endpoint(endpoint_url) or local_ok):
         raise RuntimeError("A Cloudflare R2 endpoint is required for object storage")
     try:
@@ -265,7 +259,8 @@ def _s3_client(*, presign: bool = False) -> Any:
         # AWS region for Secrets Manager and ECS (infra sets it from var.region). So the
         # fallback never fired in a deployment and every R2 call failed. Not just
         # uploads: this client backs put, get, delete, head, list and presign.
-        "region_name": "auto",
+        # A local emulator takes any region; R2 takes only its own hints, so "auto" stays for R2.
+        "region_name": "us-east-1" if local_ok else "auto",
         "endpoint_url": endpoint_url,
     }
     kwargs.update(
