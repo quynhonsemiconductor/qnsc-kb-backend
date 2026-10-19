@@ -29,7 +29,7 @@ def test_production_compose_is_explicitly_hardened():
     assert "ENABLE_RLS: \"true\"" in compose
     assert "5432:5432" not in compose
     assert "6379:6379" not in compose
-    assert "caddy:2.8-alpine" in compose
+    assert "caddy:2.11-alpine" in compose
     assert "PUBLIC_HOSTNAME" in compose
     assert "GEMINI_MODEL" not in compose  # a dead variable: nothing reads it
     assert "MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:?set MICROSOFT_CLIENT_ID}" in compose
