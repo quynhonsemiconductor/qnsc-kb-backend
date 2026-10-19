@@ -44,13 +44,16 @@ services:
     image: valkey/valkey:7.2.14-alpine
     ports:
       - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
-    command: ["valkey-server", "--requirepass", "devredis"]
+    command: ["valkey-server", "--requirepass", "${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}"]
+    # valkey-cli reads REDISCLI_AUTH, so the healthcheck needs no password literal of its own.
+    environment:
+      REDISCLI_AUTH: ${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}
     volumes:
       - redisdata:/data
     mem_limit: 128m
     mem_reservation: 32m
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a devredis ping | grep PONG"]
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -95,7 +98,7 @@ services:
     mem_reservation: 512m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://:devredis@redis:6379/0
+      - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       # Explicit, because the Settings default is now `production`: unset, this stack
       # would refuse to start rather than run with the well-known dev credentials above.
       - ENVIRONMENT=development
@@ -175,7 +178,7 @@ services:
     mem_reservation: 512m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://:devredis@redis:6379/0
+      - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
       - JOB_MODE=celery
       - AUTO_CREATE_SCHEMA=false
@@ -244,7 +247,7 @@ services:
     mem_reservation: 64m
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://:devredis@redis:6379/0
+      - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
       - JOB_MODE=celery
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
