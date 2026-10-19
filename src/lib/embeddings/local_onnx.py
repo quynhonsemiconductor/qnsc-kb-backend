@@ -65,7 +65,7 @@ def _load() -> tuple[Any, Any]:
             raise EmbeddingUnavailable(f"{path} is missing from the ONNX export")
 
     try:
-        import onnxruntime
+        import onnxruntime  # type: ignore[import-untyped]  # no py.typed or stubs; guarded by this try
         from tokenizers import Tokenizer
     except ImportError as exc:
         raise EmbeddingUnavailable(
