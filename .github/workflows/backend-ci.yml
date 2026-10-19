@@ -415,8 +415,9 @@ jobs:
           sed -i 's/^EMBEDDING_MODEL=.*/EMBEDDING_MODEL="mock"/' .env
           echo 'KB_BAKE_EMBEDDING_MODEL=false' >> .env
 
-      - name: Start Postgres and Redis
-        run: docker compose up -d --build --wait db redis garage garage-init
+      - name: Start Postgres, Redis and Garage
+        # garage-init is a one-shot: `--wait` on it flakes, and the app services already wait on its completion.
+        run: docker compose up -d --build --wait db redis garage
 
       - name: Migrate
         run: docker compose --profile migrate run --rm migrator
