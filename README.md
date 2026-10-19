@@ -43,14 +43,17 @@ take. The data lives in the `garagedata` and `garagemeta` volumes, so uploads su
 
 The test suite points at a database it writes to, so it runs on its own stack, never on a dev stack. `scripts/e2e/run.sh` starts
 Postgres and Valkey under a fresh compose project with **ephemeral loopback ports** (Docker picks them; no fixed host port is used),
-migrates, runs `pytest`, and removes the stack and its volumes on exit.
+creates CI's test database, migrates, runs `pytest` with CI's environment, and removes the stack and its volumes on exit.
+
+The runner refuses to start while a `.env` exists in the repository (the settings would read it, and CI has none). Run it from a clean
+clone, or move `.env` aside for the run.
 
 ```bash
-poetry install                                   # once
-scripts/e2e/run.sh                               # the whole suite
-scripts/e2e/run.sh tests/unit/test_local_compose.py   # or the files you name
-E2E_KEEP=1 scripts/e2e/run.sh                    # keep the stack up for a look; remove it later with
-docker compose -p <project> -f docker-compose.yml -f docker-compose.e2e.yml down -v
+poetry install                                       # once
+scripts/e2e/run.sh                                   # the whole suite
+scripts/e2e/run.sh tests/unit/test_local_compose.py  # or the files you name
+E2E_PROJECT=qnsc-kb-e2e-alice scripts/e2e/run.sh     # a name for this run (default: random)
+E2E_KEEP=1 scripts/e2e/run.sh                        # keep the stack up; the run prints how to remove it
 ```
 
 ### Run a second copy
