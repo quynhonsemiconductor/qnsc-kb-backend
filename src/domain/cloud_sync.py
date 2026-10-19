@@ -7,10 +7,11 @@ import json
 import asyncio
 import uuid
 from datetime import datetime, timedelta
+from typing import Any, cast
 
 import structlog
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Table, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -661,7 +662,8 @@ async def _save_permissions(
     acl_changed = document.acl_hash != acl_hash
     if acl_changed:
         await db.execute(
-            PermissionSnapshot.__table__.update()
+            cast(Table, PermissionSnapshot.__table__)
+            .update()
             .where(PermissionSnapshot.external_document_id == document.id)
             .values(active=False)
         )
@@ -1310,7 +1312,7 @@ async def sync_cloud_connector(
             "No connector scopes are selected", retryable=False, code="no_scopes"
         )
     scope_ids = [scope.id for scope in scopes]
-    summary: dict[str, object] = {
+    summary: dict[str, Any] = {
         "scope_count": len(scopes),
         "scopes": [],
         "changes_seen": 0,
@@ -1342,7 +1344,7 @@ async def sync_cloud_connector(
             scope = await db.get(SourceScope, scope_id_value)
             if scope is None:
                 continue
-            scope_summary = {
+            scope_summary: dict[str, Any] = {
                 "scope_id": str(scope.id),
                 "name": scope.display_name,
                 "changes": 0,
@@ -1595,11 +1597,20 @@ async def sync_cloud_connector(
                         ) from exc
                     # The rollback expired everything loaded before it. Reload the three
                     # objects the rest of the walk still writes through.
-                    connector = await db.get(Connector, connector_id)
-                    job = await db.get(ConnectorJob, job_id)
-                    scope = await db.get(SourceScope, scope_id_value)
-                    if connector is None or job is None or scope is None:
+                    reloaded_connector = await db.get(Connector, connector_id)
+                    reloaded_job = await db.get(ConnectorJob, job_id)
+                    reloaded_scope = await db.get(SourceScope, scope_id_value)
+                    if (
+                        reloaded_connector is None
+                        or reloaded_job is None
+                        or reloaded_scope is None
+                    ):
                         raise
+                    connector, job, scope = (
+                        reloaded_connector,
+                        reloaded_job,
+                        reloaded_scope,
+                    )
                 if is_file:
                     _note_item_outcome(
                         summary,
@@ -1704,10 +1715,11 @@ async def sync_cloud_connector(
         # transaction — the commit below would then fail too and the connector would end
         # the run with no error recorded anywhere and its status still "active".
         await db.rollback()
-        connector = await db.get(Connector, connector_id)
-        job = await db.get(ConnectorJob, job_id)
-        if connector is None or job is None:
+        reloaded_connector = await db.get(Connector, connector_id)
+        reloaded_job = await db.get(ConnectorJob, job_id)
+        if reloaded_connector is None or reloaded_job is None:
             raise
+        connector, job = reloaded_connector, reloaded_job
         newly_broken = connector.status != "error"
         connector.status = "error"
         connector.last_error = str(exc)[:2000]

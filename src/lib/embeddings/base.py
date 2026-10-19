@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 import threading
-from typing import Callable, Protocol, TypeVar
+from typing import Callable, Generic, Protocol, TypeVar
 
 from src.core.config import settings
 
@@ -75,7 +75,7 @@ def _unit(vector: list[float]) -> list[float]:
 T = TypeVar("T")
 
 
-class Lazy:
+class Lazy(Generic[T]):
     """A thread-safe, load-once holder.
 
     Both in-process backends need exactly this and nothing more: the weights are
@@ -99,7 +99,9 @@ class Lazy:
             with self._lock:
                 if self._value is None:
                     self._value = self._load()
-        return self._value
+        value = self._value
+        assert value is not None  # set above under the lock, or the load raised
+        return value
 
     def loaded(self) -> bool:
         return self._value is not None
