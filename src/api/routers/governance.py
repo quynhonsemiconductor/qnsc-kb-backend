@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from fastapi import APIRouter, Depends, Query, Response, status, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -728,9 +728,13 @@ async def commit_draft_candidates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    result = await GovernanceService(
-        GovernanceRepository(db), ArticleRepository(db)
-    ).commit_candidates(current_user, id, detailed=True)
+    # detailed=True always returns the dict; the union in the signature covers detailed=False.
+    result = cast(
+        dict[str, Any],
+        await GovernanceService(
+            GovernanceRepository(db), ArticleRepository(db)
+        ).commit_candidates(current_user, id, detailed=True),
+    )
     children = result["drafts"]
     return {
         "parent_draft_id": str(id),
@@ -2214,7 +2218,8 @@ async def update_approval_rule(
     rule.dept = payload.dept.strip() if payload.dept else None
     rule.file_extensions = _normalise_extensions(payload.file_extensions)
     rule.max_similarity_score = payload.max_similarity_score
-    rule.risk_tiers = payload.risk_tiers
+    # Literal tiers are a subset of the column's list[str]; the mapped type is invariant.
+    rule.risk_tiers = cast(list[str] | None, payload.risk_tiers)
     rule.can_approve = payload.can_approve
     rule.can_reject = payload.can_reject
     # Every edit is a new version, snapshotted below -- a decision an earlier version

@@ -31,7 +31,7 @@ async def search(
     gov_repo = GovernanceRepository(db)
     search_service = SearchService(chunk_repo, gov_repo, FeatureFlagRepository(db))
 
-    filters = {}
+    filters: dict[str, Any] = {}
     if dept:
         filters["dept"] = dept
     if sensitivity:
