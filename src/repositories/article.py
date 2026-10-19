@@ -1,5 +1,7 @@
 import uuid
-from typing import Sequence, Any
+from typing import Sequence, Any, cast
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy import select, update, and_, or_, exists, false, true, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -87,6 +89,7 @@ class ArticleRepository:
             member_departments = AuthorizationService.member_department_names(user)
             if user.dept:
                 member_departments.add(user.dept)
+            department_scope: ColumnElement[bool]
             if not member_departments:
                 department_scope = false()
             else:
@@ -382,7 +385,7 @@ class ArticleRepository:
         result = await self.db.execute(stmt.values(status="deleted"))
         if commit:
             await self.db.commit()
-        return result.rowcount > 0
+        return cast(CursorResult[Any], result).rowcount > 0
 
     async def create_version(
         self, version: ArticleVersion, *, commit: bool = True

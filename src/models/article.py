@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import uuid
 from datetime import date, datetime
 from typing import Any
@@ -38,6 +39,11 @@ article_departments = Table(
         primary_key=True,
     ),
 )
+
+
+if TYPE_CHECKING:
+    from src.models.user import User
+    from src.models.evidence import DocumentEvidence
 
 
 class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):

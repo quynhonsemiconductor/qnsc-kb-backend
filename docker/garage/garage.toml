@@ -1,0 +1,20 @@
+# Local development only: a single Garage node for the knowledge base's source bucket (replaces LocalStack; LocalStack's
+# community edition does not keep data across a restart). The secrets below are fixed and public on purpose, for a laptop.
+# Production uses Cloudflare R2 and never reads this file.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "1111111111111111111111111111111111111111111111111111111111111111"
+
+[s3_api]
+# The region must match the one the client signs with (src/domain/source_storage.py uses us-east-1 for local endpoints).
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[admin]
+api_bind_addr = "[::]:3903"
+admin_token = "local-dev-garage-admin-token-not-a-secret"

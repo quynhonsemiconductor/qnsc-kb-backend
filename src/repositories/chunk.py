@@ -3,14 +3,15 @@ import re
 import unicodedata
 import hashlib
 import structlog
-from typing import Sequence
+from typing import Any, Sequence
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy import select, delete, update, and_, or_, text, func, exists, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.chunk import ParentChunk, ArticleChunk, ChunkMetadata
 from src.models.article import Article, ArticleTag, ArticleUserPermission
 from src.models.graph import ArticleEntityMention, GraphEntity, GraphRelationship
-from src.models.user import Department
+from src.models.user import Department, User
 from src.core.config import settings
 from src.repositories.article import ArticleRepository
 
@@ -90,7 +91,7 @@ class ChunkRepository:
         return result.scalar_one_or_none()
 
     async def authorized_chunk_ids(
-        self, user: object, chunk_ids: list[uuid.UUID]
+        self, user: User, chunk_ids: list[uuid.UUID]
     ) -> set[str]:
         """Return only citation chunks still visible to the current user.
 
@@ -240,7 +241,7 @@ class ChunkRepository:
         self,
         query: str,
         query_embedding: list[float] | None,
-        user: object,
+        user: User,
         limit: int = 5,
         filters: dict | None = None,
     ) -> list[ArticleChunk]:
@@ -395,7 +396,7 @@ class ChunkRepository:
                 )
 
         # 1. Vector Search
-        vector_results = []
+        vector_results: Sequence[ArticleChunk] = []
         if query_embedding is not None:
             # cosine_distance: <=>
             # Query and document vectors must come from the same embedding
@@ -471,6 +472,7 @@ class ChunkRepository:
             func.plainto_tsquery("simple", func.immutable_unaccent(term))
             for term in keyword_terms
         ]
+        search_query: ColumnElement[Any]
         if term_queries:
             search_query = term_queries[0]
             for extra in term_queries[1:]:
