@@ -39,6 +39,20 @@ origins (`FRONTEND_DEV_PORT`, both `localhost` and `127.0.0.1`) before the API s
 take. The data lives in the `garagedata` and `garagemeta` volumes, so uploads survive `docker compose restart` and
 `docker compose down`. `docker compose down -v` removes them with the database.
 
+### Isolated test run (e2e)
+
+The test suite points at a database it writes to, so it runs on its own stack, never on a dev stack. `scripts/e2e/run.sh` starts
+Postgres and Valkey under a fresh compose project with **ephemeral loopback ports** (Docker picks them; no fixed host port is used),
+migrates, runs `pytest`, and removes the stack and its volumes on exit.
+
+```bash
+poetry install                                   # once
+scripts/e2e/run.sh                               # the whole suite
+scripts/e2e/run.sh tests/unit/test_local_compose.py   # or the files you name
+E2E_KEEP=1 scripts/e2e/run.sh                    # keep the stack up for a look; remove it later with
+docker compose -p <project> -f docker-compose.yml -f docker-compose.e2e.yml down -v
+```
+
 ### Run a second copy
 
 To run a second copy beside this one (a second checkout, or a branch you keep running), set in `.env`: `COMPOSE_PROJECT_NAME=qnsc-kb-2`

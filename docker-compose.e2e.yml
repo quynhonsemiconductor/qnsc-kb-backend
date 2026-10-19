@@ -1,0 +1,10 @@
+# E2E overlay: no fixed host ports. Load it after docker-compose.yml (scripts/e2e/run.sh does). Every published port becomes an
+# ephemeral loopback port that Docker picks, so two e2e runs never collide. The runner finds them with `docker compose port`.
+# `!override` replaces the base file's fixed list rather than adding to it.
+services:
+  db:
+    ports: !override
+      - "127.0.0.1::5432"
+  redis:
+    ports: !override
+      - "127.0.0.1::6379"
