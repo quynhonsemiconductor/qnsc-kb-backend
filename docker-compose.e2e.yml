@@ -1,6 +1,6 @@
-# E2E overlay: no fixed host ports. Load it after docker-compose.yml (scripts/e2e/run.sh does). Every published port becomes an
-# ephemeral loopback port that Docker picks, so two e2e runs never collide. The runner finds them with `docker compose port`.
-# `!override` replaces the base file's fixed list rather than adding to it.
+# E2E overlay: ephemeral host ports for the two services the suite reaches from the host, Postgres and Valkey. Every other service
+# publishes nothing in this overlay. Load it after docker-compose.yml (scripts/e2e/run.sh does). `!override` replaces the base
+# file's fixed list rather than adding to it. Docker picks each host port; the runner finds it with `docker compose port`.
 services:
   db:
     ports: !override
