@@ -1,7 +1,12 @@
+from typing import TYPE_CHECKING
 import uuid
 from sqlalchemy import ForeignKey, String, Text, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from src.models.article import Article
+    from src.models.user import User
 
 
 class Comment(Base, UUIDPrimaryKeyMixin, TimestampMixin):

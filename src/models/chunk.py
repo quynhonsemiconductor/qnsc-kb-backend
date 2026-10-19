@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import uuid
 from datetime import datetime
 from sqlalchemy import ForeignKey, String, Integer, Text
@@ -10,7 +11,7 @@ except (
 ):  # Keep domain/unit tests runnable without the optional DB extension.
     from sqlalchemy.types import UserDefinedType
 
-    class Vector(UserDefinedType):
+    class Vector(UserDefinedType):  # type: ignore[no-redef]  # pgvector absent: local fallback type
         cache_ok = True
 
         def __init__(self, dimensions: int):
@@ -22,6 +23,10 @@ except (
 
 from src.core.config import settings
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from src.models.article import Article
+    from src.models.evidence import DocumentEvidence
 
 
 class ParentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):

@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import uuid
 from sqlalchemy import Boolean, Column, ForeignKey, String, Table, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -9,6 +10,10 @@ user_roles = Table(
     Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
     Column("role_id", ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
 )
+
+
+if TYPE_CHECKING:
+    from src.models.user import User
 
 
 class Permission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
