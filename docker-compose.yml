@@ -58,6 +58,31 @@ services:
       timeout: 5s
       retries: 5
 
+  # Local stand-in for the Cloudflare R2 source bucket (see scripts/localstack/01-bootstrap.sh). The app containers reach it
+  # as localstack:4566; the browser reaches the presigned URLs at localhost:${LOCALSTACK_HOST_PORT}.
+  localstack:
+    image: localstack/localstack:4.14
+    ports:
+      - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4570}:4566"
+    environment:
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      PERSISTENCE: 1
+      WEB_ORIGINS: http://localhost:${FRONTEND_DEV_PORT:-5173},http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+      WEB_ORIGIN_LOOPBACK: http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+    volumes:
+      - localstackdata:/var/lib/localstack
+      - ./scripts/localstack:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      # Healthy means the init hook has run: the bucket exists AND its CORS allows the loopback frontend origin.
+      test: ["CMD-SHELL", "awslocal s3api head-bucket --bucket qnsc-kb-sources-local && awslocal s3api get-bucket-cors --bucket qnsc-kb-sources-local | grep -qF \"$$WEB_ORIGIN_LOOPBACK\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: 512m
+
   api:
     build:
       context: .
@@ -97,6 +122,11 @@ services:
     mem_limit: 4g
     mem_reservation: 512m
     environment:
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
+      - R2_ACCESS_KEY_ID=test
+      - R2_SECRET_ACCESS_KEY=test
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       # Explicit, because the Settings default is now `production`: unset, this stack
@@ -121,6 +151,8 @@ services:
       # local testing.
       - RAG_ALLOW_EXTENDED_ON_REFUSAL=true
     depends_on:
+      localstack:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -177,6 +209,11 @@ services:
     mem_limit: 4g
     mem_reservation: 512m
     environment:
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
+      - R2_ACCESS_KEY_ID=test
+      - R2_SECRET_ACCESS_KEY=test
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
@@ -218,6 +255,8 @@ services:
       - TOKENIZERS_PARALLELISM=false
       - MALLOC_ARENA_MAX=2
     depends_on:
+      localstack:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -246,6 +285,11 @@ services:
     mem_limit: 256m
     mem_reservation: 64m
     environment:
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
+      - R2_ACCESS_KEY_ID=test
+      - R2_SECRET_ACCESS_KEY=test
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
       - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
@@ -269,6 +313,8 @@ services:
       - OMP_NUM_THREADS=1
       - MALLOC_ARENA_MAX=2
     depends_on:
+      localstack:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -324,3 +370,4 @@ volumes:
   pgdata:
   redisdata:
   hfcache:
+  localstackdata:

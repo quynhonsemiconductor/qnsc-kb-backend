@@ -131,6 +131,8 @@ async def _guarded_request_target(
 
 async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
     """Test one exact candidate without changing the active runtime configuration."""
+    if provider.name == "mock":
+        return 0  # the local mock has no endpoint to reach
     url = _gemini_url(provider, streaming=False) if provider.native_gemini else provider.url
     request_url, host_headers, extensions = await _guarded_request_target(
         provider, url
@@ -500,6 +502,29 @@ class _NoGate:
         return None
 
 
+def _mock_completion(messages: list[dict[str, str]]) -> tuple[str, int, str, str]:
+    """A deterministic local stand-in for the model. No network, no key.
+
+    Only the grounded-answer prompt gets an answer. That prompt asks for the ``<<<GROUNDED>>>`` sentinel, so the mock keys on
+    it: with an authorized passage it answers from the first one and cites it; without one it returns the standard refusal,
+    after the sentinel. Every other call (contextual headers, query rewrites, judges) gets a neutral stub, never the refusal,
+    so those features keep working locally. Used only when ``Settings.uses_mock_llm`` is set and no provider is saved.
+    """
+    system_and_user = "\n".join(str(m.get("content", "")) for m in messages)
+    if "<<<GROUNDED>>>" not in system_and_user:
+        text = "[mock: no answer for this call]"
+    else:
+        user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+        document = re.search(r'<authorized-document id="(C\d{1,3})">', user)
+        if document is None:
+            text = "<<<GROUNDED>>>\nI could not produce a grounded answer from the authorized Knowledge Base sources."
+        else:
+            passage = re.search(r"<untrusted-passage>\n(.*?)\n</untrusted-passage>", user, re.DOTALL)
+            excerpt = " ".join((passage.group(1) if passage else "").split())[:300]
+            text = f"<<<GROUNDED>>>\n[mock answer: local development only] {excerpt} [{document.group(1)}]"
+    return text, len(text.split()), "mock", "mock"
+
+
 async def _complete_once(
     messages: list[dict[str, str]],
     *,
@@ -510,6 +535,12 @@ async def _complete_once(
     on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, int, str, str]:
     """One provider request, no retry policy. Use ``complete``."""
+    runtime = get_runtime_config()
+    if runtime is not None and runtime.provider == "mock":
+        text, tokens, model, provider_name = _mock_completion(messages)
+        if on_token is not None:
+            await on_token(text)
+        return text, tokens, model, provider_name
     provider = resolve_provider(model_override)
     if provider is None:
         raise RuntimeError("No LLM provider is configured.")
@@ -773,6 +804,9 @@ async def complete_multimodal(
     max_tokens: int | None = None,
 ) -> tuple[str, int, str, str]:
     """Complete against bounded, server-selected images; never accepts client URLs."""
+    runtime = get_runtime_config()
+    if runtime is not None and runtime.provider == "mock":
+        raise RuntimeError("The local mock provider does not read images; leave EVIDENCE_VISION_ENABLED off")
     # Validate caller-controlled shape before configuration. An unsupported media type is
     # invalid regardless of whether this deployment happens to have a provider configured,
     # and resolving credentials first made this guard impossible to test or reason about.

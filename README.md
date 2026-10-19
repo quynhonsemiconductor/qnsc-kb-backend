@@ -13,7 +13,7 @@ git clone https://github.com/quynhonsemiconductor/qnsc-kb-backend.git
 cd qnsc-kb-backend
 cp .env.example .env                                   # the only file you copy; it works as-is
 
-docker compose up -d --build db redis                  # first build downloads the model (~2.3 GB, several minutes)
+docker compose up -d --build db redis localstack       # first build downloads the model only with KB_BAKE_EMBEDDING_MODEL=true
 docker compose --profile migrate run --rm migrator     # creates the schema
 docker compose up -d --build api worker beat           # API + Celery worker + Celery beat
 ```
@@ -73,11 +73,15 @@ The password is never stored in the repository.
 
 | Feature | Local status |
 |---|---|
-| Sign-in, articles, drafts, review, search (local embeddings), Celery jobs, beat schedules | Works with the example env |
-| AI answers and AI formatting | Need a chat provider. It is NOT an environment variable: an administrator saves provider, model and key in the app (Admin > AI provider). Until then the workspace answers from the retrieval fallback. To use a model on your machine (Ollama, vLLM, LM Studio) set `LLM_ALLOW_LOCAL_ENDPOINTS=true` in `.env` |
-| File upload | Needs your OWN Cloudflare R2 bucket and keys in `.env` (`SOURCE_STORAGE_BUCKET`, `R2_*`). There is no local-disk or MinIO backend, by design |
+| Sign-in, articles, drafts, review, search, Celery jobs, beat schedules | Works with the example env |
+| Upload, ingest and search of sources | Works: LocalStack stands in for R2 (`SOURCE_STORAGE_BACKEND=r2`, `S3_ENDPOINT_URL` set to the emulator; the browser uploads to `S3_PUBLIC_ENDPOINT_URL`). Not durable across a LocalStack restart: see the storage note below |
+| Embeddings | Mock by default (`EMBEDDING_MODEL=mock`, `EMBEDDING_VERSION=mock-v1`): deterministic, no model download, keyword-level search quality. Real local embeddings: `KB_BAKE_EMBEDDING_MODEL=true` with the e5 model in `.env` (about 6 GB disk, 8 GB Docker memory for the bake) |
+| AI answers and AI formatting | Mock by default with `LLM_PROVIDER=mock` (development only): deterministic answers that cite the first authorized passage, no key. For a real model, an administrator saves a provider and key in Admin > AI provider. A key in `.env` is not read for answers |
 | Malware scanning (ClamAV) | Off locally (`MALWARE_SCAN_ENABLED=false`); deployed environments run it |
 | Microsoft / Google connectors, SSO, email | Off until their credentials are set in `.env`. Microsoft sign-in and the connector also need `MICROSOFT_TENANT_ID` set to your Entra **tenant GUID** (never `common`; blank or `common` leaves both off, by design). Use the **KB Dev** app registration: `docs/runbooks/entra-apps.md` |
+
+The local-only switches are refused outside development (`validate_production`): `LLM_PROVIDER=mock`, `EMBEDDING_MODEL=mock`,
+`S3_PUBLIC_ENDPOINT_URL`. The local S3 endpoint is accepted only in development.
 
 Secrets in `.env.example` (`SECRET_KEY`, `DATA_ENCRYPTION_KEY`) are throwaway placeholders that
 work in development; generate real ones with `openssl rand -hex 32` for anything other people can

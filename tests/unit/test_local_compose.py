@@ -10,7 +10,7 @@ def _read(name: str) -> str:
 
 def _env_example_defaults() -> dict[str, str]:
     """KEY=value for every host-port key, commented out or not: a copy of the file is the setup."""
-    found = re.findall(r"(?m)^#?\s?(KB_[A-Z_]*PORT)=(\S+)$", _read(".env.example"))
+    found = re.findall(r"(?m)^#?\s?([A-Z_]*_PORT)=(\S+)$", _read(".env.example"))
     return dict(found)
 
 
@@ -22,8 +22,14 @@ def test_every_published_port_binds_loopback_and_reads_its_env_default():
         assert mapping.startswith("127.0.0.1:"), f"{mapping} is reachable beyond loopback"
 
     defaults = _env_example_defaults()
-    interpolated = re.findall(r"\$\{(KB_[A-Z_]*PORT):-(\d+)\}", compose)
-    assert {name for name, _ in interpolated} == {"KB_DB_PORT", "KB_REDIS_PORT", "KB_API_PORT"}
+    interpolated = re.findall(r"\$\{([A-Z_]*PORT):-(\d+)\}", compose)
+    assert {name for name, _ in interpolated} == {
+        "KB_DB_PORT",
+        "KB_REDIS_PORT",
+        "KB_API_PORT",
+        "LOCALSTACK_HOST_PORT",
+        "FRONTEND_DEV_PORT",
+    }
     for name, value in interpolated:
         assert defaults.get(name) == value, f"{name} default {value} is not what .env.example says"
 
@@ -45,3 +51,30 @@ def test_ci_and_readme_address_services_not_containers():
     for name in (".github/workflows/backend-ci.yml", "README.md"):
         text = _read(name)
         assert not re.search(r"docker (exec|logs|rm|stop) qnsc-kb", text), name
+
+
+def test_the_source_bucket_name_is_the_same_in_the_env_example_the_init_hook_and_the_healthcheck():
+    env = dict(re.findall(r"(?m)^([A-Z_]+)=\"?([^\"\n]*)\"?$", _read(".env.example")))
+    bootstrap = re.search(r'(?m)^BUCKET="([^"]+)"', _read("scripts/localstack/01-bootstrap.sh"))
+    assert bootstrap, "BUCKET not found in scripts/localstack/01-bootstrap.sh"
+    assert env["SOURCE_STORAGE_BUCKET"] == bootstrap.group(1)
+    assert bootstrap.group(1) in _read("docker-compose.yml")
+
+
+def test_the_app_containers_reach_localstack_by_its_service_name_and_the_browser_by_the_host_port():
+    compose = _read("docker-compose.yml")
+    assert compose.count("S3_ENDPOINT_URL=http://localstack:4566") == 3  # api, worker, beat
+    assert "S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}" in compose
+
+
+def test_the_bucket_cors_allows_both_loopback_names_of_the_frontend_and_the_healthcheck_checks_it():
+    compose = _read("docker-compose.yml")
+    bootstrap = _read("scripts/localstack/01-bootstrap.sh")
+    # localhost and 127.0.0.1 are different origins to the browser: both must be allowed, and the container must prove it.
+    assert "http://127.0.0.1:" in bootstrap and "http://localhost:" in bootstrap
+    assert "WEB_ORIGINS" in compose
+    healthcheck = compose.split("healthcheck:", 1)[1].split("volumes:", 1)[0] if "healthcheck:" in compose else ""
+    assert "get-bucket-cors" in compose.split("localstack:", 1)[1].split("otel:", 1)[0]
+    assert "head-bucket" in healthcheck or "head-bucket" in compose
+    # Failures are loud: the hook never swallows a create or CORS error.
+    assert "|| true" not in bootstrap

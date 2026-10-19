@@ -12,6 +12,29 @@ import re
 DEVELOPMENT_DEFAULT_PASSWORD = "Admin123@"
 
 
+def is_local_object_endpoint(value: str | None) -> bool:
+    """Whether a URL is a plain-HTTP S3 emulator on this machine or the compose network.
+
+    Honoured only in a development environment (`Settings.allows_local_object_endpoints`).
+    """
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "http"
+        and hostname in {"localhost", "127.0.0.1", "localstack"}
+        and port is not None
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+    )
+
+
 def is_cloudflare_r2_endpoint(value: str | None) -> bool:
     """Return whether a configured URL is a Cloudflare R2 S3 endpoint."""
     if not value:
@@ -110,6 +133,9 @@ class Settings(BaseSettings):
     # else has no effect at all, rather than quietly widening production.
     LLM_ALLOW_LOCAL_ENDPOINTS: bool = False
     GEMINI_API_KEY: str | None = None
+    # The deterministic local answer provider. `mock` is honoured only in a development environment, and only when no
+    # provider is saved in the admin screen. Refused elsewhere (validate_production).
+    LLM_PROVIDER: str = ""
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
     LLM_TIMEOUT_SECONDS: float = 90.0
@@ -672,6 +698,9 @@ class Settings(BaseSettings):
     SOURCE_ORPHAN_GRACE_HOURS: int = 24
     AWS_REGION: str | None = None
     S3_ENDPOINT_URL: str | None = None
+    # Presigned URLs are signed for, and handed to the browser at, this origin. Local development only (refused in
+    # production): the services reach the emulator by its compose name, the browser needs the published host port.
+    S3_PUBLIC_ENDPOINT_URL: str | None = None
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None
     R2_SECRET_ACCESS_KEY: str | None = None
@@ -845,6 +874,16 @@ class Settings(BaseSettings):
         }
 
     @property
+    def allows_local_object_endpoints(self) -> bool:
+        """Whether S3 may be reached over plain HTTP on this machine (LocalStack/MinIO). Development only, no opt-in flag."""
+        return self.is_development_environment
+
+    @property
+    def uses_mock_llm(self) -> bool:
+        """Answers come from the deterministic local provider. Only in development; `validate_production` refuses it."""
+        return self.LLM_PROVIDER.strip().lower() == "mock" and self.is_development_environment
+
+    @property
     def allows_local_llm_endpoints(self) -> bool:
         """Whether a loopback/private LLM endpoint may be configured and called.
 
@@ -859,6 +898,13 @@ class Settings(BaseSettings):
         environment = self.ENVIRONMENT.lower()
         if environment in {"development", "dev", "local"}:
             return
+        # Local-only switches are refused first, so a copied development value fails with its own name.
+        if self.LLM_PROVIDER.strip().lower() == "mock":
+            raise RuntimeError("LLM_PROVIDER=mock is for local development only; configure a real provider")
+        if self.EMBEDDING_MODEL.strip().lower() == "mock":
+            raise RuntimeError("EMBEDDING_MODEL=mock is for local development only; set the deployed embedding model")
+        if (self.S3_PUBLIC_ENDPOINT_URL or "").strip():
+            raise RuntimeError("S3_PUBLIC_ENDPOINT_URL is for local development only; unset it in this environment")
         # Secret-material checks apply to ANY non-development environment. The
         # committed default SECRET_KEY signs access/refresh JWTs and (without a
         # DEK) encrypts stored connector tokens; a staging/uat/demo deployment

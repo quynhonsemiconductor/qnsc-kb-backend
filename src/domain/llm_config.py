@@ -78,7 +78,12 @@ async def load_runtime_config(db: AsyncSession) -> None:
     result = await db.execute(select(LLMProviderConfig).where(LLMProviderConfig.config_key == "workspace"))
     row = result.scalar_one_or_none()
     if row is None:
-        set_runtime_config(None)
+        # No provider saved in the admin screen. In development, LLM_PROVIDER=mock selects the deterministic local
+        # provider; otherwise nothing is configured and every AI call says so.
+        if settings.uses_mock_llm:
+            set_runtime_config(RuntimeLLMConfig("mock", "mock", "mock://local", "mock"))
+        else:
+            set_runtime_config(None)
         return
     key = decrypt_api_key(row.encrypted_api_key)
     set_runtime_config(RuntimeLLMConfig(row.provider, row.model, row.base_url.rstrip("/"), key) if row.enabled and key else None)
@@ -89,7 +94,7 @@ def public_config(row: LLMProviderConfig | None) -> dict:
     if row is None:
         return {
             "configured": runtime is not None,
-            "source": "admin" if runtime else "none",
+            "source": ("env (mock)" if runtime and runtime.provider == "mock" else "admin") if runtime else "none",
             "enabled": bool(runtime),
             "provider": runtime.provider if runtime else "openai",
             "model": runtime.model if runtime else "gpt-4o-mini",

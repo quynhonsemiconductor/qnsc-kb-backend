@@ -171,4 +171,13 @@ def _env_example(name: str) -> str:
 def test_env_example_embeds_the_way_the_deployed_code_does(name):
     """A local run should embed with what the deployed tasks use. EMBEDDING_ONNX_THREADS was
     1 here for a 0.5 vCPU task while the code default, which production runs, is 2."""
+    local_default = {"EMBEDDING_MODEL": "mock", "EMBEDDING_VERSION": "mock-v1"}
+    if name in local_default:
+        # The active local default is the deterministic mock, so its zero vectors and version never mix with real ones.
+        # The real value stays documented as the opt-in, and that one must be what the deployed tasks run.
+        assert _env_example(name) == local_default[name]
+        assert f'{name}="{_setting_default(name)}"' in ENV_EXAMPLE, (
+            f"the documented real {name} in .env.example is not the deployed value"
+        )
+        return
     assert _env_example(name) == str(_setting_default(name))

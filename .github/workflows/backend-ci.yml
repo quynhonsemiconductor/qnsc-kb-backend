@@ -402,6 +402,7 @@ jobs:
   # reach, a port another stack owns), or a service reports unhealthy forever. This boots the real compose
   # stack (db, redis, migrator, api, worker, beat) from `.env.example` and proves the health endpoint
   # and one authenticated call, so that drift fails a pull request instead of the next person's afternoon.
+  # LocalStack is part of the stack: uploads go to its bucket, and its healthcheck proves the bucket's CORS too.
   #
   # NOT proven here: the real embedding model. The ~2.3 GB bake is skipped (KB_BAKE_EMBEDDING_MODEL=false)
   # and EMBEDDING_MODEL is set to `mock`, so search quality is untested; that path has its own tests and the
@@ -428,7 +429,7 @@ jobs:
           echo 'KB_BAKE_EMBEDDING_MODEL=false' >> .env
 
       - name: Start Postgres and Redis
-        run: docker compose up -d --build --wait db redis
+        run: docker compose up -d --build --wait db redis localstack
 
       - name: Migrate
         run: docker compose --profile migrate run --rm migrator
