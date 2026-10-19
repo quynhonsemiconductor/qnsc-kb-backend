@@ -9,7 +9,6 @@ import os
 
 from alembic import op
 
-
 revision = "20260807_30"
 down_revision = "20260807_29"
 branch_labels = None
@@ -68,8 +67,12 @@ def upgrade() -> None:
     # External document IDs are only unique within a tenant. The old global
     # constraint allowed one company's connector to block another company's
     # legitimate ID.
-    op.execute("ALTER TABLE articles DROP CONSTRAINT IF EXISTS articles_external_id_key")
-    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_articles_company_external_id ON articles (company_domain, external_id)")
+    op.execute(
+        "ALTER TABLE articles DROP CONSTRAINT IF EXISTS articles_external_id_key"
+    )
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_articles_company_external_id ON articles (company_domain, external_id)"
+    )
 
     # ``AUTO_CREATE_SCHEMA`` is enabled in development, so use IF NOT EXISTS
     # rather than assuming Alembic is the first schema creator.
@@ -87,8 +90,12 @@ def upgrade() -> None:
             CONSTRAINT uq_ingestion_fingerprint_tenant_hash UNIQUE (company_domain, source_hash)
         )
     """)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_ingestion_fingerprints_company_domain ON ingestion_fingerprints (company_domain)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_ingestion_fingerprints_draft_id ON ingestion_fingerprints (draft_id)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ingestion_fingerprints_company_domain ON ingestion_fingerprints (company_domain)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ingestion_fingerprints_draft_id ON ingestion_fingerprints (draft_id)"
+    )
 
     # Backfill already-published sources and pending drafts. DISTINCT ON keeps
     # the migration safe even if old deployments already contain duplicates.
@@ -122,7 +129,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if os.getenv("ENABLE_RLS", "false").lower() in {"1", "true", "yes"}:
-        op.execute("DROP POLICY IF EXISTS tenant_ingestion_fingerprints ON ingestion_fingerprints")
+        op.execute(
+            "DROP POLICY IF EXISTS tenant_ingestion_fingerprints ON ingestion_fingerprints"
+        )
     op.execute("DROP INDEX IF EXISTS uq_articles_company_external_id")
-    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_external_id_key ON articles (external_id)")
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS articles_external_id_key ON articles (external_id)"
+    )
     op.execute("DROP TABLE IF EXISTS ingestion_fingerprints")

@@ -11,9 +11,7 @@ from src.lib import log_redaction
 log_redaction.install()
 
 celery_app = Celery(
-    "qnsc_kb_workers",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
+    "qnsc_kb_workers", broker=settings.REDIS_URL, backend=settings.REDIS_URL
 )
 
 # Managed caches (ElastiCache/Valkey with encryption in transit) are reached over

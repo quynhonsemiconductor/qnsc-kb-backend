@@ -138,9 +138,13 @@ class ArticleRepository:
             DocumentSource.source_system.in_(SOURCE_ACL_PROVIDERS)
         )
         source_acl_allows: list[Any] = [source_explicit_allow]
-        audience_ids = [department.id for department in getattr(user, "departments", [])]
+        audience_ids = [
+            department.id for department in getattr(user, "departments", [])
+        ]
         if audience_ids:
-            source_acl_allows.append(Article.departments.any(Department.id.in_(audience_ids)))
+            source_acl_allows.append(
+                Article.departments.any(Department.id.in_(audience_ids))
+            )
         filters.append(
             or_(
                 not_(source_acl_article),
@@ -281,7 +285,8 @@ class ArticleRepository:
             filters.append(Article.status == status)
         if topic:
             filters.append(
-                ~Article.tags.any() if topic == "General knowledge"
+                ~Article.tags.any()
+                if topic == "General knowledge"
                 else Article.tags.any(ArticleTag.tag == topic)
             )
         if search_query:

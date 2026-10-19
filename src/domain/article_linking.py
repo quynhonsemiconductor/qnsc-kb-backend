@@ -16,6 +16,7 @@ candidates, and a reader of the resulting `related_article_ids` still goes throu
 ordinary `PermissionService` check on the read path (`article_repo.list_related`), so a
 bug here can suggest a bad link but cannot bypass access control on its own.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -38,7 +39,9 @@ TOPICAL_DISTANCE_THRESHOLD = settings.VECTOR_DISTANCE_THRESHOLD
 MAX_RELATED_ARTICLES = 5
 
 
-async def _centroid_embedding(db: AsyncSession, article_id: uuid.UUID) -> list[float] | None:
+async def _centroid_embedding(
+    db: AsyncSession, article_id: uuid.UUID
+) -> list[float] | None:
     """Average every current-model chunk embedding for one article into one vector.
 
     A centroid over the whole article, not just its first chunk, so one atypical
@@ -49,14 +52,18 @@ async def _centroid_embedding(db: AsyncSession, article_id: uuid.UUID) -> list[f
     than linking off a stale or absent vector.
     """
     rows = (
-        await db.execute(
-            select(ArticleChunk.embedding).where(
-                ArticleChunk.article_id == article_id,
-                ArticleChunk.embedding_version == settings.EMBEDDING_VERSION,
-                ArticleChunk.embedding.is_not(None),
+        (
+            await db.execute(
+                select(ArticleChunk.embedding).where(
+                    ArticleChunk.article_id == article_id,
+                    ArticleChunk.embedding_version == settings.EMBEDDING_VERSION,
+                    ArticleChunk.embedding.is_not(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     vectors = [list(vector) for vector in rows if vector]
     if not vectors:
         return None
@@ -81,7 +88,10 @@ def collapse_to_top_articles(
     best_distance_by_article: dict[str, float] = {}
     for candidate_article_id, distance in chunk_rows:
         key = str(candidate_article_id)
-        if key not in best_distance_by_article or distance < best_distance_by_article[key]:
+        if (
+            key not in best_distance_by_article
+            or distance < best_distance_by_article[key]
+        ):
             best_distance_by_article[key] = distance
 
     ranked = sorted(

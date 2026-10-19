@@ -6,7 +6,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
-
 # Every other connector child table is tenant-isolated through its connector_id — see
 # 20260807_28. These two carry connector_id as well, so they get the same policy: without
 # it, one tenant's queue and notification inbox are readable by every other tenant.
@@ -52,8 +51,15 @@ def _add_missing(table: str, *columns: sa.Column) -> list[str]:
 def upgrade() -> None:
     added = _add_missing(
         "sync_cursors",
-        sa.Column("status", sa.String(length=30), nullable=False, server_default="ready"),
-        sa.Column("full_sync_required", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "status", sa.String(length=30), nullable=False, server_default="ready"
+        ),
+        sa.Column(
+            "full_sync_required",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.false(),
+        ),
         sa.Column("last_notification_at", sa.DateTime(), nullable=True),
         sa.Column("last_reconcile_at", sa.DateTime(), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
@@ -66,7 +72,12 @@ def upgrade() -> None:
         "webhook_subscriptions",
         sa.Column("resource", sa.String(length=1024), nullable=True),
         sa.Column("lifecycle_notification_url", sa.String(length=2048), nullable=True),
-        sa.Column("reauthorization_required", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "reauthorization_required",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.false(),
+        ),
         sa.Column("last_notification_at", sa.DateTime(), nullable=True),
         sa.Column("last_lifecycle_at", sa.DateTime(), nullable=True),
         sa.Column("renewal_attempts", sa.Integer(), nullable=False, server_default="0"),
@@ -91,42 +102,75 @@ def upgrade() -> None:
             sa.Column("change_type", sa.String(length=30), nullable=True),
             sa.Column("lifecycle_event", sa.String(length=50), nullable=True),
             sa.Column("payload", sa.JSON(), nullable=False),
-            sa.Column("status", sa.String(length=30), nullable=False, server_default="received"),
+            sa.Column(
+                "status",
+                sa.String(length=30),
+                nullable=False,
+                server_default="received",
+            ),
             sa.Column("received_at", sa.DateTime(), nullable=False),
             sa.Column("processed_at", sa.DateTime(), nullable=True),
             sa.Column("last_error", sa.Text(), nullable=True),
-            sa.ForeignKeyConstraint(["connector_id"], ["connectors.id"], ondelete="CASCADE"),
-            sa.ForeignKeyConstraint(["scope_id"], ["source_scopes.id"], ondelete="SET NULL"),
+            sa.ForeignKeyConstraint(
+                ["connector_id"], ["connectors.id"], ondelete="CASCADE"
+            ),
+            sa.ForeignKeyConstraint(
+                ["scope_id"], ["source_scopes.id"], ondelete="SET NULL"
+            ),
             sa.PrimaryKeyConstraint("id"),
-            sa.UniqueConstraint("provider", "subscription_id", "payload_hash", name="uq_connector_notification_delivery"),
+            sa.UniqueConstraint(
+                "provider",
+                "subscription_id",
+                "payload_hash",
+                name="uq_connector_notification_delivery",
+            ),
         )
-    op.execute("CREATE INDEX IF NOT EXISTS ix_connector_notifications_status_received ON connector_notifications (status, received_at)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_connector_notifications_status_received ON connector_notifications (status, received_at)"
+    )
 
     if not inspect(op.get_bind()).has_table("sync_requests"):
         op.create_table(
-                "sync_requests",
+            "sync_requests",
             sa.Column("id", sa.Uuid(), nullable=False),
             sa.Column("created_at", sa.DateTime(), nullable=False),
             sa.Column("updated_at", sa.DateTime(), nullable=False),
             sa.Column("connector_id", sa.Uuid(), nullable=False),
             sa.Column("scope_id", sa.Uuid(), nullable=True),
             sa.Column("job_id", sa.Uuid(), nullable=True),
-            sa.Column("reason", sa.String(length=80), nullable=False, server_default="notification"),
+            sa.Column(
+                "reason",
+                sa.String(length=80),
+                nullable=False,
+                server_default="notification",
+            ),
             sa.Column("priority", sa.Integer(), nullable=False, server_default="50"),
-            sa.Column("status", sa.String(length=30), nullable=False, server_default="queued"),
+            sa.Column(
+                "status", sa.String(length=30), nullable=False, server_default="queued"
+            ),
             sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("available_at", sa.DateTime(), nullable=False),
             sa.Column("locked_at", sa.DateTime(), nullable=True),
             sa.Column("started_at", sa.DateTime(), nullable=True),
             sa.Column("completed_at", sa.DateTime(), nullable=True),
             sa.Column("last_error", sa.Text(), nullable=True),
-            sa.ForeignKeyConstraint(["connector_id"], ["connectors.id"], ondelete="CASCADE"),
-            sa.ForeignKeyConstraint(["scope_id"], ["source_scopes.id"], ondelete="SET NULL"),
-            sa.ForeignKeyConstraint(["job_id"], ["connector_jobs.id"], ondelete="SET NULL"),
+            sa.ForeignKeyConstraint(
+                ["connector_id"], ["connectors.id"], ondelete="CASCADE"
+            ),
+            sa.ForeignKeyConstraint(
+                ["scope_id"], ["source_scopes.id"], ondelete="SET NULL"
+            ),
+            sa.ForeignKeyConstraint(
+                ["job_id"], ["connector_jobs.id"], ondelete="SET NULL"
+            ),
             sa.PrimaryKeyConstraint("id"),
         )
-    op.execute("CREATE INDEX IF NOT EXISTS ix_sync_requests_dispatch ON sync_requests (status, available_at)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_sync_requests_connector_status ON sync_requests (connector_id, status)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_sync_requests_dispatch ON sync_requests (status, available_at)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_sync_requests_connector_status ON sync_requests (connector_id, status)"
+    )
 
     if _rls_enabled():
         for table, policy in _RLS_TABLES:
@@ -147,9 +191,26 @@ def downgrade() -> None:
     op.drop_index("ix_sync_requests_connector_status", table_name="sync_requests")
     op.drop_index("ix_sync_requests_dispatch", table_name="sync_requests")
     op.drop_table("sync_requests")
-    op.drop_index("ix_connector_notifications_status_received", table_name="connector_notifications")
+    op.drop_index(
+        "ix_connector_notifications_status_received",
+        table_name="connector_notifications",
+    )
     op.drop_table("connector_notifications")
-    for column in ("last_error", "renewal_attempts", "last_lifecycle_at", "last_notification_at", "reauthorization_required", "lifecycle_notification_url", "resource"):
+    for column in (
+        "last_error",
+        "renewal_attempts",
+        "last_lifecycle_at",
+        "last_notification_at",
+        "reauthorization_required",
+        "lifecycle_notification_url",
+        "resource",
+    ):
         op.drop_column("webhook_subscriptions", column)
-    for column in ("last_error", "last_reconcile_at", "last_notification_at", "full_sync_required", "status"):
+    for column in (
+        "last_error",
+        "last_reconcile_at",
+        "last_notification_at",
+        "full_sync_required",
+        "status",
+    ):
         op.drop_column("sync_cursors", column)

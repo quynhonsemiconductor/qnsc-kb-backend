@@ -560,7 +560,9 @@ class ArticleService:
                 ),
                 commit=False,
             )
-            await self._audit(user.id, "restore_version", restored_article.id, commit=False)
+            await self._audit(
+                user.id, "restore_version", restored_article.id, commit=False
+            )
             await self.article_repo.db.commit()
         except Exception:
             await self.article_repo.db.rollback()

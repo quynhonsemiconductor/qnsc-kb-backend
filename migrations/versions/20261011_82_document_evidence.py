@@ -26,10 +26,30 @@ def upgrade() -> None:
         op.create_table(
             TABLE,
             sa.Column("id", sa.UUID(), primary_key=True),
-            sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
-            sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
-            sa.Column("article_id", sa.UUID(), sa.ForeignKey("articles.id", ondelete="CASCADE"), nullable=False),
-            sa.Column("document_source_id", sa.UUID(), sa.ForeignKey("document_sources.id", ondelete="CASCADE"), nullable=False),
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+            sa.Column(
+                "article_id",
+                sa.UUID(),
+                sa.ForeignKey("articles.id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column(
+                "document_source_id",
+                sa.UUID(),
+                sa.ForeignKey("document_sources.id", ondelete="CASCADE"),
+                nullable=False,
+            ),
             sa.Column("kind", sa.String(30), nullable=False),
             sa.Column("page_number", sa.Integer(), nullable=False),
             sa.Column("bounding_box", sa.JSON(), nullable=True),
@@ -40,10 +60,17 @@ def upgrade() -> None:
             sa.Column("structured_data", sa.JSON(), nullable=True),
             sa.Column("content_hash", sa.String(64), nullable=False),
             sa.Column("extraction_version", sa.String(50), nullable=False),
-            sa.CheckConstraint("kind IN ('table', 'figure', 'page_visual')", name="ck_document_evidence_kind"),
+            sa.CheckConstraint(
+                "kind IN ('table', 'figure', 'page_visual')",
+                name="ck_document_evidence_kind",
+            ),
         )
-    op.execute("CREATE INDEX IF NOT EXISTS ix_document_evidence_article_kind ON document_evidence (article_id, kind)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_document_evidence_source_page ON document_evidence (document_source_id, page_number)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_document_evidence_article_kind ON document_evidence (article_id, kind)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_document_evidence_source_page ON document_evidence (document_source_id, page_number)"
+    )
 
     inspector = inspect(op.get_bind())
     for chunk_table in ("parent_chunks", "article_chunks"):
@@ -51,12 +78,20 @@ def upgrade() -> None:
             continue
         columns = {column["name"] for column in inspector.get_columns(chunk_table)}
         if "evidence_id" not in columns:
-            op.add_column(chunk_table, sa.Column("evidence_id", sa.UUID(), nullable=True))
-            op.create_foreign_key(
-                f"fk_{chunk_table}_evidence_id", chunk_table, TABLE,
-                ["evidence_id"], ["id"], ondelete="CASCADE",
+            op.add_column(
+                chunk_table, sa.Column("evidence_id", sa.UUID(), nullable=True)
             )
-        op.execute(f"CREATE INDEX IF NOT EXISTS ix_{chunk_table}_evidence_id ON {chunk_table} (evidence_id)")
+            op.create_foreign_key(
+                f"fk_{chunk_table}_evidence_id",
+                chunk_table,
+                TABLE,
+                ["evidence_id"],
+                ["id"],
+                ondelete="CASCADE",
+            )
+        op.execute(
+            f"CREATE INDEX IF NOT EXISTS ix_{chunk_table}_evidence_id ON {chunk_table} (evidence_id)"
+        )
 
     if os.getenv("ENABLE_RLS", "false").lower() in {"1", "true", "yes"}:
         op.execute(f"ALTER TABLE {TABLE} ENABLE ROW LEVEL SECURITY")
@@ -73,9 +108,7 @@ def upgrade() -> None:
     role = os.getenv("APP_DATABASE_ROLE")
     if role:
         safe_role = role.replace('"', '""')
-        op.execute(
-            f'GRANT SELECT, INSERT, UPDATE, DELETE ON {TABLE} TO "{safe_role}"'
-        )
+        op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {TABLE} TO "{safe_role}"')
 
     # Existing published documents already have searchable text chunks. Keep those live
     # while the durable outbox re-indexes each source atomically; changing index_status to
@@ -83,8 +116,7 @@ def upgrade() -> None:
     # and deleting them here would create a corpus-wide search outage during deployment.
     # The reason marker makes this idempotent on a manually re-run guarded migration.
     if {"articles", "document_sources", "outbox_events"} <= tables:
-        op.execute(
-            """
+        op.execute("""
             INSERT INTO outbox_events (
                 id, created_at, updated_at, event_type, payload, status,
                 attempts, next_attempt_at, last_error
@@ -113,8 +145,7 @@ def upgrade() -> None:
                     AND existing.payload ->> 'reason' = 'document_evidence_backfill'
                     AND existing.status IN ('pending', 'processing', 'dispatched')
               )
-            """
-        )
+            """)
 
 
 def downgrade() -> None:
@@ -127,7 +158,9 @@ def downgrade() -> None:
         columns = {column["name"] for column in inspector.get_columns(chunk_table)}
         if "evidence_id" in columns:
             op.execute(f"DROP INDEX IF EXISTS ix_{chunk_table}_evidence_id")
-            op.drop_constraint(f"fk_{chunk_table}_evidence_id", chunk_table, type_="foreignkey")
+            op.drop_constraint(
+                f"fk_{chunk_table}_evidence_id", chunk_table, type_="foreignkey"
+            )
             op.drop_column(chunk_table, "evidence_id")
     if TABLE in set(inspect(op.get_bind()).get_table_names()):
         op.drop_table(TABLE)

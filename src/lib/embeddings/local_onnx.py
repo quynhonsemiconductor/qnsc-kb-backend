@@ -35,6 +35,7 @@ both int8 dynamic-quantisation recipes were measured against this gate and lost
 measures 1.000000. The weights stay ~2.3 GB, but torch and its ~700 MB of
 site-packages leave the image entirely, which is most of the win.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -86,7 +87,9 @@ def _load() -> tuple[Any, Any]:
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     tokenizer.enable_truncation(max_length=settings.EMBEDDING_MAX_TOKENS)
     tokenizer.enable_padding()
-    logger.info("ONNX embedding model ready", inputs=[i.name for i in session.get_inputs()])
+    logger.info(
+        "ONNX embedding model ready", inputs=[i.name for i in session.get_inputs()]
+    )
     return session, tokenizer
 
 
@@ -144,9 +147,7 @@ class OnnxEmbeddingProvider:
             window = order[start : start + batch_size]
             encodings = tokenizer.encode_batch([texts[index] for index in window])
             feed = {
-                "input_ids": numpy.array(
-                    [e.ids for e in encodings], dtype=numpy.int64
-                ),
+                "input_ids": numpy.array([e.ids for e in encodings], dtype=numpy.int64),
                 "attention_mask": numpy.array(
                     [e.attention_mask for e in encodings], dtype=numpy.int64
                 ),

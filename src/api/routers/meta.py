@@ -23,68 +23,143 @@ class TagCatalogRequest(BaseModel):
 def _normalize_tag(value: str) -> str:
     import re
     import unicodedata
-    folded = "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch))
+
+    folded = "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(ch)
+    )
     return re.sub(r"\s+", " ", folded.strip().casefold())
+
 
 @router.get("/tags")
 async def get_tags(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> Any:
     service = MetaService(db)
     return await service.get_all_tags(current_user)
 
 
 @router.get("/tag-catalog")
-async def list_tag_catalog(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
-    rows = (await db.execute(select(TagCatalog).where(TagCatalog.company_domain == current_user.company_domain).order_by(TagCatalog.normalized_tag))).scalars().all()
-    return [{"id": str(item.id), "tag": item.tag, "normalized_tag": item.normalized_tag, "active": item.active, "deprecated_at": item.deprecated_at, "parent_id": str(item.parent_id) if item.parent_id else None} for item in rows]
+async def list_tag_catalog(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await db.execute(
+                select(TagCatalog)
+                .where(TagCatalog.company_domain == current_user.company_domain)
+                .order_by(TagCatalog.normalized_tag)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(item.id),
+            "tag": item.tag,
+            "normalized_tag": item.normalized_tag,
+            "active": item.active,
+            "deprecated_at": item.deprecated_at,
+            "parent_id": str(item.parent_id) if item.parent_id else None,
+        }
+        for item in rows
+    ]
 
 
 @router.post("/tag-catalog", status_code=201)
-async def create_tag_catalog(request: TagCatalogRequest, current_user: User = Depends(require_permission("article.publish", scope="company")), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def create_tag_catalog(
+    request: TagCatalogRequest,
+    current_user: User = Depends(
+        require_permission("article.publish", scope="company")
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
     normalized = _normalize_tag(request.tag)
     if not normalized:
-        raise HTTPException(status_code=422, detail="Tag must contain letters or numbers")
-    existing = await db.scalar(select(TagCatalog).where(TagCatalog.company_domain == current_user.company_domain, TagCatalog.normalized_tag == normalized))
+        raise HTTPException(
+            status_code=422, detail="Tag must contain letters or numbers"
+        )
+    existing = await db.scalar(
+        select(TagCatalog).where(
+            TagCatalog.company_domain == current_user.company_domain,
+            TagCatalog.normalized_tag == normalized,
+        )
+    )
     parent_id = request.parent_id
     if parent_id is not None:
         if existing and parent_id == existing.id:
-            raise HTTPException(status_code=422, detail="A tag cannot be its own parent")
+            raise HTTPException(
+                status_code=422, detail="A tag cannot be its own parent"
+            )
         # Same-tenant existence only, checked explicitly rather than trusted from the
         # request: a parent_id naming another tenant's row would otherwise let this
         # tenant's catalog silently reference (and later render a tree branch under)
         # content it has no access to.
-        parent = await db.scalar(select(TagCatalog).where(TagCatalog.id == parent_id, TagCatalog.company_domain == current_user.company_domain))
+        parent = await db.scalar(
+            select(TagCatalog).where(
+                TagCatalog.id == parent_id,
+                TagCatalog.company_domain == current_user.company_domain,
+            )
+        )
         if not parent:
-            raise HTTPException(status_code=422, detail="Parent tag not found in this catalog")
+            raise HTTPException(
+                status_code=422, detail="Parent tag not found in this catalog"
+            )
     if existing:
         existing.tag = request.tag.strip()
         existing.active = request.active
-        existing.deprecated_at = None if request.active else (existing.deprecated_at or datetime.utcnow())
+        existing.deprecated_at = (
+            None if request.active else (existing.deprecated_at or datetime.utcnow())
+        )
         existing.parent_id = parent_id
         item = existing
     else:
-        item = TagCatalog(company_domain=current_user.company_domain, tag=request.tag.strip(), normalized_tag=normalized, active=request.active, created_by=current_user.id, parent_id=parent_id)
+        item = TagCatalog(
+            company_domain=current_user.company_domain,
+            tag=request.tag.strip(),
+            normalized_tag=normalized,
+            active=request.active,
+            created_by=current_user.id,
+            parent_id=parent_id,
+        )
         db.add(item)
     await db.commit()
     await db.refresh(item)
-    return {"id": str(item.id), "tag": item.tag, "normalized_tag": item.normalized_tag, "active": item.active, "parent_id": str(item.parent_id) if item.parent_id else None}
+    return {
+        "id": str(item.id),
+        "tag": item.tag,
+        "normalized_tag": item.normalized_tag,
+        "active": item.active,
+        "parent_id": str(item.parent_id) if item.parent_id else None,
+    }
 
 
 @router.delete("/tag-catalog/{tag_id}", status_code=204)
-async def deprecate_tag_catalog(tag_id: uuid.UUID, current_user: User = Depends(require_permission("article.publish", scope="company")), db: AsyncSession = Depends(get_db)) -> None:
-    item = await db.scalar(select(TagCatalog).where(TagCatalog.id == tag_id, TagCatalog.company_domain == current_user.company_domain))
+async def deprecate_tag_catalog(
+    tag_id: uuid.UUID,
+    current_user: User = Depends(
+        require_permission("article.publish", scope="company")
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    item = await db.scalar(
+        select(TagCatalog).where(
+            TagCatalog.id == tag_id,
+            TagCatalog.company_domain == current_user.company_domain,
+        )
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Tag not found")
     item.active = False
     item.deprecated_at = datetime.utcnow()
     await db.commit()
 
+
 @router.get("/glossary")
 async def get_glossary(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> Any:
     service = MetaService(db)
     return await service.get_glossary()

@@ -1,15 +1,73 @@
 from src.models.base import Base
-from src.models.user import User, Department, DepartmentManager, ExternalIdentity, Invitation, user_departments
+from src.models.user import (
+    User,
+    Department,
+    DepartmentManager,
+    ExternalIdentity,
+    Invitation,
+    user_departments,
+)
 from src.models.rbac import Permission, Role, RolePermission, user_roles
-from src.models.article import Article, ArticleVersion, ArticleUserPermission, ArticleTag, TagCatalog, DocumentSource, article_departments
+from src.models.article import (
+    Article,
+    ArticleVersion,
+    ArticleUserPermission,
+    ArticleTag,
+    TagCatalog,
+    DocumentSource,
+    article_departments,
+)
 from src.models.chunk import ParentChunk, ArticleChunk, ChunkMetadata
 from src.models.evidence import DocumentEvidence
 from src.models.interaction import Comment, Vote, Bookmark, ArticleFollower
-from src.models.governance import PendingDraft, DraftTransition, DraftCandidate, ApproverRule, IngestionFingerprint, Gap, ArticleEditRequest, ConflictRecord, AuditLog
-from src.models.ai import AiUsageLog, AiCache, AiFeedback, PromptVersion, AiConversation, AiMessage
-from src.models.ops import Connector, ConnectorJob, IndexReprocessJob, NotificationQueue, DeadLetterJob, OutboxEvent, SearchLog, ApiRequestMetric, FeatureFlag, LLMProviderConfig, EvalQuestion, EvalSet, EvalRun
+from src.models.governance import (
+    PendingDraft,
+    DraftTransition,
+    DraftCandidate,
+    ApproverRule,
+    IngestionFingerprint,
+    Gap,
+    ArticleEditRequest,
+    ConflictRecord,
+    AuditLog,
+)
+from src.models.ai import (
+    AiUsageLog,
+    AiCache,
+    AiFeedback,
+    PromptVersion,
+    AiConversation,
+    AiMessage,
+)
+from src.models.ops import (
+    Connector,
+    ConnectorJob,
+    IndexReprocessJob,
+    NotificationQueue,
+    DeadLetterJob,
+    OutboxEvent,
+    SearchLog,
+    ApiRequestMetric,
+    FeatureFlag,
+    LLMProviderConfig,
+    EvalQuestion,
+    EvalSet,
+    EvalRun,
+)
 from src.models.sessions import RefreshSession, PasswordResetToken
-from src.models.connectors import SourceScope, SyncCursor, ExternalDocument, DocumentVersion, PermissionSnapshot, ExternalAclPrincipal, ExternalGroupMapping, WebhookSubscription, SyncError, ConnectorNotification, SyncRequest
+from src.models.connectors import (
+    SourceScope,
+    SyncCursor,
+    ExternalDocument,
+    DocumentVersion,
+    PermissionSnapshot,
+    ExternalAclPrincipal,
+    ExternalGroupMapping,
+    WebhookSubscription,
+    SyncError,
+    ConnectorNotification,
+    SyncRequest,
+)
 from src.models.graph import GraphEntity, GraphRelationship, ArticleEntityMention
 
 __all__ = [

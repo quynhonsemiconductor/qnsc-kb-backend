@@ -14,7 +14,6 @@ import os
 from alembic import op
 from sqlalchemy import inspect
 
-
 revision = "20260911_76"
 down_revision = "20260910_75"
 branch_labels = None
@@ -32,8 +31,7 @@ def upgrade() -> None:
     existing = set(inspector.get_table_names())
 
     if "graph_entities" not in existing:
-        op.execute(
-            """
+        op.execute("""
             CREATE TABLE graph_entities (
                 id UUID PRIMARY KEY,
                 company_domain VARCHAR(255) NOT NULL,
@@ -47,16 +45,16 @@ def upgrade() -> None:
                 CONSTRAINT uq_graph_entity_company_normalized_type
                     UNIQUE (company_domain, normalized_name, entity_type)
             )
-            """
+            """)
+        op.execute(
+            "CREATE INDEX ix_graph_entities_company_domain ON graph_entities (company_domain)"
         )
-        op.execute("CREATE INDEX ix_graph_entities_company_domain ON graph_entities (company_domain)")
         op.execute(
             "CREATE INDEX ix_graph_entities_company_type ON graph_entities (company_domain, entity_type)"
         )
 
     if "graph_relationships" not in existing:
-        op.execute(
-            """
+        op.execute("""
             CREATE TABLE graph_relationships (
                 id UUID PRIMARY KEY,
                 company_domain VARCHAR(255) NOT NULL,
@@ -70,8 +68,7 @@ def upgrade() -> None:
                 CONSTRAINT uq_graph_relationship_edge
                     UNIQUE (company_domain, source_entity_id, target_entity_id, relation_type)
             )
-            """
-        )
+            """)
         op.execute(
             "CREATE INDEX ix_graph_relationships_company_domain ON graph_relationships (company_domain)"
         )
@@ -85,8 +82,7 @@ def upgrade() -> None:
         )
 
     if "article_entity_mentions" not in existing:
-        op.execute(
-            """
+        op.execute("""
             CREATE TABLE article_entity_mentions (
                 id UUID PRIMARY KEY,
                 company_domain VARCHAR(255) NOT NULL,
@@ -95,8 +91,7 @@ def upgrade() -> None:
                 created_at TIMESTAMP NOT NULL DEFAULT now(),
                 CONSTRAINT uq_article_entity_mention UNIQUE (article_id, entity_id)
             )
-            """
-        )
+            """)
         op.execute(
             "CREATE INDEX ix_article_entity_mentions_company_domain "
             "ON article_entity_mentions (company_domain)"

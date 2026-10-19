@@ -44,6 +44,7 @@ onnxruntime APPENDS to an existing external-data file instead of replacing it, s
 re-running into a used directory silently doubles the output. The output directory must
 therefore be empty or absent.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -134,7 +135,9 @@ def download_fp32(model_id: str, target: Path, revision: str | None = None) -> N
     if "onnx/model.onnx_data" in list_repo_files(model_id, revision=revision):
         names.append("onnx/model.onnx_data")
     for name in names:
-        shutil.copyfile(hf_hub_download(model_id, name, revision=revision), target / Path(name).name)
+        shutil.copyfile(
+            hf_hub_download(model_id, name, revision=revision), target / Path(name).name
+        )
 
 
 def quantise(fp32_dir: Path, out_dir: Path) -> None:
@@ -176,8 +179,12 @@ def _embed(model, texts: tuple[str, ...]):
     encodings = tokenizer.encode_batch(list(texts))
     feed = {
         "input_ids": numpy.array([e.ids for e in encodings], dtype=numpy.int64),
-        "attention_mask": numpy.array([e.attention_mask for e in encodings], dtype=numpy.int64),
-        "token_type_ids": numpy.array([e.type_ids for e in encodings], dtype=numpy.int64),
+        "attention_mask": numpy.array(
+            [e.attention_mask for e in encodings], dtype=numpy.int64
+        ),
+        "token_type_ids": numpy.array(
+            [e.type_ids for e in encodings], dtype=numpy.int64
+        ),
     }
     hidden = session.run(None, {k: v for k, v in feed.items() if k in declared})[0]
     mask = feed["attention_mask"][..., None].astype(hidden.dtype)

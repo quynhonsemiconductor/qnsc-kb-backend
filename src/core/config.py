@@ -4,7 +4,6 @@ from typing import Any, ClassVar
 from urllib.parse import quote, urlparse
 import re
 
-
 # The password the bootstrap administrator gets when nothing else is configured. It is
 # written down in this repository on purpose — a local checkout should just work — which
 # is exactly why validate_production refuses to start with it. Defined here rather than
@@ -831,7 +830,9 @@ class Settings(BaseSettings):
         ]
 
     #: Authorities that mean "any tenant" (or any personal account). Never acceptable as the pin.
-    MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset({"common", "organizations", "consumers"})
+    MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset(
+        {"common", "organizations", "consumers"}
+    )
     #: An Entra tenant id is a GUID. Shape only: no version or variant nibble, because a tenant id is not
     #: guaranteed to be an RFC 4122 UUID and a stricter pattern would refuse a real tenant.
     TENANT_GUID: ClassVar[re.Pattern[str]] = re.compile(
@@ -891,7 +892,10 @@ class Settings(BaseSettings):
     @property
     def uses_mock_llm(self) -> bool:
         """Answers come from the deterministic local provider. Only in development; `validate_production` refuses it."""
-        return self.LLM_PROVIDER.strip().lower() == "mock" and self.is_development_environment
+        return (
+            self.LLM_PROVIDER.strip().lower() == "mock"
+            and self.is_development_environment
+        )
 
     @property
     def allows_local_llm_endpoints(self) -> bool:
@@ -910,11 +914,17 @@ class Settings(BaseSettings):
             return
         # Local-only switches are refused first, so a copied development value fails with its own name.
         if self.LLM_PROVIDER.strip().lower() == "mock":
-            raise RuntimeError("LLM_PROVIDER=mock is for local development only; configure a real provider")
+            raise RuntimeError(
+                "LLM_PROVIDER=mock is for local development only; configure a real provider"
+            )
         if self.EMBEDDING_MODEL.strip().lower() == "mock":
-            raise RuntimeError("EMBEDDING_MODEL=mock is for local development only; set the deployed embedding model")
+            raise RuntimeError(
+                "EMBEDDING_MODEL=mock is for local development only; set the deployed embedding model"
+            )
         if (self.S3_PUBLIC_ENDPOINT_URL or "").strip():
-            raise RuntimeError("S3_PUBLIC_ENDPOINT_URL is for local development only; unset it in this environment")
+            raise RuntimeError(
+                "S3_PUBLIC_ENDPOINT_URL is for local development only; unset it in this environment"
+            )
         # Secret-material checks apply to ANY non-development environment. The
         # committed default SECRET_KEY signs access/refresh JWTs and (without a
         # DEK) encrypts stored connector tokens; a staging/uat/demo deployment

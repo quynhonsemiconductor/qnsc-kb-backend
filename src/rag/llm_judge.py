@@ -23,6 +23,7 @@ swallowed as "not checked" rather than surfaced -- an outage degrades this featu
 finding nothing, never to breaking or slowing down an answer users are waiting on beyond
 the bounded number of calls already spent.
 """
+
 from __future__ import annotations
 
 import re
@@ -113,7 +114,9 @@ async def judge_faithfulness(answer: str, context: str) -> float:
     return max(0.0, min(1.0, score))
 
 
-async def judge_context_precision(question: str, retrieved_passages: list[str]) -> float:
+async def judge_context_precision(
+    question: str, retrieved_passages: list[str]
+) -> float:
     """What fraction of `retrieved_passages` an LLM judge calls relevant to `question`.
 
     The counterpart to `evaluator.context_recall`: recall asks whether the passages the
@@ -124,7 +127,8 @@ async def judge_context_precision(question: str, retrieved_passages: list[str]) 
     if not retrieved_passages:
         return 1.0
     numbered = "\n\n".join(
-        f"[{index}] {passage}" for index, passage in enumerate(retrieved_passages, start=1)
+        f"[{index}] {passage}"
+        for index, passage in enumerate(retrieved_passages, start=1)
     )
     from src.domain.llm_client import complete
 

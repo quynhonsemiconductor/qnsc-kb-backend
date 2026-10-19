@@ -10,7 +10,6 @@ from src.api.deps import get_current_user, get_db
 from src.models import User
 from src.models.ops import NotificationQueue
 
-
 router = APIRouter()
 
 
@@ -37,7 +36,9 @@ async def list_notifications(
     )
     if unread_only:
         stmt = stmt.where(NotificationQueue.read_at.is_(None))
-    result = await db.execute(stmt.order_by(NotificationQueue.created_at.desc()).limit(limit))
+    result = await db.execute(
+        stmt.order_by(NotificationQueue.created_at.desc()).limit(limit)
+    )
     return [_response(item) for item in result.scalars().all()]
 
 
@@ -47,11 +48,15 @@ async def mark_notification_read(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    item = (await db.execute(select(NotificationQueue).where(
-        NotificationQueue.id == notification_id,
-        NotificationQueue.recipient_user_id == current_user.id,
-        NotificationQueue.type == "in_app",
-    ))).scalar_one_or_none()
+    item = (
+        await db.execute(
+            select(NotificationQueue).where(
+                NotificationQueue.id == notification_id,
+                NotificationQueue.recipient_user_id == current_user.id,
+                NotificationQueue.type == "in_app",
+            )
+        )
+    ).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Notification not found")
     if item.read_at is None:

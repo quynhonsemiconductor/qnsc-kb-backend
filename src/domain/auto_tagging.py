@@ -13,6 +13,7 @@ Deliberately never raises and never blocks ingestion: a tag suggestion is a conv
 reviewer can accept, edit, or ignore entirely (PendingDraft.tags stays a plain editable
 field), never a requirement for a draft to reach the review queue.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,8 +66,12 @@ def _normalize_for_catalogue(value: str) -> str:
         r"\s+",
         " ",
         "".join(
-            ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)
-        ).strip().casefold(),
+            ch
+            for ch in unicodedata.normalize("NFKD", value)
+            if not unicodedata.combining(ch)
+        )
+        .strip()
+        .casefold(),
     )
 
 
@@ -112,7 +117,11 @@ async def suggest_tags_for_document(
     examples_block = ""
     if catalogue_examples:
         shown = sorted(catalogue_examples)[:MAX_CATALOGUE_EXAMPLES]
-        examples_block = "EXISTING TAGS (prefer reusing these when they fit):\n" + ", ".join(shown) + "\n\n"
+        examples_block = (
+            "EXISTING TAGS (prefer reusing these when they fit):\n"
+            + ", ".join(shown)
+            + "\n\n"
+        )
 
     try:
         answer, _tokens, _model, _provider_name = await complete(

@@ -1,4 +1,5 @@
 """Tenant-scoped department validation and canonicalization."""
+
 from fastapi import HTTPException
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +32,9 @@ async def resolve_active_department(
         )
     )
     if department is None:
-        raise HTTPException(status_code=422, detail="Department does not exist or is inactive")
+        raise HTTPException(
+            status_code=422, detail="Department does not exist or is inactive"
+        )
     return department
 
 
@@ -46,15 +49,28 @@ async def resolve_active_departments(
     unique_ids = list(dict.fromkeys(department_ids))
     if not unique_ids:
         if required:
-            raise HTTPException(status_code=422, detail="At least one department is required")
+            raise HTTPException(
+                status_code=422, detail="At least one department is required"
+            )
         return []
-    departments = list((await db.execute(select(Department).where(
-        Department.id.in_(unique_ids),
-        Department.company_domain == company_domain,
-        Department.active.is_(True),
-    ))).scalars().all())
+    departments = list(
+        (
+            await db.execute(
+                select(Department).where(
+                    Department.id.in_(unique_ids),
+                    Department.company_domain == company_domain,
+                    Department.active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     if len(departments) != len(unique_ids):
-        raise HTTPException(status_code=422, detail="Every department must be active and belong to the user's company")
+        raise HTTPException(
+            status_code=422,
+            detail="Every department must be active and belong to the user's company",
+        )
     by_id = {department.id: department for department in departments}
     return [by_id[department_id] for department_id in unique_ids]
 

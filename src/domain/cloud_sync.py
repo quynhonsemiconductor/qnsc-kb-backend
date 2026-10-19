@@ -71,13 +71,17 @@ async def _routed_candidate_items(
     """Add deterministic department suggestions to every connector draft."""
 
     departments = (
-        await db.execute(
-            select(Department).where(
-                Department.company_domain == connector.company_domain,
-                Department.active.is_(True),
+        (
+            await db.execute(
+                select(Department).where(
+                    Department.company_domain == connector.company_domain,
+                    Department.active.is_(True),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return await route_document_candidates_llm(title, text, departments)
 
 
@@ -260,13 +264,17 @@ async def _replace_split_candidates(
     # The caller's connector is not stored on PendingDraft, so route using the
     # tenant key from the draft and keep the helper provider-independent.
     departments = (
-        await db.execute(
-            select(Department).where(
-                Department.company_domain == draft.company_domain,
-                Department.active.is_(True),
+        (
+            await db.execute(
+                select(Department).where(
+                    Department.company_domain == draft.company_domain,
+                    Department.active.is_(True),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for item in await route_document_candidates_llm(draft.title, text, departments):
         db.add(DraftCandidate(draft_id=draft.id, **item))
 
@@ -592,7 +600,13 @@ def _note_item_outcome(
         # opening a sync that "worked" still needs to see what it could not take.
         if isinstance(errors, list) and len(errors) < 50:
             errors.append(
-                {"name": name, "action": action, "scope": scope_name, "reason": reason, "web_url": web_url}
+                {
+                    "name": name,
+                    "action": action,
+                    "scope": scope_name,
+                    "reason": reason,
+                    "web_url": web_url,
+                }
             )
 
 
@@ -706,9 +720,7 @@ async def _save_permissions(
         (
             await db.execute(
                 select(ExternalGroupMapping)
-                .join(
-                    Department, Department.id == ExternalGroupMapping.department_id
-                )
+                .join(Department, Department.id == ExternalGroupMapping.department_id)
                 .where(
                     ExternalGroupMapping.connector_id == connector.id,
                     ExternalGroupMapping.active.is_(True),
@@ -746,7 +758,9 @@ async def _save_permissions(
                     ExternalIdentity.provider == identity_provider,
                     (
                         ExternalIdentity.subject.in_(user_ids)
-                        | func.lower(ExternalIdentity.email).in_({item.lower() for item in user_ids})
+                        | func.lower(ExternalIdentity.email).in_(
+                            {item.lower() for item in user_ids}
+                        )
                     ),
                     User.company_domain == connector.company_domain,
                     User.active.is_(True),
@@ -770,14 +784,18 @@ async def _save_permissions(
     # identity row. Map it to the active tenant-local account when available.
     if connector.system == "google_drive" and user_ids:
         email_users = (
-            await db.execute(
-                select(User).where(
-                    func.lower(User.email).in_({item.lower() for item in user_ids}),
-                    User.company_domain == connector.company_domain,
-                    User.active.is_(True),
+            (
+                await db.execute(
+                    select(User).where(
+                        func.lower(User.email).in_({item.lower() for item in user_ids}),
+                        User.company_domain == connector.company_domain,
+                        User.active.is_(True),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         mapped_user_ids.update(
             {str(item.email).lower(): str(item.id) for item in email_users}
         )
@@ -796,9 +814,7 @@ async def _save_permissions(
         **previous_metadata,
         acl_present_key: True,
         "provider_acl_present": True,
-        "mapped_department_ids": sorted(
-            {str(item.department_id) for item in mappings}
-        ),
+        "mapped_department_ids": sorted({str(item.department_id) for item in mappings}),
         "unmapped_group_ids": sorted(
             principal_id
             for principal_type, principal_id in observed_principals
@@ -970,9 +986,7 @@ async def _apply_mapped_groups(
             ],
         }
     internal = metadata["internal_acl_snapshot"]
-    source_group_ids = {
-        str(item) for item in metadata.get("mapped_department_ids", [])
-    }
+    source_group_ids = {str(item) for item in metadata.get("mapped_department_ids", [])}
     internal_group_ids = {str(item) for item in internal.get("department_ids", [])}
     source_user_ids = {str(item) for item in metadata.get("mapped_source_user_ids", [])}
     source_group_member_ids: set[str] = set()
@@ -1126,13 +1140,22 @@ async def _ingest_content(
             await db.execute(
                 select(Article)
                 .where(Article.id == document.article_id)
-                .options(selectinload(Article.departments), selectinload(Article.sources))
+                .options(
+                    selectinload(Article.departments), selectinload(Article.sources)
+                )
             )
         ).scalar_one_or_none()
         if article and article.lifecycle_status == "active":
             article.source_changed = True
             article.source_changed_at = datetime.utcnow()
-            article.source_previous_hash = next((source.source_hash for source in getattr(article, "sources", []) if source.source_system == connector.system), None)
+            article.source_previous_hash = next(
+                (
+                    source.source_hash
+                    for source in getattr(article, "sources", [])
+                    if source.source_system == connector.system
+                ),
+                None,
+            )
             # Connector content is external input and must pass the same
             # independent approval path as a manually submitted revision.
             existing = (
@@ -1335,7 +1358,9 @@ async def sync_cloud_connector(
                     )
                 )
             ).scalar_one_or_none()
-            reconciliation_requested = not cursor_row or bool(cursor_row.full_sync_required)
+            reconciliation_requested = not cursor_row or bool(
+                cursor_row.full_sync_required
+            )
             # A sweep may only conclude "absent means deleted" from a walk that actually
             # enumerates the scope. Google's changes feed does not: with no cursor it
             # starts at startPageToken and reports changes from NOW on, so reading its
@@ -1360,7 +1385,12 @@ async def sync_cloud_connector(
                     cursor,
                 )
             except ConnectorProviderError as exc:
-                if str(exc.code or "") in {"410", "resync_required", "sync_state_not_found", "invalid_delta"}:
+                if str(exc.code or "") in {
+                    "410",
+                    "resync_required",
+                    "sync_state_not_found",
+                    "invalid_delta",
+                }:
                     if cursor_row is None:
                         cursor_row = SyncCursor(
                             connector_id=connector.id,
@@ -1405,7 +1435,9 @@ async def sync_cloud_connector(
                 effective_mime = change.mime_type or (
                     previous.mime_type if previous else None
                 )
-                is_file = bool(effective_mime and not effective_mime.endswith(".folder"))
+                is_file = bool(
+                    effective_mime and not effective_mime.endswith(".folder")
+                )
                 unsupported = (
                     _unsupported_reason(change.name, change.mime_type)
                     if is_file and change.state != "deleted"
@@ -1458,14 +1490,15 @@ async def sync_cloud_connector(
                         action = "deleted"
                         if is_file:
                             summary["deleted"] = int(summary["deleted"]) + 1
-                        deleted_keys, deleted_article_id = await _handle_deleted_document(
-                            db, document, audit_actor_id
+                        deleted_keys, deleted_article_id = (
+                            await _handle_deleted_document(db, document, audit_actor_id)
                         )
                         await db.commit()
                         await _cleanup_unreferenced_source_keys(db, deleted_keys)
                         if deleted_article_id:
                             await event_bus.publish(
-                                "ArticleDeleted", {"article_id": str(deleted_article_id)}
+                                "ArticleDeleted",
+                                {"article_id": str(deleted_article_id)},
                             )
                     elif unsupported is not None:
                         action = "skipped"
@@ -1511,7 +1544,8 @@ async def sync_cloud_connector(
                         )
                         await db.commit()
                         await event_bus.publish(
-                            "PermissionChanged", {"article_id": str(document.article_id)}
+                            "PermissionChanged",
+                            {"article_id": str(document.article_id)},
                         )
                     if action == "unchanged" and is_file:
                         summary["unchanged"] = int(summary["unchanged"]) + 1
@@ -1584,14 +1618,18 @@ async def sync_cloud_connector(
                 # mark them deleted so stale KB articles cannot survive forever.
                 seen_external_ids = {change.external_id for change in changes}
                 existing_documents = (
-                    await db.execute(
-                        select(ExternalDocument).where(
-                            ExternalDocument.connector_id == connector_id,
-                            ExternalDocument.scope_id == scope_id_value,
-                            ExternalDocument.state != "deleted",
+                    (
+                        await db.execute(
+                            select(ExternalDocument).where(
+                                ExternalDocument.connector_id == connector_id,
+                                ExternalDocument.scope_id == scope_id_value,
+                                ExternalDocument.state != "deleted",
+                            )
                         )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 for stale_document in existing_documents:
                     if stale_document.external_id in seen_external_ids:
                         continue
@@ -1630,7 +1668,9 @@ async def sync_cloud_connector(
             # leaving it NULL for a provider that cannot enumerate makes it re-enqueue
             # that scope on every tick.
             cursor_row.last_reconcile_at = (
-                datetime.utcnow() if reconciliation_requested else cursor_row.last_reconcile_at
+                datetime.utcnow()
+                if reconciliation_requested
+                else cursor_row.last_reconcile_at
             )
             cursor_row.last_error = None
             job.summary_json = summary

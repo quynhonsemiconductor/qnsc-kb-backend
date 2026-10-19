@@ -9,7 +9,6 @@ import os
 
 from alembic import op
 
-
 revision = "20260806_21"
 down_revision = "20260806_20"
 branch_labels = None
@@ -29,7 +28,9 @@ def upgrade() -> None:
         return
     admin = "current_setting('app.global_admin', true) = 'true'"
     tenant = f"{admin} OR company_domain = current_setting('app.company_domain', true)"
-    user_owned = f"{admin} OR user_id::text = NULLIF(current_setting('app.user_id', true), '')"
+    user_owned = (
+        f"{admin} OR user_id::text = NULLIF(current_setting('app.user_id', true), '')"
+    )
     user_tenant = f"{admin} OR EXISTS (SELECT 1 FROM users u WHERE u.id = user_id AND u.company_domain = current_setting('app.company_domain', true))"
     conversation_owned = f"{admin} OR EXISTS (SELECT 1 FROM ai_conversations c WHERE c.id = conversation_id AND c.user_id::text = NULLIF(current_setting('app.user_id', true), ''))"
     role_tenant = f"{admin} OR company_domain IS NULL OR company_domain = current_setting('app.company_domain', true)"
@@ -43,7 +44,11 @@ def upgrade() -> None:
     _policy("user_roles", "tenant_user_roles", user_tenant)
     _policy("role_permissions", "tenant_role_permissions", role_permission_tenant)
     _policy("refresh_sessions", "tenant_refresh_sessions", user_tenant)
-    _policy("notification_queue", "recipient_notifications", f"{admin} OR recipient_user_id::text = NULLIF(current_setting('app.user_id', true), '')")
+    _policy(
+        "notification_queue",
+        "recipient_notifications",
+        f"{admin} OR recipient_user_id::text = NULLIF(current_setting('app.user_id', true), '')",
+    )
     _policy("ai_conversations", "owner_ai_conversations", user_owned)
     _policy("ai_messages", "owner_ai_messages", conversation_owned)
     _policy("ai_usage_logs", "owner_ai_usage_logs", user_owned)

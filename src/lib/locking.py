@@ -1,10 +1,10 @@
 """Database-backed locks for article indexing and permission reconciliation."""
+
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
 
 # 64-bit and transaction-scoped, the same pair sync_queue.claim_sync_request uses.
 #

@@ -22,7 +22,10 @@ PERMISSION_CATALOG = {
     "user.manage": ("Manage users", "Create, update, and deactivate users."),
     "role.manage": ("Manage roles", "Create and manage company roles."),
     "permission.manage": ("Manage permissions", "Assign catalog permissions to roles."),
-    "connector.manage": ("Manage connectors", "Create and synchronize source connectors."),
+    "connector.manage": (
+        "Manage connectors",
+        "Create and synchronize source connectors.",
+    ),
     "ai.ask": ("Ask AI", "Use knowledge-base AI retrieval."),
     "governance.read": ("View governance", "View governance and review workflows."),
 }
@@ -30,16 +33,29 @@ PERMISSION_CATALOG = {
 DEFAULT_ROLE_PERMISSIONS = {
     "Admin": {key: "global" for key in PERMISSION_CATALOG},
     "CEO": {
-        "article.read": "company", "article.create": "company", "article.edit": "company",
-        "article.publish": "company", "article.review": "company", "article.delete": "company", "user.read": "company",
-        "user.manage": "company", "connector.manage": "company", "governance.read": "company",
+        "article.read": "company",
+        "article.create": "company",
+        "article.edit": "company",
+        "article.publish": "company",
+        "article.review": "company",
+        "article.delete": "company",
+        "user.read": "company",
+        "user.manage": "company",
+        "connector.manage": "company",
+        "governance.read": "company",
         "ai.ask": "company",
     },
     "Reviewer": {
-        "article.read": "company", "article.review": "company", "governance.read": "company", "ai.ask": "company",
+        "article.read": "company",
+        "article.review": "company",
+        "governance.read": "company",
+        "ai.ask": "company",
     },
     "Staff": {
-        "article.read": "company", "article.create": "own", "article.edit": "own", "ai.ask": "company",
+        "article.read": "company",
+        "article.create": "own",
+        "article.edit": "own",
+        "ai.ask": "company",
     },
 }
 
@@ -48,34 +64,62 @@ async def bootstrap_rbac(db: AsyncSession) -> None:
     """Create the catalog and compatibility roles, then backfill existing users."""
     permissions: dict[str, Permission] = {}
     for key, (name, description) in PERMISSION_CATALOG.items():
-        permission = (await db.execute(select(Permission).where(Permission.key == key))).scalar_one_or_none()
+        permission = (
+            await db.execute(select(Permission).where(Permission.key == key))
+        ).scalar_one_or_none()
         if permission is None:
-            permission = Permission(key=key, name=name, description=description, system=True)
+            permission = Permission(
+                key=key, name=name, description=description, system=True
+            )
             db.add(permission)
             await db.flush()
         permissions[key] = permission
 
-    users = (await db.execute(select(User).options(selectinload(User.roles)))).scalars().all()
+    users = (
+        (await db.execute(select(User).options(selectinload(User.roles))))
+        .scalars()
+        .all()
+    )
     domains = {user.company_domain for user in users if user.company_domain}
     role_by_name: dict[tuple[str, str | None], Role] = {}
 
-    async def ensure_role(name: str, company_domain: str | None, system: bool = True) -> Role:
+    async def ensure_role(
+        name: str, company_domain: str | None, system: bool = True
+    ) -> Role:
         cache_key = (name, company_domain)
         if cache_key in role_by_name:
             return role_by_name[cache_key]
-        role = (await db.execute(select(Role).where(Role.name == name, Role.company_domain == company_domain).options(selectinload(Role.permissions)))).scalar_one_or_none()
+        role = (
+            await db.execute(
+                select(Role)
+                .where(Role.name == name, Role.company_domain == company_domain)
+                .options(selectinload(Role.permissions))
+            )
+        ).scalar_one_or_none()
         if role is None:
-            role = Role(name=name, company_domain=company_domain, system=system, active=True)
+            role = Role(
+                name=name, company_domain=company_domain, system=system, active=True
+            )
             db.add(role)
             await db.flush()
         assigned_permission_ids = set(
-            (await db.execute(
-                select(RolePermission.permission_id).where(RolePermission.role_id == role.id)
-            )).scalars().all()
+            (
+                await db.execute(
+                    select(RolePermission.permission_id).where(
+                        RolePermission.role_id == role.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
         for key, scope in DEFAULT_ROLE_PERMISSIONS[name].items():
             if permissions[key].id not in assigned_permission_ids:
-                db.add(RolePermission(role_id=role.id, permission_id=permissions[key].id, scope=scope))
+                db.add(
+                    RolePermission(
+                        role_id=role.id, permission_id=permissions[key].id, scope=scope
+                    )
+                )
                 assigned_permission_ids.add(permissions[key].id)
         role_by_name[cache_key] = role
         return role
@@ -111,7 +155,9 @@ class AuthorizationService:
         return {
             assignment.department.name
             for assignment in getattr(user, "department_ownerships", [])
-            if assignment.active and assignment.department.active and assignment.department.company_domain == user.company_domain
+            if assignment.active
+            and assignment.department.active
+            and assignment.department.company_domain == user.company_domain
         }
 
     @staticmethod
@@ -143,7 +189,9 @@ class AuthorizationService:
         deliberate exceptions. Ownership is not used as a read boundary;
         ownership must already be a membership by data validation.
         """
-        if cls.has_permission(user, "article.read", requested_scope="global") or cls.has_full_company_article_access(user):
+        if cls.has_permission(
+            user, "article.read", requested_scope="global"
+        ) or cls.has_full_company_article_access(user):
             return True
         member_departments = cls.member_department_names(user)
         article_departments = cls.article_department_names(article)
@@ -152,10 +200,16 @@ class AuthorizationService:
     @classmethod
     def restrict_article_metadata(cls, user: User, article: object) -> None:
         """Hide non-member department labels from an otherwise visible article."""
-        if cls.has_permission(user, "article.read", requested_scope="global") or cls.has_full_company_article_access(user):
+        if cls.has_permission(
+            user, "article.read", requested_scope="global"
+        ) or cls.has_full_company_article_access(user):
             return
         member_departments = cls.member_department_names(user)
-        visible = [department for department in getattr(article, "departments", []) if department.name in member_departments]
+        visible = [
+            department
+            for department in getattr(article, "departments", [])
+            if department.name in member_departments
+        ]
         # These are persistent, session-attached ORM entities.  Assigning the
         # relationship normally marks the association table dirty; a search
         # request commits its SearchLog in the same session, which would then
@@ -175,48 +229,78 @@ class AuthorizationService:
         """Whether the identity is an Admin/CEO with company-wide article access."""
         if cls.has_permission(user, "article.read", requested_scope="global"):
             return True
-        privileged_role = user.role in {"Admin", "CEO"} if not user.roles else any(
-            role.active is not False
-            and role.name in {"Admin", "CEO"}
-            and role.company_domain in {None, user.company_domain}
-            for role in user.roles
+        privileged_role = (
+            user.role in {"Admin", "CEO"}
+            if not user.roles
+            else any(
+                role.active is not False
+                and role.name in {"Admin", "CEO"}
+                and role.company_domain in {None, user.company_domain}
+                for role in user.roles
+            )
         )
-        return privileged_role and cls.has_permission(user, "article.read", requested_scope="company")
+        return privileged_role and cls.has_permission(
+            user, "article.read", requested_scope="company"
+        )
 
     @classmethod
-    def has_narrow_article_access(cls, user: User, resource: object | None = None) -> bool:
+    def has_narrow_article_access(
+        cls, user: User, resource: object | None = None
+    ) -> bool:
         """Whether own/department scope grants access without company-wide read."""
-        return (
-            not cls.has_permission(user, "article.read", requested_scope="company")
-            and any(
-                cls.has_permission(user, "article.read", resource, scope)
-                for scope in ("own", "department")
-            )
+        return not cls.has_permission(
+            user, "article.read", requested_scope="company"
+        ) and any(
+            cls.has_permission(user, "article.read", resource, scope)
+            for scope in ("own", "department")
         )
 
     @staticmethod
-    def _scope_allows(granted: str, requested: str, user: User, resource: object | None) -> bool:
+    def _scope_allows(
+        granted: str, requested: str, user: User, resource: object | None
+    ) -> bool:
         if granted not in SCOPES or requested not in SCOPES:
             return False
         if granted == "global":
             return True
         if resource is None:
-            return requested in {"own", "department", "company"} and granted in {requested, "company", "global"}
+            return requested in {"own", "department", "company"} and granted in {
+                requested,
+                "company",
+                "global",
+            }
         if granted == "company":
-            return requested in {"own", "department", "company"} and getattr(resource, "company_domain", user.company_domain) == user.company_domain
+            return (
+                requested in {"own", "department", "company"}
+                and getattr(resource, "company_domain", user.company_domain)
+                == user.company_domain
+            )
         if granted == "department":
-            resource_departments = {getattr(department, "name", None) for department in getattr(resource, "departments", [])}
+            resource_departments = {
+                getattr(department, "name", None)
+                for department in getattr(resource, "departments", [])
+            }
             resource_departments.discard(None)
             resource_departments.add(getattr(resource, "dept", None))
             return (
                 requested in {"own", "department"}
-                and getattr(resource, "company_domain", user.company_domain) == user.company_domain
-                and bool(resource_departments & AuthorizationService.owned_department_names(user))
+                and getattr(resource, "company_domain", user.company_domain)
+                == user.company_domain
+                and bool(
+                    resource_departments
+                    & AuthorizationService.owned_department_names(user)
+                )
             )
         return requested == "own" and getattr(resource, "owner_id", None) == user.id
 
     @classmethod
-    def has_permission(cls, user: User, key: str, resource: object | None = None, requested_scope: str = "company") -> bool:
+    def has_permission(
+        cls,
+        user: User,
+        key: str,
+        resource: object | None = None,
+        requested_scope: str = "company",
+    ) -> bool:
         # Compatibility fallback for users created before RBAC bootstrap and
         # for isolated domain tests; normal production users are backfilled.
         if not user.roles and user.role in DEFAULT_ROLE_PERMISSIONS:
@@ -224,10 +308,19 @@ class AuthorizationService:
             if scope:
                 return cls._scope_allows(scope, requested_scope, user, resource)
         for role in user.roles:
-            if role.active is False or (role.company_domain is not None and role.company_domain != user.company_domain):
+            if role.active is False or (
+                role.company_domain is not None
+                and role.company_domain != user.company_domain
+            ):
                 continue
             for assignment in role.permissions:
-                if assignment.permission and assignment.permission.key == key and cls._scope_allows(assignment.scope, requested_scope, user, resource):
+                if (
+                    assignment.permission
+                    and assignment.permission.key == key
+                    and cls._scope_allows(
+                        assignment.scope, requested_scope, user, resource
+                    )
+                ):
                     return True
         return False
 
@@ -243,7 +336,9 @@ class AuthorizationService:
         checks and tenant-aware queries.
         """
         return any(
-            role.active is not False and role.name == "Admin" and role.company_domain is None
+            role.active is not False
+            and role.name == "Admin"
+            and role.company_domain is None
             for role in user.roles
         )
 
@@ -252,7 +347,12 @@ class AuthorizationService:
         """Whether tenant RLS may expose cross-company identity records."""
         return any(
             cls.has_permission(user, permission, requested_scope="global")
-            for permission in ("user.read", "user.manage", "role.manage", "permission.manage")
+            for permission in (
+                "user.read",
+                "user.manage",
+                "role.manage",
+                "permission.manage",
+            )
         )
 
     @classmethod
@@ -268,19 +368,32 @@ class AuthorizationService:
     @classmethod
     def has_global_article_access(cls, user: User) -> bool:
         """Whether article RLS may expose cross-company article records."""
-        return any(cls.has_permission(user, key, requested_scope="global") for key in (
-            "article.read", "article.create", "article.edit", "article.publish", "article.delete", "article.review",
-        ))
+        return any(
+            cls.has_permission(user, key, requested_scope="global")
+            for key in (
+                "article.read",
+                "article.create",
+                "article.edit",
+                "article.publish",
+                "article.delete",
+                "article.review",
+            )
+        )
 
     @classmethod
     def get_effective_permissions(cls, user: User) -> list[dict[str, str]]:
         result: dict[str, str] = {}
         rank = {"own": 1, "department": 2, "company": 3, "global": 4}
         for role in user.roles:
-            if role.active is False or (role.company_domain is not None and role.company_domain != user.company_domain):
+            if role.active is False or (
+                role.company_domain is not None
+                and role.company_domain != user.company_domain
+            ):
                 continue
             for assignment in role.permissions:
-                if assignment.permission and rank.get(assignment.scope, 0) > rank.get(result.get(assignment.permission.key, ""), 0):
+                if assignment.permission and rank.get(assignment.scope, 0) > rank.get(
+                    result.get(assignment.permission.key, ""), 0
+                ):
                     result[assignment.permission.key] = assignment.scope
         if not user.roles:
             for key, scope in DEFAULT_ROLE_PERMISSIONS.get(user.role, {}).items():
@@ -302,8 +415,7 @@ class AuthorizationService:
             for role in user.roles
         )
         departments = sorted(
-            (str(department.id), department.name)
-            for department in user.departments
+            (str(department.id), department.name) for department in user.departments
         )
         payload = {
             "user_id": str(user.id),
@@ -315,9 +427,15 @@ class AuthorizationService:
             "departments": departments,
         }
         return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), default=str
+            ).encode("utf-8")
         ).hexdigest()
 
 
 def legacy_roles_for_permission(permission: str) -> list[str]:
-    return [name for name, values in DEFAULT_ROLE_PERMISSIONS.items() if permission in values]
+    return [
+        name
+        for name, values in DEFAULT_ROLE_PERMISSIONS.items()
+        if permission in values
+    ]

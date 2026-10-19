@@ -1,4 +1,5 @@
 """Small deterministic reranker used when a cross-encoder is unavailable."""
+
 from __future__ import annotations
 
 import re
@@ -55,23 +56,121 @@ def fold_diacritics(value: str) -> str:
 # against either form. A Vietnamese word typed without diacritics is still recognised;
 # an English stopword can no longer swallow a Vietnamese content word.
 ENGLISH_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do",
-    "does", "for", "from", "give", "how", "i", "in", "is", "it", "list", "me",
-    "my", "need", "of", "on", "or", "please", "provide", "show", "so", "some",
-    "tell", "that", "the", "them", "there", "these", "this", "those", "to",
-    "us", "use", "used", "using", "want", "we", "what", "when", "where",
-    "which", "who", "why", "will", "with", "would", "you", "your",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "could",
+    "do",
+    "does",
+    "for",
+    "from",
+    "give",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "list",
+    "me",
+    "my",
+    "need",
+    "of",
+    "on",
+    "or",
+    "please",
+    "provide",
+    "show",
+    "so",
+    "some",
+    "tell",
+    "that",
+    "the",
+    "them",
+    "there",
+    "these",
+    "this",
+    "those",
+    "to",
+    "us",
+    "use",
+    "used",
+    "using",
+    "want",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "would",
+    "you",
+    "your",
 }
 
 # Vietnamese. The list here used to hold eleven words and none of the ones a
 # person actually opens a request with, which is why a politely phrased question
 # scored five times lower than the same question typed as two keywords.
 VIETNAMESE_STOPWORDS = {
-    "à", "ạ", "ai", "bạn", "bằng", "các", "cách", "cần", "cho", "chúng", "có",
-    "của", "cung", "cấp", "danh", "dùng", "dụng", "gì", "giúp", "hãy", "khi",
-    "không", "là", "làm", "liệt", "kê", "một", "muốn", "nào", "này", "nêu",
-    "như", "những", "ở", "ra", "rằng", "sách", "sao", "sẽ", "sử", "thì",
-    "tôi", "trong", "và", "vậy", "về", "với", "được", "đó", "để", "đưa",
+    "à",
+    "ạ",
+    "ai",
+    "bạn",
+    "bằng",
+    "các",
+    "cách",
+    "cần",
+    "cho",
+    "chúng",
+    "có",
+    "của",
+    "cung",
+    "cấp",
+    "danh",
+    "dùng",
+    "dụng",
+    "gì",
+    "giúp",
+    "hãy",
+    "khi",
+    "không",
+    "là",
+    "làm",
+    "liệt",
+    "kê",
+    "một",
+    "muốn",
+    "nào",
+    "này",
+    "nêu",
+    "như",
+    "những",
+    "ở",
+    "ra",
+    "rằng",
+    "sách",
+    "sao",
+    "sẽ",
+    "sử",
+    "thì",
+    "tôi",
+    "trong",
+    "và",
+    "vậy",
+    "về",
+    "với",
+    "được",
+    "đó",
+    "để",
+    "đưa",
 }
 
 #: Kept for callers that want the whole vocabulary; not what matching uses.
@@ -93,14 +192,32 @@ def is_stopword(raw: str, folded: str) -> bool:
     """
     return raw in ENGLISH_STOPWORDS or folded in VIETNAMESE_STOPWORDS_FOLDED
 
+
 REFERENCE_MARKERS = (
-    "references", "reference", "helpful documents", "sources", "bibliography",
-    "tài liệu tham khảo", "nguồn tham khảo", "http://", "https://", "www.",
+    "references",
+    "reference",
+    "helpful documents",
+    "sources",
+    "bibliography",
+    "tài liệu tham khảo",
+    "nguồn tham khảo",
+    "http://",
+    "https://",
+    "www.",
 )
 
 DEFINITION_QUERY_MARKERS = (
-    "what is", "what are", "define", "definition", "meaning", "explain",
-    "là gì", "định nghĩa", "có nghĩa là", "giải thích", "khái niệm",
+    "what is",
+    "what are",
+    "define",
+    "definition",
+    "meaning",
+    "explain",
+    "là gì",
+    "định nghĩa",
+    "có nghĩa là",
+    "giải thích",
+    "khái niệm",
 )
 
 # Matched against folded text, so the markers must be folded too.
@@ -231,7 +348,9 @@ def score_prepared_text(
     terms = prepared.terms
     # Folded, not merely lower-cased: the query terms are folded, so an accented passage
     # token would otherwise never match the unaccented term a user actually typed.
-    passage = fold_diacritics(" ".join(str(value or "") for value in (text, title, section)))
+    passage = fold_diacritics(
+        " ".join(str(value or "") for value in (text, title, section))
+    )
     text_tokens = TOKEN_RE.findall(passage)
     normalized_text = " ".join(text_tokens)
     # A whole-token set intersection. The old form ran one anchored regex per term over
@@ -257,12 +376,16 @@ def score_prepared_text(
     return score
 
 
-def score_retrieval_text(query: str, text: str, title: str = "", section: str = "") -> float:
+def score_retrieval_text(
+    query: str, text: str, title: str = "", section: str = ""
+) -> float:
     """Score how well a passage answers the query, not just contains its terms."""
     return score_prepared_text(prepare_query(query), text, title, section)
 
 
-def retrieval_score(query: str, chunk: object, prepared: PreparedQuery | None = None) -> float:
+def retrieval_score(
+    query: str, chunk: object, prepared: PreparedQuery | None = None
+) -> float:
     """Score one retrieved chunk. THE definition of a chunk's relevance.
 
     Extracted because three call sites — the reranker, the relevance threshold, and the
@@ -297,7 +420,9 @@ def chunk_passage(chunk: object) -> str:
 
 def prepare_query_for_chunks(query: str, chunks: Sequence[object]) -> PreparedQuery:
     """Prepare a query against the pool it will be scored over."""
-    return prepare_query(query, corpus_terms([chunk_passage(chunk) for chunk in chunks]))
+    return prepare_query(
+        query, corpus_terms([chunk_passage(chunk) for chunk in chunks])
+    )
 
 
 def rerank_chunks_with_scores(

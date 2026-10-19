@@ -64,7 +64,9 @@ async def ensure_connector_authorized(db: AsyncSession, connector: Connector) ->
             # The stored token may still work; let the provider be the judge rather than
             # failing a sync that would have succeeded.
             return
-        raise ConnectorProviderError("Connector is not authorized", retryable=False, code="not_authorized")
+        raise ConnectorProviderError(
+            "Connector is not authorized", retryable=False, code="not_authorized"
+        )
     tokens = await adapter_for(connector).refresh_token()
     access_token = encrypt_secret(tokens.get("access_token"))
     if not access_token:
@@ -81,7 +83,9 @@ async def ensure_connector_authorized(db: AsyncSession, connector: Connector) ->
     connector.oauth_refresh_token = (
         encrypt_secret(tokens.get("refresh_token")) or connector.oauth_refresh_token
     )
-    connector.oauth_expires_at = datetime.utcnow() + timedelta(seconds=int(tokens.get("expires_in", 3600)))
+    connector.oauth_expires_at = datetime.utcnow() + timedelta(
+        seconds=int(tokens.get("expires_in", 3600))
+    )
     if mode == "application":
         connector.oauth_subject = "application"
     await db.commit()

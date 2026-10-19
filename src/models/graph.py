@@ -6,6 +6,7 @@ ten different documents is one row, not ten. See `domain/entity_extraction.py` f
 one document's extraction is produced and `domain/graph_service.py` for how it is merged
 into the graph that already exists.
 """
+
 import uuid
 from datetime import datetime
 from typing import Any
@@ -55,7 +56,9 @@ class GraphEntity(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # query pattern GraphExplorerPage wants, and counting mentions per row on every list
     # request would join article_entity_mentions for no reason on a value that only
     # changes when a new article mentions this entity.
-    mention_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    mention_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
 
     mentions: Mapped[list["ArticleEntityMention"]] = relationship(
         "ArticleEntityMention", back_populates="entity", cascade="all, delete-orphan"
@@ -79,8 +82,16 @@ class GraphRelationship(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "relation_type",
             name="uq_graph_relationship_edge",
         ),
-        Index("ix_graph_relationships_company_source", "company_domain", "source_entity_id"),
-        Index("ix_graph_relationships_company_target", "company_domain", "target_entity_id"),
+        Index(
+            "ix_graph_relationships_company_source",
+            "company_domain",
+            "source_entity_id",
+        ),
+        Index(
+            "ix_graph_relationships_company_target",
+            "company_domain",
+            "target_entity_id",
+        ),
     )
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -125,6 +136,10 @@ class ArticleEntityMention(Base, UUIDPrimaryKeyMixin):
     entity_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("graph_entities.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
-    entity: Mapped["GraphEntity"] = relationship("GraphEntity", back_populates="mentions")
+    entity: Mapped["GraphEntity"] = relationship(
+        "GraphEntity", back_populates="mentions"
+    )

@@ -7,12 +7,20 @@ from src.models.article import Article, ArticleTag, TagCatalog
 from src.models.user import User
 from src.repositories.article import ArticleRepository
 
+
 class MetaService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
     async def get_all_tags(self, user: User) -> list[str]:
-        stmt = select(TagCatalog.tag).where(TagCatalog.company_domain == user.company_domain, TagCatalog.active.is_(True)).order_by(TagCatalog.normalized_tag)
+        stmt = (
+            select(TagCatalog.tag)
+            .where(
+                TagCatalog.company_domain == user.company_domain,
+                TagCatalog.active.is_(True),
+            )
+            .order_by(TagCatalog.normalized_tag)
+        )
         tags = list((await self.db.execute(stmt)).scalars().all())
         logger.info("Meta tags loaded", tag_count=len(tags))
         return tags

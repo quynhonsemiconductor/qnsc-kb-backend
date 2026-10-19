@@ -12,6 +12,9 @@ uvicorn = {extras = ["standard"], version = ">=0.30.1,<0.53.0"}
 pydantic = {extras = ["email"], version = "^2.7.4"}
 pydantic-settings = "^2.3.4"
 sqlalchemy = "^2.0.31"
+# Imported by SQLAlchemy's asyncio layer at runtime. Declared here so the lock records it for every platform: the
+# transitive marker excluded macOS arm64, where the two tests that need it failed with "greenlet library is required".
+greenlet = "^3.5.5"
 alembic = "^1.13.1"
 asyncpg = ">=0.29,<0.32"
 psycopg2-binary = "^2.9.9"
@@ -106,6 +109,11 @@ pytest = "^9.1.0"
 pytest-asyncio = "^1.4.0"
 black = "^26.0.0"
 mypy = "^1.10.0"
+
+[tool.mypy]
+# `src/` is the import root, and `src` is a package. Without this mypy resolves src/api/deps.py as both `api.deps`
+# and `src.api.deps` and stops before checking anything.
+explicit_package_bases = true
 
 [build-system]
 requires = ["poetry-core"]

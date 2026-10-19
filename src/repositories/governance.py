@@ -5,14 +5,20 @@ from sqlalchemy import case, select, delete, and_, or_, func, update, false
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
-from src.models.governance import PendingDraft, DraftTransition, DraftCandidate, ApproverRule, Gap, AuditLog
+from src.models.governance import (
+    PendingDraft,
+    DraftTransition,
+    DraftCandidate,
+    ApproverRule,
+    Gap,
+    AuditLog,
+)
 from src.models.article import Article
 from src.models.interaction import Vote
 from src.models.ops import SearchLog, ApiRequestMetric
 from src.models.ai import AiUsageLog
 from src.models.user import User, Department
 from src.domain.rbac import AuthorizationService
-
 
 #: The LIKE escape character. `!`, not the conventional backslash: a backslash inside an SQL
 #: string literal means different things depending on the server's
@@ -60,14 +66,16 @@ class GovernanceRepository:
         self.db.add(draft)
         if draft.status == "draft":
             await self.db.flush()
-            self.db.add(DraftTransition(
-                draft_id=draft.id,
-                from_status=None,
-                to_status="draft",
-                actor_id=draft.created_by,
-                reason="Draft created",
-                outcome="applied",
-            ))
+            self.db.add(
+                DraftTransition(
+                    draft_id=draft.id,
+                    from_status=None,
+                    to_status="draft",
+                    actor_id=draft.created_by,
+                    reason="Draft created",
+                    outcome="applied",
+                )
+            )
         await self.db.commit()
         await self.db.refresh(draft)
         return draft
@@ -78,14 +86,22 @@ class GovernanceRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_draft_for_user(self, draft_id: uuid.UUID, user: User, *, for_update: bool = False, lightweight: bool = False) -> PendingDraft | None:
+    async def get_draft_for_user(
+        self,
+        draft_id: uuid.UUID,
+        user: User,
+        *,
+        for_update: bool = False,
+        lightweight: bool = False,
+    ) -> PendingDraft | None:
         """Load a draft only inside the actor's tenant/department scope."""
         stmt = select(PendingDraft).where(PendingDraft.id == draft_id)
         if lightweight:
             stmt = stmt.options(*self._draft_inbox_options())
-        global_access = (
-            AuthorizationService.has_permission(user, "governance.read", requested_scope="global")
-            or AuthorizationService.has_permission(user, "article.publish", requested_scope="global")
+        global_access = AuthorizationService.has_permission(
+            user, "governance.read", requested_scope="global"
+        ) or AuthorizationService.has_permission(
+            user, "article.publish", requested_scope="global"
         )
         if not global_access:
             company_wide = user.role in {"Admin", "CEO"} or any(
@@ -97,11 +113,13 @@ class GovernanceRepository:
                 departments = set(AuthorizationService.member_department_names(user))
                 if user.dept:
                     departments.add(user.dept)
-                stmt = stmt.where(or_(
-                    PendingDraft.assigned_approver_id == user.id,
-                    PendingDraft.created_by == user.id,
-                    PendingDraft.dept.in_(departments) if departments else false(),
-                ))
+                stmt = stmt.where(
+                    or_(
+                        PendingDraft.assigned_approver_id == user.id,
+                        PendingDraft.created_by == user.id,
+                        PendingDraft.dept.in_(departments) if departments else false(),
+                    )
+                )
         if for_update:
             stmt = stmt.with_for_update()
         result = await self.db.execute(stmt)
@@ -248,14 +266,19 @@ class GovernanceRepository:
         if not can_review:
             return 0
 
-        stmt = select(func.count(PendingDraft.id)).where(PendingDraft.status == "pending")
+        stmt = select(func.count(PendingDraft.id)).where(
+            PendingDraft.status == "pending"
+        )
         global_access = any(
             AuthorizationService.has_permission(user, key, requested_scope="global")
             for key in ("governance.read", "article.review", "article.publish")
         )
         if global_access:
             stmt = stmt.where(
-                or_(PendingDraft.assigned_approver_id.is_(None), PendingDraft.assigned_approver_id == user.id)
+                or_(
+                    PendingDraft.assigned_approver_id.is_(None),
+                    PendingDraft.assigned_approver_id == user.id,
+                )
             )
         else:
             stmt = stmt.where(PendingDraft.company_domain == user.company_domain)
@@ -276,9 +299,15 @@ class GovernanceRepository:
                     departments.add(user.dept)
                 unassigned_scope = and_(
                     PendingDraft.assigned_approver_id.is_(None),
-                    PendingDraft.dept.in_(sorted(departments)) if departments else false(),
+                    (
+                        PendingDraft.dept.in_(sorted(departments))
+                        if departments
+                        else false()
+                    ),
                 )
-                assignment_scope = or_(PendingDraft.assigned_approver_id == user.id, unassigned_scope)
+                assignment_scope = or_(
+                    PendingDraft.assigned_approver_id == user.id, unassigned_scope
+                )
             stmt = stmt.where(assignment_scope)
         return int(await self.db.scalar(stmt) or 0)
 
@@ -288,7 +317,9 @@ class GovernanceRepository:
         await self.db.refresh(draft)
         return draft
 
-    async def get_approver_rule(self, company_domain: str, dept: str | None) -> ApproverRule | None:
+    async def get_approver_rule(
+        self, company_domain: str, dept: str | None
+    ) -> ApproverRule | None:
         if not dept:
             return None
         result = await self.db.execute(
@@ -300,14 +331,20 @@ class GovernanceRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_approver_rules(self, company_domain: str | None = None) -> Sequence[ApproverRule]:
+    async def list_approver_rules(
+        self, company_domain: str | None = None
+    ) -> Sequence[ApproverRule]:
         stmt = select(ApproverRule).where(ApproverRule.active.is_(True))
         if company_domain:
             stmt = stmt.where(ApproverRule.company_domain == company_domain)
-        result = await self.db.execute(stmt.order_by(ApproverRule.company_domain, ApproverRule.dept))
+        result = await self.db.execute(
+            stmt.order_by(ApproverRule.company_domain, ApproverRule.dept)
+        )
         return result.scalars().all()
 
-    async def list_draft_transitions(self, draft_id: uuid.UUID, user: User) -> Sequence[DraftTransition]:
+    async def list_draft_transitions(
+        self, draft_id: uuid.UUID, user: User
+    ) -> Sequence[DraftTransition]:
         draft = await self.get_draft_for_user(draft_id, user)
         if not draft:
             return []
@@ -318,7 +355,9 @@ class GovernanceRepository:
         )
         return result.scalars().all()
 
-    async def list_candidates(self, draft_id: uuid.UUID, user: User) -> Sequence[DraftCandidate]:
+    async def list_candidates(
+        self, draft_id: uuid.UUID, user: User
+    ) -> Sequence[DraftCandidate]:
         draft = await self.get_draft_for_user(draft_id, user)
         if not draft:
             return []
@@ -333,7 +372,9 @@ class GovernanceRepository:
     #: Taken from the column rather than written out, so the two cannot drift apart.
     _GAP_QUERY_CHARS = Gap.__table__.c.query.type.length
 
-    async def log_gap(self, query: str, company_domain: str, dept: str | None = None) -> Gap:
+    async def log_gap(
+        self, query: str, company_domain: str, dept: str | None = None
+    ) -> Gap:
         """Record a query that found nothing.
 
         The query is truncated to the column width. It used to be written whole into a
@@ -380,7 +421,9 @@ class GovernanceRepository:
         await self.db.commit()
         return await self.db.get(Gap, gap_id)
 
-    async def list_gaps(self, status: str | None = None, company_domain: str | None = None) -> Sequence[Gap]:
+    async def list_gaps(
+        self, status: str | None = None, company_domain: str | None = None
+    ) -> Sequence[Gap]:
         stmt = select(Gap)
         if status:
             stmt = stmt.where(Gap.status == status)
@@ -389,7 +432,9 @@ class GovernanceRepository:
         result = await self.db.execute(stmt.order_by(Gap.count.desc()).limit(500))
         return result.scalars().all()
 
-    async def get_gap(self, gap_id: uuid.UUID, company_domain: str | None = None) -> Gap | None:
+    async def get_gap(
+        self, gap_id: uuid.UUID, company_domain: str | None = None
+    ) -> Gap | None:
         stmt = select(Gap).where(Gap.id == gap_id)
         if company_domain:
             stmt = stmt.where(Gap.company_domain == company_domain)
@@ -439,19 +484,23 @@ class GovernanceRepository:
     # Health Dashboard Metrics
     async def get_health_metrics(self) -> dict:
         now = datetime.utcnow()
-        
+
         # 1. Total active (published) articles
         total_stmt = select(func.count(Article.id)).where(Article.status == "published")
         total_res = await self.db.execute(total_stmt)
         total_articles = total_res.scalar_one() or 0
 
         # 2. Articles with owner
-        owner_stmt = select(func.count(Article.id)).where(and_(Article.status == "published", Article.owner_id.isnot(None)))
+        owner_stmt = select(func.count(Article.id)).where(
+            and_(Article.status == "published", Article.owner_id.isnot(None))
+        )
         owner_res = await self.db.execute(owner_stmt)
         articles_with_owner = owner_res.scalar_one() or 0
 
         # 3. Overdue for review
-        overdue_stmt = select(func.count(Article.id)).where(and_(Article.status == "published", Article.next_review < now))
+        overdue_stmt = select(func.count(Article.id)).where(
+            and_(Article.status == "published", Article.next_review < now)
+        )
         overdue_res = await self.db.execute(overdue_stmt)
         overdue_articles = overdue_res.scalar_one() or 0
 
@@ -472,29 +521,46 @@ class GovernanceRepository:
 
         search_total_res = await self.db.execute(select(func.count(SearchLog.id)))
         search_total = search_total_res.scalar_one() or 0
-        search_miss_res = await self.db.execute(select(func.count(SearchLog.id)).where(SearchLog.result_count == 0))
+        search_miss_res = await self.db.execute(
+            select(func.count(SearchLog.id)).where(SearchLog.result_count == 0)
+        )
         search_misses = search_miss_res.scalar_one() or 0
 
         ai_total_res = await self.db.execute(select(func.count(AiUsageLog.id)))
         ai_total = ai_total_res.scalar_one() or 0
         ai_cache_res = await self.db.execute(
-            select(func.count(AiUsageLog.id)).where(AiUsageLog.prompt_version == "cached")
+            select(func.count(AiUsageLog.id)).where(
+                AiUsageLog.prompt_version == "cached"
+            )
         )
         ai_cache_hits = ai_cache_res.scalar_one() or 0
 
-        request_metrics = await self.db.execute(select(
-            func.count(ApiRequestMetric.id),
-            func.coalesce(func.sum(case((ApiRequestMetric.status_code >= 500, 1), else_=0)), 0),
-            func.percentile_cont(0.95).within_group(ApiRequestMetric.duration_ms),
-        ))
+        request_metrics = await self.db.execute(
+            select(
+                func.count(ApiRequestMetric.id),
+                func.coalesce(
+                    func.sum(case((ApiRequestMetric.status_code >= 500, 1), else_=0)), 0
+                ),
+                func.percentile_cont(0.95).within_group(ApiRequestMetric.duration_ms),
+            )
+        )
         request_count, error_requests, p95_latency = request_metrics.one()
         ai_usage_result = await self.db.execute(
-            select(func.coalesce(func.sum(AiUsageLog.tokens_used), 0), func.coalesce(func.avg(AiUsageLog.latency_ms), 0))
+            select(
+                func.coalesce(func.sum(AiUsageLog.tokens_used), 0),
+                func.coalesce(func.avg(AiUsageLog.latency_ms), 0),
+            )
         )
         ai_tokens_total, ai_latency_avg = ai_usage_result.one()
 
-        percent_with_owner = (articles_with_owner / total_articles * 100.0) if total_articles > 0 else 0.0
-        percent_overdue = (overdue_articles / total_articles * 100.0) if total_articles > 0 else 0.0
+        percent_with_owner = (
+            (articles_with_owner / total_articles * 100.0)
+            if total_articles > 0
+            else 0.0
+        )
+        percent_overdue = (
+            (overdue_articles / total_articles * 100.0) if total_articles > 0 else 0.0
+        )
 
         return {
             "total_articles": total_articles,
@@ -502,10 +568,18 @@ class GovernanceRepository:
             "percent_overdue": percent_overdue,
             "open_gaps": open_gaps,
             "helpful_rate": helpful_rate,
-            "search_miss_rate": (search_misses / search_total * 100.0) if search_total else 0.0,
-            "ai_cache_hit_rate": (ai_cache_hits / ai_total * 100.0) if ai_total else 0.0,
+            "search_miss_rate": (
+                (search_misses / search_total * 100.0) if search_total else 0.0
+            ),
+            "ai_cache_hit_rate": (
+                (ai_cache_hits / ai_total * 100.0) if ai_total else 0.0
+            ),
             "api_request_count": int(request_count or 0),
-            "api_error_rate": (int(error_requests or 0) / int(request_count) * 100.0) if request_count else 0.0,
+            "api_error_rate": (
+                (int(error_requests or 0) / int(request_count) * 100.0)
+                if request_count
+                else 0.0
+            ),
             "api_p95_latency_ms": float(p95_latency or 0.0),
             "ai_requests": ai_total,
             "ai_tokens_total": int(ai_tokens_total or 0),

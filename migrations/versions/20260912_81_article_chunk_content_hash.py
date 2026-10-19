@@ -39,7 +39,9 @@ def upgrade() -> None:
         return
     columns = {column["name"] for column in inspector.get_columns(TABLE)}
     if "content_hash" not in columns:
-        op.add_column(TABLE, sa.Column("content_hash", sa.String(length=64), nullable=True))
+        op.add_column(
+            TABLE, sa.Column("content_hash", sa.String(length=64), nullable=True)
+        )
         op.execute(
             f"CREATE INDEX IF NOT EXISTS ix_article_chunks_content_hash "
             f"ON {TABLE} (content_hash)"

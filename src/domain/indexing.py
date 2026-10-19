@@ -91,7 +91,9 @@ def _match_source_page(
     best_score = 0.0
     for page_number, page_set, page_normalized in prepared_pages:
         overlap = len(query_set & page_set) / denominator
-        exact_bonus = 0.75 if compare_exact and query_preview in page_normalized else 0.0
+        exact_bonus = (
+            0.75 if compare_exact and query_preview in page_normalized else 0.0
+        )
         score = overlap + exact_bonus
         if score > best_score:
             best_score = score
@@ -119,14 +121,18 @@ def _section_ref_and_text(
     return (f"Section {section_idx + 1}", section_body.strip())
 
 
-def _child_chunk_metadata(parent_spec: dict, section_heading: str) -> tuple[str, str | None]:
+def _child_chunk_metadata(
+    parent_spec: dict, section_heading: str
+) -> tuple[str, str | None]:
     """Capture parent metadata while the parent spec is still in scope."""
     chunk_type = str(parent_spec.get("chunk_type") or "section")
     heading = str(parent_spec.get("heading") or section_heading or "")[:255] or None
     return chunk_type, heading
 
 
-async def set_index_status(article_id: uuid.UUID, status: str, error: str | None = None) -> None:
+async def set_index_status(
+    article_id: uuid.UUID, status: str, error: str | None = None
+) -> None:
     async with SessionLocal() as db:
         await set_database_context(db, None, True)
         article_repo = ArticleRepository(db)
@@ -171,7 +177,11 @@ async def _index_article(article_id: uuid.UUID) -> bool:
             chunk_repo = ChunkRepository(db)
             article = await article_repo.get_by_id(article_id)
 
-            if not article or article.status != "published" or article.lifecycle_status != "active":
+            if (
+                not article
+                or article.status != "published"
+                or article.lifecycle_status != "active"
+            ):
                 logger.warning(
                     "Skipping article indexing",
                     article_id=str(article_id),
@@ -205,7 +215,9 @@ async def _index_article(article_id: uuid.UUID) -> bool:
             evidence_specs: list[dict] = []
             if source and source.storage_key and settings.EVIDENCE_EXTRACTION_ENABLED:
                 try:
-                    source_bytes = await asyncio.to_thread(load_source, source.storage_key)
+                    source_bytes = await asyncio.to_thread(
+                        load_source, source.storage_key
+                    )
                     evidence_specs = await asyncio.to_thread(
                         extract_document_evidence,
                         source.original_filename or article.title,
@@ -220,7 +232,9 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                         error=str(exc),
                     )
             await db.execute(
-                delete(DocumentEvidence).where(DocumentEvidence.article_id == article_id)
+                delete(DocumentEvidence).where(
+                    DocumentEvidence.article_id == article_id
+                )
             )
             source_pages = []
             if source and source.page_texts:
@@ -245,8 +259,12 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                     and str(spec.get("search_text") or "").strip() == label
                 )
                 if needs_page_text:
-                    page_text = page_text_by_number.get(int(spec.get("page_number") or 1), "")
-                    if page_text and page_text not in str(spec.get("search_text") or ""):
+                    page_text = page_text_by_number.get(
+                        int(spec.get("page_number") or 1), ""
+                    )
+                    if page_text and page_text not in str(
+                        spec.get("search_text") or ""
+                    ):
                         spec["search_text"] = (f"{label}\n{page_text}")[
                             : settings.EVIDENCE_MAX_SEARCH_TEXT_CHARS
                         ]
@@ -257,23 +275,44 @@ async def _index_article(article_id: uuid.UUID) -> bool:
             # losslessly restructured reading representation used for indexing.
             if article.body_md and article.body_md.strip():
                 sections = [
-                    (section.split("\n", 1)[0].strip() if section else "", section, None)
+                    (
+                        section.split("\n", 1)[0].strip() if section else "",
+                        section,
+                        None,
+                    )
                     for section in article.body_md.split("\n## ")
                 ]
             elif source and source.page_texts:
                 sections = [
-                    (f"Page {item.get('page_number', index)}", str(item.get("text", "")), item.get("page_number", index))
+                    (
+                        f"Page {item.get('page_number', index)}",
+                        str(item.get("text", "")),
+                        item.get("page_number", index),
+                    )
                     for index, item in enumerate(source.page_texts, start=1)
                     if item.get("text")
                 ]
             else:
-                sections = [(section.split("\n", 1)[0].strip() if section else "", section, None) for section in article.body_md.split("\n## ")]
+                sections = [
+                    (
+                        section.split("\n", 1)[0].strip() if section else "",
+                        section,
+                        None,
+                    )
+                    for section in article.body_md.split("\n## ")
+                ]
             chunk_count = 0
             embedding_failures: list[dict[str, object]] = []
 
             indexable = [
-                _section_ref_and_text(section_idx, section_heading, section_body, page_number)
-                for section_idx, (section_heading, section_body, page_number) in enumerate(sections)
+                _section_ref_and_text(
+                    section_idx, section_heading, section_body, page_number
+                )
+                for section_idx, (
+                    section_heading,
+                    section_body,
+                    page_number,
+                ) in enumerate(sections)
             ]
             # Retrieval-only noise removal. The stored page text and the article body are
             # left untouched; this is the projection of them that becomes chunks and
@@ -295,16 +334,26 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                         boilerplate_lines=len(boilerplate),
                     )
 
-            for (section_ref, section_text), (section_heading, _section_body, page_number) in zip(
-                indexable, sections
-            ):
+            for (section_ref, section_text), (
+                section_heading,
+                _section_body,
+                page_number,
+            ) in zip(indexable, sections):
                 child_chunks = []
                 # + content_hash, appended below as each child is built.
-                pending_children: list[tuple[str, int | None, uuid.UUID, str, str | None, str]] = []
-                for parent_spec in create_parent_child_chunks(section_text, heading=section_heading):
+                pending_children: list[
+                    tuple[str, int | None, uuid.UUID, str, str | None, str]
+                ] = []
+                for parent_spec in create_parent_child_chunks(
+                    section_text, heading=section_heading
+                ):
                     parent_text = str(parent_spec["parent_text"])
-                    parent_page_number = page_number or _match_source_page(parent_text, prepared_pages)
-                    parent_chunk_type, parent_heading = _child_chunk_metadata(parent_spec, section_heading)
+                    parent_page_number = page_number or _match_source_page(
+                        parent_text, prepared_pages
+                    )
+                    parent_chunk_type, parent_heading = _child_chunk_metadata(
+                        parent_spec, section_heading
+                    )
                     parent = await chunk_repo.create_parent_chunk(
                         ParentChunk(
                             article_id=article_id,
@@ -317,10 +366,23 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                     )
                     for child_text in parent_spec["children"]:
                         clean_text = str(child_text).strip()
-                        child_page_number = page_number or _match_source_page(clean_text, prepared_pages) or parent_page_number
-                        content_hash = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()
+                        child_page_number = (
+                            page_number
+                            or _match_source_page(clean_text, prepared_pages)
+                            or parent_page_number
+                        )
+                        content_hash = hashlib.sha256(
+                            clean_text.encode("utf-8")
+                        ).hexdigest()
                         pending_children.append(
-                            (clean_text, child_page_number, parent.id, parent_chunk_type, parent_heading, content_hash)
+                            (
+                                clean_text,
+                                child_page_number,
+                                parent.id,
+                                parent_chunk_type,
+                                parent_heading,
+                                content_hash,
+                            )
                         )
 
                 # Reuse a cached vector for any child whose own text has not changed since
@@ -344,11 +406,15 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                         article.title, section_heading, section_text
                     )
                     fresh = await get_text_embeddings(
-                        [apply_header(section_header, pending_children[index][0]) for index in to_embed_indices]
+                        [
+                            apply_header(section_header, pending_children[index][0])
+                            for index in to_embed_indices
+                        ]
                     )
                     if fresh is None or len(fresh) != len(to_embed_indices):
                         embedding_failures.extend(
-                            {"section": section_ref, "chunk_index": index} for index in to_embed_indices
+                            {"section": section_ref, "chunk_index": index}
+                            for index in to_embed_indices
                         )
                         embeddings = None
                     else:
@@ -358,9 +424,17 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 if embeddings is None:
                     pass
                 else:
-                    for child_index, ((clean_text, child_page_number, parent_id, chunk_type, heading, content_hash), embedding) in enumerate(
-                        zip(pending_children, embeddings)
-                    ):
+                    for child_index, (
+                        (
+                            clean_text,
+                            child_page_number,
+                            parent_id,
+                            chunk_type,
+                            heading,
+                            content_hash,
+                        ),
+                        embedding,
+                    ) in enumerate(zip(pending_children, embeddings)):
                         child_chunks.append(
                             ArticleChunk(
                                 article_id=article_id,
@@ -406,9 +480,7 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                     )
                     db.add(evidence)
                     await db.flush()
-                    pending_evidence_children: list[
-                        tuple[str, uuid.UUID, int]
-                    ] = []
+                    pending_evidence_children: list[tuple[str, uuid.UUID, int]] = []
                     for parent_spec in create_parent_child_chunks(
                         search_text, heading=evidence.label
                     ):
@@ -425,14 +497,15 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                         )
                         pending_evidence_children.extend(
                             (clean_text, parent.id, child_index)
-                            for child_index, child_text in enumerate(parent_spec["children"])
+                            for child_index, child_text in enumerate(
+                                parent_spec["children"]
+                            )
                             if (clean_text := str(child_text).strip())
                         )
                     fresh = await get_text_embeddings(
                         [
                             apply_header(evidence.label, child_text)
-                            for child_text, _parent_id, _child_index
-                            in pending_evidence_children
+                            for child_text, _parent_id, _child_index in pending_evidence_children
                         ]
                     )
                     if fresh is None or len(fresh) != len(pending_evidence_children):
@@ -493,14 +566,25 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 # becoming a published document with a partial index. Committing the DLQ row
                 # first would have committed those partial chunks with it.
                 await db.rollback()
-                db.add(DeadLetterJob(
-                    source_queue="embedding",
-                    payload={"article_id": str(article_id), "failures": embedding_failures},
-                    error=f"Embedding unavailable for {len(embedding_failures)} chunk(s)",
-                ))
+                db.add(
+                    DeadLetterJob(
+                        source_queue="embedding",
+                        payload={
+                            "article_id": str(article_id),
+                            "failures": embedding_failures,
+                        },
+                        error=f"Embedding unavailable for {len(embedding_failures)} chunk(s)",
+                    )
+                )
                 await db.commit()
-                logger.warning("Embedding failures recorded in DLQ", article_id=str(article_id), failure_count=len(embedding_failures))
-                raise RuntimeError(f"Embedding unavailable for {len(embedding_failures)} chunk(s)")
+                logger.warning(
+                    "Embedding failures recorded in DLQ",
+                    article_id=str(article_id),
+                    failure_count=len(embedding_failures),
+                )
+                raise RuntimeError(
+                    f"Embedding unavailable for {len(embedding_failures)} chunk(s)"
+                )
             article.index_status = "ready"
             article.index_error = None
             await db.commit()
@@ -515,7 +599,10 @@ async def recompute_article_permissions(article_id: uuid.UUID) -> None:
             chunk_repo = ChunkRepository(db)
             article = await article_repo.get_by_id(article_id)
             if not article:
-                logger.warning("Skipping permission refresh; article not found", article_id=str(article_id))
+                logger.warning(
+                    "Skipping permission refresh; article not found",
+                    article_id=str(article_id),
+                )
                 return
             await chunk_repo.update_permissions(
                 article_id=article_id,

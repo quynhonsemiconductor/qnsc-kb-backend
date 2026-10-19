@@ -6,7 +6,6 @@ Revises: 20260810_49
 
 from alembic import op
 
-
 revision = "20260810_50"
 down_revision = "20260810_49"
 branch_labels = None
@@ -18,7 +17,11 @@ _INDEXES = (
     ("ix_articles_lifecycle_status", "articles", "lifecycle_status"),
     ("ix_connectors_company_domain", "connectors", "company_domain"),
     ("ix_pending_drafts_dept", "pending_drafts", "dept"),
-    ("ix_pending_drafts_external_document_id", "pending_drafts", "external_document_id"),
+    (
+        "ix_pending_drafts_external_document_id",
+        "pending_drafts",
+        "external_document_id",
+    ),
     ("ix_users_active", "users", "active"),
     ("ix_users_company_domain", "users", "company_domain"),
 )

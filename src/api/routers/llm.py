@@ -107,8 +107,13 @@ def _same_config(
 
 
 @router.get("/config")
-async def get_llm_config(current_user: User = Depends(require_permission("role.manage", scope="global")), db: AsyncSession = Depends(get_db)) -> Any:
-    result = await db.execute(select(LLMProviderConfig).where(LLMProviderConfig.config_key == "workspace"))
+async def get_llm_config(
+    current_user: User = Depends(require_permission("role.manage", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    result = await db.execute(
+        select(LLMProviderConfig).where(LLMProviderConfig.config_key == "workspace")
+    )
     return public_config(result.scalar_one_or_none())
 
 
@@ -142,7 +147,9 @@ async def test_llm_config(
     except UnsafeLLMEndpointError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ProviderAuthError as exc:
-        raise HTTPException(status_code=422, detail="The provider rejected the API key") from exc
+        raise HTTPException(
+            status_code=422, detail="The provider rejected the API key"
+        ) from exc
     except ProviderRateLimitError as exc:
         raise HTTPException(
             status_code=422,

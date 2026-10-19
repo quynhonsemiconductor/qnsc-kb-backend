@@ -28,7 +28,6 @@ import sqlalchemy as sa
 
 from src.core.config import settings
 
-
 revision = "20260831_69"
 down_revision = "20260830_68"
 branch_labels = None

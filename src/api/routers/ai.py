@@ -157,8 +157,14 @@ async def _hydrate_citations(
                     "page_number": page_number,
                     "source_url": f"/api/v1/articles/{chunk.article_id}/source"
                     + (f"?page={page_number}" if page_number else ""),
-                    "owner_email": getattr(getattr(article, "owner", None), "email", None),
-                    "last_reviewed": getattr(article, "last_reviewed", None).isoformat() if getattr(article, "last_reviewed", None) else None,
+                    "owner_email": getattr(
+                        getattr(article, "owner", None), "email", None
+                    ),
+                    "last_reviewed": (
+                        getattr(article, "last_reviewed", None).isoformat()
+                        if getattr(article, "last_reviewed", None)
+                        else None
+                    ),
                     **(
                         {
                             "evidence_id": str(evidence.id),
@@ -332,7 +338,9 @@ async def get_conversation_messages(
         # Stripped before markers are read: an owner email inside a stored provenance
         # blob ("owner: c4@example.com") would otherwise count as a citation to C4 and
         # make a healthy answer look like it cited a source it never did.
-        grounded_text = strip_source_metadata(message.grounded_content or message.content)
+        grounded_text = strip_source_metadata(
+            message.grounded_content or message.content
+        )
         answer_markers = (
             set(extract_citation_ids(grounded_text))
             if message.role == "assistant"
@@ -372,7 +380,9 @@ async def get_conversation_messages(
                 "content": (
                     "This historical answer is no longer available because your access to one or more source documents changed."
                     if message.role == "assistant" and inaccessible_source
-                    else strip_source_metadata(normalize_answer_markdown(message.content))
+                    else strip_source_metadata(
+                        normalize_answer_markdown(message.content)
+                    )
                 ),
                 # Do not leave the original answer in a secondary field after a
                 # cited source has become unauthorized.
@@ -402,7 +412,9 @@ async def get_conversation_messages(
                 # cited chunk can no longer be re-authorized.
                 "action_data": None if inaccessible_source else action_data,
                 "failed": bool(
-                    action_data and action_data.get("failed") and not inaccessible_source
+                    action_data
+                    and action_data.get("failed")
+                    and not inaccessible_source
                 ),
                 "usage_log_id": (
                     str(message.usage_log_id) if message.usage_log_id else None
@@ -463,7 +475,8 @@ async def ask_question(
     repo = AIRepository(db)
     if req.retry_failed and req.conversation_id is None:
         raise HTTPException(
-            status_code=409, detail="A failed turn can only be retried in its conversation"
+            status_code=409,
+            detail="A failed turn can only be retried in its conversation",
         )
     conversation = (
         await repo.get_conversation(req.conversation_id, current_user.id)
@@ -490,8 +503,12 @@ async def ask_question(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     data = await get_ai_service(db).ask(
-        current_user, req.question, conversation_id=conversation.id, language=req.language,
-        article_id=req.article_id, confirm_edit=req.confirm_edit,
+        current_user,
+        req.question,
+        conversation_id=conversation.id,
+        language=req.language,
+        article_id=req.article_id,
+        confirm_edit=req.confirm_edit,
         edit_instruction=req.edit_instruction,
     )
     await repo.add_message(
@@ -546,7 +563,8 @@ async def ask_question_stream(
     repo = AIRepository(db)
     if req.retry_failed and req.conversation_id is None:
         raise HTTPException(
-            status_code=409, detail="A failed turn can only be retried in its conversation"
+            status_code=409,
+            detail="A failed turn can only be retried in its conversation",
         )
     conversation = (
         await repo.get_conversation(req.conversation_id, current_user.id)

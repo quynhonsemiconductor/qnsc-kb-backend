@@ -42,11 +42,15 @@ def upgrade() -> None:
     if RULES_TABLE in set(inspector.get_table_names()):
         columns = {column["name"] for column in inspector.get_columns(RULES_TABLE)}
         if "risk_tiers" not in columns:
-            op.add_column(RULES_TABLE, sa.Column("risk_tiers", sa.JSON(), nullable=True))
+            op.add_column(
+                RULES_TABLE, sa.Column("risk_tiers", sa.JSON(), nullable=True)
+            )
         if "version" not in columns:
             op.add_column(
                 RULES_TABLE,
-                sa.Column("version", sa.Integer(), nullable=False, server_default=sa.text("1")),
+                sa.Column(
+                    "version", sa.Integer(), nullable=False, server_default=sa.text("1")
+                ),
             )
 
     if VERSIONS_TABLE not in set(inspector.get_table_names()):
@@ -73,12 +77,20 @@ def upgrade() -> None:
             sa.Column("can_reject", sa.Boolean(), nullable=False),
             sa.Column("changed_by", postgresql.UUID(as_uuid=True), nullable=True),
             sa.Column(
-                "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("now()"),
             ),
             sa.Column(
-                "updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
+                "updated_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("now()"),
             ),
-            sa.ForeignKeyConstraint(["rule_id"], ["approval_rules.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(
+                ["rule_id"], ["approval_rules.id"], ondelete="CASCADE"
+            ),
             sa.ForeignKeyConstraint(["changed_by"], ["users.id"], ondelete="SET NULL"),
             sa.UniqueConstraint("rule_id", "version", name="uq_approval_rule_version"),
         )
@@ -101,8 +113,7 @@ def upgrade() -> None:
     # current state, as version 1) so the history is never empty for an existing rule --
     # an approval_rule with zero approval_rule_versions rows would otherwise look like a
     # data-integrity gap rather than "created before versioning existed".
-    op.execute(
-        f"""
+    op.execute(f"""
         INSERT INTO {VERSIONS_TABLE}
             (id, rule_id, version, name, instruction, active, priority, connector_id,
              dept, file_extensions, max_similarity_score, risk_tiers, can_approve,
@@ -116,8 +127,7 @@ def upgrade() -> None:
             SELECT 1 FROM {VERSIONS_TABLE} v
             WHERE v.rule_id = r.id AND v.version = r.version
         )
-        """
-    )
+        """)
 
 
 def downgrade() -> None:

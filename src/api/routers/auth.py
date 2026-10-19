@@ -510,7 +510,11 @@ async def list_departments(
             "contact_email": item.contact_email,
             "owner": next(
                 (
-                    {"id": assignment.user.id, "name": assignment.user.name, "email": assignment.user.email}
+                    {
+                        "id": assignment.user.id,
+                        "name": assignment.user.name,
+                        "email": assignment.user.email,
+                    }
                     for assignment in item.managers
                     if assignment.active and assignment.user and assignment.user.active
                 ),
@@ -551,16 +555,26 @@ async def list_invitations(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    rows = (await db.execute(
-        select(Invitation)
-        .where(Invitation.company_domain == current_user.company_domain)
-        .order_by(Invitation.created_at.desc())
-        .limit(500)
-    )).scalars().all()
+    rows = (
+        (
+            await db.execute(
+                select(Invitation)
+                .where(Invitation.company_domain == current_user.company_domain)
+                .order_by(Invitation.created_at.desc())
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return [_invitation_response(item) for item in rows]
 
 
-@router.post("/invitations", response_model=InvitationResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/invitations",
+    response_model=InvitationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_invitation(
     payload: InvitationCreate,
     current_user: Any = Depends(require_permission("user.manage")),
@@ -568,8 +582,15 @@ async def create_invitation(
 ) -> Any:
     email = str(payload.email).lower()
     domain = email.rsplit("@", 1)[-1]
-    if domain != current_user.company_domain and not AuthorizationService.has_permission(current_user, "user.manage", requested_scope="global"):
-        raise HTTPException(status_code=403, detail="Employee email must remain in the company domain")
+    if (
+        domain != current_user.company_domain
+        and not AuthorizationService.has_permission(
+            current_user, "user.manage", requested_scope="global"
+        )
+    ):
+        raise HTTPException(
+            status_code=403, detail="Employee email must remain in the company domain"
+        )
     if payload.role not in MANAGED_PRIMARY_ROLES:
         raise HTTPException(status_code=422, detail="Unsupported employee role")
     if payload.role in {"Admin", "CEO"} and not _is_global_user_manager(current_user):
@@ -582,9 +603,13 @@ async def create_invitation(
             status_code=403,
             detail="Only global user managers can assign global or executive roles",
         )
-    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    existing = (
+        await db.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
     if existing and existing.active:
-        raise HTTPException(status_code=409, detail="An active account already exists for this email")
+        raise HTTPException(
+            status_code=409, detail="An active account already exists for this email"
+        )
     if is_reset_operator(email):
         # Same reasoning as the rename guard in update_user, but this is the wider hole:
         # an invitation becomes an account whose password the ACCEPTER chooses, so
@@ -597,15 +622,24 @@ async def create_invitation(
         )
     audience_ids = [str(item) for item in (payload.audience_ids or [])]
     if audience_ids:
-        count = int((await db.execute(
-            select(func.count()).select_from(Department).where(
-                Department.id.in_(payload.audience_ids),
-                Department.company_domain == current_user.company_domain,
-                Department.active.is_(True),
-            )
-        )).scalar_one())
+        count = int(
+            (
+                await db.execute(
+                    select(func.count())
+                    .select_from(Department)
+                    .where(
+                        Department.id.in_(payload.audience_ids),
+                        Department.company_domain == current_user.company_domain,
+                        Department.active.is_(True),
+                    )
+                )
+            ).scalar_one()
+        )
         if count != len(set(audience_ids)):
-            raise HTTPException(status_code=422, detail="One or more audiences are not available in this company")
+            raise HTTPException(
+                status_code=422,
+                detail="One or more audiences are not available in this company",
+            )
     raw_token = secrets.token_urlsafe(32)
     invitation = Invitation(
         email=email,
@@ -618,21 +652,29 @@ async def create_invitation(
         invited_by=current_user.id,
     )
     db.add(invitation)
-    db.add(NotificationQueue(
-        # Use the inviter as the queue owner for pre-account email delivery;
-        # the actual destination is the payload address.  This also keeps the
-        # existing recipient-scoped notification RLS policy valid.
-        recipient_user_id=current_user.id,
-        type="email",
-        payload={
-            "to": email,
-            "subject": "Your QNSC Knowledge Base invitation",
-            "text": f"You have been invited to QNSC Knowledge Base. Sign in with Microsoft within 7 days: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
-        },
-    ))
+    db.add(
+        NotificationQueue(
+            # Use the inviter as the queue owner for pre-account email delivery;
+            # the actual destination is the payload address.  This also keeps the
+            # existing recipient-scoped notification RLS policy valid.
+            recipient_user_id=current_user.id,
+            type="email",
+            payload={
+                "to": email,
+                "subject": "Your QNSC Knowledge Base invitation",
+                "text": f"You have been invited to QNSC Knowledge Base. Sign in with Microsoft within 7 days: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
+            },
+        )
+    )
     await db.commit()
     await db.refresh(invitation)
-    await AuditRepository(db).record(current_user.id, "invitation_create", "invitation", str(invitation.id), detail={"email": email, "role": payload.role})
+    await AuditRepository(db).record(
+        current_user.id,
+        "invitation_create",
+        "invitation",
+        str(invitation.id),
+        detail={"email": email, "role": payload.role},
+    )
     return _invitation_response(invitation)
 
 
@@ -642,17 +684,38 @@ async def resend_invitation(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    item = (await db.execute(select(Invitation).where(Invitation.id == invitation_id, Invitation.company_domain == current_user.company_domain))).scalar_one_or_none()
+    item = (
+        await db.execute(
+            select(Invitation).where(
+                Invitation.id == invitation_id,
+                Invitation.company_domain == current_user.company_domain,
+            )
+        )
+    ).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Invitation not found")
     if item.used_at or item.revoked_at:
-        raise HTTPException(status_code=409, detail="This invitation can no longer be resent")
+        raise HTTPException(
+            status_code=409, detail="This invitation can no longer be resent"
+        )
     raw_token = secrets.token_urlsafe(32)
     item.token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     item.expires_at = datetime.utcnow() + timedelta(days=7)
-    db.add(NotificationQueue(recipient_user_id=current_user.id, type="email", payload={"to": item.email, "subject": "Your QNSC Knowledge Base invitation", "text": f"Your invitation was renewed. Sign in with Microsoft: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}"}))
+    db.add(
+        NotificationQueue(
+            recipient_user_id=current_user.id,
+            type="email",
+            payload={
+                "to": item.email,
+                "subject": "Your QNSC Knowledge Base invitation",
+                "text": f"Your invitation was renewed. Sign in with Microsoft: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
+            },
+        )
+    )
     await db.commit()
-    await AuditRepository(db).record(current_user.id, "invitation_resend", "invitation", str(item.id))
+    await AuditRepository(db).record(
+        current_user.id, "invitation_resend", "invitation", str(item.id)
+    )
     return _invitation_response(item)
 
 
@@ -662,13 +725,22 @@ async def revoke_invitation(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    item = (await db.execute(select(Invitation).where(Invitation.id == invitation_id, Invitation.company_domain == current_user.company_domain))).scalar_one_or_none()
+    item = (
+        await db.execute(
+            select(Invitation).where(
+                Invitation.id == invitation_id,
+                Invitation.company_domain == current_user.company_domain,
+            )
+        )
+    ).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Invitation not found")
     if not item.used_at:
         item.revoked_at = datetime.utcnow()
     await db.commit()
-    await AuditRepository(db).record(current_user.id, "invitation_revoke", "invitation", str(item.id))
+    await AuditRepository(db).record(
+        current_user.id, "invitation_revoke", "invitation", str(item.id)
+    )
     return _invitation_response(item)
 
 
@@ -796,7 +868,11 @@ async def preview_invitation(
     }
 
 
-@router.post("/invitations/accept", response_model=TokenResponse, response_model_exclude_none=True)
+@router.post(
+    "/invitations/accept",
+    response_model=TokenResponse,
+    response_model_exclude_none=True,
+)
 async def accept_invitation(
     request: Request,
     response: Response,
@@ -858,13 +934,19 @@ async def accept_invitation(
 
     if item.audience_ids:
         memberships = (
-            await db.execute(
-                select(Department).where(
-                    Department.id.in_([uuid.UUID(value) for value in item.audience_ids]),
-                    Department.company_domain == user.company_domain,
+            (
+                await db.execute(
+                    select(Department).where(
+                        Department.id.in_(
+                            [uuid.UUID(value) for value in item.audience_ids]
+                        ),
+                        Department.company_domain == user.company_domain,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         user.departments = list(memberships)
         if memberships and not user.dept:
             user.dept = memberships[0].name
@@ -1016,7 +1098,9 @@ async def reset_password(
     if grant is None:
         raise HTTPException(status_code=404, detail="This reset link is not valid")
     if grant.used_at:
-        raise HTTPException(status_code=410, detail="This reset link has already been used")
+        raise HTTPException(
+            status_code=410, detail="This reset link has already been used"
+        )
     if grant.expires_at <= datetime.utcnow():
         raise HTTPException(status_code=410, detail="This reset link has expired")
 
@@ -1041,9 +1125,7 @@ async def reset_password(
     )
     await _revoke_refresh_sessions(db, user.id)
     await db.commit()
-    await AuditRepository(db).record(
-        user.id, "password_reset", "user", str(user.id)
-    )
+    await AuditRepository(db).record(user.id, "password_reset", "user", str(user.id))
     return {"status": "reset"}
 
 
@@ -1140,7 +1222,9 @@ async def create_department(
         name=name,
         description=payload.description.strip(),
         active=True,
-        contact_email=str(payload.contact_email).lower() if payload.contact_email else None,
+        contact_email=(
+            str(payload.contact_email).lower() if payload.contact_email else None
+        ),
     )
     db.add(item)
     await db.commit()
@@ -1179,7 +1263,12 @@ async def update_department(
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     item = await _department_for_management(db, department_id, current_user)
-    if payload.name is None and payload.description is None and payload.active is None and payload.contact_email is None:
+    if (
+        payload.name is None
+        and payload.description is None
+        and payload.active is None
+        and payload.contact_email is None
+    ):
         raise HTTPException(
             status_code=422, detail="Provide a new name, description, or active status"
         )
@@ -1390,7 +1479,8 @@ async def replace_department_members(
     )
     if len(users) != len(unique_ids):
         raise HTTPException(
-            status_code=422, detail="Every department member must be in the same company"
+            status_code=422,
+            detail="Every department member must be in the same company",
         )
     await db.refresh(department, attribute_names=["members"])
     department.members = list(users)
@@ -1411,7 +1501,12 @@ async def list_department_members(
     department = await _department_for_management(db, department_id, current_user)
     await db.refresh(department, attribute_names=["members"])
     return [
-        {"id": str(user.id), "name": user.name, "email": user.email, "active": user.active}
+        {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "active": user.active,
+        }
         for user in sorted(
             department.members, key=lambda item: (item.name.lower(), item.email.lower())
         )
@@ -1746,7 +1841,10 @@ async def update_managed_user(
                 )
             await db.execute(
                 update(PendingDraft)
-                .where(PendingDraft.assigned_approver_id == user.id, PendingDraft.status == "pending")
+                .where(
+                    PendingDraft.assigned_approver_id == user.id,
+                    PendingDraft.status == "pending",
+                )
                 .values(assigned_approver_id=None, assigned_by=None, assigned_at=None)
             )
         user.active = user_in.active
@@ -1798,7 +1896,10 @@ async def deactivate_user(
     user.active = False
     await db.execute(
         update(PendingDraft)
-        .where(PendingDraft.assigned_approver_id == user.id, PendingDraft.status == "pending")
+        .where(
+            PendingDraft.assigned_approver_id == user.id,
+            PendingDraft.status == "pending",
+        )
         .values(assigned_approver_id=None, assigned_by=None, assigned_at=None)
     )
     await _revoke_refresh_sessions(db, user.id)
@@ -2550,15 +2651,23 @@ async def entra_callback(
     )
     invitation = None
     if user is None:
-        invitation = (await db.execute(
-            select(Invitation).where(
-                Invitation.email == email,
-                Invitation.company_domain == email.rsplit("@", 1)[-1],
-                Invitation.used_at.is_(None),
-                Invitation.revoked_at.is_(None),
-                Invitation.expires_at > datetime.utcnow(),
-            ).order_by(Invitation.created_at.desc())
-        )).scalars().first()
+        invitation = (
+            (
+                await db.execute(
+                    select(Invitation)
+                    .where(
+                        Invitation.email == email,
+                        Invitation.company_domain == email.rsplit("@", 1)[-1],
+                        Invitation.used_at.is_(None),
+                        Invitation.revoked_at.is_(None),
+                        Invitation.expires_at > datetime.utcnow(),
+                    )
+                    .order_by(Invitation.created_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
     if user is None:
         if invitation is None:
             raise HTTPException(
@@ -2568,7 +2677,8 @@ async def entra_callback(
         domain = invitation.company_domain
         user = User(
             email=email,
-            name=invitation.name or str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
+            name=invitation.name
+            or str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
             password_hash=get_password_hash(secrets.token_urlsafe(32)),
             company_domain=domain,
             role=invitation.role,
@@ -2583,12 +2693,30 @@ async def entra_callback(
                 status_code=500, detail="Could not provision the Microsoft account"
             )
         await AuditRepository(db).record(
-            user.id, "entra_user_provision", "user", str(user.id), outcome="success", detail={"invitation_id": str(invitation.id)}
+            user.id,
+            "entra_user_provision",
+            "user",
+            str(user.id),
+            outcome="success",
+            detail={"invitation_id": str(invitation.id)},
         )
         invitation.used_at = datetime.utcnow()
         invitation.accepted_user_id = user.id
         if invitation.audience_ids:
-            memberships = (await db.execute(select(Department).where(Department.id.in_([uuid.UUID(item) for item in invitation.audience_ids]), Department.company_domain == user.company_domain))).scalars().all()
+            memberships = (
+                (
+                    await db.execute(
+                        select(Department).where(
+                            Department.id.in_(
+                                [uuid.UUID(item) for item in invitation.audience_ids]
+                            ),
+                            Department.company_domain == user.company_domain,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             user.departments = list(memberships)
             if memberships:
                 user.dept = memberships[0].name

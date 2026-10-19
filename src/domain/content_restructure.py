@@ -505,15 +505,16 @@ async def _restructure_sections(
     async def _one(index: int, section: str) -> RestructureResult:
         async with limit:
             return await _restructure_single_document(
-                f"{title} — part {index}", section, model, department_descriptions, background
+                f"{title} — part {index}",
+                section,
+                model,
+                department_descriptions,
+                background,
             )
 
     return list(
         await asyncio.gather(
-            *(
-                _one(index, section)
-                for index, section in enumerate(sections, start=1)
-            )
+            *(_one(index, section) for index, section in enumerate(sections, start=1))
         )
     )
 
@@ -633,9 +634,15 @@ async def _restructure_document(
             # One section could not run. Keeping the others would persist a half-formatted document as if it
             # were final, so the whole document waits and is formatted again.
             waiting = _result(
-                source_text, fallback, "deferred", provider_config.model, deferred[0].error
+                source_text,
+                fallback,
+                "deferred",
+                provider_config.model,
+                deferred[0].error,
             )
-            waiting.retry_after = max(result.retry_after or 0 for result in deferred) or 30
+            waiting.retry_after = (
+                max(result.retry_after or 0 for result in deferred) or 30
+            )
             return waiting
         combined = "\n\n".join(result.body_md for result in section_results).strip()
         all_succeeded = all(result.status == "llm" for result in section_results)

@@ -6,6 +6,7 @@ authorization concept is introduced here. Backfilling existing articles that pub
 before this feature existed is an operator action, gated the same way
 `/governance/index/reprocess` is.
 """
+
 import uuid
 from typing import Any
 
@@ -74,7 +75,9 @@ async def get_neighbors(
 ) -> dict[str, Any]:
     if not await entity_exists(db, current_user.company_domain, entity_id):
         raise HTTPException(status_code=404, detail="Entity not found")
-    return await get_entity_neighbors(db, current_user.company_domain, entity_id, depth=depth)
+    return await get_entity_neighbors(
+        db, current_user.company_domain, entity_id, depth=depth
+    )
 
 
 @router.post("/reprocess", status_code=202)
@@ -114,7 +117,9 @@ async def reprocess_graph(
         if not article:
             continue
         try:
-            extraction = await extract_entities_and_relationships(article.title, article.body_md)
+            extraction = await extract_entities_and_relationships(
+                article.title, article.body_md
+            )
             await apply_extraction(db, article, extraction)
             await db.commit()
             processed += 1
