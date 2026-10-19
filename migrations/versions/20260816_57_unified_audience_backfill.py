@@ -36,7 +36,9 @@ def upgrade() -> None:
     """)
     # Explicit-user rows already carry the legacy users-only audience. Once
     # migrated, all articles use the normal department/audience branch.
-    op.execute("UPDATE articles SET visibility = 'department' WHERE visibility = 'users'")
+    op.execute(
+        "UPDATE articles SET visibility = 'department' WHERE visibility = 'users'"
+    )
 
 
 def downgrade() -> None:

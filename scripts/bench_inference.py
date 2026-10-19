@@ -23,6 +23,7 @@ What it does NOT measure, on purpose and said here so no one reads more into it:
 
 The corpus is fetched from the public Wikipedia API on first use and cached in `--cache`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,16 +44,66 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Titles of Vietnamese Wikipedia articles with a substantial introduction. A title that does not
 # exist or has a short intro is dropped, so this list is a ceiling and not a promise.
 TITLES = [
-    "Hà Nội", "Thành phố Hồ Chí Minh", "Đà Nẵng", "Huế", "Quy Nhơn", "Nha Trang", "Cần Thơ",
-    "Hải Phòng", "Sông Mê Kông", "Sông Hồng", "Vịnh Hạ Long", "Phú Quốc", "Đà Lạt", "Sa Pa",
-    "Hồ Chí Minh", "Nguyễn Huệ", "Trần Hưng Đạo", "Lý Thường Kiệt", "Quang Trung", "Võ Nguyên Giáp",
-    "Phở", "Bánh mì", "Áo dài", "Tết Nguyên Đán", "Cà phê Việt Nam", "Nước mắm", "Bún chả",
-    "Trí tuệ nhân tạo", "Học máy", "Mạng nơ-ron nhân tạo", "Máy tính", "Internet", "Hệ điều hành",
-    "Cơ sở dữ liệu", "Bán dẫn", "Transistor", "Vi mạch", "Pin mặt trời", "Điện toán đám mây",
-    "Quang hợp", "Hệ mặt trời", "Sao Hỏa", "Trái Đất", "Mặt Trăng", "Núi lửa", "Động đất",
-    "Hồ Hoàn Kiếm", "Văn Miếu - Quốc Tử Giám", "Hội An", "Phong Nha-Kẻ Bàng", "Cố đô Huế",
-    "Vịnh Cam Ranh", "Đồng bằng sông Cửu Long", "Tây Nguyên", "Biển Đông", "Dãy Trường Sơn",
-    "Công nghệ sinh học", "Năng lượng tái tạo", "Biến đổi khí hậu", "Kinh tế Việt Nam",
+    "Hà Nội",
+    "Thành phố Hồ Chí Minh",
+    "Đà Nẵng",
+    "Huế",
+    "Quy Nhơn",
+    "Nha Trang",
+    "Cần Thơ",
+    "Hải Phòng",
+    "Sông Mê Kông",
+    "Sông Hồng",
+    "Vịnh Hạ Long",
+    "Phú Quốc",
+    "Đà Lạt",
+    "Sa Pa",
+    "Hồ Chí Minh",
+    "Nguyễn Huệ",
+    "Trần Hưng Đạo",
+    "Lý Thường Kiệt",
+    "Quang Trung",
+    "Võ Nguyên Giáp",
+    "Phở",
+    "Bánh mì",
+    "Áo dài",
+    "Tết Nguyên Đán",
+    "Cà phê Việt Nam",
+    "Nước mắm",
+    "Bún chả",
+    "Trí tuệ nhân tạo",
+    "Học máy",
+    "Mạng nơ-ron nhân tạo",
+    "Máy tính",
+    "Internet",
+    "Hệ điều hành",
+    "Cơ sở dữ liệu",
+    "Bán dẫn",
+    "Transistor",
+    "Vi mạch",
+    "Pin mặt trời",
+    "Điện toán đám mây",
+    "Quang hợp",
+    "Hệ mặt trời",
+    "Sao Hỏa",
+    "Trái Đất",
+    "Mặt Trăng",
+    "Núi lửa",
+    "Động đất",
+    "Hồ Hoàn Kiếm",
+    "Văn Miếu - Quốc Tử Giám",
+    "Hội An",
+    "Phong Nha-Kẻ Bàng",
+    "Cố đô Huế",
+    "Vịnh Cam Ranh",
+    "Đồng bằng sông Cửu Long",
+    "Tây Nguyên",
+    "Biển Đông",
+    "Dãy Trường Sơn",
+    "Công nghệ sinh học",
+    "Năng lượng tái tạo",
+    "Biến đổi khí hậu",
+    "Kinh tế Việt Nam",
 ]
 
 
@@ -123,7 +174,12 @@ def fetch_articles(cache: Path, limit: int) -> list[dict[str, str]]:
     import httpx
 
     found: list[dict[str, str]] = []
-    with httpx.Client(timeout=30.0, headers={"User-Agent": "qnsc-kb-backend-bench/1.0 (https://github.com/quynhonsemiconductor/qnsc-kb-backend; performance benchmark, ~60 requests)"}) as client:
+    with httpx.Client(
+        timeout=30.0,
+        headers={
+            "User-Agent": "qnsc-kb-backend-bench/1.0 (https://github.com/quynhonsemiconductor/qnsc-kb-backend; performance benchmark, ~60 requests)"
+        },
+    ) as client:
         for start in range(0, len(TITLES), 20):
             batch = TITLES[start : start + 20]
             response = client.get(
@@ -139,7 +195,9 @@ def fetch_articles(cache: Path, limit: int) -> list[dict[str, str]]:
                 },
             )
             response.raise_for_status()
-            for page in (response.json().get("query", {}).get("pages", {}) or {}).values():
+            for page in (
+                response.json().get("query", {}).get("pages", {}) or {}
+            ).values():
                 text = (page.get("extract") or "").strip()
                 if len(text) >= 500:
                     found.append({"title": page["title"], "text": text})
@@ -148,14 +206,21 @@ def fetch_articles(cache: Path, limit: int) -> list[dict[str, str]]:
     return found[:limit]
 
 
-def build_pool(articles: list[dict[str, str]]) -> tuple[list[SimpleNamespace], list[dict[str, Any]]]:
+def build_pool(
+    articles: list[dict[str, str]],
+) -> tuple[list[SimpleNamespace], list[dict[str, Any]]]:
     """Chunk with the REAL chunker and wrap the children the way the ORM objects look to the reranker."""
     from src.rag.chunker import create_parent_child_chunks
 
     chunks: list[SimpleNamespace] = []
     for article_index, article in enumerate(articles):
-        for parent in create_parent_child_chunks(article["text"], heading=article["title"]):
-            parent_ref = SimpleNamespace(text=parent["parent_text"], section_ref=parent.get("heading") or article["title"])
+        for parent in create_parent_child_chunks(
+            article["text"], heading=article["title"]
+        ):
+            parent_ref = SimpleNamespace(
+                text=parent["parent_text"],
+                section_ref=parent.get("heading") or article["title"],
+            )
             for child in parent["children"]:
                 text = str(child)
                 if len(text) < 80:
@@ -172,9 +237,19 @@ def build_pool(articles: list[dict[str, str]]) -> tuple[list[SimpleNamespace], l
     queries: list[dict[str, Any]] = []
     for chunk in chunks[:: max(1, len(chunks) // 80)]:
         title_words = set(re.findall(r"\w+", chunk.article.title.lower()))
-        words = [w for w in chunk.chunk_text.split() if re.sub(r"\W+", "", w).lower() not in title_words]
+        words = [
+            w
+            for w in chunk.chunk_text.split()
+            if re.sub(r"\W+", "", w).lower() not in title_words
+        ]
         if len(words) >= 12:
-            queries.append({"query": " ".join(words[2:14]), "gold_chunk": chunk.id, "gold_article": chunk.article_index})
+            queries.append(
+                {
+                    "query": " ".join(words[2:14]),
+                    "gold_chunk": chunk.id,
+                    "gold_article": chunk.article_index,
+                }
+            )
     return chunks, queries
 
 
@@ -186,14 +261,20 @@ def bench_load() -> dict[str, Any]:
     started = time.perf_counter()
     warm_up()
     seconds = time.perf_counter() - started
-    return {"load_seconds": round(seconds, 2), "rss_before_mb": before, "rss_after_mb": rss_mb()}
+    return {
+        "load_seconds": round(seconds, 2),
+        "rss_before_mb": before,
+        "rss_after_mb": rss_mb(),
+    }
 
 
 def bench_query_embedding(queries: list[str], repeats: int) -> dict[str, Any]:
     from src.lib.embeddings import get_bge_embedding
 
     first = []
-    for q in queries[:3]:  # the first call after load pays one-off allocation; report it, then discard
+    for q in queries[
+        :3
+    ]:  # the first call after load pays one-off allocation; report it, then discard
         t = time.perf_counter()
         get_bge_embedding(q)
         first.append(time.perf_counter() - t)
@@ -206,7 +287,9 @@ def bench_query_embedding(queries: list[str], repeats: int) -> dict[str, Any]:
     return {"first_calls_ms": [round(x * 1000, 1) for x in first], **stats_ms(samples)}
 
 
-def bench_lexical_rerank(chunks: list[SimpleNamespace], queries: list[str], sizes: list[int]) -> dict[str, Any]:
+def bench_lexical_rerank(
+    chunks: list[SimpleNamespace], queries: list[str], sizes: list[int]
+) -> dict[str, Any]:
     from src.rag.reranker import rerank_chunks_with_scores
 
     out = {}
@@ -221,7 +304,9 @@ def bench_lexical_rerank(chunks: list[SimpleNamespace], queries: list[str], size
     return out
 
 
-def bench_cross_encoder(chunks: list[SimpleNamespace], queries: list[str], pools: list[int], threads: int) -> dict[str, Any]:
+def bench_cross_encoder(
+    chunks: list[SimpleNamespace], queries: list[str], pools: list[int], threads: int
+) -> dict[str, Any]:
     import torch
 
     torch.set_num_threads(threads)
@@ -264,9 +349,13 @@ def bench_quality(
     from src.rag.reranker import chunk_passage, rerank_chunks_with_scores
 
     started = time.perf_counter()
-    matrix = numpy.array(get_bge_embeddings([c.chunk_text for c in chunks]), dtype="float32")
+    matrix = numpy.array(
+        get_bge_embeddings([c.chunk_text for c in chunks]), dtype="float32"
+    )
     index_seconds = time.perf_counter() - started
-    query_vectors = numpy.array([get_bge_embedding(q["query"]) for q in queries], dtype="float32")
+    query_vectors = numpy.array(
+        [get_bge_embedding(q["query"]) for q in queries], dtype="float32"
+    )
     similarity = query_vectors @ matrix.T
 
     cross_scorer = None
@@ -284,7 +373,11 @@ def bench_quality(
             if gold in ranking:
                 rr += 1.0 / (ranking.index(gold) + 1)
         n = max(1, len(queries))
-        return {"R@5": round(hit5 / n, 3), "R@10": round(hit10 / n, 3), "MRR": round(rr / n, 3)}
+        return {
+            "R@5": round(hit5 / n, 3),
+            "R@10": round(hit10 / n, 3),
+            "MRR": round(rr / n, 3),
+        }
 
     out: dict[str, Any] = {
         "corpus_chunks": len(chunks),
@@ -296,7 +389,9 @@ def bench_quality(
         ranks = []
         for q, row in zip(queries, similarity):
             top = [int(i) for i in numpy.argsort(-row)[:pool]]
-            reranked = rerank_chunks_with_scores(q["query"], [chunks[i] for i in top], limit=pool)
+            reranked = rerank_chunks_with_scores(
+                q["query"], [chunks[i] for i in top], limit=pool
+            )
             ranks.append([c.id for c, _ in reranked])
         out[f"lexical_pool_{pool}"] = metrics(ranks)
     if cross_scorer is not None:
@@ -309,20 +404,50 @@ def bench_quality(
             subset = list(zip(queries, similarity))[:cross_queries]
             for q, row in subset:
                 top = [int(i) for i in numpy.argsort(-row)[:pool]]
-                lexical = [c for c, _ in rerank_chunks_with_scores(q["query"], [chunks[i] for i in top], limit=pool)]
+                lexical = [
+                    c
+                    for c, _ in rerank_chunks_with_scores(
+                        q["query"], [chunks[i] for i in top], limit=pool
+                    )
+                ]
                 t = time.perf_counter()
                 scores = cross_scorer(q["query"], [chunk_passage(c) for c in lexical])
                 seconds.append(time.perf_counter() - t)
-                order = sorted(range(len(lexical)), key=lambda k: scores[k], reverse=True)
+                order = sorted(
+                    range(len(lexical)), key=lambda k: scores[k], reverse=True
+                )
                 ranks.append([lexical[k].id for k in order])
             gold = [q for q, _ in subset]
-            hit = lambda k: round(sum(q["gold_chunk"] in r[:k] for q, r in zip(gold, ranks)) / max(1, len(gold)), 3)
-            mrr = round(sum((1 / (r.index(q["gold_chunk"]) + 1)) if q["gold_chunk"] in r else 0 for q, r in zip(gold, ranks)) / max(1, len(gold)), 3)
-            out[f"cross_encoder_pool_{pool}"] = {"queries": len(gold), "R@5": hit(5), "R@10": hit(10), "MRR": mrr, "latency": stats_ms(seconds)}
+            hit = lambda k: round(
+                sum(q["gold_chunk"] in r[:k] for q, r in zip(gold, ranks))
+                / max(1, len(gold)),
+                3,
+            )
+            mrr = round(
+                sum(
+                    (1 / (r.index(q["gold_chunk"]) + 1)) if q["gold_chunk"] in r else 0
+                    for q, r in zip(gold, ranks)
+                )
+                / max(1, len(gold)),
+                3,
+            )
+            out[f"cross_encoder_pool_{pool}"] = {
+                "queries": len(gold),
+                "R@5": hit(5),
+                "R@10": hit(10),
+                "MRR": mrr,
+                "latency": stats_ms(seconds),
+            }
     return out
 
 
-def bench_pipeline(chunks: list[SimpleNamespace], queries: list[str], pool_size: int, with_cross: bool, cross_pool: int) -> dict[str, Any]:
+def bench_pipeline(
+    chunks: list[SimpleNamespace],
+    queries: list[str],
+    pool_size: int,
+    with_cross: bool,
+    cross_pool: int,
+) -> dict[str, Any]:
     """A search without the database: embed -> candidate pool -> lexical rerank (-> cross-encoder).
 
     The pool comes from a brute-force dot product over the in-memory corpus, standing in for
@@ -333,7 +458,9 @@ def bench_pipeline(chunks: list[SimpleNamespace], queries: list[str], pool_size:
     from src.lib.embeddings import get_bge_embedding, get_bge_embeddings
     from src.rag.reranker import chunk_passage, rerank_chunks_with_scores
 
-    matrix = numpy.array(get_bge_embeddings([c.chunk_text for c in chunks]), dtype="float32")
+    matrix = numpy.array(
+        get_bge_embeddings([c.chunk_text for c in chunks]), dtype="float32"
+    )
     if with_cross:
         from src.rag.cross_encoder import score as cross_scorer
     totals, parts = [], {"embed": [], "pool": [], "lexical": [], "cross": []}
@@ -354,12 +481,16 @@ def bench_pipeline(chunks: list[SimpleNamespace], queries: list[str], pool_size:
         parts["lexical"].append(t3 - t2)
         parts["cross"].append(t4 - t3)
         totals.append(t4 - t0)
-    return {"total": stats_ms(totals), **{k: stats_ms(v) for k, v in parts.items() if v}}
+    return {
+        "total": stats_ms(totals),
+        **{k: stats_ms(v) for k, v in parts.items() if v},
+    }
 
 
 def bench_db(dsn: str, sizes: list[int], ef_values: list[int]) -> dict[str, Any]:
     """pgvector on SYNTHETIC unit vectors: the cost of `ORDER BY embedding <=> q LIMIT 240` at an
-    ef_search, with 10% of rows passing a filter (the permission/status predicates cut into the scan)."""
+    ef_search, with 10% of rows passing a filter (the permission/status predicates cut into the scan).
+    """
     import numpy
     import psycopg2
     from psycopg2.extras import execute_values
@@ -372,15 +503,26 @@ def bench_db(dsn: str, sizes: list[int], ef_values: list[int]) -> dict[str, Any]
     cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
     for size in sizes:
         cur.execute("DROP TABLE IF EXISTS bench_chunks")
-        cur.execute("CREATE TABLE bench_chunks (id int primary key, bucket int, embedding vector(1024))")
+        cur.execute(
+            "CREATE TABLE bench_chunks (id int primary key, bucket int, embedding vector(1024))"
+        )
         vectors = rng.standard_normal((size, 1024)).astype("float32")
         vectors /= numpy.linalg.norm(vectors, axis=1, keepdims=True)
-        rows = [(i, i % 10, "[" + ",".join(f"{x:.5f}" for x in v) + "]") for i, v in enumerate(vectors)]
+        rows = [
+            (i, i % 10, "[" + ",".join(f"{x:.5f}" for x in v) + "]")
+            for i, v in enumerate(vectors)
+        ]
         for start in range(0, len(rows), 2000):
-            execute_values(cur, "INSERT INTO bench_chunks (id, bucket, embedding) VALUES %s", rows[start : start + 2000],
-                           template="(%s, %s, %s::vector)")
+            execute_values(
+                cur,
+                "INSERT INTO bench_chunks (id, bucket, embedding) VALUES %s",
+                rows[start : start + 2000],
+                template="(%s, %s, %s::vector)",
+            )
         t = time.perf_counter()
-        cur.execute("CREATE INDEX ON bench_chunks USING hnsw (embedding vector_cosine_ops)")
+        cur.execute(
+            "CREATE INDEX ON bench_chunks USING hnsw (embedding vector_cosine_ops)"
+        )
         build = time.perf_counter() - t
         cur.execute("ANALYZE bench_chunks")
         section: dict[str, Any] = {"hnsw_build_seconds": round(build, 1)}
@@ -393,11 +535,15 @@ def bench_db(dsn: str, sizes: list[int], ef_values: list[int]) -> dict[str, Any]
                 literal = "[" + ",".join(f"{x:.5f}" for x in q) + "]"
                 t = time.perf_counter()
                 cur.execute(
-                    "SELECT id FROM bench_chunks WHERE bucket = 3 ORDER BY embedding <=> %s::vector LIMIT 240", (literal,)
+                    "SELECT id FROM bench_chunks WHERE bucket = 3 ORDER BY embedding <=> %s::vector LIMIT 240",
+                    (literal,),
                 )
                 returned.append(len(cur.fetchall()))
                 samples.append(time.perf_counter() - t)
-            section[f"ef_search_{ef}"] = {**stats_ms(samples), "rows_returned_mean": round(statistics.fmean(returned), 1)}
+            section[f"ef_search_{ef}"] = {
+                **stats_ms(samples),
+                "rows_returned_mean": round(statistics.fmean(returned), 1),
+            }
         out[str(size)] = section
     cur.execute("DROP TABLE IF EXISTS bench_chunks")
     conn.close()
@@ -406,24 +552,51 @@ def bench_db(dsn: str, sizes: list[int], ef_values: list[int]) -> dict[str, Any]
 
 # ── main ─────────────────────────────────────────────────────────────────────────────────────
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--onnx-dir", default=os.getenv("EMBEDDING_ONNX_DIR", "/opt/embedding-onnx"))
-    parser.add_argument("--threads", type=int, required=True, help="ONNX / torch intra-op threads for this run")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--onnx-dir", default=os.getenv("EMBEDDING_ONNX_DIR", "/opt/embedding-onnx")
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        required=True,
+        help="ONNX / torch intra-op threads for this run",
+    )
     parser.add_argument("--articles", type=int, default=60)
     parser.add_argument(
         "--sections",
         default="load,embed,lexical,cross,quality,pipeline,db",
         help="which parts to run; `cross` also needs --cross-encoder, `db` needs --db-dsn",
     )
-    parser.add_argument("--repeats", type=int, default=3, help="passes over the query set for the embedding latency")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=3,
+        help="passes over the query set for the embedding latency",
+    )
     parser.add_argument("--lexical-pools", default="48,80,120,240")
-    parser.add_argument("--cross-encoder", action="store_true", help="also measure the optional cross-encoder (needs the ml group)")
+    parser.add_argument(
+        "--cross-encoder",
+        action="store_true",
+        help="also measure the optional cross-encoder (needs the ml group)",
+    )
     parser.add_argument("--cross-pools", default="10,30")
-    parser.add_argument("--cross-queries", type=int, default=10, help="queries scored by the cross-encoder in the quality section")
+    parser.add_argument(
+        "--cross-queries",
+        type=int,
+        default=10,
+        help="queries scored by the cross-encoder in the quality section",
+    )
     parser.add_argument("--db-dsn", default=None)
     parser.add_argument("--db-sizes", default="5000,30000")
     parser.add_argument("--ef-values", default="40,200,1000")
-    parser.add_argument("--cache", type=Path, default=Path(os.getenv("BENCH_CACHE", "/tmp/bench-corpus.json")))
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        default=Path(os.getenv("BENCH_CACHE", "/tmp/bench-corpus.json")),
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -435,8 +608,12 @@ def main() -> int:
     articles = fetch_articles(args.cache, args.articles)
     chunks, queries = build_pool(articles)
     query_texts = [q["query"] for q in queries]
-    result["corpus"] = {"articles": len(articles), "chunks": len(chunks), "queries": len(queries),
-                        "chunk_chars_mean": round(statistics.fmean(len(c.chunk_text) for c in chunks))}
+    result["corpus"] = {
+        "articles": len(articles),
+        "chunks": len(chunks),
+        "queries": len(queries),
+        "chunk_chars_mean": round(statistics.fmean(len(c.chunk_text) for c in chunks)),
+    }
     print(f"corpus: {result['corpus']}", flush=True)
 
     sections = set(args.sections.split(","))
@@ -446,28 +623,51 @@ def main() -> int:
         result["model_load"] = bench_load()
         print(f"load: {result['model_load']}", flush=True)
     if "embed" in sections:
-        result["query_embedding"] = bench_query_embedding(query_texts[:40], args.repeats)
+        result["query_embedding"] = bench_query_embedding(
+            query_texts[:40], args.repeats
+        )
         print(f"query embedding: {result['query_embedding']}", flush=True)
     if "lexical" in sections:
-        result["lexical_rerank"] = bench_lexical_rerank(chunks, query_texts, lexical_pools)
+        result["lexical_rerank"] = bench_lexical_rerank(
+            chunks, query_texts, lexical_pools
+        )
         print(f"lexical rerank: {result['lexical_rerank']}", flush=True)
     if "cross" in sections and args.cross_encoder:
-        result["cross_encoder"] = bench_cross_encoder(chunks, query_texts, cross_pools, args.threads)
+        result["cross_encoder"] = bench_cross_encoder(
+            chunks, query_texts, cross_pools, args.threads
+        )
         print(f"cross-encoder: {result['cross_encoder']}", flush=True)
     if "quality" in sections:
-        result["quality_proxy"] = bench_quality(chunks, queries, lexical_pools, cross_pools, args.cross_encoder, args.cross_queries)
+        result["quality_proxy"] = bench_quality(
+            chunks,
+            queries,
+            lexical_pools,
+            cross_pools,
+            args.cross_encoder,
+            args.cross_queries,
+        )
         print(f"quality proxy: {json.dumps(result['quality_proxy'])}", flush=True)
     if "pipeline" in sections:
-        result["pipeline_no_db"] = bench_pipeline(chunks, query_texts, max(lexical_pools), args.cross_encoder, max(cross_pools))
+        result["pipeline_no_db"] = bench_pipeline(
+            chunks,
+            query_texts,
+            max(lexical_pools),
+            args.cross_encoder,
+            max(cross_pools),
+        )
         print(f"pipeline (no db): {result['pipeline_no_db']}", flush=True)
     if args.db_dsn and "db" in sections:
         result["db_vector_synthetic"] = bench_db(
-            args.db_dsn, [int(x) for x in args.db_sizes.split(",")], [int(x) for x in args.ef_values.split(",")]
+            args.db_dsn,
+            [int(x) for x in args.db_sizes.split(",")],
+            [int(x) for x in args.ef_values.split(",")],
         )
         print(f"db: {json.dumps(result['db_vector_synthetic'])}", flush=True)
     result["rss_end_mb"] = rss_mb()
     if args.out:
-        args.out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        args.out.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     return 0
 
 

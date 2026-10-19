@@ -14,7 +14,6 @@ Create Date: 2026-09-10
 from alembic import op
 from sqlalchemy import inspect
 
-
 revision = "20260910_75"
 down_revision = "20260910_74"
 branch_labels = None

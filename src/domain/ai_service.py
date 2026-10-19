@@ -43,7 +43,10 @@ from src.domain.llm_client import (
     resolve_provider,
 )
 from src.domain.evidence_analytics import AnalyticsPlan, execute_analytics_plan
-from src.domain.evidence_extraction import render_evidence_preview, table_evidence_preview
+from src.domain.evidence_extraction import (
+    render_evidence_preview,
+    table_evidence_preview,
+)
 from src.domain.source_storage import load_source
 from src.models.article import Article, DocumentSource
 from src.models.evidence import DocumentEvidence
@@ -152,7 +155,10 @@ UNVERIFIABLE_GROUNDED_ANSWER = (
     "I could not produce a grounded answer from the authorized Knowledge Base sources."
 )
 
-_VIETNAMESE_CHARACTER_RE = re.compile(r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]", re.IGNORECASE)
+_VIETNAMESE_CHARACTER_RE = re.compile(
+    r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]",
+    re.IGNORECASE,
+)
 _VIETNAMESE_QUERY_WORD_RE = re.compile(
     r"\b(anh|chi|ban|cua|cho|khong|duoc|huong|dan|lam|nao|quy|trinh|tai|sao|thong|tin|toi|ve)\b",
     re.IGNORECASE,
@@ -167,7 +173,9 @@ def _query_language(question: str) -> str:
     fallbacks, so it must never consult the UI locale.
     """
     normalized = question.strip()
-    if _VIETNAMESE_CHARACTER_RE.search(normalized) or _VIETNAMESE_QUERY_WORD_RE.search(normalized):
+    if _VIETNAMESE_CHARACTER_RE.search(normalized) or _VIETNAMESE_QUERY_WORD_RE.search(
+        normalized
+    ):
         return "vi"
     return "en"
 
@@ -191,7 +199,10 @@ _REFUSAL_RE = re.compile(
 _ANALYTICS_OPERATIONS = (
     ("average", ("average", "mean", "trung bình")),
     ("median", ("median", "trung vị")),
-    ("percentage_change", ("percent change", "percentage change", "phần trăm thay đổi")),
+    (
+        "percentage_change",
+        ("percent change", "percentage change", "phần trăm thay đổi"),
+    ),
     ("difference", ("difference", "chênh lệch")),
     ("sum", ("sum", "total", "tổng")),
     ("min", ("minimum", "lowest", "nhỏ nhất", "thấp nhất")),
@@ -211,7 +222,11 @@ def _analytics_results(question: str, context_results: list[dict]) -> list[dict]
         return []
     normalized = " ".join(question.lower().split())
     operation = next(
-        (name for name, markers in _ANALYTICS_OPERATIONS if any(marker in normalized for marker in markers)),
+        (
+            name
+            for name, markers in _ANALYTICS_OPERATIONS
+            if any(marker in normalized for marker in markers)
+        ),
         None,
     )
     if not operation or operation in {"difference", "percentage_change"}:
@@ -251,7 +266,16 @@ def _is_visual_question(question: str) -> bool:
     normalized = question.lower()
     return any(
         marker in normalized
-        for marker in ("image", "figure", "chart", "diagram", "ảnh", "hình", "biểu đồ", "sơ đồ")
+        for marker in (
+            "image",
+            "figure",
+            "chart",
+            "diagram",
+            "ảnh",
+            "hình",
+            "biểu đồ",
+            "sơ đồ",
+        )
     )
 
 
@@ -319,7 +343,9 @@ async def _visual_evidence_context(
         )
         return description.strip(), "analyzed" if description.strip() else "empty"
     except Exception as exc:
-        logger.warning("Visual evidence analysis unavailable; continuing with text", error=str(exc))
+        logger.warning(
+            "Visual evidence analysis unavailable; continuing with text", error=str(exc)
+        )
         return "", "text_fallback"
 
 
@@ -344,8 +370,17 @@ def _looks_like_edit_request(question: str) -> bool:
     return any(
         marker in normalized
         for marker in (
-            "cập nhật", "sửa", "chỉnh sửa", "đính chính", "thay đổi", "sửa lại",
-            "update", "edit", "correct", "fix", "modify",
+            "cập nhật",
+            "sửa",
+            "chỉnh sửa",
+            "đính chính",
+            "thay đổi",
+            "sửa lại",
+            "update",
+            "edit",
+            "correct",
+            "fix",
+            "modify",
         )
     )
 
@@ -521,16 +556,16 @@ def _conflict_answer(
     conflicts: list[dict[str, Any]], language: str = "en"
 ) -> tuple[str, list[dict[str, Any]]]:
     lines = [
-        "Cơ sở tri thức có thông tin mâu thuẫn. Tôi không thể xác định thông tin nào đang hiện hành."
-        if language == "vi" else
-        "The Knowledge Base contains conflicting information. I cannot determine which statement is current.",
+        (
+            "Cơ sở tri thức có thông tin mâu thuẫn. Tôi không thể xác định thông tin nào đang hiện hành."
+            if language == "vi"
+            else "The Knowledge Base contains conflicting information. I cannot determine which statement is current."
+        ),
     ]
     citations: list[dict[str, Any]] = []
     seen_sources: set[str] = set()
     for conflict in conflicts:
-        lines.append(
-            f"\n**{conflict['fact'].title()}**"
-        )
+        lines.append(f"\n**{conflict['fact'].title()}**")
         for entry in conflict["entries"]:
             source = entry["source"]
             source_id = str(source["source_id"])
@@ -798,14 +833,18 @@ class AIService:
                 question_length=len(question),
             )
             return _answer_payload(
-                "Xin lỗi, tôi không thể thực hiện yêu cầu này vì yêu cầu vi phạm các quy tắc an toàn của Cơ sở tri thức QNSC."
-                if language == "vi" else
-                "I'm sorry, I cannot fulfill this request as it violates the security guardrails of the QNSC Knowledge Base.",
+                (
+                    "Xin lỗi, tôi không thể thực hiện yêu cầu này vì yêu cầu vi phạm các quy tắc an toàn của Cơ sở tri thức QNSC."
+                    if language == "vi"
+                    else "I'm sorry, I cannot fulfill this request as it violates the security guardrails of the QNSC Knowledge Base."
+                ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
 
-        is_confirmed_edit = confirm_edit and bool(edit_instruction) and article_id is not None
+        is_confirmed_edit = (
+            confirm_edit and bool(edit_instruction) and article_id is not None
+        )
         if _looks_like_edit_request(question) or is_confirmed_edit:
             target_id = article_id
             matched_target: dict[str, Any] | None = None
@@ -827,9 +866,7 @@ class AIService:
                 # the subject.
                 target_results: list[dict[str, Any]] = []
                 target_queries = [target_query or question, question]
-                target_queries.extend(
-                    re.findall(r"\b[A-Z][A-Z0-9_-]{1,}\b", question)
-                )
+                target_queries.extend(re.findall(r"\b[A-Z][A-Z0-9_-]{1,}\b", question))
                 seen_queries: set[str] = set()
                 for candidate_query in target_queries:
                     candidate_query = candidate_query.strip()
@@ -854,9 +891,11 @@ class AIService:
                 # match before the user can confirm the article.
                 if not unique_targets:
                     return _answer_payload(
-                        "Tôi hiểu đây là yêu cầu cập nhật, nhưng chưa xác định được tài liệu nào. Vui lòng nêu tên tài liệu hoặc mở tài liệu đó rồi yêu cầu cập nhật lại."
-                        if language == "vi" else
-                        "I understand this is an update request, but I could not identify a specific article. Please include the article title or open the article and try again.",
+                        (
+                            "Tôi hiểu đây là yêu cầu cập nhật, nhưng chưa xác định được tài liệu nào. Vui lòng nêu tên tài liệu hoặc mở tài liệu đó rồi yêu cầu cập nhật lại."
+                            if language == "vi"
+                            else "I understand this is an update request, but I could not identify a specific article. Please include the article title or open the article and try again."
+                        ),
                         prompt_version=settings.PROMPT_VERSION,
                         retrieval_version="edit-request",
                         action="edit_target_required",
@@ -871,7 +910,9 @@ class AIService:
                     raise HTTPException(status_code=404, detail="Article not found")
 
                 instruction = (edit_instruction or question).strip()
-                article_preview = re.sub(r"\s+", " ", target_article.body_md or "").strip()[:700]
+                article_preview = re.sub(
+                    r"\s+", " ", target_article.body_md or ""
+                ).strip()[:700]
                 original_information = re.sub(
                     r"\s+",
                     " ",
@@ -888,8 +929,8 @@ class AIService:
                         f"**Thông tin gốc:** {original_information}\n\n"
                         f"**Thông tin sẽ cập nhật:** {instruction}\n\n"
                         "Nếu đúng, hãy chọn **Đúng, cập nhật** hoặc trả lời **Có**. Chưa có thay đổi nào được thực hiện."
-                        if language == "vi" else
-                        f"I found the article **{target_article.title}**. Is this the article you want to update?\n\n"
+                        if language == "vi"
+                        else f"I found the article **{target_article.title}**. Is this the article you want to update?\n\n"
                         f"**Original information:** {original_information}\n\n"
                         f"**Information to update:** {instruction}\n\n"
                         "If yes, choose **Yes, update** or reply **Yes**. Nothing has been changed yet."
@@ -919,7 +960,10 @@ class AIService:
                 if PermissionService.can_edit_article(user, target_article):
                     provider_config = resolve_provider()
                     if not provider_config:
-                        raise HTTPException(status_code=503, detail="AI editing is unavailable because no LLM provider is configured.")
+                        raise HTTPException(
+                            status_code=503,
+                            detail="AI editing is unavailable because no LLM provider is configured.",
+                        )
                     revision_prompt = (
                         "Update the following knowledge-base article according to the user's correction. "
                         "Return the complete revised Markdown article only, with no commentary. "
@@ -953,7 +997,9 @@ class AIService:
                             status_code=502,
                             detail="The AI returned an empty article revision, so no changes were made. Please try the confirmation again.",
                         )
-                    if len(target_article.body_md or "") > 1000 and len(revised_body) < int(len(target_article.body_md) * 0.55):
+                    if len(target_article.body_md or "") > 1000 and len(
+                        revised_body
+                    ) < int(len(target_article.body_md) * 0.55):
                         raise HTTPException(
                             status_code=502,
                             detail="The AI returned an incomplete article revision, so no changes were made. Please try the confirmation again.",
@@ -1039,9 +1085,11 @@ class AIService:
         history_lines: list[str] = []
         for message in reversed(conversation_messages):
             candidate = f"{message.role.upper()}: {message.content[:3000]}"
-            if history_lines and len(candidate) + sum(
-                len(line) for line in history_lines
-            ) > history_budget:
+            if (
+                history_lines
+                and len(candidate) + sum(len(line) for line in history_lines)
+                > history_budget
+            ):
                 break
             history_lines.insert(0, candidate)
         history_text = "\n".join(history_lines)
@@ -1134,7 +1182,9 @@ class AIService:
             cached_grounded = strip_source_metadata(cached_grounded)
             if not settings.RAG_CACHE_EXTENDED_SECTION:
                 cached_extended = ""
-            cached_extended = strip_citation_markers(strip_source_metadata(cached_extended))
+            cached_extended = strip_citation_markers(
+                strip_source_metadata(cached_extended)
+            )
             cached_answer = render_answer_sections(
                 cached_grounded, cached_extended, settings.RAG_ENABLE_EXTENDED_SECTION
             )
@@ -1249,9 +1299,11 @@ class AIService:
         if not retrieved_results:
             # Logs a gap entry in SearchService already. Return graceful refusal.
             return _answer_payload(
-                "Xin lỗi, tôi không tìm thấy tài liệu được cấp quyền nào trong Cơ sở tri thức để trả lời câu hỏi này. Nếu thông tin còn thiếu, vui lòng gửi yêu cầu bổ sung nội dung."
-                if language == "vi" else
-                "I'm sorry, I could not find any authorized documents in the Knowledge Base to answer your question. If this information is missing, please file a content request.",
+                (
+                    "Xin lỗi, tôi không tìm thấy tài liệu được cấp quyền nào trong Cơ sở tri thức để trả lời câu hỏi này. Nếu thông tin còn thiếu, vui lòng gửi yêu cầu bổ sung nội dung."
+                    if language == "vi"
+                    else "I'm sorry, I could not find any authorized documents in the Knowledge Base to answer your question. If this information is missing, please file a content request."
+                ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
@@ -1266,9 +1318,11 @@ class AIService:
                 result_count=len(retrieved_results),
             )
             return _answer_payload(
-                "Tôi không tìm thấy đủ thông tin liên quan và được cấp quyền trong Cơ sở tri thức để trả lời câu hỏi này một cách chắc chắn."
-                if language == "vi" else
-                "I could not find enough relevant, authorized information in the Knowledge Base to answer this question confidently.",
+                (
+                    "Tôi không tìm thấy đủ thông tin liên quan và được cấp quyền trong Cơ sở tri thức để trả lời câu hỏi này một cách chắc chắn."
+                    if language == "vi"
+                    else "I could not find enough relevant, authorized information in the Knowledge Base to answer this question confidently."
+                ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
@@ -1289,11 +1343,13 @@ class AIService:
                 )
                 options_text = ", ".join(ambiguous_departments)
                 return _answer_payload(
-                    f"Câu hỏi này khớp với nội dung ở nhiều phòng ban ({options_text}). "
-                    "Bạn muốn hỏi về phòng ban nào?"
-                    if language == "vi" else
-                    f"This question matches content in more than one department ({options_text}). "
-                    "Which one did you mean?",
+                    (
+                        f"Câu hỏi này khớp với nội dung ở nhiều phòng ban ({options_text}). "
+                        "Bạn muốn hỏi về phòng ban nào?"
+                        if language == "vi"
+                        else f"This question matches content in more than one department ({options_text}). "
+                        "Which one did you mean?"
+                    ),
                     prompt_version=settings.PROMPT_VERSION,
                     retrieval_version=settings.RETRIEVAL_VERSION,
                     clarification_options=ambiguous_departments,
@@ -1302,9 +1358,11 @@ class AIService:
         context_results = _select_context(retrieved_results)
         if not context_results:
             return _answer_payload(
-                "Tôi không tìm thấy đủ thông tin liên quan và được cấp quyền trong Cơ sở tri thức để trả lời câu hỏi này một cách chắc chắn."
-                if language == "vi" else
-                "I could not find enough relevant, authorized information in the Knowledge Base to answer this question confidently.",
+                (
+                    "Tôi không tìm thấy đủ thông tin liên quan và được cấp quyền trong Cơ sở tri thức để trả lời câu hỏi này một cách chắc chắn."
+                    if language == "vi"
+                    else "I could not find enough relevant, authorized information in the Knowledge Base to answer this question confidently."
+                ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
@@ -1312,22 +1370,41 @@ class AIService:
         explicit_conflicts = _detect_explicit_conflicts(context_results)
         if explicit_conflicts:
             for conflict in explicit_conflicts:
-                article_ids = sorted({str(entry.get("article_id")) for entry in conflict.get("entries", []) if entry.get("article_id")})
+                article_ids = sorted(
+                    {
+                        str(entry.get("article_id"))
+                        for entry in conflict.get("entries", [])
+                        if entry.get("article_id")
+                    }
+                )
                 if len(article_ids) > 1:
-                    existing = await self.gov_repo.db.scalar(select(ConflictRecord).where(
-                        ConflictRecord.company_domain == user.company_domain,
-                        ConflictRecord.fact == str(conflict["fact"])[:255],
-                        ConflictRecord.status == "open",
-                    ))
+                    existing = await self.gov_repo.db.scalar(
+                        select(ConflictRecord).where(
+                            ConflictRecord.company_domain == user.company_domain,
+                            ConflictRecord.fact == str(conflict["fact"])[:255],
+                            ConflictRecord.status == "open",
+                        )
+                    )
                     if not existing:
-                        self.gov_repo.db.add(ConflictRecord(
-                            company_domain=user.company_domain,
-                            fact=str(conflict["fact"])[:255],
-                            article_ids=article_ids,
-                            evidence=[{"article_id": str(entry.get("article_id")), "title": entry.get("title"), "value": entry.get("value")} for entry in conflict.get("entries", [])],
-                        ))
+                        self.gov_repo.db.add(
+                            ConflictRecord(
+                                company_domain=user.company_domain,
+                                fact=str(conflict["fact"])[:255],
+                                article_ids=article_ids,
+                                evidence=[
+                                    {
+                                        "article_id": str(entry.get("article_id")),
+                                        "title": entry.get("title"),
+                                        "value": entry.get("value"),
+                                    }
+                                    for entry in conflict.get("entries", [])
+                                ],
+                            )
+                        )
             await self.gov_repo.db.commit()
-            conflict_grounded, conflict_citations = _conflict_answer(explicit_conflicts, language)
+            conflict_grounded, conflict_citations = _conflict_answer(
+                explicit_conflicts, language
+            )
             conflict_log = AiUsageLog(
                 user_id=user.id,
                 question=REDACTED_OPERATIONAL_CONTENT,
@@ -1422,7 +1499,9 @@ class AIService:
             else ""
         )
         context_str = "\n".join(
-            value for value in ("\n".join(context_blocks), trusted_analysis, visual_context) if value
+            value
+            for value in ("\n".join(context_blocks), trusted_analysis, visual_context)
+            if value
         )
 
         definition_request = is_definition_query(question)
@@ -1529,8 +1608,16 @@ class AIService:
                 provider=provider_config.name,
                 retry_after=exc.retry_after,
             )
-            wait = f" Vui lòng thử lại sau {exc.retry_after} giây." if exc.retry_after else " Vui lòng thử lại sau ít phút."
-            wait_en = f" Please retry in {exc.retry_after} seconds." if exc.retry_after else " Please retry shortly."
+            wait = (
+                f" Vui lòng thử lại sau {exc.retry_after} giây."
+                if exc.retry_after
+                else " Vui lòng thử lại sau ít phút."
+            )
+            wait_en = (
+                f" Please retry in {exc.retry_after} seconds."
+                if exc.retry_after
+                else " Please retry shortly."
+            )
             raise HTTPException(
                 status_code=429,
                 detail=(
@@ -1595,9 +1682,11 @@ class AIService:
                 answer_length=len(grounded_answer) + len(extended_answer),
             )
             return _answer_payload(
-                "Câu trả lời được tạo đã bị chặn bởi các quy tắc an toàn vì có thể chứa nội dung không an toàn hoặc thuật ngữ bị hạn chế."
-                if language == "vi" else
-                "The generated answer was blocked by our security guardrails as it contains potentially unsafe content or restricted terms.",
+                (
+                    "Câu trả lời được tạo đã bị chặn bởi các quy tắc an toàn vì có thể chứa nội dung không an toàn hoặc thuật ngữ bị hạn chế."
+                    if language == "vi"
+                    else "The generated answer was blocked by our security guardrails as it contains potentially unsafe content or restricted terms."
+                ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
             )
@@ -1631,9 +1720,7 @@ class AIService:
                 retrieved_markers=sorted(context_by_id),
             )
             grounded_answer = strip_unknown_markers(grounded_answer, set(context_by_id))
-            extended_answer = strip_unknown_markers(
-                extended_answer, set(context_by_id)
-            )
+            extended_answer = strip_unknown_markers(extended_answer, set(context_by_id))
             source_matches = extract_citation_ids(grounded_answer)
             is_refusal = _is_grounding_refusal(grounded_answer)
 
@@ -1650,7 +1737,9 @@ class AIService:
         # top score here is usually a genuine gap in the corpus (nothing on-topic exists),
         # and showing an unrelated passage anyway reads as a wrong answer, not a helpful
         # near-miss.
-        top_context_score = float(context_results[0].get("score") or 0.0) if context_results else 0.0
+        top_context_score = (
+            float(context_results[0].get("score") or 0.0) if context_results else 0.0
+        )
         if (
             is_refusal
             and context_results
@@ -1682,8 +1771,8 @@ class AIService:
                 f"Một đoạn có thể liên quan trong **{result['title']}** "
                 f"({result['section_ref'] or 'Chung'}) — chưa được xác minh là câu trả lời:\n\n"
                 f"> {snippet}"
-                if language == "vi" else
-                f"{grounded_answer}\n\n"
+                if language == "vi"
+                else f"{grounded_answer}\n\n"
                 f"A possibly related passage in **{result['title']}** "
                 f"({result['section_ref'] or 'General'}) — not verified as an answer:\n\n"
                 f"> {snippet}"
@@ -1709,7 +1798,8 @@ class AIService:
             )
             grounded_answer = (
                 "Không thể tạo câu trả lời có căn cứ từ các nguồn được cấp quyền trong Cơ sở tri thức."
-                if language == "vi" else UNVERIFIABLE_GROUNDED_ANSWER
+                if language == "vi"
+                else UNVERIFIABLE_GROUNDED_ANSWER
             )
             extended_answer = ""
             is_refusal = True
@@ -1736,7 +1826,8 @@ class AIService:
                         or [res.get("chunk_text", "")],
                         "page_number": res.get("page_number"),
                         "source_url": res.get("source_url"),
-                        "owner_email": res.get("owner_email") or settings.SYSTEM_DATA_OWNER_EMAIL,
+                        "owner_email": res.get("owner_email")
+                        or settings.SYSTEM_DATA_OWNER_EMAIL,
                         "last_reviewed": res.get("last_reviewed"),
                         **(
                             {
@@ -1773,7 +1864,9 @@ class AIService:
             try:
                 from src.rag.llm_judge import find_unverified_claims
 
-                context_by_source_id = {item["source_id"]: item["excerpt"] for item in citations}
+                context_by_source_id = {
+                    item["source_id"]: item["excerpt"] for item in citations
+                }
                 unverified_claims = await find_unverified_claims(
                     grounded_answer,
                     context_by_source_id,
@@ -1867,7 +1960,9 @@ class AIService:
             # Above the refusal line (RAG_MIN_CONTEXT_SCORE) so an answer was generated,
             # but not comfortably above it -- worth a visible "verify this" notice
             # (AskPage.tsx) rather than presenting a shaky retrieval as a certain one.
-            confidence="low" if top_score < settings.RAG_LOW_CONFIDENCE_SCORE else "normal",
+            confidence=(
+                "low" if top_score < settings.RAG_LOW_CONFIDENCE_SCORE else "normal"
+            ),
             unverified_claims=unverified_claims,
             analytics_results=analytics_results,
             evidence_status=evidence_status,

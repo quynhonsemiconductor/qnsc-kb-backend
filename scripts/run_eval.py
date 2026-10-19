@@ -34,23 +34,45 @@ from src.rag.evaluator import answer_correctness, context_recall, lexical_faithf
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the QNSC RAG regression gate")
-    parser.add_argument("--input", type=Path, required=True, help="JSON file containing evaluation cases")
-    parser.add_argument("--api-base", type=str, default=None, help="Base URL of a live API (e.g. http://localhost:8000/api/v1) to run the real pipeline gate")
-    parser.add_argument("--email", type=str, default=None, help="Login email for live mode")
-    parser.add_argument("--password", type=str, default=None, help="Login password for live mode")
-    parser.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout for live mode")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="JSON file containing evaluation cases",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="Base URL of a live API (e.g. http://localhost:8000/api/v1) to run the real pipeline gate",
+    )
+    parser.add_argument(
+        "--email", type=str, default=None, help="Login email for live mode"
+    )
+    parser.add_argument(
+        "--password", type=str, default=None, help="Login password for live mode"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=120.0, help="Per-request timeout for live mode"
+    )
     parser.add_argument("--min-context-recall", type=float, default=0.80)
     parser.add_argument("--min-faithfulness", type=float, default=0.80)
     parser.add_argument("--min-correctness", type=float, default=0.80)
     return parser.parse_args()
 
 
-def score_case(case: dict, answer: str, context: str, retrieved_chunk_ids: list) -> dict:
+def score_case(
+    case: dict, answer: str, context: str, retrieved_chunk_ids: list
+) -> dict:
     return {
         "case": case.get("id", "?"),
-        "context_recall": context_recall(retrieved_chunk_ids, case.get("expected_chunk_ids", [])),
+        "context_recall": context_recall(
+            retrieved_chunk_ids, case.get("expected_chunk_ids", [])
+        ),
         "faithfulness": lexical_faithfulness(answer, context),
-        "answer_correctness": answer_correctness(answer, str(case.get("expected_answer", ""))),
+        "answer_correctness": answer_correctness(
+            answer, str(case.get("expected_answer", ""))
+        ),
     }
 
 
@@ -110,12 +132,8 @@ def run_live(cases: list[dict], args: argparse.Namespace) -> dict:
             retrieved_chunk_ids = [
                 str(item.get("chunk_id")) for item in citations if item.get("chunk_id")
             ]
-            context = "\n".join(
-                str(item.get("excerpt", "")) for item in citations
-            )
-            results.append(
-                score_case(case, answer, context, retrieved_chunk_ids)
-            )
+            context = "\n".join(str(item.get("excerpt", "")) for item in citations)
+            results.append(score_case(case, answer, context, retrieved_chunk_ids))
     return _summarize(results)
 
 

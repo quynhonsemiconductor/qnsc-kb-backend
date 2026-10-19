@@ -7,7 +7,6 @@ permissions are independent concerns.
 
 from alembic import op
 
-
 revision = "20260807_35"
 down_revision = "20260807_34"
 branch_labels = None

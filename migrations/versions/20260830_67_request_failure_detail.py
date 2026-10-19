@@ -19,6 +19,7 @@ Revises: 20260829_66
 Create Date: 2026-08-30
 
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect

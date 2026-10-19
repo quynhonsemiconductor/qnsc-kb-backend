@@ -9,7 +9,6 @@ import os
 
 from alembic import op
 
-
 revision = "20260806_24"
 down_revision = "20260806_23"
 branch_labels = None
@@ -50,7 +49,11 @@ def upgrade() -> None:
     _policy("access_groups", "tenant_access_groups", access_group_tenant)
     _policy("comments", "tenant_comments", article_tenant)
     _policy("votes", "tenant_votes", article_tenant)
-    _policy("bookmarks", "tenant_bookmarks", f"({admin} OR user_id::text = NULLIF(current_setting('app.user_id', true), '')) AND ({article_tenant})")
+    _policy(
+        "bookmarks",
+        "tenant_bookmarks",
+        f"({admin} OR user_id::text = NULLIF(current_setting('app.user_id', true), '')) AND ({article_tenant})",
+    )
 
     # These derived tables carry document content but previously had no
     # database-level tenant boundary of their own.

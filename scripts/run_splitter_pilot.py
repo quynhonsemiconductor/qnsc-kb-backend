@@ -3,6 +3,7 @@
 Usage:
     python scripts/run_splitter_pilot.py --path .. --output ../splitter-pilot-report.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +24,10 @@ def main() -> None:
     for path in args.path:
         roots.extend([path] if path.is_file() else sorted(path.rglob("*.md")))
     roots = list(dict.fromkeys(roots))
-    documents = [(path.name, path.read_text(encoding="utf-8", errors="replace")) for path in roots]
+    documents = [
+        (path.name, path.read_text(encoding="utf-8", errors="replace"))
+        for path in roots
+    ]
     report = splitter_metrics(documents)
     rendered = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:

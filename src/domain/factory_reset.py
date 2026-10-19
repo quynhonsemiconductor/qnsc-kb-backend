@@ -35,6 +35,7 @@ database that looks clean. ``KEPT_TABLES`` is verified against the live metadata
 so deleting a model without updating this module fails loudly instead of quietly
 widening the keep-set.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -158,7 +159,8 @@ def assert_keep_set_is_closed() -> None:
     unknown = KEPT_TABLES - tables
     if unknown:
         raise FactoryResetError(
-            "KEPT_TABLES names tables that are not mapped: " + ", ".join(sorted(unknown))
+            "KEPT_TABLES names tables that are not mapped: "
+            + ", ".join(sorted(unknown))
         )
     purged = tables - KEPT_TABLES
     dangling = [

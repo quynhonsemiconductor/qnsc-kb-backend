@@ -22,6 +22,7 @@ master database credential and the application code:
 Idempotent: an existing address is reported and left alone, so a re-run after a partial
 failure is safe.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +46,10 @@ async def main() -> int:
     password = os.getenv("ADMIN_PASSWORD") or ""
 
     if not email or not name or not password:
-        print("ADMIN_EMAIL, ADMIN_NAME and ADMIN_PASSWORD are all required", file=sys.stderr)
+        print(
+            "ADMIN_EMAIL, ADMIN_NAME and ADMIN_PASSWORD are all required",
+            file=sys.stderr,
+        )
         return 1
 
     # The MASTER credential, not the application role: this writes identity rows before

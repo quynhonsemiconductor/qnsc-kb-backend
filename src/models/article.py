@@ -1,7 +1,21 @@
 import uuid
 from datetime import date, datetime
 from typing import Any
-from sqlalchemy import Table, Column, ForeignKey, String, Integer, Text, DateTime, Date, JSON, UniqueConstraint, Boolean, CheckConstraint, Index
+from sqlalchemy import (
+    Table,
+    Column,
+    ForeignKey,
+    String,
+    Integer,
+    Text,
+    DateTime,
+    Date,
+    JSON,
+    UniqueConstraint,
+    Boolean,
+    CheckConstraint,
+    Index,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 from src.models.user import Department
@@ -10,21 +24,32 @@ from src.models.user import Department
 # imports of its own, so a model may depend on it without an ORM import cycle.
 from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 
-
 # One article may be visible in several departments. ``articles.dept`` is
 # retained as the primary/legacy department for synchronized integrations.
 article_departments = Table(
     "article_departments",
     Base.metadata,
-    Column("article_id", ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True),
-    Column("department_id", ForeignKey("departments.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "article_id", ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    ),
+    Column(
+        "department_id",
+        ForeignKey("departments.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
 )
+
 
 class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "articles"
     __table_args__ = (
         Index("ix_articles_external_id", "external_id", unique=True),
-        Index("uq_articles_company_external_id", "company_domain", "external_id", unique=True),
+        Index(
+            "uq_articles_company_external_id",
+            "company_domain",
+            "external_id",
+            unique=True,
+        ),
     )
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -32,42 +57,64 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     body_md: Mapped[str] = mapped_column(Text, nullable=False)
     dept: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     domain: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    company_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False, default="local")
+    company_domain: Mapped[str] = mapped_column(
+        String(255), index=True, nullable=False, default="local"
+    )
     # POLICY, SOP, DECISION, FAQ, RCA, HOWTO, PLAYBOOK, REFERENCE
     type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     # public, internal, confidential, restricted
-    sensitivity: Mapped[str] = mapped_column(String(50), default="internal", nullable=False)
+    sensitivity: Mapped[str] = mapped_column(
+        String(50), default="internal", nullable=False
+    )
     # public: company-wide public content; department: governed by the
     # article's department/ACL; users: only explicit ArticleUserPermission
     # allow rows (subject to explicit deny precedence).
-    visibility: Mapped[str] = mapped_column(String(30), default="department", nullable=False)
-    language: Mapped[str] = mapped_column(String(10), default="vi", server_default="vi", nullable=False)
-    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    visibility: Mapped[str] = mapped_column(
+        String(30), default="department", nullable=False
+    )
+    language: Mapped[str] = mapped_column(
+        String(10), default="vi", server_default="vi", nullable=False
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     # draft, pending_review, published, archived
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
-    lifecycle_status: Mapped[str] = mapped_column(String(30), default="active", nullable=False, index=True)
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(30), default="active", nullable=False, index=True
+    )
     # Compliance metadata, independent of `lifecycle_status`: that field is what an editor
     # WANTS (active/archived); these two are what governance REQUIRES regardless of editor
     # intent. Enforced in domain/articles.py::soft_delete_article, which refuses a delete
     # outright rather than merely warning about it.
     retention_until: Mapped[date | None] = mapped_column(Date, nullable=True)
-    legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    legal_hold: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     related_article_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     # Best-effort document identity fields (document_number, issue_date, expiry_date,
     # signed_by) -- see domain/structured_metadata.py. Never required and never blocks
     # publish; absent until the extraction has run, and may stay partially or fully null
     # for a document that states none of these.
-    structured_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    structured_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
     source_position: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     last_reviewed: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_review: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     needs_update: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    self_approved: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
-    source_changed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    self_approved: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    source_changed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     source_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     source_previous_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    index_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
+    index_status: Mapped[str] = mapped_column(
+        String(30), default="pending", nullable=False
+    )
     index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     owner: Mapped["User | None"] = relationship("User")
@@ -81,7 +128,10 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         "DocumentSource", back_populates="article", cascade="all, delete-orphan"
     )
     user_permissions: Mapped[list["ArticleUserPermission"]] = relationship(
-        "ArticleUserPermission", back_populates="article", cascade="all, delete-orphan", lazy="selectin"
+        "ArticleUserPermission",
+        back_populates="article",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
     tags: Mapped[list["ArticleTag"]] = relationship(
         "ArticleTag", back_populates="article", cascade="all, delete-orphan"
@@ -98,20 +148,37 @@ class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     def explicit_user_ids(self) -> list[uuid.UUID]:
         # Source-managed rows are provider ACL mirrors, not internal grants, so
         # they are excluded from the internal allow/deny lists an editor sees.
-        return [item.user_id for item in self.user_permissions if item.effect == "allow" and item.source not in SOURCE_ACL_PROVIDERS]
+        return [
+            item.user_id
+            for item in self.user_permissions
+            if item.effect == "allow" and item.source not in SOURCE_ACL_PROVIDERS
+        ]
 
     @property
     def explicit_denied_user_ids(self) -> list[uuid.UUID]:
-        return [item.user_id for item in self.user_permissions if item.effect == "deny" and item.source not in SOURCE_ACL_PROVIDERS]
+        return [
+            item.user_id
+            for item in self.user_permissions
+            if item.effect == "deny" and item.source not in SOURCE_ACL_PROVIDERS
+        ]
+
 
 class ArticleVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "article_versions"
-    __table_args__ = (Index("uq_article_versions_article_version", "article_id", "version", unique=True),)
+    __table_args__ = (
+        Index(
+            "uq_article_versions_article_version", "article_id", "version", unique=True
+        ),
+    )
 
-    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"), nullable=False)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), nullable=False
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    edited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    edited_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     article: Mapped[Article] = relationship("Article", back_populates="versions")
     editor: Mapped["User | None"] = relationship("User")
@@ -136,25 +203,40 @@ class ArticleUserPermission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             unique=True,
             postgresql_where=(Column("source").is_(None)),
         ),
-        Index("uq_article_user_permission_source", "article_id", "user_id", "source", unique=True),
-        CheckConstraint("effect IN ('allow', 'deny')", name="ck_article_user_permission_effect"),
+        Index(
+            "uq_article_user_permission_source",
+            "article_id",
+            "user_id",
+            "source",
+            unique=True,
+        ),
+        CheckConstraint(
+            "effect IN ('allow', 'deny')", name="ck_article_user_permission_effect"
+        ),
     )
 
-    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     effect: Mapped[str] = mapped_column(String(10), nullable=False, default="allow")
     source: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
-    article: Mapped[Article] = relationship("Article", back_populates="user_permissions")
+    article: Mapped[Article] = relationship(
+        "Article", back_populates="user_permissions"
+    )
     user: Mapped["User"] = relationship("User")
+
 
 class ArticleTag(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "article_tags"
-    __table_args__ = (
-        UniqueConstraint("article_id", "tag", name="uq_article_tag"),
-    )
+    __table_args__ = (UniqueConstraint("article_id", "tag", name="uq_article_tag"),)
 
-    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"), nullable=False)
+    article_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), nullable=False
+    )
     tag: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
 
     article: Mapped[Article] = relationship("Article", back_populates="tags")
@@ -165,25 +247,38 @@ class TagCatalog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     __tablename__ = "tag_catalog"
     __table_args__ = (
-        UniqueConstraint("company_domain", "normalized_tag", name="uq_tag_catalog_company_normalized"),
+        UniqueConstraint(
+            "company_domain", "normalized_tag", name="uq_tag_catalog_company_normalized"
+        ),
         Index("ix_tag_catalog_company_active", "company_domain", "active"),
     )
 
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     tag: Mapped[str] = mapped_column(String(80), nullable=False)
     normalized_tag: Mapped[str] = mapped_column(String(80), nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     # SET NULL, not CASCADE: deprecating a parent tag must not delete every tag beneath
     # it. A null parent means "root", the shape every tag had before this column existed.
-    parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tag_catalog.id", ondelete="SET NULL"), nullable=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tag_catalog.id", ondelete="SET NULL"), nullable=True
+    )
+
 
 class DocumentSource(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "document_sources"
 
-    article_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("articles.id", ondelete="SET NULL"), nullable=True)
-    source_system: Mapped[str] = mapped_column(String(100), nullable=False)  # google_drive, sharepoint, manual
+    article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL"), nullable=True
+    )
+    source_system: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )  # google_drive, sharepoint, manual
     source_ref: Mapped[str] = mapped_column(String(512), nullable=False)
     source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -194,5 +289,7 @@ class DocumentSource(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     article: Mapped[Article | None] = relationship("Article", back_populates="sources")
     evidence: Mapped[list["DocumentEvidence"]] = relationship(
-        "DocumentEvidence", back_populates="document_source", cascade="all, delete-orphan"
+        "DocumentEvidence",
+        back_populates="document_source",
+        cascade="all, delete-orphan",
     )

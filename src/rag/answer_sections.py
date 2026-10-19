@@ -1,4 +1,5 @@
 """Parsing and rendering for grounded and general-knowledge answer sections."""
+
 from __future__ import annotations
 
 import re
@@ -6,7 +7,9 @@ import re
 GROUNDED_SENTINEL = "<<<GROUNDED>>>"
 EXTENDED_SENTINEL = "<<<EXTENDED>>>"
 GROUNDED_HEADING = "## Answer from the Knowledge Base"
-EXTENDED_HEADING = "## Additional context (general knowledge — not from the Knowledge Base, not cited)"
+EXTENDED_HEADING = (
+    "## Additional context (general knowledge — not from the Knowledge Base, not cited)"
+)
 
 # Tolerant on the bracket count by necessity. The sentinels are written by a language
 # model, not by a protocol: glm-4.5-flash emits `<<<GROUNDED>>` — two closing angles —
@@ -15,7 +18,9 @@ EXTENDED_HEADING = "## Additional context (general knowledge — not from the Kn
 # after `<<<EXTENDED>>` — uncited general knowledge, by definition — was folded into the
 # grounded section instead of being separated, stripped of markers, and put under its
 # own "not from the Knowledge Base" heading.
-_SENTINEL_LINE_RE = re.compile(r"^\s*<{2,4}\s*(GROUNDED|EXTENDED)\s*>{2,4}\s*$", re.IGNORECASE)
+_SENTINEL_LINE_RE = re.compile(
+    r"^\s*<{2,4}\s*(GROUNDED|EXTENDED)\s*>{2,4}\s*$", re.IGNORECASE
+)
 _SENTINEL_WORDS = ("GROUNDED", "EXTENDED")
 
 
@@ -34,6 +39,8 @@ def could_begin_a_sentinel(probe: str) -> bool:
         return False
     name = body.rstrip(">").upper()
     return any(word.startswith(name) for word in _SENTINEL_WORDS)
+
+
 # Matches the bare `[C1]` the prompt asks for AND the enriched bracket a model writes
 # when it is also told to surface review dates and owners: `[C4: 2026-08-08, a@b.c]`.
 # The extended section must carry no marker in either shape — nothing there is
@@ -101,15 +108,19 @@ def split_answer_sections(raw: str) -> tuple[str, str]:
         return normalize_answer_markdown(_strip_sentinel_lines(text)), ""
 
     extended_marker = next(
-        (item for item in markers if item[0] == "EXTENDED" and item[1] >= grounded_marker[2]),
+        (
+            item
+            for item in markers
+            if item[0] == "EXTENDED" and item[1] >= grounded_marker[2]
+        ),
         None,
     )
-    prefix = text[:grounded_marker[1]]
+    prefix = text[: grounded_marker[1]]
     if extended_marker:
-        grounded_raw = prefix + text[grounded_marker[2]:extended_marker[1]]
-        extended_raw = text[extended_marker[2]:]
+        grounded_raw = prefix + text[grounded_marker[2] : extended_marker[1]]
+        extended_raw = text[extended_marker[2] :]
     else:
-        grounded_raw = prefix + text[grounded_marker[2]:]
+        grounded_raw = prefix + text[grounded_marker[2] :]
         extended_raw = ""
     return (
         normalize_answer_markdown(_strip_sentinel_lines(grounded_raw)),
@@ -174,7 +185,7 @@ class IncrementalAnswerStream:
                 self._line = ""
                 self._released = 0
                 return
-        out.append(line[self._released:] + "\n")
+        out.append(line[self._released :] + "\n")
         self._line = ""
         self._released = 0
 
@@ -191,7 +202,7 @@ class IncrementalAnswerStream:
             else:
                 self._line += character
                 if not self._holding():
-                    out.append(self._line[self._released:])
+                    out.append(self._line[self._released :])
                     self._released = len(self._line)
         return "".join(out)
 
@@ -205,7 +216,6 @@ class IncrementalAnswerStream:
         if not self._in_fence and _SENTINEL_LINE_RE.match(line):
             return ""
         return line[released:]
-
 
 
 # Provenance the reader is shown BESIDE each source, not inside the prose. The context

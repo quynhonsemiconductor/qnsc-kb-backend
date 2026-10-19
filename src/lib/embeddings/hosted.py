@@ -5,6 +5,7 @@ in-process backends exist to keep. Kept working because it is the fallback when 
 deployment cannot afford to carry a model at all, and because it is what the hosted
 option costs in code — a few dozen lines — if that trade is ever re-made.
 """
+
 from __future__ import annotations
 
 import time

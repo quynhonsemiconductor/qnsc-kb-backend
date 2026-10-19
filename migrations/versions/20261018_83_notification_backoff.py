@@ -51,7 +51,9 @@ def upgrade() -> None:
                 INDEX,
                 TABLE,
                 ["next_attempt_at", "created_at"],
-                postgresql_where=sa.text("type = 'email' AND status IN ('pending', 'failed')"),
+                postgresql_where=sa.text(
+                    "type = 'email' AND status IN ('pending', 'failed')"
+                ),
                 postgresql_concurrently=True,
             )
 

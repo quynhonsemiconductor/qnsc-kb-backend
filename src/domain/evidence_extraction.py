@@ -1,4 +1,5 @@
 """Bounded, local extraction of tables and visual document evidence."""
+
 from __future__ import annotations
 
 import csv
@@ -134,10 +135,7 @@ def _table_spec(
     # very large iterables, and converting the entire source to a list before slicing
     # defeats the memory bound this function exists to enforce.
     cleaned = [
-        [
-            _clean_cell(cell)
-            for cell in islice(row, settings.EVIDENCE_MAX_TABLE_COLUMNS)
-        ]
+        [_clean_cell(cell) for cell in islice(row, settings.EVIDENCE_MAX_TABLE_COLUMNS)]
         for row in islice(rows, settings.EVIDENCE_MAX_TABLE_ROWS + 1)
     ]
     cleaned = [row for row in cleaned if any(row)]
@@ -444,7 +442,9 @@ def extract_document_evidence(filename: str, data: bytes) -> list[dict[str, Any]
     return []
 
 
-def table_evidence_preview(structured_data: dict[str, Any] | None) -> dict[str, Any] | None:
+def table_evidence_preview(
+    structured_data: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Return a bounded citation projection without copying the full table into SSE."""
     if not isinstance(structured_data, dict):
         return None

@@ -29,6 +29,7 @@ Concurrency: several API replicas can start at once and all see an empty table. 
 unique constraint on email settles it — the loser catches IntegrityError, rolls back, and
 carries on, because by then the account it wanted exists.
 """
+
 from __future__ import annotations
 
 import structlog
@@ -119,7 +120,9 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> User | None:
     except IntegrityError:
         # Another replica won the race and created it first. Nothing to repair.
         await db.rollback()
-        logger.info("Bootstrap administrator already created by another process", email=email)
+        logger.info(
+            "Bootstrap administrator already created by another process", email=email
+        )
         return None
 
     logger.info("Created bootstrap administrator", email=email, user_id=str(user.id))

@@ -111,25 +111,12 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      # black and mypy have been dev dependencies since the project began and nothing ever
-      # ran either, so both start ADVISORY. This codebase has never been formatted, and a
-      # blocking gate would fail every PR on a whole-repo backlog that has nothing to do
-      # with the change under review.
-      #
-      # Promote to blocking after one dedicated `style: format with black` commit. Doing
-      # that reformat inside a feature branch would bury the actual change under every
-      # file in the repository, which is why it is not done here.
-      #
-      # An advisory check nobody ever promotes is decoration — this one has a specific
-      # next step, and it should be taken.
-      - name: Format check (black, advisory)
-        continue-on-error: true
+      # Black is blocking: the codebase was formatted in one dedicated commit, so every later PR is checked.
+      - name: Format check (black)
         run: poetry run black --check src migrations scripts
 
-      # Advisory to begin with: this codebase has never been type-checked, so a blocking
-      # gate would fail on a large backlog that has nothing to do with the PR in front of
-      # it. Make it blocking once the existing errors are cleared — an advisory check
-      # nobody ever promotes is decoration.
+      # Advisory: `mypy src` reports 229 errors in 50 files (the import layout is fixed in pyproject). Blocking
+      # once those are cleared; until then this step is visible in the log but does not gate the PR.
       - name: Typecheck (mypy, advisory)
         continue-on-error: true
         run: poetry run mypy src

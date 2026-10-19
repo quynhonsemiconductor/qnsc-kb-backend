@@ -14,6 +14,7 @@ that module is imported by ``models/article.py`` and must stay free of imports.
 being unable to say WHY it is hidden is an operations problem, so the reason
 travels with the answer.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -86,7 +87,9 @@ def provider_availability(system: str) -> ProviderAvailability:
     # fallback that keeps ingestion possible on a deployment with no cloud setup.
     if system == "local_folder":
         return ProviderAvailability(system=system, available=True)
-    missing = _microsoft_missing(system) if is_microsoft_graph(system) else _google_missing()
+    missing = (
+        _microsoft_missing(system) if is_microsoft_graph(system) else _google_missing()
+    )
     return ProviderAvailability(
         system=system, available=not missing, missing=tuple(missing)
     )

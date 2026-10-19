@@ -14,6 +14,7 @@ gates whether `search_service.py` calls this module at all; a fresh deploy with 
 but the dependency missing still fails loud, in logs, and the caller falls back to the
 lexical scorer rather than 500ing the search.
 """
+
 from __future__ import annotations
 
 import threading
@@ -104,7 +105,9 @@ class CircuitBreaker:
             if self._probing:
                 if now - self._probe_started < cooldown:
                     return None
-                logger.warning("Cross-encoder probe was never accounted for; allowing another")
+                logger.warning(
+                    "Cross-encoder probe was never accounted for; allowing another"
+                )
             elif now - self._opened_at < cooldown:
                 return None
             self._probing = True
@@ -122,12 +125,18 @@ class CircuitBreaker:
                 attempt.recorded = True
             self._timeouts += 1
             self._probing = False
-            if self._opened_at is not None or self._timeouts >= settings.CROSS_ENCODER_BREAKER_THRESHOLD:
+            if (
+                self._opened_at is not None
+                or self._timeouts >= settings.CROSS_ENCODER_BREAKER_THRESHOLD
+            ):
                 first = self._opened_at is None
                 self._opened_at = self._clock()
                 logger.warning(
-                    "Cross-encoder circuit open: skipping the reranker" if first
-                    else "Cross-encoder still timing out; circuit stays open",
+                    (
+                        "Cross-encoder circuit open: skipping the reranker"
+                        if first
+                        else "Cross-encoder still timing out; circuit stays open"
+                    ),
                     consecutive_timeouts=self._timeouts,
                     cooldown_seconds=settings.CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS,
                 )
@@ -164,8 +173,14 @@ class CircuitBreaker:
 breaker = CircuitBreaker()
 
 _BUDGET_SAMPLE = [
-    ("what is the leave policy", "Employees accrue twelve days of annual leave per year, approved by their manager."),
-    ("who approves expenses", "Expenses above the limit need approval from the department head before payment."),
+    (
+        "what is the leave policy",
+        "Employees accrue twelve days of annual leave per year, approved by their manager.",
+    ),
+    (
+        "who approves expenses",
+        "Expenses above the limit need approval from the department head before payment.",
+    ),
 ]
 
 
@@ -183,7 +198,9 @@ def check_budget() -> float:
     # a search that arrives while this runs would otherwise either be timed alongside it (a bogus per-pair
     # cost) or contend with it. Waiting is fine here, this runs in a startup thread.
     with _scoring:
-        model.predict(_BUDGET_SAMPLE)  # first call pays one-off allocation; not representative
+        model.predict(
+            _BUDGET_SAMPLE
+        )  # first call pays one-off allocation; not representative
         started = time.perf_counter()
         model.predict(_BUDGET_SAMPLE)
         per_pair = (time.perf_counter() - started) / len(_BUDGET_SAMPLE)
@@ -229,7 +246,9 @@ def score(query: str, passages: list[str]) -> list[float]:
     if not passages:
         return []
     if not _scoring.acquire(blocking=False):
-        raise CrossEncoderUnavailable("cross-encoder is still scoring an earlier search")
+        raise CrossEncoderUnavailable(
+            "cross-encoder is still scoring an earlier search"
+        )
     try:
         model = _model.get()
         pairs = [(query, passage) for passage in passages]
@@ -246,7 +265,9 @@ def score(query: str, passages: list[str]) -> list[float]:
 T = TypeVar("T")
 
 
-def reorder_by_cross_encoder(ranked: Sequence[T], cross_scores: Sequence[float]) -> list[T]:
+def reorder_by_cross_encoder(
+    ranked: Sequence[T], cross_scores: Sequence[float]
+) -> list[T]:
     """Reorder `ranked` by `cross_scores`, highest first. Pure and DB/model-free.
 
     `ranked` items are opaque and NOT compared to each other -- only `cross_scores` values

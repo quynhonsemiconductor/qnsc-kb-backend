@@ -6,6 +6,7 @@ index that is a full table scan per publish/update. The remaining indexes
 cover hot query paths (comment threads, per-user usage/search logs, source
 lookup by article, outbox drain) that previously sequential-scanned.
 """
+
 from alembic import op
 
 revision = "20260816_53"

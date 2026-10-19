@@ -69,7 +69,9 @@ from src.domain.llm_client import complete, resolve_provider
 from src.domain.content_restructure import clear_restructure_deferrals
 from src.domain.events import event_bus
 from src.domain.permissions import PermissionService
-from src.domain.article_edit_requests import create_article_edit_request as create_edit_request
+from src.domain.article_edit_requests import (
+    create_article_edit_request as create_edit_request,
+)
 from src.domain.rbac import AuthorizationService
 from src.domain.departments import (
     resolve_active_department,
@@ -128,9 +130,7 @@ async def _read_upload_limited(file: UploadFile) -> bytes:
     return bytes(data)
 
 
-async def _reservation_guards_live_content(
-    db: AsyncSession, fingerprint: Any
-) -> bool:
+async def _reservation_guards_live_content(db: AsyncSession, fingerprint: Any) -> bool:
     """Whether a source-hash reservation still points at something that exists.
 
     Article deletion is a SOFT delete, and the DocumentSource duplicate check is written
@@ -484,12 +484,33 @@ async def auto_tag_articles(
 
     suggestions_by_id: dict[str, list[str]] = {}
     try:
-        catalogue = set((await db.execute(select(TagCatalog.normalized_tag).where(TagCatalog.company_domain == current_user.company_domain, TagCatalog.active.is_(True)))).scalars().all())
+        catalogue = set(
+            (
+                await db.execute(
+                    select(TagCatalog.normalized_tag).where(
+                        TagCatalog.company_domain == current_user.company_domain,
+                        TagCatalog.active.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
     except AttributeError:
         # Lightweight unit doubles may not expose a database; production
         # requests always use the tenant catalogue query above.
         catalogue = None
-    normalize_tag = lambda value: re.sub(r"\s+", " ", "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)).strip().casefold())
+    normalize_tag = lambda value: re.sub(
+        r"\s+",
+        " ",
+        "".join(
+            ch
+            for ch in unicodedata.normalize("NFKD", value)
+            if not unicodedata.combining(ch)
+        )
+        .strip()
+        .casefold(),
+    )
     for item in raw_results:
         if not isinstance(item, dict) or not item.get("id"):
             continue
@@ -512,7 +533,9 @@ async def auto_tag_articles(
         if catalogue == set():
             cleaned_tags = []
         elif catalogue is not None:
-            cleaned_tags = [tag for tag in cleaned_tags if normalize_tag(tag) in catalogue]
+            cleaned_tags = [
+                tag for tag in cleaned_tags if normalize_tag(tag) in catalogue
+            ]
         suggestions_by_id[str(item["id"])] = cleaned_tags[:8]
 
     results = []
@@ -606,7 +629,9 @@ async def confirm_article_tags(
 @router.post("/bulk-reclassify")
 async def bulk_reclassify_articles(
     request: BulkReclassifyRequest,
-    current_user: User = Depends(require_permission("permission.manage", scope="company")),
+    current_user: User = Depends(
+        require_permission("permission.manage", scope="company")
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Change type and/or sensitivity for many articles at once, directly.
@@ -689,9 +714,7 @@ async def bulk_reclassify_articles(
             outcome="success",
         )
     for record in changed:
-        await event_bus.publish(
-            "ArticleUpdated", {"article_id": record["article_id"]}
-        )
+        await event_bus.publish("ArticleUpdated", {"article_id": record["article_id"]})
     return {"changed": changed, "changed_count": len(changed)}
 
 
@@ -824,9 +847,7 @@ async def upload_source(
     # or inactive articles so a document can be uploaded again after removal.
     # Reserve the tenant/hash pair while the expensive extraction and storage
     # work is still in progress. This closes the concurrent-upload race.
-    await lock_company_scope(
-        db, f"upload:{current_user.company_domain}:{source_hash}"
-    )
+    await lock_company_scope(db, f"upload:{current_user.company_domain}:{source_hash}")
     fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
             IngestionFingerprint.company_domain == current_user.company_domain,
@@ -964,11 +985,7 @@ async def upload_source(
             # view is incomplete and approving it publishes a document with holes in it.
             # Absent when extraction was clean, so existing drafts and responses are
             # unchanged.
-            **(
-                {"unreadable_pages": unreadable_pages}
-                if unreadable_pages
-                else {}
-            ),
+            **({"unreadable_pages": unreadable_pages} if unreadable_pages else {}),
         },
     )
     db.add(
@@ -1055,7 +1072,8 @@ async def upload_source(
             "Source stored and queued for reviewer approval. AI reading view is formatting in the background."
             if restructuring_enabled
             else "Source extracted and queued for reviewer approval."
-        ) + (
+        )
+        + (
             f" {len(unreadable_pages)} page(s) could not be read and are excluded: "
             f"{', '.join(str(page) for page in unreadable_pages)}."
             if unreadable_pages
@@ -1550,7 +1568,9 @@ async def view_article_evidence(
             evidence.bounding_box,
         )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Original source file is missing") from exc
+        raise HTTPException(
+            status_code=404, detail="Original source file is missing"
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(
@@ -1760,7 +1780,10 @@ async def create_article(
         )
     )
     restructure_result = await restructure_document(
-        article_in.title, article_in.body_md, enabled=restructuring_enabled, background=False
+        article_in.title,
+        article_in.body_md,
+        enabled=restructuring_enabled,
+        background=False,
     )
     draft_body = restructure_result.body_md or article_in.body_md
     matches = await find_similar_documents(db, current_user, draft_body)
@@ -1774,9 +1797,7 @@ async def create_article(
     source_hash = hashlib.sha256(
         f"{current_user.company_domain}\0{normalized_body}".encode("utf-8")
     ).hexdigest()
-    await lock_company_scope(
-        db, f"upload:{current_user.company_domain}:{source_hash}"
-    )
+    await lock_company_scope(db, f"upload:{current_user.company_domain}:{source_hash}")
     existing_fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
             IngestionFingerprint.company_domain == current_user.company_domain,
@@ -1881,40 +1902,73 @@ async def list_articles(
 ) -> Any:
     article_repo = ArticleRepository(db)
     return await article_repo.list_articles(
-        user=current_user, dept=dept, topic=topic, status=status, search_query=q,
-        limit=limit, offset=offset,
+        user=current_user,
+        dept=dept,
+        topic=topic,
+        status=status,
+        search_query=q,
+        limit=limit,
+        offset=offset,
     )
 
 
 @router.post("/{id}/follow", status_code=status.HTTP_201_CREATED)
-async def follow_article(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def follow_article(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
     article = await ArticleRepository(db).get_by_id(id, user=current_user)
     if not article or article.status == "deleted":
         raise HTTPException(status_code=404, detail="Article not found")
-    existing = await db.scalar(select(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    existing = await db.scalar(
+        select(ArticleFollower).where(
+            ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id
+        )
+    )
     if not existing:
         # Make the idempotent operation race-safe: two tabs may both observe
         # no row before either commits.
-        await db.execute(pg_insert(ArticleFollower).values(user_id=current_user.id, article_id=id).on_conflict_do_nothing())
+        await db.execute(
+            pg_insert(ArticleFollower)
+            .values(user_id=current_user.id, article_id=id)
+            .on_conflict_do_nothing()
+        )
         await db.commit()
     return {"article_id": str(id), "following": True}
 
 
 @router.delete("/{id}/follow", status_code=status.HTTP_204_NO_CONTENT)
-async def unfollow_article(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> None:
+async def unfollow_article(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
     article = await ArticleRepository(db).get_by_id(id, user=current_user)
     if not article or article.status == "deleted":
         raise HTTPException(status_code=404, detail="Article not found")
-    await db.execute(delete(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    await db.execute(
+        delete(ArticleFollower).where(
+            ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id
+        )
+    )
     await db.commit()
 
 
 @router.get("/{id}/follow")
-async def article_follow_status(id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def article_follow_status(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
     article = await ArticleRepository(db).get_by_id(id, user=current_user)
     if not article or article.status == "deleted":
         raise HTTPException(status_code=404, detail="Article not found")
-    followed = await db.scalar(select(ArticleFollower).where(ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id))
+    followed = await db.scalar(
+        select(ArticleFollower).where(
+            ArticleFollower.user_id == current_user.id, ArticleFollower.article_id == id
+        )
+    )
     return {"article_id": str(id), "following": bool(followed)}
 
 
@@ -1955,7 +2009,9 @@ async def create_article_edit_request(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Record a reader correction and notify users who can edit this article."""
-    return await create_edit_request(db, current_user, id, request_in.request_text, source="manual")
+    return await create_edit_request(
+        db, current_user, id, request_in.request_text, source="manual"
+    )
 
 
 @router.put("/{id}", response_model=DraftSubmissionResponse)
@@ -2137,9 +2193,7 @@ async def update_article(
     source_hash = hashlib.sha256(
         f"{current.company_domain}\0{normalized_body}".encode("utf-8")
     ).hexdigest()
-    await lock_company_scope(
-        db, f"upload:{current.company_domain}:{source_hash}"
-    )
+    await lock_company_scope(db, f"upload:{current.company_domain}:{source_hash}")
     duplicate_fingerprint = await db.scalar(
         select(IngestionFingerprint).where(
             IngestionFingerprint.company_domain == current.company_domain,
@@ -2390,7 +2444,9 @@ async def restore_version(
             "type": str(snapshot.get("type") or current.type),
             "sensitivity": str(snapshot.get("sensitivity") or current.sensitivity),
             "language": str(snapshot.get("language") or current.language),
-            "department_ids": [str(department.id) for department in current.departments],
+            "department_ids": [
+                str(department.id) for department in current.departments
+            ],
             "next_review": (
                 current.next_review.isoformat() if current.next_review else None
             ),
