@@ -11,7 +11,9 @@ depends_on = None
 def upgrade() -> None:
     # unaccent(text) is STABLE, so PostgreSQL will not allow it directly in
     # an expression index. This immutable wrapper intentionally pins the
-    # extension dictionary used by the application search contract.
+    # extension dictionary used by the application search contract. The call is
+    # schema-qualified: PostgreSQL 18 cannot inline an unqualified
+    # unaccent(regdictionary, text) call from an SQL function body ("No function matches").
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     op.execute("""
         CREATE OR REPLACE FUNCTION immutable_unaccent(value text)
@@ -19,7 +21,7 @@ def upgrade() -> None:
         LANGUAGE sql
         IMMUTABLE
         PARALLEL SAFE
-        AS $$ SELECT unaccent('public.unaccent', value) $$
+        AS $$ SELECT public.unaccent('public.unaccent'::regdictionary, value) $$
     """)
     op.execute("DROP INDEX IF EXISTS ix_article_chunks_fts")
     op.execute("""
