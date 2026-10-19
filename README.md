@@ -1,6 +1,6 @@
 # QNSC Knowledge Base Backend
 
-FastAPI-based backend application for QNSC Knowledge Base, utilizing pgvector for hybrid RAG search, Celery for asynchronous processing, and Redis for caching.
+FastAPI-based backend application for QNSC Knowledge Base, utilizing pgvector for hybrid RAG search, Celery for asynchronous processing, and Valkey (Redis protocol) for caching, the engine production runs on ElastiCache.
 
 ## Run it locally (Docker, from a clean clone)
 
@@ -30,6 +30,12 @@ If a port is already taken (a second project's Postgres on 5432 is the usual cla
 `KB_DB_PORT`, `KB_REDIS_PORT` or `KB_API_PORT` in `.env` (see the top of `.env.example`) and run the
 same commands. On Apple Silicon this works as-is: the worker runs from the API image. Set
 `KB_WORKER_TARGET=worker` only if you need OCR of scanned files (x86_64 only).
+
+### Run a second copy
+
+To run a second copy beside this one (a second checkout, or a branch you keep running), set in `.env`: `COMPOSE_PROJECT_NAME=qnsc-kb-2`
+(it prefixes the containers and volumes), and free values for `KB_DB_PORT`, `KB_REDIS_PORT` and `KB_API_PORT`. The containers reach each other
+by service name, so nothing else changes. Then run the same commands. The frontend's dev server still needs its own port (see that repository).
 
 ### Sign in
 

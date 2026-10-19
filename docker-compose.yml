@@ -1,3 +1,10 @@
+# Project name `qnsc-kb-backend` unless COMPOSE_PROJECT_NAME is set (in .env or the shell): that is what lets a second
+# copy of this repo run beside the first. No container_name is set on purpose, for the same reason.
+#
+# Images match production: RDS PostgreSQL 16 with pgvector (infra/live: rds engine_version "16") and ElastiCache
+# Valkey 7.2 (tf-modules cache module default). Tags are pinned to a full version.
+name: qnsc-kb-backend
+
 services:
   db:
     # Matches CI (.github/workflows/backend-ci.yml) and the RDS PG16 engine, so dev is
@@ -10,7 +17,7 @@ services:
     # data directory. Run `docker compose down -v` once to drop the old pgdata, then
     # re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
     # database nobody needs to keep.
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.1-pg16
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
       # be reachable from the LAN. The HOST port is KB_DB_PORT (default 5432): set it in
@@ -31,17 +38,19 @@ services:
       timeout: 5s
       retries: 5
 
+  # The service keeps the name `redis` (REDIS_URL points at redis:6379 inside the network). The engine is Valkey, the
+  # one production runs on ElastiCache; it speaks the Redis protocol, so REDIS_URL is unchanged.
   redis:
-    image: redis:7-alpine
+    image: valkey/valkey:7.2.14-alpine
     ports:
       - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
-    command: ["redis-server", "--requirepass", "devredis"]
+    command: ["valkey-server", "--requirepass", "devredis"]
     volumes:
       - redisdata:/data
     mem_limit: 128m
     mem_reservation: 32m
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a devredis ping | grep PONG"]
+      test: ["CMD-SHELL", "valkey-cli -a devredis ping | grep PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
