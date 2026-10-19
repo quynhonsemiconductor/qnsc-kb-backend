@@ -3,7 +3,6 @@ from sqlalchemy import Boolean, Column, ForeignKey, String, Table, UniqueConstra
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
-
 user_roles = Table(
     "user_roles",
     Base.metadata,
@@ -15,7 +14,9 @@ user_roles = Table(
 class Permission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "permissions"
 
-    key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    key: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     system: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -26,11 +27,15 @@ class Permission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class Role(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "roles"
-    __table_args__ = (UniqueConstraint("company_domain", "name", name="uq_roles_company_name"),)
+    __table_args__ = (
+        UniqueConstraint("company_domain", "name", name="uq_roles_company_name"),
+    )
 
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    company_domain: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    company_domain: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     permissions: Mapped[list["RolePermission"]] = relationship(
@@ -43,10 +48,18 @@ class Role(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class RolePermission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "role_permissions"
-    __table_args__ = (UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),)
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
+    )
 
-    role_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
-    permission_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False)
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"), nullable=False
+    )
+    permission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False
+    )
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="company")
     role: Mapped[Role] = relationship("Role", back_populates="permissions")
-    permission: Mapped[Permission] = relationship("Permission", back_populates="role_permissions")
+    permission: Mapped[Permission] = relationship(
+        "Permission", back_populates="role_permissions"
+    )

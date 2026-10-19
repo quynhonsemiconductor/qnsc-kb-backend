@@ -1,4 +1,5 @@
 """enable optional PostgreSQL row-level tenant isolation"""
+
 import os
 from alembic import op
 
@@ -31,13 +32,26 @@ def upgrade() -> None:
     if role:
         safe_role = role.replace('"', '""')
         op.execute(f'GRANT USAGE ON SCHEMA public TO "{safe_role}"')
-        op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{safe_role}"')
-        op.execute(f'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO "{safe_role}"')
-        op.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{safe_role}"')
-        op.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "{safe_role}"')
+        op.execute(
+            f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{safe_role}"'
+        )
+        op.execute(
+            f'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO "{safe_role}"'
+        )
+        op.execute(
+            f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{safe_role}"'
+        )
+        op.execute(
+            f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "{safe_role}"'
+        )
 
 
 def downgrade() -> None:
-    for table, name in (("document_sources", "tenant_document_sources"), ("parent_chunks", "tenant_parent_chunks"), ("article_chunks", "tenant_article_chunks"), ("articles", "tenant_articles")):
+    for table, name in (
+        ("document_sources", "tenant_document_sources"),
+        ("parent_chunks", "tenant_parent_chunks"),
+        ("article_chunks", "tenant_article_chunks"),
+        ("articles", "tenant_articles"),
+    ):
         op.execute(f"DROP POLICY IF EXISTS {name} ON {table}")
         op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")

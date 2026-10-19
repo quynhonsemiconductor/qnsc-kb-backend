@@ -111,25 +111,12 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      # black and mypy have been dev dependencies since the project began and nothing ever
-      # ran either, so both start ADVISORY. This codebase has never been formatted, and a
-      # blocking gate would fail every PR on a whole-repo backlog that has nothing to do
-      # with the change under review.
-      #
-      # Promote to blocking after one dedicated `style: format with black` commit. Doing
-      # that reformat inside a feature branch would bury the actual change under every
-      # file in the repository, which is why it is not done here.
-      #
-      # An advisory check nobody ever promotes is decoration — this one has a specific
-      # next step, and it should be taken.
-      - name: Format check (black, advisory)
-        continue-on-error: true
+      # Black is blocking: the codebase was formatted in one dedicated commit, so every later PR is checked.
+      - name: Format check (black)
         run: poetry run black --check src migrations scripts
 
-      # Advisory to begin with: this codebase has never been type-checked, so a blocking
-      # gate would fail on a large backlog that has nothing to do with the PR in front of
-      # it. Make it blocking once the existing errors are cleared — an advisory check
-      # nobody ever promotes is decoration.
+      # Advisory: `mypy src` reports 229 errors in 50 files (the import layout is fixed in pyproject). Blocking
+      # once those are cleared; until then this step is visible in the log but does not gate the PR.
       - name: Typecheck (mypy, advisory)
         continue-on-error: true
         run: poetry run mypy src
@@ -153,7 +140,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.1-pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -165,11 +152,12 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # Valkey, the engine production runs on ElastiCache (same protocol; REDIS_URL unchanged). Service name kept.
       redis:
-        image: redis:7-alpine
+        image: valkey/valkey:7.2.14-alpine
         ports: ['6379:6379']
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
@@ -281,7 +269,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.1-pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -401,6 +389,7 @@ jobs:
   # reach, a port another stack owns), or a service reports unhealthy forever. This boots the real compose
   # stack (db, redis, migrator, api, worker, beat) from `.env.example` and proves the health endpoint
   # and one authenticated call, so that drift fails a pull request instead of the next person's afternoon.
+  # LocalStack is part of the stack: uploads go to its bucket, and its healthcheck proves the bucket's CORS too.
   #
   # NOT proven here: the real embedding model. The ~2.3 GB bake is skipped (KB_BAKE_EMBEDDING_MODEL=false)
   # and EMBEDDING_MODEL is set to `mock`, so search quality is untested; that path has its own tests and the
@@ -427,7 +416,7 @@ jobs:
           echo 'KB_BAKE_EMBEDDING_MODEL=false' >> .env
 
       - name: Start Postgres and Redis
-        run: docker compose up -d --build --wait db redis
+        run: docker compose up -d --build --wait db redis localstack
 
       - name: Migrate
         run: docker compose --profile migrate run --rm migrator
@@ -496,7 +485,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # BAKE_EMBEDDING_MODEL=false: this job proves the Dockerfile BUILDS, and baking
       # ~2.3 GB of weights into the api and worker images would push that through the
@@ -508,7 +497,7 @@ jobs:
       # builds (and every PR's `cache-from`, which falls back to main's) depend on. PRs still READ the cache; a PR's later pushes
       # reuse main's layers. An empty `cache-to` is "do not export".
       - name: Build api image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: api
@@ -521,7 +510,7 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=api' || '' }}
 
       - name: Build worker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: worker
@@ -539,7 +528,7 @@ jobs:
           image-ref: qnsc-kb-api:scan
 
       - name: Build migrator image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: migrator

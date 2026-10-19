@@ -18,6 +18,7 @@ therefore takes effect on the next deploy without a manual ``ALTER ROLE`` — ot
 the application would keep the new password while the role kept the old one, and the
 failure would surface as an authentication error minutes later in a different task.
 """
+
 from __future__ import annotations
 
 import asyncio

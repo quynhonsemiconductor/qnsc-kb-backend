@@ -122,9 +122,7 @@ def attach_consumers(
         QueueSnapshot(
             name=name,
             depth=depths.get(name),
-            consumers=tuple(
-                worker.name for worker in workers if name in worker.queues
-            ),
+            consumers=tuple(worker.name for worker in workers if name in worker.queues),
         )
         for name in queue_names
     ]
@@ -163,8 +161,7 @@ def summarise(
 
     return {
         "verdict": verdict,
-        "healthy": verdict
-        in {VERDICT_INLINE_MODE, VERDICT_BUSY, VERDICT_HEALTHY},
+        "healthy": verdict in {VERDICT_INLINE_MODE, VERDICT_BUSY, VERDICT_HEALTHY},
         "detail": _DETAIL[verdict],
         "job_mode": job_mode,
         "worker_count": len(workers),
@@ -172,9 +169,7 @@ def summarise(
         "queues": [queue.as_dict() for queue in queues],
         "total_queued": backlog if broker_error is None else None,
         "queues_without_consumer": sorted(unconsumed),
-        "queues_with_backlog_and_no_consumer": sorted(
-            queue.name for queue in starved
-        ),
+        "queues_with_backlog_and_no_consumer": sorted(queue.name for queue in starved),
         # The message, never the URL: the broker URL carries the Redis password.
         "broker_error": broker_error,
     }

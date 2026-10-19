@@ -1,8 +1,8 @@
 """Stable asyncio loop runner for synchronous worker entry points."""
+
 from __future__ import annotations
 
 import asyncio
-
 
 _worker_event_loop: asyncio.AbstractEventLoop | None = None
 

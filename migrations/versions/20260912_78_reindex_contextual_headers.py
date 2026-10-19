@@ -32,7 +32,6 @@ import sqlalchemy as sa
 
 from src.core.config import settings
 
-
 revision = "20260912_78"
 down_revision = "20260912_77"
 branch_labels = None
@@ -41,7 +40,9 @@ depends_on = None
 
 def upgrade() -> None:
     connection = op.get_bind()
-    target_version = settings.CHUNKING_VERSION  # "v3-contextual-headers" at this revision
+    target_version = (
+        settings.CHUNKING_VERSION
+    )  # "v3-contextual-headers" at this revision
 
     stale = connection.execute(
         sa.text(

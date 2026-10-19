@@ -23,7 +23,11 @@ from src.rag.reranker import (
 from src.rag.cross_encoder import CrossEncoderUnavailable, reorder_by_cross_encoder
 from src.rag.cross_encoder import breaker as cross_encoder_breaker
 from src.rag.cross_encoder import score as cross_encoder_score
-from src.rag.query_router import is_comparison_query, needs_deep_retrieval, split_comparison_subjects
+from src.rag.query_router import (
+    is_comparison_query,
+    needs_deep_retrieval,
+    split_comparison_subjects,
+)
 from src.rag.multi_query import generate_followup_query, generate_subqueries
 from src.models.ops import SearchLog
 from src.repositories.feature_flags import FeatureFlagRepository
@@ -42,7 +46,9 @@ from src.lib.embeddings import get_bge_embedding, get_bge_embeddings
 # Keyed by DIGEST, not by the query itself, so no user's question text is retained in
 # process memory. The entry is a tuple, and a copy is handed out, so no caller can
 # mutate what the next one reads.
-_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str], tuple[float, ...]]" = OrderedDict()
+_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str], tuple[float, ...]]" = (
+    OrderedDict()
+)
 _QUERY_EMBEDDING_CACHE_MAX = 256
 
 
@@ -139,11 +145,21 @@ async def get_text_embeddings(texts: list[str]) -> list[list[float]] | None:
     try:
         return await asyncio.to_thread(get_bge_embeddings, texts)
     except Exception as exc:
-        logger.error("Error generating local BGE embedding batch", error=str(exc), batch_size=len(texts))
+        logger.error(
+            "Error generating local BGE embedding batch",
+            error=str(exc),
+            batch_size=len(texts),
+        )
         return None
 
+
 class SearchService:
-    def __init__(self, chunk_repo: ChunkRepository, gov_repo: GovernanceRepository, feature_flags: FeatureFlagRepository | None = None):
+    def __init__(
+        self,
+        chunk_repo: ChunkRepository,
+        gov_repo: GovernanceRepository,
+        feature_flags: FeatureFlagRepository | None = None,
+    ):
         self.chunk_repo = chunk_repo
         self.gov_repo = gov_repo
         self.feature_flags = feature_flags
@@ -182,14 +198,12 @@ class SearchService:
             try:
                 await self.gov_repo.db.rollback()
             except Exception:
-                logger.warning("Could not reset the session after a gap write", exc_info=True)
+                logger.warning(
+                    "Could not reset the session after a gap write", exc_info=True
+                )
 
     async def search(
-        self,
-        user: User,
-        query: str,
-        filters: dict | None = None,
-        limit: int = 5
+        self, user: User, query: str, filters: dict | None = None, limit: int = 5
     ) -> list[dict[str, Any]]:
         # Reset before any early return, so a caller never reads the previous query's
         # verdict for one that never reached the embedder.
@@ -197,7 +211,9 @@ class SearchService:
         if not query.strip():
             return []
         if not any(
-            AuthorizationService.has_permission(user, "article.read", requested_scope=scope)
+            AuthorizationService.has_permission(
+                user, "article.read", requested_scope=scope
+            )
             for scope in ("own", "department", "company", "global")
         ):
             return []
@@ -205,14 +221,26 @@ class SearchService:
         started = time.perf_counter()
 
         effective_filters = dict(filters or {})
-        if not AuthorizationService.has_permission(user, "article.read", requested_scope="global"):
+        if not AuthorizationService.has_permission(
+            user, "article.read", requested_scope="global"
+        ):
             effective_filters["company_domain"] = user.company_domain
         if not AuthorizationService.has_full_company_article_access(user):
-            effective_filters["departments"] = sorted(AuthorizationService.member_department_names(user))
-        if not AuthorizationService.has_permission(user, "article.read", requested_scope="company"):
-            if AuthorizationService.has_permission(user, "article.read", requested_scope="department"):
-                effective_filters["departments"] = sorted(AuthorizationService.owned_department_names(user))
-            elif AuthorizationService.has_permission(user, "article.read", requested_scope="own"):
+            effective_filters["departments"] = sorted(
+                AuthorizationService.member_department_names(user)
+            )
+        if not AuthorizationService.has_permission(
+            user, "article.read", requested_scope="company"
+        ):
+            if AuthorizationService.has_permission(
+                user, "article.read", requested_scope="department"
+            ):
+                effective_filters["departments"] = sorted(
+                    AuthorizationService.owned_department_names(user)
+                )
+            elif AuthorizationService.has_permission(
+                user, "article.read", requested_scope="own"
+            ):
                 effective_filters["owner_id"] = user.id
         logger.info(
             "Search started",
@@ -225,7 +253,7 @@ class SearchService:
             user_department=user.dept,
             department_count=len(user.departments),
         )
-        
+
         # Question words such as "what is" / "là gì" are not useful search
         # terms. Normalize them before both vector and keyword retrieval so
         # the exact subject (for example, CTS) is not drowned out by generic
@@ -297,7 +325,10 @@ class SearchService:
         # 1. Get embedding asynchronously
         embedding = await _embed_or_degrade(retrieval_query)
 
-        reranking_enabled = not self.feature_flags or await self.feature_flags.is_enabled("rag.reranker", user)
+        reranking_enabled = (
+            not self.feature_flags
+            or await self.feature_flags.is_enabled("rag.reranker", user)
+        )
         # The cross-encoder REORDERS the pool the lexical scorer already ranked; it never
         # runs on its own. Off entirely when the base reranker is off, so disabling
         # "rag.reranker" still means "no reranking of any kind" as it always has.
@@ -314,20 +345,25 @@ class SearchService:
             and needs_deep_retrieval(query)
             and (
                 not self.feature_flags
-                or await self.feature_flags.is_enabled("rag.cross_encoder_reranker", user)
+                or await self.feature_flags.is_enabled(
+                    "rag.cross_encoder_reranker", user
+                )
             )
         )
         # A cross-encoder needs a wider pool than `limit` to have anything to reorder --
         # hybrid_search itself is asked for `limit` rows otherwise, unchanged from before
         # this feature existed. Requesting the wider pool only when the flag is actually
         # on keeps every other search exactly as cheap as it was.
-        pool_limit = settings.CROSS_ENCODER_CANDIDATE_POOL if cross_encoder_enabled else limit
+        pool_limit = (
+            settings.CROSS_ENCODER_CANDIDATE_POOL if cross_encoder_enabled else limit
+        )
 
         # 2. Query hybrid search -- once per comparison subject / generated sub-query
         # when the query was expanded above, run concurrently and merged and
         # de-duplicated by chunk id; a single call otherwise, exactly as before either
         # feature existed.
         if multi_subject_queries:
+
             async def _search_subject(subject_query: str) -> list:
                 subject_embedding = (
                     embedding
@@ -347,19 +383,24 @@ class SearchService:
             # `multi_subject_queries`, so the merge below stays deterministic --
             # identical to running the loop sequentially, just not serialized on I/O.
             results_per_subject = await asyncio.gather(
-                *(_search_subject(subject_query) for subject_query in multi_subject_queries)
+                *(
+                    _search_subject(subject_query)
+                    for subject_query in multi_subject_queries
+                )
             )
             candidates: list = []
             seen_chunk_ids: set = set()
             for subject_candidates in results_per_subject:
-                candidates = _merge_candidates(candidates, subject_candidates, seen_chunk_ids)
+                candidates = _merge_candidates(
+                    candidates, subject_candidates, seen_chunk_ids
+                )
         else:
             candidates = await self.chunk_repo.hybrid_search(
                 query=retrieval_query,
                 query_embedding=embedding,
                 user=user,
                 limit=pool_limit,
-                filters=effective_filters
+                filters=effective_filters,
             )
 
         # Scored here, and again below only if an adaptive follow-up round (also part of
@@ -368,7 +409,9 @@ class SearchService:
         # rather than scoring the same passage again.
         async def _rerank(pool: list) -> list[tuple]:
             if reranking_enabled:
-                result = rerank_chunks_with_scores(retrieval_query, pool, limit=pool_limit)
+                result = rerank_chunks_with_scores(
+                    retrieval_query, pool, limit=pool_limit
+                )
             else:
                 # Prepared against the same pool the reranker would have used, so
                 # turning the reranker off changes the ordering and not the calibration.
@@ -377,7 +420,11 @@ class SearchService:
                     (chunk, retrieval_score(retrieval_query, chunk, prepared))
                     for chunk in pool[:pool_limit]
                 ]
-            attempt = cross_encoder_breaker.begin() if cross_encoder_enabled and len(result) > 1 else None
+            attempt = (
+                cross_encoder_breaker.begin()
+                if cross_encoder_enabled and len(result) > 1
+                else None
+            )
             if attempt is not None:
                 try:
                     try:
@@ -385,7 +432,10 @@ class SearchService:
                             asyncio.to_thread(
                                 cross_encoder_score,
                                 retrieval_query,
-                                [chunk_passage(chunk) for chunk, _lexical_score in result],
+                                [
+                                    chunk_passage(chunk)
+                                    for chunk, _lexical_score in result
+                                ],
                             ),
                             timeout=settings.CROSS_ENCODER_TIMEOUT_SECONDS,
                         )
@@ -453,7 +503,9 @@ class SearchService:
                     limit=pool_limit,
                     filters=effective_filters,
                 )
-                merged = _merge_candidates(candidates, followup_candidates, seen_chunk_ids)
+                merged = _merge_candidates(
+                    candidates, followup_candidates, seen_chunk_ids
+                )
                 if len(merged) == len(candidates):
                     # Every follow-up hit was already in the pool -- nothing new to
                     # re-score, and another round would just ask the same question again.
@@ -473,7 +525,8 @@ class SearchService:
         # when the reranked passage has at least one meaningful lexical signal.
         relevance_threshold = settings.RAG_MIN_RELEVANCE_SCORE
         scored_chunks = [
-            (chunk, score) for chunk, score in ranked
+            (chunk, score)
+            for chunk, score in ranked
             if getattr(chunk, "article", None) is not None
             and PermissionService.can_view_article(user, chunk.article)
             and score >= relevance_threshold
@@ -506,48 +559,72 @@ class SearchService:
             article = chunk.article
             AuthorizationService.restrict_article_metadata(user, article)
 
-            formatted_results.append({
-                "chunk_id": str(chunk.id),
-                "parent_chunk_id": str(chunk.parent_chunk_id),
-                "article_id": str(article.id),
-                "title": article.title,
-                "dept": article.dept,
-                "domain": article.domain,
-                "type": article.type,
-                "sensitivity": article.sensitivity,
-                "chunk_text": chunk.chunk_text,
-                "parent_text": parent.text if parent else chunk.chunk_text,
-                "child_texts": [child.chunk_text for child in parent.child_chunks] if parent else [chunk.chunk_text],
-                "section_ref": parent.section_ref if parent else None,
-                "heading": (parent.heading if parent else None) or (parent.section_ref if parent else None),
-                "chunk_type": getattr(chunk, "chunk_type", "text"),
-                "chunking_version": getattr(chunk, "chunking_version", None),
-                "page_number": chunk.page_number if chunk.page_number is not None else (parent.page_number if parent else None),
-                "source_url": f"/api/v1/articles/{article.id}/source" + (f"?page={chunk.page_number or parent.page_number}" if (chunk.page_number or (parent and parent.page_number)) else ""),
-                "owner_email": getattr(getattr(article, "owner", None), "email", None),
-                "last_reviewed": article.last_reviewed.isoformat() if article.last_reviewed else None,
-                "evidence": (
-                    {
-                        "id": str(chunk.evidence.id),
-                        "kind": chunk.evidence.kind,
-                        "label": chunk.evidence.label,
-                        "page_number": chunk.evidence.page_number,
-                        "structured_data": chunk.evidence.structured_data,
-                        "preview_url": f"/api/v1/articles/{article.id}/evidence/{chunk.evidence.id}/preview",
-                    }
-                    if getattr(chunk, "evidence", None)
-                    else None
-                ),
-                "score": score
-            })
+            formatted_results.append(
+                {
+                    "chunk_id": str(chunk.id),
+                    "parent_chunk_id": str(chunk.parent_chunk_id),
+                    "article_id": str(article.id),
+                    "title": article.title,
+                    "dept": article.dept,
+                    "domain": article.domain,
+                    "type": article.type,
+                    "sensitivity": article.sensitivity,
+                    "chunk_text": chunk.chunk_text,
+                    "parent_text": parent.text if parent else chunk.chunk_text,
+                    "child_texts": (
+                        [child.chunk_text for child in parent.child_chunks]
+                        if parent
+                        else [chunk.chunk_text]
+                    ),
+                    "section_ref": parent.section_ref if parent else None,
+                    "heading": (parent.heading if parent else None)
+                    or (parent.section_ref if parent else None),
+                    "chunk_type": getattr(chunk, "chunk_type", "text"),
+                    "chunking_version": getattr(chunk, "chunking_version", None),
+                    "page_number": (
+                        chunk.page_number
+                        if chunk.page_number is not None
+                        else (parent.page_number if parent else None)
+                    ),
+                    "source_url": f"/api/v1/articles/{article.id}/source"
+                    + (
+                        f"?page={chunk.page_number or parent.page_number}"
+                        if (chunk.page_number or (parent and parent.page_number))
+                        else ""
+                    ),
+                    "owner_email": getattr(
+                        getattr(article, "owner", None), "email", None
+                    ),
+                    "last_reviewed": (
+                        article.last_reviewed.isoformat()
+                        if article.last_reviewed
+                        else None
+                    ),
+                    "evidence": (
+                        {
+                            "id": str(chunk.evidence.id),
+                            "kind": chunk.evidence.kind,
+                            "label": chunk.evidence.label,
+                            "page_number": chunk.evidence.page_number,
+                            "structured_data": chunk.evidence.structured_data,
+                            "preview_url": f"/api/v1/articles/{article.id}/evidence/{chunk.evidence.id}/preview",
+                        }
+                        if getattr(chunk, "evidence", None)
+                        else None
+                    ),
+                    "score": score,
+                }
+            )
 
         try:
-            self.chunk_repo.db.add(SearchLog(
-                user_id=user.id,
-                query=REDACTED_OPERATIONAL_CONTENT,
-                result_count=len(formatted_results),
-                latency_ms=int((time.perf_counter() - started) * 1000),
-            ))
+            self.chunk_repo.db.add(
+                SearchLog(
+                    user_id=user.id,
+                    query=REDACTED_OPERATIONAL_CONTENT,
+                    result_count=len(formatted_results),
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            )
             await self.chunk_repo.db.commit()
         except Exception as exc:
             logger.warning("Search log persistence failed", error=str(exc))

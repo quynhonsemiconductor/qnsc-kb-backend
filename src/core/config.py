@@ -4,12 +4,34 @@ from typing import Any, ClassVar
 from urllib.parse import quote, urlparse
 import re
 
-
 # The password the bootstrap administrator gets when nothing else is configured. It is
 # written down in this repository on purpose — a local checkout should just work — which
 # is exactly why validate_production refuses to start with it. Defined here rather than
 # beside the bootstrap code so that check has no import cycle to reach it.
 DEVELOPMENT_DEFAULT_PASSWORD = "Admin123@"
+
+
+def is_local_object_endpoint(value: str | None) -> bool:
+    """Whether a URL is a plain-HTTP S3 emulator on this machine or the compose network.
+
+    Honoured only in a development environment (`Settings.allows_local_object_endpoints`).
+    """
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "http"
+        and hostname in {"localhost", "127.0.0.1", "localstack"}
+        and port is not None
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+    )
 
 
 def is_cloudflare_r2_endpoint(value: str | None) -> bool:
@@ -110,6 +132,9 @@ class Settings(BaseSettings):
     # else has no effect at all, rather than quietly widening production.
     LLM_ALLOW_LOCAL_ENDPOINTS: bool = False
     GEMINI_API_KEY: str | None = None
+    # The deterministic local answer provider. `mock` is honoured only in a development environment, and only when no
+    # provider is saved in the admin screen. Refused elsewhere (validate_production).
+    LLM_PROVIDER: str = ""
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
     LLM_TIMEOUT_SECONDS: float = 90.0
@@ -579,6 +604,16 @@ class Settings(BaseSettings):
     # Short on purpose. This runs inside document ingest, once per document, and a slow
     # provider must cost a suggestion rather than the import.
     DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # Whether a document is cut into several review candidates. OFF: every document is ONE
+    # candidate, so one draft and one approval. ON restores the earlier behaviour: an upload
+    # over 48,000 characters is split at paragraph boundaries (document_splitter.py), and a
+    # connector import is split at every `##` heading with each part routed to a department
+    # (department_routing.py), which sends the draft to the "Review sections" page and
+    # commits it into child drafts. Turned off 2026-10-18 at the product owner's request:
+    # reviewing parts and then committing them was more process than the review needed.
+    # Drafts that were ALREADY split keep their candidates and stay reviewable either way,
+    # and the department suggestion is still made, for the document as a whole.
+    DOCUMENT_AUTO_SPLIT_ENABLED: bool = False
     # Master switch for the tenant Knowledge Graph. Keep it off while the product focuses
     # on document retrieval/review: this also prevents publish-time entity extraction from
     # spending an LLM request. Microsoft Graph connectors/email are unrelated and remain on.
@@ -672,6 +707,9 @@ class Settings(BaseSettings):
     SOURCE_ORPHAN_GRACE_HOURS: int = 24
     AWS_REGION: str | None = None
     S3_ENDPOINT_URL: str | None = None
+    # Presigned URLs are signed for, and handed to the browser at, this origin. Local development only (refused in
+    # production): the services reach the emulator by its compose name, the browser needs the published host port.
+    S3_PUBLIC_ENDPOINT_URL: str | None = None
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None
     R2_SECRET_ACCESS_KEY: str | None = None
@@ -792,7 +830,9 @@ class Settings(BaseSettings):
         ]
 
     #: Authorities that mean "any tenant" (or any personal account). Never acceptable as the pin.
-    MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset({"common", "organizations", "consumers"})
+    MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset(
+        {"common", "organizations", "consumers"}
+    )
     #: An Entra tenant id is a GUID. Shape only: no version or variant nibble, because a tenant id is not
     #: guaranteed to be an RFC 4122 UUID and a stricter pattern would refuse a real tenant.
     TENANT_GUID: ClassVar[re.Pattern[str]] = re.compile(
@@ -845,6 +885,19 @@ class Settings(BaseSettings):
         }
 
     @property
+    def allows_local_object_endpoints(self) -> bool:
+        """Whether S3 may be reached over plain HTTP on this machine (LocalStack/MinIO). Development only, no opt-in flag."""
+        return self.is_development_environment
+
+    @property
+    def uses_mock_llm(self) -> bool:
+        """Answers come from the deterministic local provider. Only in development; `validate_production` refuses it."""
+        return (
+            self.LLM_PROVIDER.strip().lower() == "mock"
+            and self.is_development_environment
+        )
+
+    @property
     def allows_local_llm_endpoints(self) -> bool:
         """Whether a loopback/private LLM endpoint may be configured and called.
 
@@ -859,6 +912,19 @@ class Settings(BaseSettings):
         environment = self.ENVIRONMENT.lower()
         if environment in {"development", "dev", "local"}:
             return
+        # Local-only switches are refused first, so a copied development value fails with its own name.
+        if self.LLM_PROVIDER.strip().lower() == "mock":
+            raise RuntimeError(
+                "LLM_PROVIDER=mock is for local development only; configure a real provider"
+            )
+        if self.EMBEDDING_MODEL.strip().lower() == "mock":
+            raise RuntimeError(
+                "EMBEDDING_MODEL=mock is for local development only; set the deployed embedding model"
+            )
+        if (self.S3_PUBLIC_ENDPOINT_URL or "").strip():
+            raise RuntimeError(
+                "S3_PUBLIC_ENDPOINT_URL is for local development only; unset it in this environment"
+            )
         # Secret-material checks apply to ANY non-development environment. The
         # committed default SECRET_KEY signs access/refresh JWTs and (without a
         # DEK) encrypts stored connector tokens; a staging/uat/demo deployment

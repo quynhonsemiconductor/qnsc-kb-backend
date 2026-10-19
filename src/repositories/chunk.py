@@ -52,7 +52,9 @@ class ChunkRepository:
         await self.db.flush()
         return parent
 
-    async def create_child_chunks(self, chunks: list[ArticleChunk]) -> list[ArticleChunk]:
+    async def create_child_chunks(
+        self, chunks: list[ArticleChunk]
+    ) -> list[ArticleChunk]:
         self.db.add_all(chunks)
         await self.db.flush()
         return chunks
@@ -66,8 +68,12 @@ class ChunkRepository:
         the rebuild failed -- retrieval returned nothing for it while index_status still
         read "ready" from the previous run.
         """
-        await self.db.execute(delete(ParentChunk).where(ParentChunk.article_id == article_id))
-        await self.db.execute(delete(ArticleChunk).where(ArticleChunk.article_id == article_id))
+        await self.db.execute(
+            delete(ParentChunk).where(ParentChunk.article_id == article_id)
+        )
+        await self.db.execute(
+            delete(ArticleChunk).where(ArticleChunk.article_id == article_id)
+        )
 
     async def get_by_article_id(self, article_id: uuid.UUID) -> Sequence[ArticleChunk]:
         result = await self.db.execute(
@@ -83,7 +89,9 @@ class ChunkRepository:
         )
         return result.scalar_one_or_none()
 
-    async def authorized_chunk_ids(self, user: object, chunk_ids: list[uuid.UUID]) -> set[str]:
+    async def authorized_chunk_ids(
+        self, user: object, chunk_ids: list[uuid.UUID]
+    ) -> set[str]:
         """Return only citation chunks still visible to the current user.
 
         Selects the id COLUMN, not the entity. Authorization is decided entirely by
@@ -95,7 +103,11 @@ class ChunkRepository:
         if not chunk_ids:
             return set()
 
-        conditions = [ArticleChunk.id.in_(chunk_ids), Article.status == "published", *ArticleRepository._authorized_article_filters(user)]
+        conditions = [
+            ArticleChunk.id.in_(chunk_ids),
+            Article.status == "published",
+            *ArticleRepository._authorized_article_filters(user),
+        ]
         result = await self.db.execute(
             select(ArticleChunk.id)
             .join(Article, Article.id == ArticleChunk.article_id)
@@ -103,15 +115,13 @@ class ChunkRepository:
         )
         return {str(chunk_id) for chunk_id in result.scalars().all()}
 
-    async def update_permissions(self, article_id: uuid.UUID, sensitivity: str, visibility: str, dept: str) -> None:
+    async def update_permissions(
+        self, article_id: uuid.UUID, sensitivity: str, visibility: str, dept: str
+    ) -> None:
         await self.db.execute(
             update(ArticleChunk)
             .where(ArticleChunk.article_id == article_id)
-            .values(
-                sensitivity=sensitivity,
-                visibility=visibility,
-                department_id=dept
-            )
+            .values(sensitivity=sensitivity, visibility=visibility, department_id=dept)
         )
         await self.db.commit()
 
@@ -154,7 +164,8 @@ class ChunkRepository:
         neighbor_edges = (
             await self.db.execute(
                 select(
-                    GraphRelationship.source_entity_id, GraphRelationship.target_entity_id
+                    GraphRelationship.source_entity_id,
+                    GraphRelationship.target_entity_id,
                 ).where(
                     GraphRelationship.company_domain == company_domain,
                     or_(
@@ -231,7 +242,7 @@ class ChunkRepository:
         query_embedding: list[float] | None,
         user: object,
         limit: int = 5,
-        filters: dict | None = None
+        filters: dict | None = None,
     ) -> list[ArticleChunk]:
         """
         Executes a hybrid search:
@@ -241,7 +252,7 @@ class ChunkRepository:
         - Enforces access control natively via the shared Article predicate.
         """
         filters = filters or {}
-        
+
         # Base filter: permissions bitwise AND
         # We also enforce that the article must be published (not draft or soft deleted)
         where_clauses = [
@@ -257,11 +268,13 @@ class ChunkRepository:
         # An explicit ALLOW is already part of the shared Article predicate above; only
         # the DENY needs adding here. This used to build an unused `explicit_allow`
         # EXISTS on every search.
-        explicit_deny = exists(select(ArticleUserPermission.id).where(
-            ArticleUserPermission.article_id == Article.id,
-            ArticleUserPermission.user_id == user.id,
-            ArticleUserPermission.effect == "deny",
-        ))
+        explicit_deny = exists(
+            select(ArticleUserPermission.id).where(
+                ArticleUserPermission.article_id == Article.id,
+                ArticleUserPermission.user_id == user.id,
+                ArticleUserPermission.effect == "deny",
+            )
+        )
         where_clauses.append(not_(explicit_deny))
         # Audience authorization is already present in the shared Article
         # predicate above.
@@ -294,14 +307,23 @@ class ChunkRepository:
             where_clauses.append(or_(*scope_conditions))
 
         # A deactivated department is no longer a valid content scope.
-        where_clauses.append(exists(select(Department.id).where(
-            Department.company_domain == Article.company_domain,
-            Department.name == Article.dept,
-            Department.active.is_(True),
-        )))
+        where_clauses.append(
+            exists(
+                select(Department.id).where(
+                    Department.company_domain == Article.company_domain,
+                    Department.name == Article.dept,
+                    Department.active.is_(True),
+                )
+            )
+        )
 
         if filters.get("dept"):
-            where_clauses.append(or_(ArticleChunk.department_id == filters["dept"], Article.departments.any(Department.name == filters["dept"])))
+            where_clauses.append(
+                or_(
+                    ArticleChunk.department_id == filters["dept"],
+                    Article.departments.any(Department.name == filters["dept"]),
+                )
+            )
         if filters.get("sensitivity"):
             where_clauses.append(ArticleChunk.sensitivity == filters["sensitivity"])
         if filters.get("type"):
@@ -388,7 +410,8 @@ class ChunkRepository:
                     and_(
                         *where_clauses,
                         ArticleChunk.embedding_version == settings.EMBEDDING_VERSION,
-                        ArticleChunk.embedding.cosine_distance(query_embedding) <= settings.VECTOR_DISTANCE_THRESHOLD,
+                        ArticleChunk.embedding.cosine_distance(query_embedding)
+                        <= settings.VECTOR_DISTANCE_THRESHOLD,
                     )
                 )
                 .order_by(ArticleChunk.embedding.cosine_distance(query_embedding))
@@ -407,16 +430,21 @@ class ChunkRepository:
         # with the immutable_unaccent GIN index created by migration 58.
         # The old leading-wildcard ILIKE path forced a scan of every chunk and
         # ranked against a different expression than the one it filtered.
-        search_vector = func.to_tsvector("simple", func.immutable_unaccent(ArticleChunk.chunk_text))
+        search_vector = func.to_tsvector(
+            "simple", func.immutable_unaccent(ArticleChunk.chunk_text)
+        )
 
         def fold(value: str) -> str:
             return "".join(
-                char for char in unicodedata.normalize("NFD", value)
+                char
+                for char in unicodedata.normalize("NFD", value)
                 if unicodedata.category(char) != "Mn"
             ).lower()
 
         folded_query = fold(query)
-        keyword_terms = [term for term in re.findall(r"[\w'-]+", folded_query) if len(term) > 1]
+        keyword_terms = [
+            term for term in re.findall(r"[\w'-]+", folded_query) if len(term) > 1
+        ]
 
         # OR the terms, do NOT and them. plainto_tsquery joins every lexeme with `&`, so a
         # question longer than its own subject could not match the passage containing that
@@ -450,17 +478,26 @@ class ChunkRepository:
         else:
             # No usable terms (all one-character, or an empty query): fall back to the
             # whole string rather than building an empty tsquery, which matches nothing.
-            search_query = func.plainto_tsquery("simple", func.immutable_unaccent(query))
+            search_query = func.plainto_tsquery(
+                "simple", func.immutable_unaccent(query)
+            )
 
         keyword_conditions = [search_vector.op("@@")(search_query)]
-        keyword_conditions.extend(func.immutable_unaccent(Article.title).ilike(f"%{term}%") for term in keyword_terms)
+        keyword_conditions.extend(
+            func.immutable_unaccent(Article.title).ilike(f"%{term}%")
+            for term in keyword_terms
+        )
         keyword_stmt = (
             select(ArticleChunk)
             .join(Article, Article.id == ArticleChunk.article_id)
             .where(
                 and_(
                     *where_clauses,
-                    or_(*keyword_conditions) if keyword_conditions else search_vector.op("@@")(search_query)
+                    (
+                        or_(*keyword_conditions)
+                        if keyword_conditions
+                        else search_vector.op("@@")(search_query)
+                    ),
                 )
             )
             .order_by(
@@ -490,10 +527,16 @@ class ChunkRepository:
         if settings.GRAPH_RETRIEVAL_ENABLED:
             try:
                 graph_results = await self._graph_augmented_candidates(
-                    getattr(user, "company_domain", None), folded_query, where_clauses, limit
+                    getattr(user, "company_domain", None),
+                    folded_query,
+                    where_clauses,
+                    limit,
                 )
             except Exception as exc:
-                logger.warning("Graph-augmented retrieval failed; continuing without it", error=str(exc))
+                logger.warning(
+                    "Graph-augmented retrieval failed; continuing without it",
+                    error=str(exc),
+                )
             logger.info(
                 "Search graph candidates loaded",
                 query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
@@ -516,7 +559,9 @@ class ChunkRepository:
         add_rrf_scores(graph_results)
 
         # Sort by score descending
-        sorted_results = sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)
+        sorted_results = sorted(
+            rrf_scores.values(), key=lambda x: x["score"], reverse=True
+        )
         logger.info(
             "Search candidates merged",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),

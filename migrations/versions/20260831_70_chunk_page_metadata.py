@@ -34,7 +34,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
-
 revision = "20260831_70"
 down_revision = "20260831_69"
 branch_labels = None
@@ -51,7 +50,9 @@ def upgrade() -> None:
     # body_md rather than from extracted page text, and NULL is what the retrieval
     # formatter already falls back on.
     op.execute("ALTER TABLE parent_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER")
-    op.execute("ALTER TABLE article_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER")
+    op.execute(
+        "ALTER TABLE article_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER"
+    )
 
     inspector = inspect(op.get_bind())
     if METADATA_TABLE not in set(inspector.get_table_names()):

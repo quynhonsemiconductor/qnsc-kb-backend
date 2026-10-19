@@ -4,6 +4,7 @@ from src.models.article import Article
 from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.rbac import AuthorizationService
 
+
 class PermissionService:
     @staticmethod
     def _explicit_user_effect(user: User, article: Article) -> str | None:
@@ -51,15 +52,24 @@ class PermissionService:
         )
         if source_user_allow:
             return True
-        user_department_ids = {department.id for department in (getattr(user, "departments", []) or [])}
-        article_department_ids = {department.id for department in (getattr(article, "departments", []) or [])}
+        user_department_ids = {
+            department.id for department in (getattr(user, "departments", []) or [])
+        }
+        article_department_ids = {
+            department.id for department in (getattr(article, "departments", []) or [])
+        }
         return bool(user_department_ids & article_department_ids)
 
     @classmethod
     def can_view_article(cls, user: User, article: Article) -> bool:
-        if article.status == "deleted" or getattr(article, "lifecycle_status", "active") not in (None, "active"):
+        if article.status == "deleted" or getattr(
+            article, "lifecycle_status", "active"
+        ) not in (None, "active"):
             return False
-        if not any(AuthorizationService.has_permission(user, "article.read", article, scope) for scope in ("own", "department", "company", "global")):
+        if not any(
+            AuthorizationService.has_permission(user, "article.read", article, scope)
+            for scope in ("own", "department", "company", "global")
+        ):
             return False
         explicit_effect = cls._explicit_user_effect(user, article)
         if explicit_effect == "deny":
@@ -74,7 +84,12 @@ class PermissionService:
             # but a reader must not discover it through direct IDs or search.
             governance_access = any(
                 AuthorizationService.has_permission(user, permission, article, scope)
-                for permission in ("article.review", "article.publish", "article.edit", "article.delete")
+                for permission in (
+                    "article.review",
+                    "article.publish",
+                    "article.edit",
+                    "article.delete",
+                )
                 for scope in ("own", "department", "company", "global")
             )
             if article.owner_id != user.id and not governance_access:
@@ -86,8 +101,13 @@ class PermissionService:
         if article.sensitivity == "restricted":
             # Restricted content requires an explicit shared department, never
             # a name-based match through `Article.dept`.
-            user_department_ids = {department.id for department in getattr(user, "departments", []) or []}
-            article_department_ids = {department.id for department in getattr(article, "departments", []) or []}
+            user_department_ids = {
+                department.id for department in getattr(user, "departments", []) or []
+            }
+            article_department_ids = {
+                department.id
+                for department in getattr(article, "departments", []) or []
+            }
             if not user_department_ids & article_department_ids:
                 return False
         if AuthorizationService.can_access_article_departments(user, article):
@@ -96,8 +116,14 @@ class PermissionService:
 
     @classmethod
     def can_edit_article(cls, user: User, article: Article) -> bool:
-        return any(AuthorizationService.has_permission(user, "article.edit", article, scope) for scope in ("own", "department", "company"))
+        return any(
+            AuthorizationService.has_permission(user, "article.edit", article, scope)
+            for scope in ("own", "department", "company")
+        )
 
     @classmethod
     def can_delete_article(cls, user: User, article: Article) -> bool:
-        return any(AuthorizationService.has_permission(user, "article.delete", article, scope) for scope in ("own", "department", "company"))
+        return any(
+            AuthorizationService.has_permission(user, "article.delete", article, scope)
+            for scope in ("own", "department", "company")
+        )

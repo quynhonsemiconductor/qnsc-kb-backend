@@ -10,7 +10,12 @@ from fastapi import APIRouter, Depends, Query, Response, status, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from src.api.deps import get_db, get_current_user, require_permission, set_database_context
+from src.api.deps import (
+    get_db,
+    get_current_user,
+    require_permission,
+    set_database_context,
+)
 from src.models import User
 from src.models.article import Article
 from src.models.user import Department
@@ -39,7 +44,14 @@ from src.domain.ai_service import AIService
 from src.domain.search_service import SearchService
 from src.repositories.chunk import ChunkRepository
 from src.repositories.ai import AIRepository
-from src.models.ops import EvalQuestion, EvalSet, EvalRun, IndexReprocessJob, Connector, ApiRequestMetric
+from src.models.ops import (
+    EvalQuestion,
+    EvalSet,
+    EvalRun,
+    IndexReprocessJob,
+    Connector,
+    ApiRequestMetric,
+)
 from src.rag.evaluator import answer_correctness, context_recall, lexical_faithfulness
 from src.core.config import is_cloudflare_r2_endpoint, settings
 from src.models.ops import FeatureFlag
@@ -67,26 +79,38 @@ _RESTRUCTURE_PROCESSING_STALE_AFTER = timedelta(minutes=65)
 _RESTRUCTURE_DEFERRED_STALE_AFTER = timedelta(minutes=15)
 
 
-def _visible_restructure_state(draft: PendingDraft, now: datetime | None = None) -> tuple[str, str | None]:
+def _visible_restructure_state(
+    draft: PendingDraft, now: datetime | None = None
+) -> tuple[str, str | None]:
     """Expose abandoned work as actionable without mutating history during a GET."""
 
     current = now or datetime.now(timezone.utc).replace(tzinfo=None)
     age = current - (draft.updated_at or draft.created_at)
     if draft.restructure_status == "queued" and age > _RESTRUCTURE_QUEUE_STALE_AFTER:
-        return "stalled", "Document preparation did not reach a worker. Retry preparation."
-    if draft.restructure_status == "deferred" and age > _RESTRUCTURE_DEFERRED_STALE_AFTER:
-        return "stalled", "AI formatting was deferred by the provider's rate limit and the retry did not run. Retry preparation."
+        return (
+            "stalled",
+            "Document preparation did not reach a worker. Retry preparation.",
+        )
+    if (
+        draft.restructure_status == "deferred"
+        and age > _RESTRUCTURE_DEFERRED_STALE_AFTER
+    ):
+        return (
+            "stalled",
+            "AI formatting was deferred by the provider's rate limit and the retry did not run. Retry preparation.",
+        )
     if (
         draft.restructure_status == "processing"
         and age > _RESTRUCTURE_PROCESSING_STALE_AFTER
     ):
-        return "stalled", "Document preparation exceeded the worker time limit. Retry preparation."
+        return (
+            "stalled",
+            "Document preparation exceeded the worker time limit. Retry preparation.",
+        )
     return draft.restructure_status, draft.restructure_error
 
 
-def _queue_draft_restructure(
-    draft: PendingDraft, now: datetime | None = None
-) -> None:
+def _queue_draft_restructure(draft: PendingDraft, now: datetime | None = None) -> None:
     """Start a new queue generation, including a heartbeat when status was already queued."""
 
     draft.restructure_status = "queued"
@@ -197,7 +221,9 @@ def _draft_response(
     return response
 
 
-def _permission_leakage_detected(retrieved: list[dict[str, Any]], citations: list[dict[str, Any]] | None) -> bool:
+def _permission_leakage_detected(
+    retrieved: list[dict[str, Any]], citations: list[dict[str, Any]] | None
+) -> bool:
     """Detect citations that were not present in the authorized retrieval set."""
     authorized_chunk_ids = {
         str(item["chunk_id"]) for item in retrieved if item.get("chunk_id")
@@ -402,14 +428,46 @@ async def verify_review_deadlines(
 
 @router.get("/pending-drafts")
 async def list_pending_drafts(
+    response: Response,
     status: str | None = Query(None),
+    limit: int = Query(
+        GovernanceRepository.DRAFT_PAGE_LIMIT,
+        ge=1,
+        le=GovernanceRepository.DRAFT_PAGE_LIMIT,
+    ),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(None, max_length=200),
     current_user: User = Depends(require_permission("governance.read")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    """One page of the review queue, with the authorized total in `X-Total-Count`.
+
+    The body stays a bare JSON array. An envelope would have been tidier, but the
+    frontend reads this response as a list today and the two repositories do not deploy
+    together, so the total travels in a header instead of changing the shape. A caller
+    that sends no paging arguments gets what it always got: the newest 500.
+
+    The previous hard cap of 500 rows was not a page -- it was a silent truncation with
+    nothing reporting it. With more than 500 pending drafts the oldest appeared in NO tab
+    of the UI, and the count shown stayed at 500 however many were added. Oldest,
+    because the order is newest-first, which is exactly the set most likely to be stuck
+    and in need of attention.
+
+    `search` matches title, source reference and department, ignoring case and accents,
+    and applies to the whole queue rather than the rows already loaded in a browser. The
+    total in the header is the total of the rows it matches.
+    """
     gov_repo = GovernanceRepository(db)
     art_repo = ArticleRepository(db)
     service = GovernanceService(gov_repo, art_repo)
-    drafts = await service.list_drafts(current_user, status)
+    drafts = await service.list_drafts(
+        current_user, status, limit=limit, offset=offset, search=search
+    )
+    # Counted under the SAME authorization scope as the page: see
+    # GovernanceService._draft_queue_scope.
+    response.headers["X-Total-Count"] = str(
+        await service.count_drafts(current_user, status, search=search)
+    )
     return [
         _draft_response(draft, service, current_user, include_content=False)
         for draft in drafts
@@ -520,9 +578,7 @@ async def assign_draft_approver(
 ) -> Any:
     draft = await GovernanceService(
         GovernanceRepository(db), ArticleRepository(db)
-    ).assign_approver(
-        current_user, id, req.approver_id, req.use_rule, req.reason
-    )
+    ).assign_approver(current_user, id, req.approver_id, req.use_rule, req.reason)
     return {
         "id": str(draft.id),
         "status": draft.status,
@@ -1000,7 +1056,11 @@ async def bulk_decide_drafts(
                     current_user, draft_id, req.review_note or ""
                 )
                 decided.append(
-                    {"draft_id": str(draft_id), "title": draft.title, "status": draft.status}
+                    {
+                        "draft_id": str(draft_id),
+                        "title": draft.title,
+                        "status": draft.status,
+                    }
                 )
         except HTTPException as exc:
             # The service already explains itself, including the structured codes the UI
@@ -1013,7 +1073,9 @@ async def bulk_decide_drafts(
                     "draft_id": str(draft_id),
                     "status_code": exc.status_code,
                     "code": detail.get("code") if isinstance(detail, dict) else None,
-                    "reason": detail.get("message") if isinstance(detail, dict) else detail,
+                    "reason": (
+                        detail.get("message") if isinstance(detail, dict) else detail
+                    ),
                 }
             )
             reloaded = await _reload_actor(db, actor_id)
@@ -1122,7 +1184,10 @@ async def restructure_draft(
             detail="Only users with review or publish permission can restructure this draft",
         )
     visible_status, _visible_error = _visible_restructure_state(draft)
-    if draft.restructure_status in {"queued", "processing", "deferred"} and visible_status != "stalled":
+    if (
+        draft.restructure_status in {"queued", "processing", "deferred"}
+        and visible_status != "stalled"
+    ):
         raise HTTPException(
             status_code=409,
             detail="Document preparation is already in progress",
@@ -1533,9 +1598,7 @@ async def get_worker_diagnostics(
             # Redis lists one key per queue, so LLEN is the backlog. Asked directly
             # rather than inferred from Celery, which reports what workers accepted
             # rather than what is still waiting.
-            return {
-                name: int(await redis.llen(name)) for name in queue_names
-            }, None
+            return {name: int(await redis.llen(name)) for name in queue_names}, None
         except Exception as exc:
             return {name: None for name in queue_names}, f"{type(exc).__name__}: {exc}"
         finally:
@@ -1661,8 +1724,29 @@ async def list_eval_sets(
     current_user: User = Depends(require_permission("governance.read", scope="global")),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    rows = (await db.execute(select(EvalSet).where(EvalSet.company_domain == current_user.company_domain).order_by(EvalSet.created_at.desc()))).scalars().all()
-    return [{"id": str(item.id), "name": item.name, "version": item.version, "environment": item.environment, "status": item.status, "approved_by": str(item.approved_by) if item.approved_by else None, "approved_at": item.approved_at} for item in rows]
+    rows = (
+        (
+            await db.execute(
+                select(EvalSet)
+                .where(EvalSet.company_domain == current_user.company_domain)
+                .order_by(EvalSet.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(item.id),
+            "name": item.name,
+            "version": item.version,
+            "environment": item.environment,
+            "status": item.status,
+            "approved_by": str(item.approved_by) if item.approved_by else None,
+            "approved_at": item.approved_at,
+        }
+        for item in rows
+    ]
 
 
 @router.post("/eval-sets", status_code=status.HTTP_201_CREATED)
@@ -1671,16 +1755,36 @@ async def create_eval_set(
     current_user: User = Depends(require_permission("governance.read", scope="global")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    item = EvalSet(company_domain=current_user.company_domain, name=req.name.strip(), version=req.version.strip(), environment=req.environment.strip(), status="draft")
+    item = EvalSet(
+        company_domain=current_user.company_domain,
+        name=req.name.strip(),
+        version=req.version.strip(),
+        environment=req.environment.strip(),
+        status="draft",
+    )
     db.add(item)
     await db.commit()
     await db.refresh(item)
-    return {"id": str(item.id), "name": item.name, "version": item.version, "environment": item.environment, "status": item.status}
+    return {
+        "id": str(item.id),
+        "name": item.name,
+        "version": item.version,
+        "environment": item.environment,
+        "status": item.status,
+    }
 
 
 @router.post("/eval-sets/{id}/approve")
-async def approve_eval_set(id: uuid.UUID, current_user: User = Depends(require_permission("governance.read", scope="global")), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
-    item = await db.scalar(select(EvalSet).where(EvalSet.id == id, EvalSet.company_domain == current_user.company_domain))
+async def approve_eval_set(
+    id: uuid.UUID,
+    current_user: User = Depends(require_permission("governance.read", scope="global")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    item = await db.scalar(
+        select(EvalSet).where(
+            EvalSet.id == id, EvalSet.company_domain == current_user.company_domain
+        )
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Evaluation set not found")
     item.status = "approved"
@@ -1695,16 +1799,57 @@ async def eval_report(
     current_user: User = Depends(require_permission("governance.read", scope="global")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    rows = (await db.execute(select(EvalRun).order_by(EvalRun.created_at.desc()).limit(500))).scalars().all()
+    rows = (
+        (
+            await db.execute(
+                select(EvalRun).order_by(EvalRun.created_at.desc()).limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
     if not rows:
-        return {"sample_count": 0, "kpis": {"citation_recall": 0, "groundedness": 0, "correctness": 0, "latency_ms": 0}, "permission_leakage": 0, "verdict": "NO-GO", "reason": "No evaluation runs exist"}
+        return {
+            "sample_count": 0,
+            "kpis": {
+                "citation_recall": 0,
+                "groundedness": 0,
+                "correctness": 0,
+                "latency_ms": 0,
+            },
+            "permission_leakage": 0,
+            "verdict": "NO-GO",
+            "reason": "No evaluation runs exist",
+        }
     citation = sum(item.context_recall for item in rows) / len(rows)
     grounded = sum(item.faithfulness for item in rows) / len(rows)
     correctness = sum(item.answer_correctness for item in rows) / len(rows)
     latency = sum(item.latency_ms for item in rows) / len(rows)
     permission_leakage = sum(1 for item in rows if item.permission_leakage)
-    go = citation >= 0.95 and grounded >= 0.90 and correctness >= 0.90 and latency <= 4000 and permission_leakage == 0
-    return {"sample_count": len(rows), "kpis": {"citation_recall": round(citation, 4), "groundedness": round(grounded, 4), "correctness": round(correctness, 4), "latency_ms": round(latency)}, "permission_leakage": permission_leakage, "verdict": "GO" if go else "NO-GO", "thresholds": {"citation_recall": 0.95, "groundedness": 0.90, "correctness": 0.90, "latency_ms": 4000}}
+    go = (
+        citation >= 0.95
+        and grounded >= 0.90
+        and correctness >= 0.90
+        and latency <= 4000
+        and permission_leakage == 0
+    )
+    return {
+        "sample_count": len(rows),
+        "kpis": {
+            "citation_recall": round(citation, 4),
+            "groundedness": round(grounded, 4),
+            "correctness": round(correctness, 4),
+            "latency_ms": round(latency),
+        },
+        "permission_leakage": permission_leakage,
+        "verdict": "GO" if go else "NO-GO",
+        "thresholds": {
+            "citation_recall": 0.95,
+            "groundedness": 0.90,
+            "correctness": 0.90,
+            "latency_ms": 4000,
+        },
+    }
 
 
 @router.get("/eval-runs")
@@ -1912,7 +2057,9 @@ class ApprovalRuleRequest(BaseModel):
     # Validated against the agent's own closed vocabulary rather than an open list of
     # strings, so a typo in a risk tier fails the request instead of silently scoping a
     # rule to a tier no draft can ever be classified into.
-    risk_tiers: list[Literal["standard", "high"]] | None = Field(default=None, max_length=2)
+    risk_tiers: list[Literal["standard", "high"]] | None = Field(
+        default=None, max_length=2
+    )
     # Both default to False here as well as in the model and the database: a rule created
     # by a client that omits them must not acquire authority by omission.
     can_approve: bool = False
@@ -1947,7 +2094,9 @@ def _approval_rule_payload(rule: ApprovalRule) -> dict[str, Any]:
     }
 
 
-def _snapshot_rule_version(rule: ApprovalRule, changed_by: uuid.UUID) -> ApprovalRuleVersion:
+def _snapshot_rule_version(
+    rule: ApprovalRule, changed_by: uuid.UUID
+) -> ApprovalRuleVersion:
     """A full snapshot of `rule`'s current fields, at its CURRENT `version` number.
 
     Called after the caller has already set rule.version to the value this snapshot
@@ -1990,12 +2139,16 @@ async def list_approval_rules(
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
     rules = (
-        await db.execute(
-            select(ApprovalRule)
-            .where(ApprovalRule.company_domain == current_user.company_domain)
-            .order_by(ApprovalRule.priority, ApprovalRule.created_at)
+        (
+            await db.execute(
+                select(ApprovalRule)
+                .where(ApprovalRule.company_domain == current_user.company_domain)
+                .order_by(ApprovalRule.priority, ApprovalRule.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [_approval_rule_payload(rule) for rule in rules]
 
 
@@ -2032,7 +2185,11 @@ async def create_approval_rule(
             target_type="approval_rule",
             target_id=str(rule.id),
             outcome="success",
-            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject, "version": rule.version},
+            detail_json={
+                "can_approve": rule.can_approve,
+                "can_reject": rule.can_reject,
+                "version": rule.version,
+            },
         )
     )
     await db.commit()
@@ -2072,7 +2229,11 @@ async def update_approval_rule(
             target_type="approval_rule",
             target_id=str(rule.id),
             outcome="success",
-            detail_json={"can_approve": rule.can_approve, "can_reject": rule.can_reject, "version": rule.version},
+            detail_json={
+                "can_approve": rule.can_approve,
+                "can_reject": rule.can_reject,
+                "version": rule.version,
+            },
         )
     )
     await db.commit()
@@ -2255,9 +2416,7 @@ async def factory_reset_database(
     if not settings.FACTORY_RESET_ENABLED:
         # 404, not 403: an endpoint that is switched off should not advertise that it
         # exists and is merely refusing this caller.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Not Found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
     if not is_reset_operator(current_user.email):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -16,10 +16,19 @@ class FeatureFlagRepository:
         return result.scalars().all()
 
     async def get(self, key: str) -> FeatureFlag | None:
-        result = await self.db.execute(select(FeatureFlag).where(FeatureFlag.key == key))
+        result = await self.db.execute(
+            select(FeatureFlag).where(FeatureFlag.key == key)
+        )
         return result.scalar_one_or_none()
 
-    async def upsert(self, key: str, enabled: bool, rollout_percent: int, role: str | None, department: str | None) -> FeatureFlag:
+    async def upsert(
+        self,
+        key: str,
+        enabled: bool,
+        rollout_percent: int,
+        role: str | None,
+        department: str | None,
+    ) -> FeatureFlag:
         flag = await self.get(key)
         if flag is None:
             flag = FeatureFlag(key=key)

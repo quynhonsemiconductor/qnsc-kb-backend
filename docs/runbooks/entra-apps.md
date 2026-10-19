@@ -2,8 +2,13 @@
 
 Microsoft sign-in and the SharePoint/OneDrive connector use an Entra app registration. This is the standard
 (plan §7.4) and the owner's steps. It follows an Entra audit that found the single app `QNSC Knowledge Base`
-(`dbd99dbb-d20e-4076-8f8b-75c15e733414`) is **multi-tenant** (`signInAudience = AzureADMultipleOrgs`), is shared by
-every environment, and has only `localhost` redirect URIs.
+(`dbd99dbb-d20e-4076-8f8b-75c15e733414`) was **multi-tenant** (`signInAudience = AzureADMultipleOrgs`), shared by
+every environment, with only `localhost` redirect URIs.
+
+**Current state (2026-10-18):** the owner **renamed that app to `KB Dev` and switched it to single tenant**. Same
+client id, so `infra/live/develop` (`microsoft_client_id = dbd99dbb-...`) needs no change. **`KB Prod` does not exist
+yet**: it is created when KB goes to production. The mail apps are separate (`KB Dev Service`, later
+`KB Prod Service`; `docs/runbooks/email-graph.md`).
 
 ## What the code does about it (kb-backend, this change)
 
@@ -81,8 +86,11 @@ example `KB Prod Connector`) with `Sites.Selected` and its own client id: a desi
 
 ## Owner steps, in order
 
-1. Create **KB Dev** and **KB Prod** as above (Entra admin center > App registrations > New registration).
-2. For each, create the client secret and put it in that environment's bundle key `microsoft-client-secret`.
+1. **KB Dev** exists (the renamed, single-tenant app). Check it against the table above: *Supported account types*
+   single tenant, **Web** platform, the four redirect URIs (localhost and `kb-api-dev`), delegated permissions only,
+   no implicit grant, **Assignment required = Yes**. **KB Prod** is created the same way, with the two production
+   URIs only, **when KB goes to production** (production cannot boot without it: `microsoft_client_id` is empty).
+2. For each app that is in use, create the client secret and put it in that environment's bundle key `microsoft-client-secret`.
    **Merge, do not replace** the bundle, and keep the value off the command line (a pipe, not an argument; the secret
    comes from the clipboard or a file, never from the shell history):
 
@@ -94,18 +102,19 @@ example `KB Prod Connector`) with `Sites.Selected` and its own client id: a desi
    aws secretsmanager get-secret-value --secret-id "$ID" --query SecretString --output text \
      | jq -e 'has("secret-key") and has("data-encryption-key") and has("microsoft-client-secret")'   # prints true
    ```
-3. Set `microsoft_client_id` to that app's Application (client) ID in `infra/live/<env>/variables.tf` and open a pull
-   request. Develop's default is still the old shared app; this replaces it. `microsoft_tenant_id` already defaults to
-   the QNSC tenant in both environments, and the module now rejects anything that is not a GUID.
+3. **Develop:** nothing to change in Terraform (KB Dev kept its client id). If its client secret was rotated or replaced,
+   step 2 is all that is needed, then redeploy. **Production:** when KB Prod exists, set `microsoft_client_id` to its
+   Application (client) ID in `infra/live/prod/variables.tf` and open a pull request. `microsoft_tenant_id` already
+   defaults to the QNSC tenant in both environments, and the module rejects anything that is not a GUID.
 4. Merge; apply; deploy. Order matters only for the brief window between the secret changing and the client id
-   changing; sign-in on the old app cannot work on develop today anyway (its only redirect URIs are `localhost`).
+   changing. Develop sign-in needs the two `kb-api-dev.qnsc.vn` redirect URIs on KB Dev: they were not on the old
+   registration (only `localhost` was), so check they were added.
 5. Local development: in `.env` set `MICROSOFT_CLIENT_ID` (KB Dev), `MICROSOFT_CLIENT_SECRET`,
    `MICROSOFT_TENANT_ID=<the GUID>`, `MICROSOFT_LOGIN_REDIRECT_URI=http://localhost:8000/api/v1/auth/entra/callback`
    and `MICROSOFT_REDIRECT_URI=http://localhost:8000/api/v1/connectors/oauth/callback`. Without the tenant GUID the
    Microsoft sign-in button is disabled (503), by design.
-6. Once both environments sign in on their own app, **retire `QNSC Knowledge Base`**: set *Supported account types* to
-   single tenant first (it stops accepting foreign tenants at once), remove its redirect URIs, delete its client
-   secret, and delete the app after a grace period.
+6. There is no old app left to retire: `QNSC Knowledge Base` **is** KB Dev now. Remove any redirect URI or client
+   secret on it that no environment uses.
 
 ## Prove it
 

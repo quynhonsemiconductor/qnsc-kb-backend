@@ -27,6 +27,7 @@ article_chunks, chunk_metadata, article_versions, article_user_permissions, arti
 article_departments, comments, votes, bookmarks, article_followers and
 article_edit_requests. One DELETE on `connectors` removes the entire sync tree.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -112,7 +113,9 @@ async def _tenant_user_ids(db: AsyncSession, company_domain: str) -> list[Any]:
     they can only be reached through this join. Their RLS policies are owner-based too,
     which is why the purge has to run as a global admin to see other users' rows at all.
     """
-    rows = await db.execute(select(User.id).where(User.company_domain == company_domain))
+    rows = await db.execute(
+        select(User.id).where(User.company_domain == company_domain)
+    )
     return list(rows.scalars().all())
 
 
@@ -202,7 +205,9 @@ async def delete_purged_objects(counts: PurgeCounts) -> None:
             counts.storage_objects += 1
         except Exception as exc:  # pragma: no cover - depends on object store
             counts.storage_failures.append(key)
-            logger.warning("Purge could not delete source object", key=key, error=str(exc))
+            logger.warning(
+                "Purge could not delete source object", key=key, error=str(exc)
+            )
 
 
 async def purge_knowledge_base(
@@ -220,7 +225,9 @@ async def purge_knowledge_base(
     """
     counts = PurgeCounts()
     user_ids = await _tenant_user_ids(db, company_domain)
-    article_ids_stmt = select(Article.id).where(Article.company_domain == company_domain)
+    article_ids_stmt = select(Article.id).where(
+        Article.company_domain == company_domain
+    )
     connector_ids_stmt = select(Connector.id).where(
         Connector.company_domain == company_domain
     )
@@ -244,7 +251,9 @@ async def purge_knowledge_base(
         )
         counts.pending_drafts = await _count(
             db,
-            select(PendingDraft.id).where(PendingDraft.company_domain == company_domain),
+            select(PendingDraft.id).where(
+                PendingDraft.company_domain == company_domain
+            ),
         )
         counts.external_documents = await _count(
             db,
@@ -275,7 +284,9 @@ async def purge_knowledge_base(
         )
         counts.sync_cursors_reset = await _count(
             db,
-            select(SyncCursor.id).where(SyncCursor.connector_id.in_(connector_ids_stmt)),
+            select(SyncCursor.id).where(
+                SyncCursor.connector_id.in_(connector_ids_stmt)
+            ),
         )
         if user_ids:
             counts.ai_cache = await _count(

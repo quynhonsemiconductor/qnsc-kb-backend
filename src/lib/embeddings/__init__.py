@@ -23,6 +23,7 @@ width and normalised to unit length in exactly one place. See base.py for why.
 retrieval. Never set it anywhere that serves a person: a zero vector makes an indexing
 outage look healthy.
 """
+
 from __future__ import annotations
 
 import structlog
@@ -103,7 +104,9 @@ _INSTRUCTION_PREFIXES = {
 # to an instruct model instead would still produce valid, unit-norm vectors -- just ones
 # the model was not tuned to place well, the same silent-degradation failure mode this
 # whole prefix seam exists to avoid.
-_RETRIEVAL_INSTRUCTION = "Given a search query, retrieve relevant passages that answer the query"
+_RETRIEVAL_INSTRUCTION = (
+    "Given a search query, retrieve relevant passages that answer the query"
+)
 
 
 def _needs_instruction_prefix() -> bool:
@@ -128,7 +131,9 @@ def _decorate(texts: list[str], task: str) -> list[str]:
         return texts
     if _is_instruct_tuned():
         if task == "RETRIEVAL_QUERY":
-            return [f"Instruct: {_RETRIEVAL_INSTRUCTION}\nQuery: {text}" for text in texts]
+            return [
+                f"Instruct: {_RETRIEVAL_INSTRUCTION}\nQuery: {text}" for text in texts
+            ]
         return list(texts)
     key = "query" if task == "RETRIEVAL_QUERY" else "passage"
     prefix = _INSTRUCTION_PREFIXES[key]

@@ -43,9 +43,7 @@ async def provision() -> None:
 
     async with SessionLocal() as db:
         user = await db.scalar(
-            select(User)
-            .where(User.email == email)
-            .options(selectinload(User.roles))
+            select(User).where(User.email == email).options(selectinload(User.roles))
         )
         if user is None:
             user = User(

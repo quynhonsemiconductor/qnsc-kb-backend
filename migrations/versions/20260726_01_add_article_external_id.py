@@ -3,6 +3,7 @@
 Revision ID: 20260726_01
 Revises:
 """
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -14,7 +15,9 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS external_id VARCHAR(120)")
-    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_articles_external_id ON articles (external_id)")
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_articles_external_id ON articles (external_id)"
+    )
 
 
 def downgrade() -> None:

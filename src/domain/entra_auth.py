@@ -1,4 +1,5 @@
 """Microsoft Entra authorization-code and ID-token verification helpers."""
+
 from __future__ import annotations
 
 import secrets
@@ -15,7 +16,9 @@ def _tenant() -> str:
     """The pinned tenant. Raises when there is none: sign-in never falls back to a multi-tenant authority."""
     tenant = settings.microsoft_tenant
     if tenant is None:
-        raise ValueError("MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)")
+        raise ValueError(
+            "MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)"
+        )
     return tenant
 
 
@@ -80,8 +83,12 @@ def _validate_tenant_claims(claims: dict[str, Any]) -> str:
 
 
 async def exchange_code(code: str) -> dict[str, Any]:
-    tenant = _tenant()  # before any network call: an unpinned config never reaches a multi-tenant authority
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False) as client:
+    tenant = (
+        _tenant()
+    )  # before any network call: an unpinned config never reaches a multi-tenant authority
+    async with httpx.AsyncClient(
+        timeout=30.0, follow_redirects=False, trust_env=False
+    ) as client:
         response = await client.post(
             f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
             data={
@@ -106,7 +113,9 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     if not kid:
         raise ValueError("Microsoft ID token has no key identifier")
     algorithm = _validated_algorithm(unverified_header)
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=15.0, follow_redirects=False, trust_env=False
+    ) as client:
         response = await client.get(
             f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
         )
@@ -134,7 +143,11 @@ async def verify_id_token(id_token: str, expected_nonce: str) -> dict[str, Any]:
     if claims.get("nonce") != expected_nonce:
         raise ValueError("Microsoft ID token nonce is invalid")
     subject = str(claims.get("oid") or claims.get("sub") or "").strip()
-    email = str(claims.get("preferred_username") or claims.get("email") or "").strip().lower()
+    email = (
+        str(claims.get("preferred_username") or claims.get("email") or "")
+        .strip()
+        .lower()
+    )
     if not subject or "@" not in email:
         raise ValueError("Microsoft ID token does not identify an internal user")
     claims["subject"] = subject

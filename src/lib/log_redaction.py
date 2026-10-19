@@ -17,6 +17,7 @@ Two layers, because neither is enough alone:
 Redaction is by parameter NAME in a URL query string (and a `Bearer` token), not by trying to recognise
 secrets in general. A value is replaced; the name stays so a log is still debuggable.
 """
+
 from __future__ import annotations
 
 import logging
@@ -33,16 +34,52 @@ REDACTED = "[REDACTED]"
 #   * it is exactly one of _WHOLE_NAMES (`code`, `key`, `sig`, `tempauth`, ...), or
 #   * its LAST word is one of _SECRET_WORDS (`access_token`, `X-Amz-Signature`, `client_secret`, `refreshToken`), or
 #   * it ends in `key` after a word that makes it a credential (`api_key`, `X-Api-Key`, `subscription-key`).
-_WHOLE_NAMES = frozenset({
-    "tempauth", "auth", "authorization", "token", "sig", "signature", "secret", "password", "passwd", "pwd",
-    "code", "key", "apikey", "sas", "credential", "credentials", "assertion", "jwt", "bearer",
-})
-_SECRET_WORDS = frozenset({
-    "token", "secret", "signature", "password", "passwd", "credential", "assertion", "apikey",
-    # plurals: `user_credentials`, `access_tokens`, `client_secrets`
-    "tokens", "secrets", "signatures", "passwords", "credentials", "assertions", "apikeys",
-})
-_KEY_PREFIXES = frozenset({"api", "access", "secret", "private", "subscription", "signing", "encryption", "x"})
+_WHOLE_NAMES = frozenset(
+    {
+        "tempauth",
+        "auth",
+        "authorization",
+        "token",
+        "sig",
+        "signature",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "code",
+        "key",
+        "apikey",
+        "sas",
+        "credential",
+        "credentials",
+        "assertion",
+        "jwt",
+        "bearer",
+    }
+)
+_SECRET_WORDS = frozenset(
+    {
+        "token",
+        "secret",
+        "signature",
+        "password",
+        "passwd",
+        "credential",
+        "assertion",
+        "apikey",
+        # plurals: `user_credentials`, `access_tokens`, `client_secrets`
+        "tokens",
+        "secrets",
+        "signatures",
+        "passwords",
+        "credentials",
+        "assertions",
+        "apikeys",
+    }
+)
+_KEY_PREFIXES = frozenset(
+    {"api", "access", "secret", "private", "subscription", "signing", "encryption", "x"}
+)
 
 _QUERY_PARAM = re.compile(r"([?&;])([\w.\-]+)=([^&\s'\"<>#]+)")
 _BEARER = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=\-]{12,}")
@@ -147,7 +184,9 @@ def install() -> None:
         if record.exc_info and record.exc_info[0] is not None and not record.exc_text:
             # Tracebacks are rendered later by the Formatter and name the URLs of failed requests. Render once
             # here, redacted; the Formatter uses `exc_text` when it is set.
-            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
+            record.exc_text = redact(
+                logging.Formatter().formatException(record.exc_info)
+            )
         return record
 
     logging.setLogRecordFactory(factory)

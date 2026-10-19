@@ -137,7 +137,7 @@ jobs:
       # Short-lived installation token from the qnsc-automation App, so no long-lived PAT is
       # needed. Requires "Variables: read and write" on BOTH qnsc-kb repos — the
       # frontend's Pages project name is an output of THIS stack.
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: app-token
         if: ${{ vars.QNSC_AUTOMATION_APP_ID != '' }}
         continue-on-error: true
@@ -245,7 +245,7 @@ jobs:
           # infra apply never resets the task definition to :latest.
           TF_VAR_image_tag: ${{ github.ref_name }}
 
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: app-token
         if: ${{ vars.QNSC_AUTOMATION_APP_ID != '' }}
         continue-on-error: true

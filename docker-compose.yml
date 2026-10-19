@@ -1,3 +1,10 @@
+# Project name `qnsc-kb-backend` unless COMPOSE_PROJECT_NAME is set (in .env or the shell): that is what lets a second
+# copy of this repo run beside the first. No container_name is set on purpose, for the same reason.
+#
+# Images match production: RDS PostgreSQL 16 with pgvector (infra/live: rds engine_version "16") and ElastiCache
+# Valkey 7.2 (tf-modules cache module default). Tags are pinned to a full version.
+name: qnsc-kb-backend
+
 services:
   db:
     # Matches CI (.github/workflows/backend-ci.yml) and the RDS PG16 engine, so dev is
@@ -10,7 +17,7 @@ services:
     # data directory. Run `docker compose down -v` once to drop the old pgdata, then
     # re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
     # database nobody needs to keep.
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.1-pg16
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
       # be reachable from the LAN. The HOST port is KB_DB_PORT (default 5432): set it in
@@ -31,20 +38,50 @@ services:
       timeout: 5s
       retries: 5
 
+  # The service keeps the name `redis` (REDIS_URL points at redis:6379 inside the network). The engine is Valkey, the
+  # one production runs on ElastiCache; it speaks the Redis protocol, so REDIS_URL is unchanged.
   redis:
-    image: redis:7-alpine
+    image: valkey/valkey:7.2.14-alpine
     ports:
       - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
-    command: ["redis-server", "--requirepass", "devredis"]
+    command: ["valkey-server", "--requirepass", "${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}"]
+    # valkey-cli reads REDISCLI_AUTH, so the healthcheck needs no password literal of its own.
+    environment:
+      REDISCLI_AUTH: ${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}
     volumes:
       - redisdata:/data
     mem_limit: 128m
     mem_reservation: 32m
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a devredis ping | grep PONG"]
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Local stand-in for the Cloudflare R2 source bucket (see scripts/localstack/01-bootstrap.sh). The app containers reach it
+  # as localstack:4566; the browser reaches the presigned URLs at localhost:${LOCALSTACK_HOST_PORT}.
+  localstack:
+    image: localstack/localstack:4.14
+    ports:
+      - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4570}:4566"
+    environment:
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      PERSISTENCE: 1
+      WEB_ORIGINS: http://localhost:${FRONTEND_DEV_PORT:-5173},http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+      WEB_ORIGIN_LOOPBACK: http://127.0.0.1:${FRONTEND_DEV_PORT:-5173}
+    volumes:
+      - localstackdata:/var/lib/localstack
+      - ./scripts/localstack:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      # Healthy means the init hook has run: the bucket exists AND its CORS allows the loopback frontend origin.
+      test: ["CMD-SHELL", "awslocal s3api head-bucket --bucket qnsc-kb-sources-local && awslocal s3api get-bucket-cors --bucket qnsc-kb-sources-local | grep -qF \"$$WEB_ORIGIN_LOOPBACK\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: 512m
 
   api:
     build:
@@ -85,8 +122,13 @@ services:
     mem_limit: 4g
     mem_reservation: 512m
     environment:
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
+      - R2_ACCESS_KEY_ID=test
+      - R2_SECRET_ACCESS_KEY=test
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://:devredis@redis:6379/0
+      - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       # Explicit, because the Settings default is now `production`: unset, this stack
       # would refuse to start rather than run with the well-known dev credentials above.
       - ENVIRONMENT=development
@@ -109,6 +151,8 @@ services:
       # local testing.
       - RAG_ALLOW_EXTENDED_ON_REFUSAL=true
     depends_on:
+      localstack:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -165,8 +209,13 @@ services:
     mem_limit: 4g
     mem_reservation: 512m
     environment:
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
+      - R2_ACCESS_KEY_ID=test
+      - R2_SECRET_ACCESS_KEY=test
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://:devredis@redis:6379/0
+      - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
       - JOB_MODE=celery
       - AUTO_CREATE_SCHEMA=false
@@ -206,6 +255,8 @@ services:
       - TOKENIZERS_PARALLELISM=false
       - MALLOC_ARENA_MAX=2
     depends_on:
+      localstack:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -234,8 +285,13 @@ services:
     mem_limit: 256m
     mem_reservation: 64m
     environment:
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:${LOCALSTACK_HOST_PORT:-4570}
+      - SOURCE_STORAGE_BUCKET=qnsc-kb-sources-local
+      - R2_ACCESS_KEY_ID=test
+      - R2_SECRET_ACCESS_KEY=test
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/qnsc_kb
-      - REDIS_URL=redis://:devredis@redis:6379/0
+      - REDIS_URL=redis://:${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}@redis:6379/0
       - ENVIRONMENT=development
       - JOB_MODE=celery
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
@@ -257,6 +313,8 @@ services:
       - OMP_NUM_THREADS=1
       - MALLOC_ARENA_MAX=2
     depends_on:
+      localstack:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -312,3 +370,4 @@ volumes:
   pgdata:
   redisdata:
   hfcache:
+  localstackdata:

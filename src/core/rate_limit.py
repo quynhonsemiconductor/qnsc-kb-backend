@@ -27,7 +27,9 @@ class InMemoryRateLimiter:
             while events and events[0] <= cutoff:
                 events.popleft()
             if len(events) >= self.limit:
-                retry_after = max(1, int((events[0] + self.window - now).total_seconds()))
+                retry_after = max(
+                    1, int((events[0] + self.window - now).total_seconds())
+                )
                 return False, retry_after
             events.append(now)
             return True, 0
@@ -52,7 +54,13 @@ class RedisRateLimiter:
     fallback so a local stack without Redis still serves logins.
     """
 
-    def __init__(self, namespace: str, limit: int, window_seconds: int = 60, fail_closed: bool = False):
+    def __init__(
+        self,
+        namespace: str,
+        limit: int,
+        window_seconds: int = 60,
+        fail_closed: bool = False,
+    ):
         self.namespace = namespace
         self.limit = limit
         self.window_seconds = window_seconds
@@ -66,7 +74,9 @@ class RedisRateLimiter:
         redis_key = f"qnsc:rate:{self.namespace}:{bucket}:{key_hash}"
         client: Redis | None = None
         try:
-            client = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=1, socket_timeout=1)
+            client = Redis.from_url(
+                settings.REDIS_URL, socket_connect_timeout=1, socket_timeout=1
+            )
             count = await client.incr(redis_key)
             if count == 1:
                 await client.expire(redis_key, self.window_seconds + 1)
@@ -82,7 +92,11 @@ class RedisRateLimiter:
                     error=str(exc),
                 )
                 return False, self.window_seconds
-            logger.warning("Redis rate limit unavailable; using local fallback", namespace=self.namespace, error=str(exc))
+            logger.warning(
+                "Redis rate limit unavailable; using local fallback",
+                namespace=self.namespace,
+                error=str(exc),
+            )
             return self.fallback.allow(key)
         finally:
             if client is not None:
@@ -90,5 +104,9 @@ class RedisRateLimiter:
 
 
 ai_rate_limiter = RedisRateLimiter("ai", limit=settings.AI_RATE_LIMIT_PER_MINUTE)
-auth_rate_limiter = RedisRateLimiter("auth", limit=10, window_seconds=60, fail_closed=True)
-source_upload_rate_limiter = RedisRateLimiter("source_upload", limit=10, window_seconds=60)
+auth_rate_limiter = RedisRateLimiter(
+    "auth", limit=10, window_seconds=60, fail_closed=True
+)
+source_upload_rate_limiter = RedisRateLimiter(
+    "source_upload", limit=10, window_seconds=60
+)

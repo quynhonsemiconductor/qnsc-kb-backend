@@ -9,7 +9,6 @@ import os
 
 from alembic import op
 
-
 revision = "20260806_23"
 down_revision = "20260806_22"
 branch_labels = None
@@ -17,8 +16,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE ai_cache ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_ai_cache_owner_user_id ON ai_cache (owner_user_id)")
+    op.execute(
+        "ALTER TABLE ai_cache ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ai_cache_owner_user_id ON ai_cache (owner_user_id)"
+    )
     if os.getenv("ENABLE_RLS", "false").lower() not in {"1", "true", "yes"}:
         return
     admin = "current_setting('app.global_admin', true) = 'true'"

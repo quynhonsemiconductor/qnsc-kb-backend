@@ -207,18 +207,23 @@ class GovernanceService:
             user, "article.publish", requested_scope="global"
         )
 
-    async def list_drafts(
-        self, user: User, status: str | None = None
-    ) -> Sequence[PendingDraft]:
-        # No assignment filter for identities that `_can_approve_draft` lets decide ANY
-        # draft. Filtering them to "unassigned or mine" hid a pending draft from everyone
-        # who could act on it: `submit_draft` applies the department's `approver_rules`
-        # automatically, so an upload could be assigned on the way in and then appear in
-        # no queue view at all -- not awaiting approval, not approved, not rejected, while
-        # the row was still `pending`. A reviewer scoped to the department still saw it
-        # through the dept clause below, so the identity with MORE authority saw less.
+    def _draft_queue_scope(self, user: User) -> dict:
+        """The repository arguments describing what this identity may see.
+
+        Resolved in ONE place so the page and its total can never be computed from
+        different predicates. A total that counted rows the caller may not see would
+        leak the existence of another department's drafts.
+
+        No assignment filter for identities that `_can_approve_draft` lets decide ANY
+        draft. Filtering them to "unassigned or mine" hid a pending draft from everyone
+        who could act on it: `submit_draft` applies the department's `approver_rules`
+        automatically, so an upload could be assigned on the way in and then appear in
+        no queue view at all -- not awaiting approval, not approved, not rejected, while
+        the row was still `pending`. A reviewer scoped to the department still saw it
+        through the dept clause below, so the identity with MORE authority saw less.
+        """
         if self._is_global_publisher(user):
-            return await self.gov_repo.list_drafts(status)
+            return {}
         can_company_review = any(
             AuthorizationService.has_permission(user, key, requested_scope="company")
             for key in ("article.review", "article.publish", "governance.read")
@@ -232,26 +237,47 @@ class GovernanceService:
             # draft in their company, so an assignment made by an approver rule must not
             # remove one from their queue. Scoped to the tenant, never across it.
             if self._is_company_governance_lead(user):
-                return await self.gov_repo.list_drafts(status, user.company_domain)
+                return {"company_domain": user.company_domain}
             member_departments = AuthorizationService.member_department_names(user)
             if user.dept:
                 member_departments.add(user.dept)
-            member_department_ids = {
-                str(department.id)
-                for department in getattr(user, "departments", [])
-                if getattr(department, "active", True)
-                and getattr(department, "company_domain", user.company_domain)
-                == user.company_domain
+            return {
+                "company_domain": user.company_domain,
+                "depts": sorted(member_departments),
+                "assigned_approver_id": user.id,
             }
-            return await self.gov_repo.list_drafts(
-                status,
-                user.company_domain,
-                depts=sorted(member_departments),
-                assigned_approver_id=user.id,
-            )
         raise HTTPException(
             status_code=403, detail="Not authorized to view the approval queue"
         )
+
+    async def list_drafts(
+        self,
+        user: User,
+        status: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        search: str | None = None,
+    ) -> Sequence[PendingDraft]:
+        scope = self._draft_queue_scope(user)
+        return await self.gov_repo.list_drafts(
+            status, **scope, limit=limit, offset=offset, search=search
+        )
+
+    async def count_drafts(
+        self, user: User, status: str | None = None, *, search: str | None = None
+    ) -> int:
+        """Total drafts this identity may see, for the same scope `list_drafts` pages.
+
+        With `search`, the total of the rows that search matches inside that scope: a
+        search can narrow what the caller sees but never widen it, and the count must
+        describe the same rows the page is cut from.
+        """
+        scope = self._draft_queue_scope(user)
+        counter = getattr(self.gov_repo, "count_drafts", None)
+        if counter is None:  # Lightweight unit-test repository compatibility.
+            return len(await self.gov_repo.list_drafts(status, **scope, search=search))
+        return await counter(status, **scope, search=search)
 
     async def submit_draft(
         self, user: User, draft_id: uuid.UUID, reason: str | None = None
@@ -520,7 +546,14 @@ class GovernanceService:
             # Existing pre-routing candidates retain the parent route until a reviewer
             # opens them. New formatted candidates always carry an explicit selection.
             if not selected_departments and item.department_ids:
-                results.append({"candidate_id": str(item.id), "position": item.position, "status": "failed", "error": "Choose at least one active department"})
+                results.append(
+                    {
+                        "candidate_id": str(item.id),
+                        "position": item.position,
+                        "status": "failed",
+                        "error": "Choose at least one active department",
+                    }
+                )
                 continue
             child_hash = hashlib.sha256(
                 f"{parent.source_hash}:{item.position}:{item.body_md}".encode("utf-8")
@@ -576,9 +609,19 @@ class GovernanceService:
             )
             children.append(child)
             item.status = "committed"
-            results.append({"candidate_id": str(item.id), "position": item.position, "status": "created", "draft_id": str(child.id), "title": child.title})
+            results.append(
+                {
+                    "candidate_id": str(item.id),
+                    "position": item.position,
+                    "status": "created",
+                    "draft_id": str(child.id),
+                    "title": child.title,
+                }
+            )
         if not children:
-            raise HTTPException(status_code=422, detail="No valid candidates could be committed")
+            raise HTTPException(
+                status_code=422, detail="No valid candidates could be committed"
+            )
         await self._transition_draft(
             parent, user, "rejected", "Split candidates committed as independent drafts"
         )
@@ -588,7 +631,11 @@ class GovernanceService:
             await self.submit_draft(user, child.id, "Committed from batch review")
         await self.log_audit(user.id, "batch_commit", "draft", str(parent.id))
         if detailed:
-            return {"parent_draft_id": str(parent.id), "results": results, "drafts": children}
+            return {
+                "parent_draft_id": str(parent.id),
+                "results": results,
+                "drafts": children,
+            }
         return children
 
     async def assign_approver(
@@ -676,10 +723,14 @@ class GovernanceService:
                 recipient_user_id=approver.id,
                 type="in_app",
                 payload={
-                    "event": "draft_reassigned" if previous_approver_id else "draft_assigned",
+                    "event": (
+                        "draft_reassigned" if previous_approver_id else "draft_assigned"
+                    ),
                     "draft_id": str(draft.id),
                     "approver_id": str(approver.id),
-                    "previous_approver_id": str(previous_approver_id) if previous_approver_id else None,
+                    "previous_approver_id": (
+                        str(previous_approver_id) if previous_approver_id else None
+                    ),
                     "assigned_by": str(user.id),
                     "reason": reason.strip() if reason and reason.strip() else None,
                 },
@@ -703,11 +754,17 @@ class GovernanceService:
         await self.gov_repo.db.commit()
         await self.log_audit(
             user.id,
-            "reassign_approver" if previous_approver_id else ("assign_approver_rule" if use_rule else "assign_approver"),
+            (
+                "reassign_approver"
+                if previous_approver_id
+                else ("assign_approver_rule" if use_rule else "assign_approver")
+            ),
             "draft",
             str(draft.id),
             detail={
-                "previous_approver_id": str(previous_approver_id) if previous_approver_id else None,
+                "previous_approver_id": (
+                    str(previous_approver_id) if previous_approver_id else None
+                ),
                 "new_approver_id": str(approver.id),
                 "reason": reason.strip() if reason and reason.strip() else None,
                 "used_rule": use_rule,
@@ -997,7 +1054,9 @@ class GovernanceService:
                     if mapped_ids
                     else []
                 )
-                if len({item.id for item in selected_departments}) != len(set(mapped_ids)):
+                if len({item.id for item in selected_departments}) != len(
+                    set(mapped_ids)
+                ):
                     raise HTTPException(
                         status_code=422,
                         detail="The connector ACL contains an invalid department",
@@ -1283,7 +1342,9 @@ class GovernanceService:
                     type=category,
                     sensitivity=sensitivity,
                     language=str(metadata.get("language") or "vi"),
-                    self_approved=bool(draft.created_by and draft.created_by == user.id),
+                    self_approved=bool(
+                        draft.created_by and draft.created_by == user.id
+                    ),
                     next_review=next_review,
                     owner_id=user.id,
                     status="published",
@@ -1395,10 +1456,18 @@ class GovernanceService:
                 [
                     AuditLog(
                         user_id=user.id,
-                        action=("self_approve" if draft.created_by and draft.created_by == user.id else "approve"),
+                        action=(
+                            "self_approve"
+                            if draft.created_by and draft.created_by == user.id
+                            else "approve"
+                        ),
                         target_type="draft",
                         target_id=str(draft.id),
-                        detail_json={"self_approved": bool(draft.created_by and draft.created_by == user.id)},
+                        detail_json={
+                            "self_approved": bool(
+                                draft.created_by and draft.created_by == user.id
+                            )
+                        },
                     ),
                     AuditLog(
                         user_id=user.id,
@@ -1421,14 +1490,31 @@ class GovernanceService:
                         },
                     )
                 )
-            follower_ids = (await db.execute(select(ArticleFollower.user_id).where(ArticleFollower.article_id == created_article.id))).scalars().all()
+            follower_ids = (
+                (
+                    await db.execute(
+                        select(ArticleFollower.user_id).where(
+                            ArticleFollower.article_id == created_article.id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             for follower_id in follower_ids:
                 if follower_id != user.id and follower_id != draft.created_by:
-                    db.add(NotificationQueue(
-                        recipient_user_id=follower_id,
-                        type="in_app",
-                        payload={"event": "article_version_published", "article_id": str(created_article.id), "version": next_version, "source_changed": bool(update_target)},
-                    ))
+                    db.add(
+                        NotificationQueue(
+                            recipient_user_id=follower_id,
+                            type="in_app",
+                            payload={
+                                "event": "article_version_published",
+                                "article_id": str(created_article.id),
+                                "version": next_version,
+                                "source_changed": bool(update_target),
+                            },
+                        )
+                    )
             await db.commit()
         except Exception:
             if hasattr(db, "rollback"):
@@ -1536,7 +1622,9 @@ class GovernanceService:
             for page in (draft.page_texts or [])
             if page.get("text")
         )
-        result = await restructure_document(draft.title, source_text, enabled=enabled, background=False)
+        result = await restructure_document(
+            draft.title, source_text, enabled=enabled, background=False
+        )
         draft.restructured_body_md = result.body_md
         draft.restructure_candidate_md = result.candidate_body_md
         draft.restructure_decision = (

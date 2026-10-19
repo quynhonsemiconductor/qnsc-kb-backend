@@ -18,7 +18,6 @@ from typing import Any
 
 import httpx
 
-
 ROLES = ("Admin", "CEO", "Reviewer", "Staff")
 ROLE_EMAIL_PREFIX = {
     "Admin": "kb-admin",

@@ -4,6 +4,7 @@ Production keeps this material separate from JWT signing and can decrypt with
 short-lived previous keys during a controlled rotation. A KMS/secret manager
 can supply the same values without changing callers.
 """
+
 from __future__ import annotations
 
 import base64
@@ -28,7 +29,11 @@ def _key_materials() -> list[str]:
     SECRET_KEY from PREVIOUS_DATA_ENCRYPTION_KEYS only once everything is re-encrypted.
     """
     values = [settings.DATA_ENCRYPTION_KEY or settings.SECRET_KEY]
-    values.extend(key.strip() for key in settings.PREVIOUS_DATA_ENCRYPTION_KEYS.split(",") if key.strip())
+    values.extend(
+        key.strip()
+        for key in settings.PREVIOUS_DATA_ENCRYPTION_KEYS.split(",")
+        if key.strip()
+    )
     if settings.DATA_ENCRYPTION_KEY:
         values.append(settings.SECRET_KEY)
     return list(dict.fromkeys(values))
@@ -49,7 +54,11 @@ def encrypt_secret(value: str | None) -> str | None:
             "value distinct from SECRET_KEY, which signs tokens and must not encrypt "
             "data at rest"
         )
-    return _fernet_for(settings.DATA_ENCRYPTION_KEY).encrypt(value.encode("utf-8")).decode("ascii")
+    return (
+        _fernet_for(settings.DATA_ENCRYPTION_KEY)
+        .encrypt(value.encode("utf-8"))
+        .decode("ascii")
+    )
 
 
 def decrypt_secret(value: str | None) -> str | None:

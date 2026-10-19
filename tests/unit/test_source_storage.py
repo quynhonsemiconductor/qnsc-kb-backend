@@ -115,7 +115,7 @@ def test_r2_upload_uses_private_tenant_scoped_object_key(monkeypatch):
     monkeypatch.setattr(settings, "SOURCE_STORAGE_BACKEND", "r2")
     monkeypatch.setattr(settings, "SOURCE_STORAGE_BUCKET", "private-kb")
     monkeypatch.setattr(settings, "SOURCE_STORAGE_PREFIX", "sources")
-    monkeypatch.setattr(source_storage, "_s3_client", lambda: Client())
+    monkeypatch.setattr(source_storage, "_s3_client", lambda **_kwargs: Client())
 
     source_hash = "a" * 64
     key = save_source(source_hash, "report.pdf", b"document", "ACME.test")
@@ -151,7 +151,7 @@ def test_a_backend_failure_is_raised_as_a_catchable_storage_error(monkeypatch):
     monkeypatch.setattr(settings, "SOURCE_STORAGE_BACKEND", "r2")
     monkeypatch.setattr(settings, "SOURCE_STORAGE_BUCKET", "private-kb")
     monkeypatch.setattr(settings, "SOURCE_STORAGE_PREFIX", "sources")
-    monkeypatch.setattr(source_storage, "_s3_client", lambda: Client())
+    monkeypatch.setattr(source_storage, "_s3_client", lambda **_kwargs: Client())
 
     with pytest.raises(source_storage.SourceStorageError) as raised:
         save_source("a" * 64, "report.pdf", b"document", "acme.test")
@@ -199,7 +199,7 @@ def test_r2_source_listing_is_limited_to_the_configured_private_prefix(monkeypat
     monkeypatch.setattr(settings, "SOURCE_STORAGE_BACKEND", "r2")
     monkeypatch.setattr(settings, "SOURCE_STORAGE_BUCKET", "private-kb")
     monkeypatch.setattr(settings, "SOURCE_STORAGE_PREFIX", "sources")
-    monkeypatch.setattr(source_storage, "_s3_client", lambda: Client())
+    monkeypatch.setattr(source_storage, "_s3_client", lambda **_kwargs: Client())
 
     objects = list_source_objects()
 

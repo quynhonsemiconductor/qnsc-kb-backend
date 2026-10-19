@@ -12,6 +12,7 @@ Called best-effort, after a draft publishes (see governance.py), the same way
 `domain/contradiction_check.py` is: a bad extraction is a missing convenience, not a
 reason to fail a publish that would otherwise have succeeded.
 """
+
 from __future__ import annotations
 
 import json
@@ -52,7 +53,9 @@ class StructuredMetadataUnavailable(RuntimeError):
     """The extraction call failed or returned something unusable. Never fatal to a caller."""
 
 
-async def extract_structured_metadata(title: str, body_md: str) -> dict[str, str | None]:
+async def extract_structured_metadata(
+    title: str, body_md: str
+) -> dict[str, str | None]:
     """Best-effort document identity fields, or raise `StructuredMetadataUnavailable`.
 
     Every value in the returned dict is either a clean string or explicitly `None` --

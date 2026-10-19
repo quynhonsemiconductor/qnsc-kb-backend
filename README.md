@@ -1,6 +1,6 @@
 # QNSC Knowledge Base Backend
 
-FastAPI-based backend application for QNSC Knowledge Base, utilizing pgvector for hybrid RAG search, Celery for asynchronous processing, and Redis for caching.
+FastAPI-based backend application for QNSC Knowledge Base, utilizing pgvector for hybrid RAG search, Celery for asynchronous processing, and Valkey (Redis protocol) as the Celery broker and result backend, and for the shared login rate limiter. The engine is the one production runs on ElastiCache; production's Valkey node is currently disabled.
 
 ## Run it locally (Docker, from a clean clone)
 
@@ -13,7 +13,7 @@ git clone https://github.com/quynhonsemiconductor/qnsc-kb-backend.git
 cd qnsc-kb-backend
 cp .env.example .env                                   # the only file you copy; it works as-is
 
-docker compose up -d --build db redis                  # first build downloads the model (~2.3 GB, several minutes)
+docker compose up -d --build db redis localstack       # first build downloads the model only with KB_BAKE_EMBEDDING_MODEL=true
 docker compose --profile migrate run --rm migrator     # creates the schema
 docker compose up -d --build api worker beat           # API + Celery worker + Celery beat
 ```
@@ -30,6 +30,16 @@ If a port is already taken (a second project's Postgres on 5432 is the usual cla
 `KB_DB_PORT`, `KB_REDIS_PORT` or `KB_API_PORT` in `.env` (see the top of `.env.example`) and run the
 same commands. On Apple Silicon this works as-is: the worker runs from the API image. Set
 `KB_WORKER_TARGET=worker` only if you need OCR of scanned files (x86_64 only).
+
+### Run a second copy
+
+To run a second copy beside this one (a second checkout, or a branch you keep running), set in `.env`: `COMPOSE_PROJECT_NAME=qnsc-kb-2`
+(it prefixes the containers and volumes), and free values for `KB_DB_PORT`, `KB_REDIS_PORT` and `KB_API_PORT`. The containers reach each other
+by service name, so nothing else changes. Then run the same commands. The frontend's dev server still needs its own port (see that repository).
+
+The second copy's frontend must also be allowed by this backend: in its `.env`, set `CORS_ORIGINS` and `FRONTEND_URL` to the second
+frontend origin, e.g. `http://127.0.0.1:5174` (the frontend README explains why 127.0.0.1). Cookies are per host, not per port, so
+`localhost:5173` and `localhost:5174` share one cookie jar: open the second frontend as `127.0.0.1`, or use another browser profile.
 
 ### Sign in
 
@@ -63,11 +73,15 @@ The password is never stored in the repository.
 
 | Feature | Local status |
 |---|---|
-| Sign-in, articles, drafts, review, search (local embeddings), Celery jobs, beat schedules | Works with the example env |
-| AI answers and AI formatting | Need a chat provider. It is NOT an environment variable: an administrator saves provider, model and key in the app (Admin > AI provider). Until then the workspace answers from the retrieval fallback. To use a model on your machine (Ollama, vLLM, LM Studio) set `LLM_ALLOW_LOCAL_ENDPOINTS=true` in `.env` |
-| File upload | Needs your OWN Cloudflare R2 bucket and keys in `.env` (`SOURCE_STORAGE_BUCKET`, `R2_*`). There is no local-disk or MinIO backend, by design |
+| Sign-in, articles, drafts, review, search, Celery jobs, beat schedules | Works with the example env |
+| Upload, ingest and search of sources | Works: LocalStack stands in for R2 (`SOURCE_STORAGE_BACKEND=r2`, `S3_ENDPOINT_URL` set to the emulator; the browser uploads to `S3_PUBLIC_ENDPOINT_URL`). Not durable across a LocalStack restart: see the storage note below |
+| Embeddings | Mock by default (`EMBEDDING_MODEL=mock`, `EMBEDDING_VERSION=mock-v1`): deterministic, no model download, keyword-level search quality. Real local embeddings: `KB_BAKE_EMBEDDING_MODEL=true` with the e5 model in `.env` (about 6 GB disk, 8 GB Docker memory for the bake) |
+| AI answers and AI formatting | Mock by default with `LLM_PROVIDER=mock` (development only): deterministic answers that cite the first authorized passage, no key. For a real model, an administrator saves a provider and key in Admin > AI provider. A key in `.env` is not read for answers |
 | Malware scanning (ClamAV) | Off locally (`MALWARE_SCAN_ENABLED=false`); deployed environments run it |
 | Microsoft / Google connectors, SSO, email | Off until their credentials are set in `.env`. Microsoft sign-in and the connector also need `MICROSOFT_TENANT_ID` set to your Entra **tenant GUID** (never `common`; blank or `common` leaves both off, by design). Use the **KB Dev** app registration: `docs/runbooks/entra-apps.md` |
+
+The local-only switches are refused outside development (`validate_production`): `LLM_PROVIDER=mock`, `EMBEDDING_MODEL=mock`,
+`S3_PUBLIC_ENDPOINT_URL`. The local S3 endpoint is accepted only in development.
 
 Secrets in `.env.example` (`SECRET_KEY`, `DATA_ENCRYPTION_KEY`) are throwaway placeholders that
 work in development; generate real ones with `openssl rand -hex 32` for anything other people can
