@@ -13,7 +13,7 @@ git clone https://github.com/quynhonsemiconductor/qnsc-kb-backend.git
 cd qnsc-kb-backend
 cp .env.example .env                                   # the only file you copy; it works as-is
 
-docker compose up -d --build db redis localstack       # first build downloads the model only with KB_BAKE_EMBEDDING_MODEL=true
+docker compose up -d --build db redis garage garage-init       # .env.example sets KB_BAKE_EMBEDDING_MODEL=false: no model download
 docker compose --profile migrate run --rm migrator     # creates the schema
 docker compose up -d --build api worker beat           # API + Celery worker + Celery beat
 ```
@@ -31,10 +31,19 @@ If a port is already taken (a second project's Postgres on 5432 is the usual cla
 same commands. On Apple Silicon this works as-is: the worker runs from the API image. Set
 `KB_WORKER_TARGET=worker` only if you need OCR of scanned files (x86_64 only).
 
+### Object storage (local)
+
+Uploads go to a local Garage node (an S3-compatible store, the stand-in for the R2 bucket), on `STORAGE_HOST_PORT`
+(default 4570, loopback only). `garage-init` creates the bucket, imports a fixed local key, and allows the frontend
+origins (`FRONTEND_DEV_PORT`, both `localhost` and `127.0.0.1`) before the API starts; it fails loudly if any step does not
+take. The data lives in the `garagedata` and `garagemeta` volumes, so uploads survive `docker compose restart` and
+`docker compose down`. `docker compose down -v` removes them with the database.
+
 ### Run a second copy
 
 To run a second copy beside this one (a second checkout, or a branch you keep running), set in `.env`: `COMPOSE_PROJECT_NAME=qnsc-kb-2`
-(it prefixes the containers and volumes), and free values for `KB_DB_PORT`, `KB_REDIS_PORT` and `KB_API_PORT`. The containers reach each other
+(it prefixes the containers and volumes), and free values for `KB_DB_PORT`, `KB_REDIS_PORT`, `KB_API_PORT` and `STORAGE_HOST_PORT`.
+Set the second frontend's `FRONTEND_DEV_PORT` here too: the bucket's CORS is built from it at start, so an unlisted origin fails at upload. The containers reach each other
 by service name, so nothing else changes. Then run the same commands. The frontend's dev server still needs its own port (see that repository).
 
 The second copy's frontend must also be allowed by this backend: in its `.env`, set `CORS_ORIGINS` and `FRONTEND_URL` to the second
@@ -74,7 +83,7 @@ The password is never stored in the repository.
 | Feature | Local status |
 |---|---|
 | Sign-in, articles, drafts, review, search, Celery jobs, beat schedules | Works with the example env |
-| Upload, ingest and search of sources | Works: LocalStack stands in for R2 (`SOURCE_STORAGE_BACKEND=r2`, `S3_ENDPOINT_URL` set to the emulator; the browser uploads to `S3_PUBLIC_ENDPOINT_URL`). Not durable across a LocalStack restart: see the storage note below |
+| Upload, ingest and search of sources | Works: Garage stands in for R2 (`SOURCE_STORAGE_BACKEND=r2`, `S3_ENDPOINT_URL` set to the Garage node; the browser uploads to `S3_PUBLIC_ENDPOINT_URL` through a presigned URL). `garage-init` creates the bucket and CORS for the local web origins before the API starts. Uploads persist in the `garagedata` volume across restarts |
 | Embeddings | Mock by default (`EMBEDDING_MODEL=mock`, `EMBEDDING_VERSION=mock-v1`): deterministic, no model download, keyword-level search quality. Real local embeddings: `KB_BAKE_EMBEDDING_MODEL=true` with the e5 model in `.env` (about 6 GB disk, 8 GB Docker memory for the bake) |
 | AI answers and AI formatting | Mock by default with `LLM_PROVIDER=mock` (development only): deterministic answers that cite the first authorized passage, no key. For a real model, an administrator saves a provider and key in Admin > AI provider. A key in `.env` is not read for answers |
 | Malware scanning (ClamAV) | Off locally (`MALWARE_SCAN_ENABLED=false`); deployed environments run it |
