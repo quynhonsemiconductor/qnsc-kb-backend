@@ -19,6 +19,7 @@ WORKFLOW = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
 PROD_ORDER = ["tofu plan (saved as tfplan)", "plan-guard (tfplan)", "destructive-guard (tfplan)", "tofu apply (the saved plan)"]
 SHARED_ORDER = ["tofu plan (saved as tfplan)", "destructive-guard (tfplan)", "tofu apply (the saved plan)"]
+DEVELOP_ORDER = SHARED_ORDER
 
 
 def read() -> str:
@@ -52,10 +53,13 @@ def test_shared_apply_runs_the_destructive_guard_on_the_saved_plan_before_applyi
     assert in_order(step_names(job_block(read(), "apply-shared")), SHARED_ORDER)
 
 
-def test_prod_and_shared_applies_run_only_a_saved_plan():
-    """apply-develop still applies without a saved plan; it is out of scope here and is tracked separately."""
+def test_develop_apply_runs_the_destructive_guard_on_the_saved_plan_before_applying():
+    assert in_order(step_names(job_block(read(), "apply-develop")), DEVELOP_ORDER)
+
+
+def test_every_apply_runs_only_a_saved_plan():
     text = read()
-    for name in ("apply-prod", "apply-shared"):
+    for name in ("apply-prod", "apply-shared", "apply-develop"):
         job = job_block(text, name)
         assert "-auto-approve" not in job, name
         assert "tofu apply -input=false tfplan" in job, name
