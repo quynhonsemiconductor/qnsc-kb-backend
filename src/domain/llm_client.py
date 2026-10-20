@@ -458,9 +458,23 @@ async def complete(
     Both modes: while the provider has asked not to be called (a recent 429), a call fails fast with the
     remaining wait instead of spending a request to find out (a background call waits it out when it is
     short), and an empty reply is a failed call, retried and then raised as ProviderEmptyReplyError.
+
+    NON-STREAMING calls only (`on_token is None`): `timeout` is the WHOLE call's budget, not per
+    attempt — every retry runs against the remaining budget, so a retried interactive call can never
+    take two full timeouts. That matters behind Cloudflare: a 60 s timeout retried once is 121 s, past
+    the 100 s the edge grants, so the second attempt would produce an answer the client can never see
+    (a 524 with no body). Streaming keeps its per-attempt read timeout: a healthy stream runs longer
+    than `timeout` in total while chunks keep arriving, and a total budget would abort it mid-answer.
     """
     rate_retries = 0
     empty_retries = 0
+    # Which wait most recently consumed budget, so an exhausted budget raises the error
+    # that names the real cause rather than a generic empty-reply failure.
+    last_wait: str | None = None
+    # Starts when the first attempt actually starts — AFTER the `_gate()` wait, not at
+    # function entry: a background call queued behind LLM_MAX_CONCURRENCY would
+    # otherwise arrive at the provider with a budget already spent in the queue.
+    deadline: float | None = None
     while True:
         remaining = _rate_limited_until - time.monotonic()
         if remaining > 0:
@@ -475,11 +489,26 @@ async def complete(
             await asyncio.sleep(remaining + random.uniform(0, 1))
         pause: float | None = None
         async with _gate() if background else _NoGate():
+            if deadline is None and on_token is None:
+                deadline = time.monotonic() + timeout
+            if deadline is not None and deadline - time.monotonic() <= 0:
+                if last_wait == "rate":
+                    raise ProviderRateLimitError(
+                        "The provider's rate-limit wait consumed the call's time budget",
+                        retry_after=int(_rate_limited_until - time.monotonic()) + 1,
+                    )
+                raise ProviderEmptyReplyError(
+                    "No time budget left in the call for another attempt"
+                )
             try:
                 result = await _complete_once(
                     messages,
                     model_override=model_override,
-                    timeout=timeout,
+                    timeout=(
+                        min(timeout, deadline - time.monotonic())
+                        if deadline is not None
+                        else timeout
+                    ),
                     thinking=thinking,
                     max_tokens=max_tokens,
                     on_token=on_token,
@@ -499,6 +528,7 @@ async def complete(
                     raise
                 rate_retries += 1
                 pause = wait + random.uniform(0, 1)
+                last_wait = "rate"
                 logger.info(
                     "LLM rate limited; waiting and retrying",
                     retry_after=wait,
@@ -513,6 +543,7 @@ async def complete(
                     )
                 empty_retries += 1
                 pause = 1.0 * empty_retries
+                last_wait = "empty"
                 logger.warning(
                     "LLM returned an empty reply; retrying", attempt=empty_retries
                 )
