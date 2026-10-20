@@ -4,10 +4,30 @@ from threading import Lock
 import hashlib
 import time
 import structlog
+from fastapi import Request
 from redis.asyncio import Redis
 from src.core.config import settings
 
 logger = structlog.get_logger()
+
+
+def client_ip_from_request(request: Request) -> str:
+    """The address the limiters bucket on: CF-Connecting-IP, else the socket address.
+
+    Behind Cloudflare the socket address is the cloudflared pod, so keying on it puts
+    every visitor in one shared bucket (and one shared 429). Cloudflare sets
+    CF-Connecting-IP from the actual visitor address, overwriting any client-supplied
+    value, so it is trustworthy wherever the origin is reachable only through
+    Cloudflare. X-Forwarded-For is deliberately never consulted: any client can append
+    to it, and the proxies in front of the API append rather than overwrite, so the
+    leftmost value is attacker-chosen.
+    """
+    cf_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+    if cf_ip:
+        return cf_ip
+    if request.client is not None:
+        return request.client.host
+    return "unknown"
 
 
 class InMemoryRateLimiter:
