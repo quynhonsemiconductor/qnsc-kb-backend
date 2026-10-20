@@ -19,7 +19,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
@@ -174,9 +174,9 @@ class ConnectorAdapter:
                     )
             return response.status_code, response_headers, bytes(body)
 
-    async def _request(
-        self, method: str, url: str, **kwargs: Any
-    ) -> dict[str, Any] | list[Any] | bytes:
+    # Decoded JSON (dict or list), or raw bytes for downloads. JSON stays Any: a union here forced
+    # narrowing at every one of the ~25 JSON call sites in this file. Downloads use _request_bytes.
+    async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
         self._validate_provider_url(url)
         headers = dict(kwargs.pop("headers", {}))
         headers["Authorization"] = f"Bearer {self.access_token}"
@@ -277,6 +277,10 @@ class ConnectorAdapter:
                         ) from exc
                 return body
         raise ConnectorProviderError("Provider request failed")
+
+    async def _request_bytes(self, method: str, url: str, **kwargs: Any) -> bytes:
+        # Download endpoints answer with the file body, not JSON, so _request returns bytes here.
+        return cast(bytes, await self._request(method, url, **kwargs))
 
     async def exchange_code(self, code: str) -> dict[str, Any]:
         raise NotImplementedError
@@ -593,7 +597,9 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
 
     async def download(self, change: NormalizedChange) -> bytes:
         drive_id = change.corpus_id
-        return await self._request("GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/content")  # type: ignore[return-value]
+        return await self._request_bytes(
+            "GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/content"
+        )
 
 
 class SharePointAdapter(MicrosoftGraphAdapter):
@@ -1179,8 +1185,14 @@ class GoogleDriveAdapter(ConnectorAdapter):
                 or change.mime_type.endswith("presentation")
                 else "text/csv"
             )
-            return await self._request("GET", f"{self.api}/files/{change.external_id}/export?mimeType={export_mime}")  # type: ignore[return-value]
-        return await self._request("GET", f"{self.api}/files/{change.external_id}?alt=media&supportsAllDrives=true")  # type: ignore[return-value]
+            return await self._request_bytes(
+                "GET",
+                f"{self.api}/files/{change.external_id}/export?mimeType={export_mime}",
+            )
+        return await self._request_bytes(
+            "GET",
+            f"{self.api}/files/{change.external_id}?alt=media&supportsAllDrives=true",
+        )
 
 
 #: Provider name -> adapter. A table rather than an if-chain so registering a

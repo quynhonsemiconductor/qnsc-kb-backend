@@ -42,6 +42,9 @@ import asyncio
 from dataclasses import dataclass, field
 
 import structlog
+from typing import Any, cast
+
+from sqlalchemy.engine import CursorResult
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -243,7 +246,7 @@ async def factory_reset(db: AsyncSession, *, dry_run: bool = True) -> ResetCount
             )
             continue
         result = await db.execute(delete(table))
-        counts.rows[name] = result.rowcount or 0
+        counts.rows[name] = cast(CursorResult[Any], result).rowcount or 0
 
     if dry_run:
         logger.info("Factory reset dry run", **counts.as_dict())

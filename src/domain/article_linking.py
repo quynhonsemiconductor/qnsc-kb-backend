@@ -20,7 +20,7 @@ bug here can suggest a bad link but cannot bypass access control on its own.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from sqlalchemy import select
@@ -139,4 +139,6 @@ async def find_topical_matches(
             .limit(limit * 20)
         )
     ).all()
-    return collapse_to_top_articles(list(rows), limit=limit)
+    return collapse_to_top_articles(
+        cast(list[tuple[Any, float]], list(rows)), limit=limit
+    )

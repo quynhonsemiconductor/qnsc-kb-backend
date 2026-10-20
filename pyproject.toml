@@ -110,11 +110,20 @@ pytest-asyncio = "^1.4.0"
 black = "^26.0.0"
 mypy = "^1.10.0"
 celery-types = "^0.26.0"
+types-openpyxl = "^3.1.5.20261017"
+boto3-stubs = {version = "^1.43.114", extras = ["s3", "sesv2"]}
 
 [tool.mypy]
 # `src/` is the import root, and `src` is a package. Without this mypy resolves src/api/deps.py as both `api.deps`
 # and `src.api.deps` and stops before checking anything.
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# Optional OCR engine, not installed in the dev group. The import is guarded at runtime.
+# The single documented exception to the stub-package rule: paddle is the optional `ocr` group,
+# not the dev group, so no stub package is declared for it.
+module = ["paddle", "paddle.*", "paddleocr", "paddleocr.*"]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["poetry-core"]

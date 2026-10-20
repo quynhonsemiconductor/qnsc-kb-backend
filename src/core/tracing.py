@@ -9,7 +9,7 @@ try:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 except ImportError:  # Keep local/unit environments lightweight.
-    trace = None
+    trace = None  # type: ignore[assignment]  # OpenTelemetry absent: trace stays None
 
 
 def configure_tracing() -> None:

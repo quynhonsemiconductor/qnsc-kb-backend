@@ -7,7 +7,7 @@ import hashlib
 import io
 from itertools import islice
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 from src.core.config import settings
 
@@ -229,7 +229,7 @@ def _pdf_evidence(data: bytes) -> list[dict[str, Any]]:
         # only be recognised by being everywhere. Cheap: `get_images` reads the page's
         # resource list, it does not decode pixels.
         xref_page_counts: dict[int, int] = {}
-        for page in document:
+        for page in cast(Iterable[Any], document):
             seen_on_page: set[int] = set()
             try:
                 images = page.get_images(full=True)
@@ -240,7 +240,7 @@ def _pdf_evidence(data: bytes) -> list[dict[str, Any]]:
             for xref in seen_on_page:
                 xref_page_counts[xref] = xref_page_counts.get(xref, 0) + 1
 
-        for page_index, page in enumerate(document, start=1):
+        for page_index, page in enumerate(cast(Iterable[Any], document), start=1):
             if len(specs) >= settings.EVIDENCE_MAX_ARTIFACTS_PER_DOCUMENT:
                 break
             try:
@@ -493,8 +493,8 @@ def render_evidence_preview(
         finally:
             document.close()
     elif extension in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
-        with Image.open(io.BytesIO(data)) as image:
-            image = image.convert("RGB")
+        with Image.open(io.BytesIO(data)) as source_image:
+            image = source_image.convert("RGB")
             image.thumbnail(
                 (
                     settings.EVIDENCE_PREVIEW_MAX_PIXELS,

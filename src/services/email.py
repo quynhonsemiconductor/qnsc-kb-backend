@@ -20,6 +20,7 @@ as that mailbox and as nobody else. See docs/runbooks/email-graph.md.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING, Any
 import base64
 import hashlib
 import re
@@ -31,12 +32,14 @@ from urllib.parse import quote
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
 import httpx
 import structlog
 
 from src.core.config import settings
+
+if TYPE_CHECKING:
+    from mypy_boto3_sesv2.type_defs import MessageTypeDef
 
 logger = structlog.get_logger()
 
@@ -478,7 +481,7 @@ class SesEmailSender(EmailSender):
             if settings.MAIL_FROM_NAME
             else sender
         )
-        body: dict[str, Any] = {"Subject": {"Data": subject}, "Body": {}}
+        body: MessageTypeDef = {"Subject": {"Data": subject}, "Body": {}}
         if html:
             body["Body"]["Html"] = {"Data": html}
         else:
