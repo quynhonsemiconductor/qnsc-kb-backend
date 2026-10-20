@@ -219,17 +219,27 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
     token: str | None = Depends(oauth2_scheme),
     access_token_cookie: str | None = Cookie(default=None, alias="access_token"),
+    host_access_token_cookie: str | None = Cookie(
+        default=None, alias="__Host-access_token"
+    ),
 ) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if not token and access_token_cookie:
+    # __Host- only in deployed environments: the host-locked name is the one this
+    # deployment sets, and a plain cookie is not — a sibling *.qnsc.vn host can plant
+    # one, which is exactly what the __Host- prefix exists to prevent. The plain name
+    # is therefore accepted only in local development, where it is the generation set.
+    cookie_token = host_access_token_cookie or (
+        access_token_cookie if settings.is_development_environment else None
+    )
+    if not token and cookie_token:
         # Keyed on the cookie, not on the presence of a session: a request that
         # authenticated with an explicit Authorization header proved its own intent.
         _reject_cross_site_cookie_request(request)
-        token = access_token_cookie
+        token = cookie_token
     if not token:
         raise credentials_exception
     try:

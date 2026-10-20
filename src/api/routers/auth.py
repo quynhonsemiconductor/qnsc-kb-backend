@@ -2442,12 +2442,27 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+def _auth_cookie_names() -> tuple[str, str]:
+    """The auth pair's cookie names: `__Host-`-prefixed when deployed, plain locally.
+
+    The `__Host-` prefix is honoured only with the `Secure` attribute (plus `Path=/`
+    and no `Domain`), and local development serves plain HTTP, where a prefixed
+    cookie would be dropped — so the plain names stay local-only. Every deployed
+    environment gets the host-locked names and `Secure`, dev and prod alike
+    (ONPREM-PLAN §7.2). Readers accept both names for one deploy cycle.
+    """
+    if settings.is_development_environment:
+        return "access_token", "refresh_token"
+    return "__Host-access_token", "__Host-refresh_token"
+
+
 def _set_auth_cookies(
     response: Response, access_token: str, refresh_token: str
 ) -> None:
-    secure = settings.ENVIRONMENT.lower() in {"production", "prod"}
+    access_name, refresh_name = _auth_cookie_names()
+    secure = not settings.is_development_environment
     response.set_cookie(
-        "access_token",
+        access_name,
         access_token,
         httponly=True,
         secure=secure,
@@ -2456,18 +2471,35 @@ def _set_auth_cookies(
         path="/",
     )
     response.set_cookie(
-        "refresh_token",
+        refresh_name,
         refresh_token,
         httponly=True,
         secure=secure,
         samesite="lax",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path=f"{settings.API_V1_STR}/auth",
+        path="/",
     )
+    if access_name != "access_token":
+        # One rename cycle: a browser can still carry the pre-rename plain cookies
+        # (the refresh one at its old /api/v1/auth path). They must not survive the
+        # next issuance — the plain name is not host-locked, and the plain refresh
+        # session behind them is already revoked, so leaving them set only risks
+        # the stale value winning a later read.
+        response.delete_cookie("access_token", path="/")
+        response.delete_cookie("refresh_token", path="/")
+        response.delete_cookie("refresh_token", path=f"{settings.API_V1_STR}/auth")
 
 
 def _clear_auth_cookies(response: Response) -> None:
+    access_name, refresh_name = _auth_cookie_names()
+    response.delete_cookie(access_name, path="/")
+    response.delete_cookie(refresh_name, path="/")
+    # Both generations, whatever this environment sets today: a browser can still
+    # hold the plain names from before the `__Host-` rename, and the refresh cookie
+    # used to live at the narrower `/api/v1/auth` path, which only its own
+    # path-scoped delete clears.
     response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
     response.delete_cookie("refresh_token", path=f"{settings.API_V1_STR}/auth")
 
 
@@ -2477,11 +2509,22 @@ async def refresh_token(
     response: Response,
     req: RefreshRequest | None = None,
     refresh_token_cookie: str | None = Cookie(default=None, alias="refresh_token"),
+    host_refresh_token_cookie: str | None = Cookie(
+        default=None, alias="__Host-refresh_token"
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     _reject_cross_site_auth_request(request)
     refresh_value = (
-        req.refresh_token if req and req.refresh_token else refresh_token_cookie
+        req.refresh_token
+        if req and req.refresh_token
+        else (
+            host_refresh_token_cookie
+            # Same rule as the access cookie: the plain name is dev-only. A deployed
+            # request with only a plain cookie gets no session from it — a sibling
+            # host could have planted it.
+            or (refresh_token_cookie if settings.is_development_environment else None)
+        )
     )
     if not refresh_value:
         raise HTTPException(status_code=401, detail="Refresh token is required")
@@ -2542,11 +2585,22 @@ async def logout(
     response: Response,
     req: RefreshRequest | None = None,
     refresh_token_cookie: str | None = Cookie(default=None, alias="refresh_token"),
+    host_refresh_token_cookie: str | None = Cookie(
+        default=None, alias="__Host-refresh_token"
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     _reject_cross_site_auth_request(request)
     refresh_value = (
-        req.refresh_token if req and req.refresh_token else refresh_token_cookie
+        req.refresh_token
+        if req and req.refresh_token
+        else (
+            host_refresh_token_cookie
+            # Same rule as the access cookie: the plain name is dev-only. A deployed
+            # request with only a plain cookie gets no session from it — a sibling
+            # host could have planted it.
+            or (refresh_token_cookie if settings.is_development_environment else None)
+        )
     )
     session = None
     if refresh_value:
