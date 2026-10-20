@@ -1,0 +1,10 @@
+# E2E overlay: ephemeral host ports for the two services the suite reaches from the host, Postgres and Valkey. Every other service
+# publishes nothing in this overlay. Load it after docker-compose.yml (scripts/e2e/run.sh does). `!override` replaces the base
+# file's fixed list rather than adding to it. Docker picks each host port; the runner finds it with `docker compose port`.
+services:
+  db:
+    ports: !override
+      - "127.0.0.1::5432"
+  redis:
+    ports: !override
+      - "127.0.0.1::6379"
