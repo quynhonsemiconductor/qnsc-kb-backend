@@ -115,10 +115,9 @@ jobs:
       - name: Format check (black)
         run: poetry run black --check src migrations scripts
 
-      # Advisory: `mypy src` reports 229 errors in 50 files (the import layout is fixed in pyproject). Blocking
-      # once those are cleared; until then this step is visible in the log but does not gate the PR.
-      - name: Typecheck (mypy, advisory)
-        continue-on-error: true
+      # Blocking. `mypy src` is clean. The package layout is set in pyproject ([tool.mypy]); each module
+      # override and each `type: ignore` carries its reason where it is declared.
+      - name: Typecheck (mypy)
         run: poetry run mypy src
 
       # Cheap catch-all that needs no configuration: every module must at least parse.

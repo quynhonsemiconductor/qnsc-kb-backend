@@ -162,7 +162,9 @@ def get_bge_embedding(text: str) -> list[float]:
     not been BGE-specific for some time.
     """
     if is_mock():
-        return [0.0] * settings.EMBEDDING_DIMENSION
+        dimension = settings.EMBEDDING_DIMENSION
+        assert dimension is not None  # set by configuration whenever the mock is used
+        return [0.0] * dimension
     try:
         return _embed([text], task="RETRIEVAL_QUERY")[0]
     except Exception as exc:
@@ -182,7 +184,9 @@ def get_bge_embeddings(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     if is_mock():
-        return [[0.0] * settings.EMBEDDING_DIMENSION for _ in texts]
+        dimension = settings.EMBEDDING_DIMENSION
+        assert dimension is not None  # set by configuration whenever the mock is used
+        return [[0.0] * dimension for _ in texts]
     try:
         return _embed(texts, task="RETRIEVAL_DOCUMENT")
     except Exception as exc:

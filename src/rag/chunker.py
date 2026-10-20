@@ -93,16 +93,16 @@ def _split_large_block(block: dict[str, str], size: int) -> list[dict[str, str]]
             for index in range(0, len(text), size)
         ]
     pieces = []
-    current = ""
+    running = ""
     for sentence in sentences:
-        candidate = f"{current} {sentence}".strip()
-        if current and len(candidate) > size:
-            pieces.append({**block, "text": current})
-            current = sentence
+        candidate = f"{running} {sentence}".strip()
+        if running and len(candidate) > size:
+            pieces.append({**block, "text": running})
+            running = sentence
         else:
-            current = candidate
-    if current:
-        pieces.append({**block, "text": current})
+            running = candidate
+    if running:
+        pieces.append({**block, "text": running})
     return pieces
 
 

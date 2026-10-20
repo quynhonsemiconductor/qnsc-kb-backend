@@ -125,6 +125,11 @@ explicit_package_bases = true
 module = ["paddle", "paddle.*", "paddleocr", "paddleocr.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# Local embedding and reranker backends. Not in the dev group; the imports are guarded at runtime.
+module = ["sentence_transformers", "sentence_transformers.*", "torch", "torch.*", "tokenizers", "tokenizers.*"]
+ignore_missing_imports = true
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
