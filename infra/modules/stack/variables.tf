@@ -645,6 +645,8 @@ variable "alarm_thresholds" {
     rds_cpu_pct     = optional(number, 80)
     rds_free_bytes  = optional(number, 2147483648) // 2 GiB
     rds_connections = optional(number, 80)
+    # Percent of allocated storage (see the module README). 0 keeps rds_free_bytes.
+    rds_free_storage_pct = optional(number, 0)
   })
   default = {}
 

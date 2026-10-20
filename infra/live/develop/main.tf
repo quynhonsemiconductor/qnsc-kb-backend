@@ -166,6 +166,12 @@ module "stack" {
     use_spot           = true
   }
 
+  # Free-space alarm at 20% of allocated storage (fires at 4 GiB free of 20 GiB). Keep
+  # allocated_storage_gb in step with growth: the alarm reads the value above.
+  alarm_thresholds = {
+    rds_free_storage_pct = 20
+  }
+
   rds = {
     engine_version = "16" // matches the pgvector/pgvector:pg16 image used in development
     // RAISED 2026-09-14 from db.t4g.micro. Measured over three days:

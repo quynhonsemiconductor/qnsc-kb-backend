@@ -1141,7 +1141,7 @@ resource "aws_scheduler_schedule" "ecs_scale_up" {
 // external health check, which belongs at go-live rather than against an environment
 // deliberately running zero tasks.
 module "observability" {
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/observability?ref=observability-v4.3.0"
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/observability?ref=observability-v4.4.0"
 
   name             = local.name
   region           = var.region
@@ -1154,6 +1154,9 @@ module "observability" {
   ]
 
   rds_instance_id = module.rds.identifier
+
+  # Storage the free-space floor is a percent of; the value is the one the rds module allocates.
+  rds_allocated_storage_gb = var.rds.allocated_storage_gb
 
   // Node mode only, and only a node THIS product owns. qnsc-kb shares the runtime
   // layer's Valkey (cache.shared = true, db_index 1), and a shared node's alarms belong
