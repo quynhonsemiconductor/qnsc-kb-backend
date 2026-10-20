@@ -10,6 +10,9 @@ cleanly. Nothing failed until the next task START:
     perform: secretsmanager:GetSecretValue on resource:
     .../secret:rally/develop/tunnel-token-tf-*
 
+    (The `rally-*` strings are real physical names from the incident —
+    legacy, do not rename.)
+
 ECS could not fetch the token, the task never started, the deployment circuit breaker
 rolled the service back — and because rollback leaves the PREVIOUS task definition
 serving, the service stayed healthy. develop ran a ten-day-old image for two days while
