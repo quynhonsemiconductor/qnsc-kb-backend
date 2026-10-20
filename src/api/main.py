@@ -388,8 +388,7 @@ async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
     configure_tracing()
-    # Structured JSON logs to stdout (the production-hardening doc's contract
-    # with the log aggregation pipeline).
+    # Structured JSON logs to stdout (the contract with the log aggregation pipeline).
     from src.lib.observability import setup_logging
 
     setup_logging()

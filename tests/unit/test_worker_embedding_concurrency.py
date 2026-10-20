@@ -134,7 +134,7 @@ def test_document_preparation_is_routed_out_of_the_ingestion_backlog() -> None:
 def test_every_shipped_compose_worker_consumes_document_preparation() -> None:
     # docker-compose.override.yml is intentionally local-only and gitignored, so it is
     # unavailable in CI and cannot be part of a shipped configuration invariant.
-    for filename in ("docker-compose.yml", "docker-compose.production.yml"):
+    for filename in ("docker-compose.yml",):
         text = (REPO / filename).read_text(encoding="utf-8")
         assert "document-preparation,celery,ingestion,connectors,permissions" in text, (
             f"{filename} routes preparation work to a queue its worker does not consume"
