@@ -218,7 +218,8 @@ locals {
     { name = "MICROSOFT_REDIRECT_URI", value = var.microsoft_client_id != "" ? "${local.api_base_url}/api/v1/connectors/oauth/callback" : "" },
 
     // Who application email is sent FROM, and the dedicated Entra app that sends as it (certificate
-    // auth: the key + certificate is the WORKER-ONLY secret MAIL_GRAPH_PEM, see mail_secrets). The
+    // auth: the key + certificate is the WORKER-ONLY secret, see aws_secretsmanager_secret.mail_graph —
+    // mounted as the worker-only FILE AZURE_CLIENT_CERTIFICATE_PATH, never an env value). The
     // API never refuses to boot over mail; the worker does the checking at its own start (tasks.py): client id
     // set with the rest missing refuses to start, client id empty logs an error that an alarm watches.
     { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
@@ -266,14 +267,14 @@ locals {
     { name = "GOOGLE_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["google-client-secret"] },
   ] : [])
 
-  // The mail credential (ONE PEM: private key + certificate) reaches the WORKER container only: it is the only
-  // caller of get_email_sender() (deliver_notification_queue). The API and beat never need it, and a key that is
-  // not in a container cannot be read out of it. It is a STANDALONE secret, not a key of the bundle above: the
-  // bundle's ARN is on the api's execution role too, so anything in it is readable by the api's role. Empty until
-  // mail_graph_client_id is set (mail_graph_enabled).
-  mail_secrets = local.mail_graph_enabled ? [
-    { name = "MAIL_GRAPH_PEM", secret_arn = aws_secretsmanager_secret.mail_graph[0].arn },
-  ] : []
+  // The mail credential (ONE PEM: private key + certificate) reaches the WORKER only — but as the worker-only
+  // FILE at AZURE_CLIENT_CERTIFICATE_PATH (ONPREM-PLAN §7.3), never as an env value, so nothing is injected
+  // here. The API and beat never need it, and a key that is not in a container cannot be read out of it. The
+  // credential stays a STANDALONE secret, not a key of the bundle above: the bundle's ARN is on the api's
+  // execution role too, so anything in it is readable by the api's role. The secret is created, and its read
+  // granted to the worker's execution role alone (secret_arns below), gated on mail_graph_enabled; the mount
+  // that turns it into the worker's file is the platform's (ESO → projected file).
+  mail_secrets = []
 
   tags = { Environment = var.env }
 }
@@ -446,20 +447,21 @@ resource "terraform_data" "tunnel_token_value" {
 // ONE PEM holding the private key and its certificate, so the pair is written and read atomically and can never
 // drift apart. Not a key of the secrets bundle: the bundle's ARN is granted to the api's execution role as well,
 // which would make the key readable by the api's role. This secret is referenced only by the worker container
-// (mail_secrets) and granted only to the worker's execution role (its secret_arns). No TASK role anywhere in
+// and granted only to the worker's execution role (its secret_arns); the worker reads it as the FILE at
+// AZURE_CLIENT_CERTIFICATE_PATH, mounted by the platform — never as an env value. No TASK role anywhere in
 // this stack can read any secret (task_secret_arns is never passed to ecs-service), so application code, which
 // runs as the task role, cannot read it either.
 //
 // The CONTAINER is created whenever the provider is not the in-memory fake (develop is still "ses" until its client id
 // is set, and the owner writes the value before that), empty and without a version, so the owner can put the
-// value BEFORE setting mail_graph_client_id; it is injected only once that is set (mail_graph_enabled). The value
+// value BEFORE setting mail_graph_client_id; the read is granted once that is set (mail_graph_enabled). The value
 // never enters Terraform state. The deploy preflight (ci backend-deploy) lists this secret's versions on every
 // deploy and fails by NAME if it holds none: that is the per-secret check the bundle's keys never had.
 resource "aws_secretsmanager_secret" "mail_graph" {
   count = local.mail_secret_exists ? 1 : 0
 
   name                    = "${var.product}/${var.env}/mail-graph-certificate"
-  description             = "Mail app credential for Microsoft Graph: private key and certificate in ONE PEM (MAIL_GRAPH_PEM). Worker only. Value is set out of band: docs/runbooks/email-graph.md."
+  description             = "Mail app credential for Microsoft Graph: private key and certificate in ONE PEM. Worker only, mounted as the file AZURE_CLIENT_CERTIFICATE_PATH. Value is set out of band: docs/runbooks/email-graph.md."
   kms_key_id              = local.kms_key_arn
   recovery_window_in_days = var.secrets_recovery_window_days
 

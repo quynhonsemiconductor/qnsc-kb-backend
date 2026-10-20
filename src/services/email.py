@@ -23,6 +23,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 import base64
 import hashlib
+import pathlib
 import re
 import time
 import uuid
@@ -188,18 +189,40 @@ _KEY_BLOCK = re.compile(
 )
 
 
+def _read_cert_file() -> str:
+    """The ONE combined PEM from the worker-only file, or "" when the path is unset or unreadable.
+
+    AZURE_CLIENT_CERTIFICATE_PATH (ONPREM-PLAN §7.3) is the ONE Graph credential mechanism: the file is
+    mounted into the worker only, never an env value. The private key comes first, then the certificate
+    (`cat mail.key mail.crt`); the blocks are matched, not split on order, so either arrangement parses.
+    """
+    path = settings.AZURE_CLIENT_CERTIFICATE_PATH
+    if not path:
+        return ""
+    try:
+        return _normalise_pem(pathlib.Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        # A path that exists but cannot be read must not masquerade as "not configured": the
+        # misconfiguration error below names the path and the errno instead of "missing".
+        raise MailSendError(
+            f"the certificate file is unreadable at {path}: {exc.strerror or type(exc).__name__}",
+            stage="config",
+        ) from exc
+
+
 def _pems() -> tuple[str, str]:
     """(certificate PEM, private key PEM) from the configuration, or empty strings for what is missing.
 
-    Deployed environments get ONE standalone secret, MAIL_GRAPH_PEM, holding the private key and the certificate
-    together in a single PEM, so the pair is written and read atomically and cannot drift apart. The two separate
-    settings are for a local test and for scripts/graph_mail_check.py; when both are set they win.
+    Deployed environments read the worker-only FILE at AZURE_CLIENT_CERTIFICATE_PATH, holding the private key
+    and the certificate in a single PEM, so the pair is written and read atomically and cannot drift apart.
+    The two separate settings are for a local test and for scripts/graph_mail_check.py; when both are set
+    they win.
     """
     cert_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_CERT_PEM))
     key_pem = _normalise_pem(_reveal(settings.MAIL_GRAPH_PRIVATE_KEY_PEM))
     if cert_pem and key_pem:
         return cert_pem, key_pem
-    combined = _normalise_pem(_reveal(settings.MAIL_GRAPH_PEM))
+    combined = _read_cert_file()
     if combined:
         cert = _CERT_BLOCK.search(combined)
         key = _KEY_BLOCK.search(combined)
@@ -213,7 +236,7 @@ def _credential() -> _Credential:
     cert_pem, key_pem = _pems()
     if not cert_pem or not key_pem:
         raise MailSendError(
-            "MAIL_GRAPH_PEM (a private key and its certificate in one PEM) is required for EMAIL_PROVIDER=graph",
+            "AZURE_CLIENT_CERTIFICATE_PATH (a private key and its certificate in one PEM, in the worker-only file) is required for EMAIL_PROVIDER=graph",
             stage="config",
         )
     cache_key = (
@@ -232,7 +255,8 @@ def _credential() -> _Credential:
         key = serialization.load_pem_private_key(key_pem.encode(), password=None)
     except Exception as exc:  # the message names the setting, never the material
         raise MailSendError(
-            f"MAIL_GRAPH_PEM could not be parsed: {type(exc).__name__}", stage="config"
+            f"the certificate file at AZURE_CLIENT_CERTIFICATE_PATH could not be parsed: {type(exc).__name__}",
+            stage="config",
         ) from exc
     if not isinstance(key, rsa.RSAPrivateKey):
         raise MailSendError(
@@ -532,18 +556,27 @@ def configuration_problems() -> tuple[list[str], bool]:
         if is_placeholder(value)
     )
     if placeholders:
-        return [f"{', '.join(placeholders)} still holds a release-template placeholder; replace it before EMAIL_PROVIDER=graph can start"], False
+        return [
+            f"{', '.join(placeholders)} still holds a release-template placeholder; replace it before EMAIL_PROVIDER=graph can start"
+        ], False
     if settings.microsoft_tenant is None:
         # Without a pinned tenant every token request fails at the config stage and stops every batch for ever.
         # Say so once, at start, instead.
         return [
             "MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)"
         ], False
-    cert_pem, key_pem = _pems()
+    try:
+        cert_pem, key_pem = _pems()
+    except MailSendError as exc:
+        # An unreadable certificate file must come back as a FATAL problem, not propagate: Celery's
+        # worker_init Signal.send catches Exception and only logs it, so a raise out of here would
+        # leave the worker "ready" with mail it can never send (fail-open). The caller turns a fatal
+        # list into SystemExit.
+        return [str(exc)], False
     required = {
         "MICROSOFT_GRAPH_SENDER": settings.MICROSOFT_GRAPH_SENDER,
-        "a certificate in MAIL_GRAPH_PEM": cert_pem,
-        "a private key in MAIL_GRAPH_PEM": key_pem,
+        "a certificate in the file at AZURE_CLIENT_CERTIFICATE_PATH": cert_pem,
+        "a private key in the file at AZURE_CLIENT_CERTIFICATE_PATH": key_pem,
     }
     missing = sorted(
         name for name, value in required.items() if not (value or "").strip()
@@ -561,7 +594,12 @@ def certificate_status(now: datetime | None = None) -> dict[str, Any] | None:
     Run daily by the worker (a once-per-process warning at the first send is invisible in a process that lives
     for weeks). Expired is reported, not raised: the daily task must always get to log it.
     """
-    cert_pem, _ = _pems()
+    try:
+        cert_pem, _ = _pems()
+    except MailSendError as exc:
+        # Reported, not raised: the daily task must always get to log it (same shape as the
+        # unparseable-PEM branch below, plus the reason).
+        return {"valid": False, "days_left": None, "expires": None, "error": str(exc)}
     if not cert_pem:
         return None
     from cryptography import x509
