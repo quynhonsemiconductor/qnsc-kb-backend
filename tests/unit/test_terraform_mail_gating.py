@@ -72,18 +72,18 @@ def test_no_task_role_in_the_stack_can_read_any_secret():
         assert "task_ssm_parameter_arns" not in text, tf
 
 
-def test_mail_secrets_are_gated_and_are_exactly_the_one_pem():
-    start = STACK.index("  mail_secrets = ")
-    mail = STACK[start : STACK.index("] : []", start)]
-    assert "local.mail_graph_enabled" in mail
-    assert re.findall(r'name = "(\w+)"', mail) == ["MAIL_GRAPH_PEM"]
-    assert "aws_secretsmanager_secret.mail_graph[0].arn" in mail
+def test_the_credential_is_never_injected_as_an_env_value():
+    """ONPREM-PLAN §7.3: the credential reaches the worker as the FILE at AZURE_CLIENT_CERTIFICATE_PATH,
+    mounted by the platform — never as an env value. The secret's read is granted, not injected."""
+    mail = STACK[STACK.index("  mail_secrets = ") : STACK.index("  tags = ")]
+    assert 'mail_secrets = []' in mail
+    assert "MAIL_GRAPH_PEM" not in STACK
+    # the worker's execution role keeps the read (the mount's identity is that role's)
+    assert "local.mail_graph_enabled ? [aws_secretsmanager_secret.mail_graph[0].arn] : []" in STACK
 
 
-def test_only_the_worker_container_receives_it_and_only_the_worker_execution_role_is_granted_it():
-    assert STACK.count("local.mail_secrets") == 1  # the worker module and nowhere else
+def test_only_the_worker_execution_role_is_granted_it_and_nothing_leaks_into_the_api():
     worker = block(STACK, 'module "worker"')
-    assert "secrets          = concat(local.common_secrets, local.mail_secrets)" in worker
     assert "aws_secretsmanager_secret.mail_graph[0].arn" in worker  # its execution role's secret_arns
     api = block(STACK, 'module "api"')
     assert "mail_graph" not in api and "mail_secrets" not in api and "secrets = local.common_secrets" in api

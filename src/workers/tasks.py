@@ -459,7 +459,8 @@ def check_mail_certificate() -> None:
     if not status["valid"]:
         logger.error(
             "Mail certificate has expired or cannot be read",
-            detail="MAIL_GRAPH_CERT_PEM is not a certificate",
+            detail=status.get("error")
+            or "the certificate file at AZURE_CLIENT_CERTIFICATE_PATH is not a certificate",
         )
     elif status["expired"]:
         logger.error(
