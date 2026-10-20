@@ -101,7 +101,7 @@ reach. `.env` is gitignored; never copy a deployed environment's values into it.
 ```bash
 docker compose logs -f api worker beat
 docker compose down            # keep the data
-docker compose down -v         # also drop the database (needed once if you had an older pg15 volume)
+docker compose down -v         # also drop the database (needed once if you had a pg15 or pg16 volume: PostgreSQL 18 uses /var/lib/postgresql/18 and refuses older data)
 ```
 
 ## Without Docker, and tests
