@@ -1,23 +1,23 @@
 # Project name `qnsc-kb-backend` unless COMPOSE_PROJECT_NAME is set (in .env or the shell): that is what lets a second
 # copy of this repo run beside the first. No container_name is set on purpose, for the same reason.
 #
-# Images match production: RDS PostgreSQL 16 with pgvector (infra/live: rds engine_version "16") and ElastiCache
-# Valkey 7.2 (tf-modules cache module default). Tags are pinned to a full version.
+# Images match the data-store track: RDS PostgreSQL 18.6 with pgvector 0.8.2 (RDS 18.4 and later ship 0.8.2) and
+# ElastiCache Valkey 8.1 (the same engine; ElastiCache "8.2" is open-source 8.1 plus valkey-search). Tags are pinned.
 name: qnsc-kb-backend
 
 services:
   db:
-    # Matches CI (.github/workflows/backend-ci.yml) and the RDS PG16 engine, so dev is
+    # Matches CI (.github/workflows/backend-ci.yml) and the RDS PG18 target, so dev is
     # the same Postgres major AND the same pgvector as everything else. It was
     # ankane/pgvector:v0.5.1 — PG 15.4 with pgvector 0.5.1 — which predates the
     # iterative index scans src/repositories/chunk.py asks for, so filtered vector
     # search behaved differently here than in production and the difference was silent.
     #
-    # ONE-TIME, DESTRUCTIVE for existing dev volumes: PG16 refuses to start on a PG15
-    # data directory. Run `docker compose down -v` once to drop the old pgdata, then
-    # re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
+    # ONE-TIME, DESTRUCTIVE for existing dev volumes: PG18 refuses to start on a PG16 data
+    # directory and on the old /data mount. Run `docker compose down -v` once to drop the old pgdata,
+    # then re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
     # database nobody needs to keep.
-    image: pgvector/pgvector:0.8.1-pg16
+    image: pgvector/pgvector:0.8.2-pg18
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
       # be reachable from the LAN. The HOST port is KB_DB_PORT (default 5432): set it in
@@ -29,7 +29,8 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: qnsc_kb
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PostgreSQL 18 images keep data in a major-version subdirectory of /var/lib/postgresql.
+      - pgdata:/var/lib/postgresql
     mem_limit: 768m
     mem_reservation: 256m
     healthcheck:
@@ -41,7 +42,7 @@ services:
   # The service keeps the name `redis` (REDIS_URL points at redis:6379 inside the network). The engine is Valkey, the
   # one production runs on ElastiCache; it speaks the Redis protocol, so REDIS_URL is unchanged.
   redis:
-    image: valkey/valkey:7.2.14-alpine
+    image: valkey/valkey:8.1.10-alpine
     ports:
       - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
     command: ["valkey-server", "--requirepass", "${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}"]
