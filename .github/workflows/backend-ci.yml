@@ -163,6 +163,8 @@ jobs:
 
     env:
       PYTHONPATH: .
+      # CI talks to a plaintext Postgres; db_ssl.py must not fail closed here.
+      ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb_test
       REDIS_URL: redis://localhost:6379/0
       # DO NOT set EMBEDDING_MODEL=mock here, however tempting it looks as a way to avoid
@@ -200,6 +202,52 @@ jobs:
 
       - name: Unit tests
         run: poetry run pytest -q
+
+      # Proves the DATABASE_SSL_CA decision (src/core/db_ssl.py) against a real Postgres
+      # speaking TLS with a self-signed CA (SAN localhost): verify-full connects, a CA the
+      # server does not chain to is refused. The fail-closed-in-production case needs no
+      # server: it is tests/unit/test_db_ssl.py.
+      - name: DB TLS verify-full against a self-signed CA
+        run: |
+          mkdir certs
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/ca.key -out certs/ca.crt -days 2 \
+            -subj "/CN=db-tls-test-ca" -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" -addext "subjectKeyIdentifier=hash"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/rogue.key -out certs/rogue.crt -days 2 \
+            -subj "/CN=rogue-ca" -addext "basicConstraints=critical,CA:TRUE"
+          openssl req -newkey rsa:2048 -nodes -keyout certs/server.key -out certs/server.csr -subj "/CN=localhost"
+          printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid,issuer\nsubjectKeyIdentifier=hash\n' > certs/server.ext
+          openssl x509 -req -in certs/server.csr -CA certs/ca.crt -CAkey certs/ca.key \
+            -CAcreateserial -out certs/server.crt -days 2 -extfile certs/server.ext
+          openssl req -newkey rsa:2048 -nodes -keyout certs/noip.key -out certs/noip.csr -subj "/CN=no-ip-san"
+          printf 'subjectAltName=DNS:unrelated-host.internal\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid,issuer\nsubjectKeyIdentifier=hash\n' > certs/noip.ext
+          openssl x509 -req -in certs/noip.csr -CA certs/ca.crt -CAkey certs/ca.key \
+            -CAcreateserial -out certs/noip.crt -days 2 -extfile certs/noip.ext
+          docker run -d --name pg-tls \
+            -v "$PWD/certs:/certs" \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:15432:5432 \
+            postgres:18.6 bash -c "chown 999:999 /certs/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key"
+          n=0
+          until docker exec pg-tls pg_isready -U postgres >/dev/null 2>&1; do
+            n=$((n + 1)); [ "$n" -gt 30 ] && echo "postgres never became ready" && exit 1
+            sleep 1
+          done
+          docker run -d --name pg-wrongname \
+            -v "$PWD/certs:/certs" \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:15433:5432 \
+            postgres:18.6 bash -c "chown 999:999 /certs/noip.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/noip.crt -c ssl_key_file=/certs/noip.key"
+          n=0
+          until docker exec pg-wrongname pg_isready -U postgres >/dev/null 2>&1; do
+            n=$((n + 1)); [ "$n" -gt 30 ] && echo "wrongname postgres never became ready" && exit 1
+            sleep 1
+          done
+          PG_TLS_URL='postgresql://postgres:postgres@127.0.0.1:15432/postgres' \
+          PG_TLS_CA_FILE="$PWD/certs/ca.crt" \
+          PG_TLS_ROGUE_CA_FILE="$PWD/certs/rogue.crt" \
+          PG_TLS_WRONG_HOST_URL='postgresql://postgres:postgres@127.0.0.1:15433/postgres' \
+            poetry run pytest -q tests/integration/test_db_ssl_integration.py
 
       # Offline mode only sanity-checks the scoring functions against
       # fixtures — it deliberately does NOT claim to measure RAG quality.
@@ -282,6 +330,7 @@ jobs:
 
     env:
       PYTHONPATH: .
+      ENVIRONMENT: development # CI talks to a plaintext Postgres; db_ssl.py must not fail closed here
       MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb_upgrade
       # Exercises the branch that production runs: the RLS policies and the GRANTs to
       # the application role are skipped entirely when this is false, so a CI run
@@ -569,6 +618,7 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONPATH: .
+      ENVIRONMENT: development # imports src.api.deps, whose engine must not fail closed on a missing CA
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

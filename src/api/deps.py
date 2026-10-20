@@ -7,6 +7,7 @@ from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from src.core.config import settings
+from src.core.db_ssl import ssl_connect_args
 from src.models import User
 from src.repositories.user import UserRepository
 from src.domain.rbac import AuthorizationService, bootstrap_rbac
@@ -18,6 +19,8 @@ engine = create_async_engine(
     connect_args={
         "timeout": 5,
         "command_timeout": 5,
+        # verify-full against DATABASE_SSL_CA when set; no TLS locally (db_ssl.py).
+        **ssl_connect_args(),
     },
 )
 SessionLocal = async_sessionmaker(
