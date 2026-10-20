@@ -6,7 +6,9 @@ authors = ["quynhonsemiconductor"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+# A ceiling, not a lag: the images run python:3.13-slim (see the Dockerfile), and the
+# pin keeps local dev, CI and the image on one interpreter.
+python = ">=3.13,<3.14"
 fastapi = "^0.141.0"
 uvicorn = {extras = ["standard"], version = ">=0.30.1,<0.53.0"}
 pydantic = {extras = ["email"], version = "^2.7.4"}
