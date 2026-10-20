@@ -1,6 +1,8 @@
 """Tenant-scoped department validation and canonicalization."""
 
 from fastapi import HTTPException
+from typing import Literal, overload
+
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +12,28 @@ from src.models.user import Department
 def normalize_department_name(name: str | None) -> str | None:
     value = (name or "").strip()
     return value or None
+
+
+@overload
+async def resolve_active_department(
+    db: AsyncSession,
+    company_domain: str,
+    name: str | None,
+    *,
+    required: Literal[True] = True,
+) -> Department: ...
+
+
+@overload
+async def resolve_active_department(
+    db: AsyncSession, company_domain: str, name: str | None, *, required: Literal[False]
+) -> Department | None: ...
+
+
+@overload
+async def resolve_active_department(
+    db: AsyncSession, company_domain: str, name: str | None, *, required: bool
+) -> Department | None: ...
 
 
 async def resolve_active_department(

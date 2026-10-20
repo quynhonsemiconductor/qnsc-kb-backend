@@ -204,6 +204,16 @@ def _reject_cross_site_cookie_request(request: Request) -> None:
         raise _cross_site_exception()
 
 
+def loaded_user(user: User | None) -> User:
+    """Narrow a re-fetch of a user row that was loaded or written earlier in this request.
+
+    The re-fetch cannot miss in practice. If it ever did, the next attribute access raised
+    AttributeError (a 500); the assert keeps that outcome.
+    """
+    assert user is not None, "user row vanished within the request that loaded it"
+    return user
+
+
 async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -254,7 +264,7 @@ async def get_current_user(
         raise credentials_exception
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await user_repo.get_by_email(email)
+        user = loaded_user(await user_repo.get_by_email(email))
     await set_database_context(
         db,
         user.company_domain,

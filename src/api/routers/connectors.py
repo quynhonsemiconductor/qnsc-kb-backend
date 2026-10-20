@@ -997,9 +997,11 @@ async def list_acl_principals(
                 # Server-owned policy: the client must not re-derive who is mappable from the
                 # principal type.
                 "mappable": True,
-                "department_id": mapping["department_id"] if active_mapping else None,
+                "department_id": (
+                    mapping["department_id"] if mapping and active_mapping else None
+                ),
                 "department_name": (
-                    mapping["department_name"] if active_mapping else None
+                    mapping["department_name"] if mapping and active_mapping else None
                 ),
                 "internal_user_id": mapped_user_id,
             }

@@ -6,7 +6,7 @@ import uuid
 import unicodedata
 from pathlib import Path
 from datetime import date, datetime
-from typing import Annotated, Any, Sequence
+from typing import Annotated, Any, Sequence, cast
 from fastapi import (
     APIRouter,
     Depends,
@@ -1369,7 +1369,8 @@ async def complete_source_upload(
 
     async def discard_failed_upload(reason: str) -> None:
         try:
-            await asyncio.to_thread(delete_source, draft.storage_key)
+            # The upload is recorded with its storage key before this path can run.
+            await asyncio.to_thread(delete_source, cast(str, draft.storage_key))
         except Exception:
             logger.warning(
                 "Could not remove failed presigned upload object",

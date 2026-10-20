@@ -2,7 +2,8 @@ import uuid
 import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, cast
 from fastapi import (
     APIRouter,
     Body,
@@ -20,6 +21,7 @@ import jwt
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import (
+    loaded_user,
     get_db,
     get_current_user,
     require_permission,
@@ -52,7 +54,7 @@ from src.domain.departments import (
 )
 from src.core.rate_limit import auth_rate_limiter
 from src.domain import entra_auth
-from sqlalchemy import delete, select, func, update
+from sqlalchemy import Table, delete, select, func, update
 from sqlalchemy.orm import selectinload
 import structlog
 
@@ -389,7 +391,9 @@ async def _set_primary_role(db: AsyncSession, user: Any, name: str) -> None:
     user.role = name
 
 
-def _validate_role_assignment_authority(current_user: Any, roles: list[Role]) -> None:
+def _validate_role_assignment_authority(
+    current_user: Any, roles: Sequence[Role]
+) -> None:
     """Company managers must never grant a global role or broader permissions."""
     if any(
         role.name.casefold() == LEGACY_DEPARTMENT_OWNER_ROLE.casefold()
@@ -465,7 +469,8 @@ def _refresh_subject_from_token(refresh_value: str) -> str:
 async def _revoke_refresh_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
     """Make every refresh token unusable after a sensitive account change."""
     await db.execute(
-        RefreshSession.__table__.update()
+        cast(Table, RefreshSession.__table__)
+        .update()
         .where(RefreshSession.user_id == user_id, RefreshSession.revoked_at.is_(None))
         .values(revoked_at=datetime.utcnow())
     )
@@ -628,7 +633,7 @@ async def create_invitation(
                     select(func.count())
                     .select_from(Department)
                     .where(
-                        Department.id.in_(payload.audience_ids),
+                        Department.id.in_(payload.audience_ids or []),
                         Department.company_domain == current_user.company_domain,
                         Department.active.is_(True),
                     )
@@ -1116,7 +1121,8 @@ async def reset_password(
     # Any other outstanding grant for this user is now void too, or a second link from the
     # same mailbox would still work after the password changed.
     await db.execute(
-        PasswordResetToken.__table__.update()
+        cast(Table, PasswordResetToken.__table__)
+        .update()
         .where(
             PasswordResetToken.user_id == user.id,
             PasswordResetToken.used_at.is_(None),
@@ -1615,7 +1621,7 @@ async def create_managed_user(
         allow_privileged_role=True,
     )
     await bootstrap_rbac(db)
-    user = await UserRepository(db).get_by_id(user.id)
+    user = loaded_user(await UserRepository(db).get_by_id(user.id))
     user.departments = memberships
     user.dept = department.name if department else None
     if requested_roles is not None:
@@ -1642,7 +1648,7 @@ async def create_managed_user(
     # _user_response walks user.roles -> role.permissions, which then lazy-loads inside an
     # async request and raises MissingGreenlet. The 500 is reported after the user has
     # already been committed, so it reads as "creation failed" when the row exists.
-    user = await UserRepository(db).get_by_id(user.id)
+    user = loaded_user(await UserRepository(db).get_by_id(user.id))
     await AuditRepository(db).record(
         current_user.id, "user_create", "user", str(user.id)
     )
@@ -2378,7 +2384,7 @@ async def replace_user_roles(
     # Re-FETCH, not refresh() — same reason as create_managed_user above: refresh discards
     # the eager loads, and _user_response then lazy-loads user.roles inside an async
     # request and raises MissingGreenlet.
-    user = await UserRepository(db).get_by_id(user.id)
+    user = loaded_user(await UserRepository(db).get_by_id(user.id))
     await AuditRepository(db).record(
         current_user.id, "user_roles_update", "user", str(user.id)
     )
@@ -2423,7 +2429,7 @@ async def login(
     )
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await user_repo.get_by_id(user.id)
+        user = loaded_user(await user_repo.get_by_id(user.id))
     token = auth_service.create_token(user)
     refresh = auth_service.create_refresh_token(user)
     await _store_refresh_session(db, user, refresh)
@@ -2505,7 +2511,7 @@ async def refresh_token(
         raise HTTPException(status_code=401, detail="Account is unavailable")
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
+        user = loaded_user(await UserRepository(db).get_by_id(user.id))
     await set_database_context(
         db,
         user.company_domain,
@@ -2687,11 +2693,12 @@ async def entra_callback(
         db.add(user)
         await db.flush()
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
-        if user is None:
+        provisioned = await UserRepository(db).get_by_id(user.id)
+        if provisioned is None:
             raise HTTPException(
                 status_code=500, detail="Could not provision the Microsoft account"
             )
+        user = provisioned
         await AuditRepository(db).record(
             user.id,
             "entra_user_provision",
@@ -2746,7 +2753,7 @@ async def entra_callback(
         )
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
+        user = loaded_user(await UserRepository(db).get_by_id(user.id))
     service = AuthService(UserRepository(db))
     access = service.create_token(user)
     refresh = service.create_refresh_token(user)

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -67,7 +67,7 @@ def _historical_source_id(citation: dict) -> str | None:
         if normalized.isdigit() and int(normalized) > 0:
             return f"C{int(normalized)}"
     try:
-        source_index = int(citation.get("source_index"))
+        source_index = int(cast(Any, citation.get("source_index")))
     except (TypeError, ValueError):
         source_index = 0
     return f"C{source_index}" if source_index > 0 else None
@@ -124,15 +124,11 @@ async def _hydrate_citations(
     hydrated = []
     for citation in citations:
         chunk = chunks_by_id.get(str(citation.get("chunk_id")))
-        if (
-            chunk
-            and chunk.parent_chunk
-            and chunk.article
-            and _historical_source_id(citation)
-        ):
+        source_id = _historical_source_id(citation)
+        if chunk and chunk.parent_chunk and chunk.article and source_id:
             parent = chunk.parent_chunk
             article = chunk.article
-            source_id = _historical_source_id(citation)
+            last_reviewed = getattr(article, "last_reviewed", None)
             child_chunks = sorted(
                 parent.child_chunks, key=lambda item: item.chunk_index
             )
@@ -161,9 +157,7 @@ async def _hydrate_citations(
                         getattr(article, "owner", None), "email", None
                     ),
                     "last_reviewed": (
-                        getattr(article, "last_reviewed", None).isoformat()
-                        if getattr(article, "last_reviewed", None)
-                        else None
+                        last_reviewed.isoformat() if last_reviewed else None
                     ),
                     **(
                         {

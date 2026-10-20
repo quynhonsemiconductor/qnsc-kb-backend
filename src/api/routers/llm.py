@@ -226,8 +226,8 @@ async def update_llm_config(
     row.provider = payload.provider
     row.model = model
     row.base_url = base_url
-    if payload.api_key and normalize_api_key(payload.api_key):
-        row.encrypted_api_key = encrypt_api_key(api_key)
+    if payload.api_key and (normalized := normalize_api_key(payload.api_key)):
+        row.encrypted_api_key = encrypt_api_key(normalized)
     elif row.encrypted_api_key is None and api_key:
         row.encrypted_api_key = encrypt_api_key(api_key)
     await db.commit()

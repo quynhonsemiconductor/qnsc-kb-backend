@@ -9,7 +9,10 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import func, select, text
+from typing import Any, cast
+
+from sqlalchemy import Table, func, select, text
+from sqlalchemy.engine import CursorResult
 from src.core.config import settings
 from src.api.routers import (
     auth,
@@ -362,7 +365,8 @@ async def reconcile_published_indexes() -> None:
 
         for article_id in ready_ids:
             await db.execute(
-                Article.__table__.update()
+                cast(Table, Article.__table__)
+                .update()
                 .where(Article.id == article_id)
                 .values(index_status="ready", index_error=None)
             )
@@ -461,8 +465,9 @@ async def _inline_outbox_recovery_loop() -> None:
                     )
                 )
                 await db.commit()
-            if result.rowcount:
-                logger.info("Pruned terminal outbox events", pruned=result.rowcount)
+            pruned = cast(CursorResult[Any], result).rowcount
+            if pruned:
+                logger.info("Pruned terminal outbox events", pruned=pruned)
         except asyncio.CancelledError:
             raise
         except Exception:
