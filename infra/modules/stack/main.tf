@@ -330,6 +330,7 @@ module "rds" {
   # Major upgrade controls. Both default off; set together for the one apply that performs the upgrade.
   allow_major_version_upgrade = var.rds.allow_major_version_upgrade
   apply_immediately           = var.rds.apply_immediately
+  auto_minor_version_upgrade  = var.rds.auto_minor_version_upgrade
 
   tags = local.tags
 }

@@ -49,7 +49,7 @@ def test_develop_rds_major_equals_the_compose_postgres_major():
     terraform = (ROOT / "infra" / "live" / "develop" / "main.tf").read_text(
         encoding="utf-8"
     )
-    develop = re.search(r'rds = \{[\s\S]*?engine_version\s*=\s*"(\d+)"', terraform)
+    develop = re.search(r'rds = \{[\s\S]*?engine_version\s*=\s*"(\d+)(?:\.\d+)?"', terraform)
     compose = re.search(
         r"pgvector/pgvector:\d+\.\d+\.\d+-pg(\d+)$", _compose(), flags=re.MULTILINE
     )

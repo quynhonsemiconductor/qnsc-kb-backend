@@ -164,6 +164,8 @@ variable "rds" {
     engine_version              = optional(string, "16")
     allow_major_version_upgrade = optional(bool, false)
     apply_immediately           = optional(bool, false)
+    # Off for a full-minor pin ("18.6"): the rds module requires it. Default true = AWS patches minors.
+    auto_minor_version_upgrade = optional(bool, true)
   })
 
   description = <<-EOT
