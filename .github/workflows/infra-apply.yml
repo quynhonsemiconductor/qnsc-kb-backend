@@ -174,6 +174,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      pull-requests: read # destructive-guard reads the labels of the PR being merged
       id-token: write # mandatory for the OIDC AssumeRole
 
     steps:
@@ -195,15 +196,28 @@ jobs:
         working-directory: infra/live/develop
         run: tofu validate
 
-      - name: tofu apply
+      # Plan, then apply THAT PLAN. The old single apply planned and applied in one step, so nothing read the plan
+      # before it ran. Org-level variable, so it is NOT environment-scoped and resolves in the plan too, which keeps the
+      # plan honest about the count-gated Cloudflare resources.
+      - name: tofu plan (saved as tfplan)
         working-directory: infra/live/develop
-        run: tofu apply -input=false -auto-approve
+        run: tofu plan -input=false -out=tfplan
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          # Org-level variable, so it is NOT environment-scoped and resolves in the plan
-          # job too — which is what keeps plan and apply honest about the count-gated
-          # Cloudflare resources.
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Refuse a saved plan that DELETES or REPLACES a DNS, edge, mail-identity, certificate or key resource, or a CI
+      # OIDC role, unless this run is allowed to. See docs/runbooks/infra-destructive-guard.md.
+      - name: destructive-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/destructive-guard@v1
+        with:
+          working-directory: infra/live/develop
+          plan-file: tfplan
+          dispatch-allow: ${{ inputs.allow_destructive }}
+
+      - name: tofu apply (the saved plan)
+        working-directory: infra/live/develop
+        run: tofu apply -input=false tfplan
 
       # Short-lived installation token from the qnsc-automation App, so no long-lived PAT is
       # needed. Requires "Variables: read and write" on BOTH qnsc-kb repos — the
