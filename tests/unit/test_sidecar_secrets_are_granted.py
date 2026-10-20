@@ -1,7 +1,7 @@
 """A service running a sidecar must be allowed to read that sidecar's secrets.
 
-THE FAILURE THIS EXISTS FOR happened in rally, not here, and this repo was right only
-because someone remembered to be. rally wired the cloudflared sidecar into its api task
+THE FAILURE THIS EXISTS FOR happened in rova, not here, and this repo was right only
+because someone remembered to be. rova wired the cloudflared sidecar into its api task
 and did not add the tunnel token to the execution role's read list. Terraform applied
 cleanly. Nothing failed until the next task START:
 
@@ -112,7 +112,7 @@ def test_a_service_running_a_sidecar_grants_its_secrets(blocks, marker, required
             f"not mention `{required}`. The execution role will not be able to read the "
             f"secret, so ECS cannot start the task: ResourceInitializationError, then a "
             f"circuit-breaker rollback that leaves the OLD task definition serving and "
-            f"the service reporting healthy. This is what broke rally's develop for two "
+            f"the service reporting healthy. This is what broke rova's develop for two "
             f"days."
         )
 
