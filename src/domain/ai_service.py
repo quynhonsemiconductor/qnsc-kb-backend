@@ -6,7 +6,7 @@ import re
 import hashlib
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from fastapi import HTTPException
 from sqlalchemy import select
 from src.core.config import settings
@@ -42,7 +42,11 @@ from src.domain.llm_client import (
     complete_multimodal,
     resolve_provider,
 )
-from src.domain.evidence_analytics import AnalyticsPlan, execute_analytics_plan
+from src.domain.evidence_analytics import (
+    AnalyticsOperation,
+    AnalyticsPlan,
+    execute_analytics_plan,
+)
 from src.domain.evidence_extraction import (
     render_evidence_preview,
     table_evidence_preview,
@@ -196,7 +200,7 @@ _REFUSAL_RE = re.compile(
 )
 
 
-_ANALYTICS_OPERATIONS = (
+_ANALYTICS_OPERATIONS: tuple[tuple[AnalyticsOperation, tuple[str, ...]], ...] = (
     ("average", ("average", "mean", "trung bình")),
     ("median", ("median", "trung vị")),
     (
@@ -695,8 +699,11 @@ async def _authorized_conversation_history(
                 break
         answer_markers = set(
             extract_citation_ids(
-                getattr(message, "grounded_content", None)
-                or getattr(message, "content", "")
+                cast(
+                    str,
+                    getattr(message, "grounded_content", None)
+                    or getattr(message, "content", ""),
+                )
             )
         )
         if answer_markers != stored_markers:
@@ -1804,42 +1811,46 @@ class AIService:
             extended_answer = ""
             is_refusal = True
 
-        for marker in source_matches:
-            res = context_by_id.get(marker)
-            if res:
-                child_ids = res.get("child_chunk_ids") or [res["chunk_id"]]
+        for source_marker in source_matches:
+            context_row = context_by_id.get(source_marker)
+            if context_row:
+                child_ids = context_row.get("child_chunk_ids") or [
+                    context_row["chunk_id"]
+                ]
                 citations.append(
                     {
-                        "source_id": marker,
-                        "source_index": int(marker[1:]),
+                        "source_id": source_marker,
+                        "source_index": int(source_marker[1:]),
                         "chunk_id": child_ids[0],
                         "child_chunk_ids": child_ids,
-                        "parent_chunk_id": res.get("parent_chunk_id"),
-                        "article_id": res["article_id"],
-                        "title": res["title"],
-                        "section_ref": res["section_ref"],
-                        "heading": res.get("heading"),
-                        "source_ref": f"{res['title']} - {res.get('heading') or res['section_ref'] or 'General'}",
-                        "excerpt": res["context_text"],
-                        "highlight_text": res.get("chunk_text", "")[:500],
-                        "highlight_texts": res.get("child_texts")
-                        or [res.get("chunk_text", "")],
-                        "page_number": res.get("page_number"),
-                        "source_url": res.get("source_url"),
-                        "owner_email": res.get("owner_email")
+                        "parent_chunk_id": context_row.get("parent_chunk_id"),
+                        "article_id": context_row["article_id"],
+                        "title": context_row["title"],
+                        "section_ref": context_row["section_ref"],
+                        "heading": context_row.get("heading"),
+                        "source_ref": f"{context_row['title']} - {context_row.get('heading') or context_row['section_ref'] or 'General'}",
+                        "excerpt": context_row["context_text"],
+                        "highlight_text": context_row.get("chunk_text", "")[:500],
+                        "highlight_texts": context_row.get("child_texts")
+                        or [context_row.get("chunk_text", "")],
+                        "page_number": context_row.get("page_number"),
+                        "source_url": context_row.get("source_url"),
+                        "owner_email": context_row.get("owner_email")
                         or settings.SYSTEM_DATA_OWNER_EMAIL,
-                        "last_reviewed": res.get("last_reviewed"),
+                        "last_reviewed": context_row.get("last_reviewed"),
                         **(
                             {
-                                "evidence_id": res["evidence"]["id"],
-                                "evidence_kind": res["evidence"]["kind"],
-                                "evidence_label": res["evidence"]["label"],
-                                "evidence_preview_url": res["evidence"]["preview_url"],
+                                "evidence_id": context_row["evidence"]["id"],
+                                "evidence_kind": context_row["evidence"]["kind"],
+                                "evidence_label": context_row["evidence"]["label"],
+                                "evidence_preview_url": context_row["evidence"][
+                                    "preview_url"
+                                ],
                                 "evidence_table": table_evidence_preview(
-                                    res["evidence"].get("structured_data")
+                                    context_row["evidence"].get("structured_data")
                                 ),
                             }
-                            if res.get("evidence")
+                            if context_row.get("evidence")
                             else {}
                         ),
                     }

@@ -13,10 +13,12 @@ except (
         def get_logger():
             return _FallbackLogger()
 
-    structlog = _FallbackStructlog()
+    structlog = _FallbackStructlog()  # type: ignore[assignment]  # structlog absent: fallback logger
 import uuid
 import asyncio
-from typing import Callable, Awaitable
+from typing import Any, Awaitable, Callable, cast
+
+from sqlalchemy.engine import CursorResult
 from datetime import datetime
 from src.core.config import settings
 
@@ -101,7 +103,7 @@ class EventBus:
                         logger.info(
                             "AI cache invalidated after article event",
                             event_type=event_type,
-                            invalidated_count=result.rowcount,
+                            invalidated_count=cast(CursorResult[Any], result).rowcount,
                         )
                 except Exception as exc:
                     logger.error(

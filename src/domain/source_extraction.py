@@ -245,7 +245,7 @@ def _convert_pdf_with_pymupdf4llm(data: bytes) -> str:
         return ""
     try:
         import pymupdf
-        import pymupdf4llm
+        import pymupdf4llm  # type: ignore[import-untyped]  # no py.typed or stubs; trusted PDF converter
     except Exception as exc:
         logger.warning(
             "PyMuPDF4LLM is not importable; PDF Markdown structure falls back to MarkItDown",
@@ -444,7 +444,7 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
             # pages instead of silently dropping scanned appendices.
             if any(not item["text"] for item in pages):
                 try:
-                    import fitz
+                    import fitz  # type: ignore[import-untyped]  # PyMuPDF ships no py.typed; no stubs installed
                     from PIL import Image
 
                     document = fitz.open(stream=data, filetype="pdf")

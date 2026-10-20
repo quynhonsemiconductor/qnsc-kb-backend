@@ -1411,12 +1411,17 @@ class GovernanceService:
                 )
             )
             if draft.storage_key:
+                source_system = "upload"
+                if external_document:
+                    # Loaded in the same branch that sets external_document. If it were
+                    # missing, this raises AssertionError where it raised AttributeError before.
+                    # Both are unhandled, so the request fails the same way.
+                    assert connector is not None
+                    source_system = connector.system
                 db.add(
                     DocumentSource(
                         article_id=created_article.id,
-                        source_system=(
-                            connector.system if external_document else "upload"
-                        ),
+                        source_system=source_system,
                         source_ref=draft.source_ref,
                         source_hash=draft.source_hash,
                         storage_key=draft.storage_key,

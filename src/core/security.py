@@ -3,9 +3,9 @@ import bcrypt
 if not hasattr(bcrypt, "__about__"):
 
     class About:
-        __version__ = bcrypt.__version__
+        __version__ = getattr(bcrypt, "__version__")
 
-    bcrypt.__about__ = About()
+    setattr(bcrypt, "__about__", About())
 
 import uuid
 from datetime import datetime, timedelta, timezone

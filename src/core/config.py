@@ -1094,7 +1094,7 @@ class Settings(BaseSettings):
             raise RuntimeError("MALWARE_SCAN_ENABLED must be true in production")
         if not self.MALWARE_SCANNER_HOST:
             raise RuntimeError("MALWARE_SCANNER_HOST is required in production")
-        microsoft_required = (
+        microsoft_required: tuple[str | None, ...] = (
             self.MICROSOFT_CLIENT_ID,
             self.MICROSOFT_CLIENT_SECRET,
             self.MICROSOFT_TENANT_ID,

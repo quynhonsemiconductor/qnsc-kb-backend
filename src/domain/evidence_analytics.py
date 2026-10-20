@@ -14,17 +14,20 @@ class RowFilter(BaseModel):
     equals: str = Field(max_length=1000)
 
 
+AnalyticsOperation = Literal[
+    "count",
+    "sum",
+    "average",
+    "median",
+    "min",
+    "max",
+    "difference",
+    "percentage_change",
+]
+
+
 class AnalyticsPlan(BaseModel):
-    operation: Literal[
-        "count",
-        "sum",
-        "average",
-        "median",
-        "min",
-        "max",
-        "difference",
-        "percentage_change",
-    ]
+    operation: AnalyticsOperation
     evidence_id: str = Field(min_length=1, max_length=64)
     column: str | None = Field(default=None, max_length=255)
     filters: list[RowFilter] = Field(default_factory=list, max_length=5)

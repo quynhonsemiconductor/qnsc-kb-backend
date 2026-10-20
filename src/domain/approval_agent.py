@@ -434,7 +434,7 @@ async def run(
         .all()
     )
 
-    summary = {
+    summary: dict[str, Any] = {
         "evaluated": 0,
         "approved": 0,
         "rejected": 0,

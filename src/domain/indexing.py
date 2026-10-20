@@ -388,6 +388,7 @@ async def _index_article(article_id: uuid.UUID) -> bool:
                 # Reuse a cached vector for any child whose own text has not changed since
                 # the last successful index (see reusable_by_hash above); only the
                 # children that are new or actually changed need embedding at all.
+                embeddings: list[list[float] | None] | None
                 embeddings, to_embed_indices = _partition_for_reuse(
                     [item[5] for item in pending_children], reusable_by_hash
                 )
