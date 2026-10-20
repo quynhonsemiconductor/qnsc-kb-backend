@@ -589,10 +589,12 @@ class Settings(BaseSettings):
     # tasks.py). docs/runbooks/email-graph.md.
     MICROSOFT_GRAPH_SENDER: str | None = None
     MAIL_GRAPH_CLIENT_ID: str | None = None
-    # Deployed: ONE standalone secret (qnsc-kb/<env>/mail-graph-certificate) holding the private key and the
-    # certificate in a single PEM. Injected into the WORKER container only, and readable only by the worker's
-    # execution role. The two settings below are for a local test and scripts/graph_mail_check.py.
-    MAIL_GRAPH_PEM: SecretStr | None = None
+    # Deployed: the worker-only FILE at AZURE_CLIENT_CERTIFICATE_PATH (the azure-identity standard name,
+    # ONPREM-PLAN §7.3), holding the private key and the certificate in a single PEM (key first). Synced from
+    # the standalone secret kb-<env>-graph-cert and mounted into the WORKER container only, readable only by
+    # the worker's identity. The two PEM settings below are for a local test and
+    # scripts/graph_mail_check.py.
+    AZURE_CLIENT_CERTIFICATE_PATH: str | None = None
     MAIL_GRAPH_CERT_PEM: SecretStr | None = None
     MAIL_GRAPH_PRIVATE_KEY_PEM: SecretStr | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"

@@ -107,6 +107,11 @@ readable by the API's role. This secret is referenced only by the **worker** con
 No task role in the stack can read any secret. One value, one write: the key and the certificate cannot drift apart,
 and there is no bundle JSON to merge or to clobber.
 
+The code reads the credential ONLY from the **worker-only FILE** `AZURE_CLIENT_CERTIFICATE_PATH`
+(ONPREM-PLAN §7.3): the same secret, synced and mounted into the worker's filesystem, never an env value.
+Without the mounted file a worker told to send mail refuses to start — the deploy fails by name until the
+mount exists.
+
 The secret's **container** is created by Terraform as soon as the stack is applied (empty, without a version), in
 every environment that is not the in-memory fake, **including develop while it is still on SES**; you only write the
 value. Nothing is injected or granted until `mail_graph_client_id` is set. The deploy fails by name until you do (see below).
@@ -226,9 +231,10 @@ down.
    one with it. Merge that change.
 3. Merging runs Infrastructure · Apply: develop's `email_provider` becomes `graph`, and the mail secret is injected
    into the **worker container only** and granted to the worker's execution role only (the API and beat never
-   receive it, and no task role can read it). The SES send permission stays in place on purpose, so a rollback to
-   the previous task definition can still send; it is removed by the separate clean-up change (#216) once Graph
-   is proven.
+   receive it, and no task role can read it). SES is removed in the same release window
+   as the rova prod switch-on, after one real rova prod email has arrived (#216, see the release sequence in its PR
+   body). Rollback is a redeploy of the previous release, not a retained SES path; this environment has no prod
+   traffic yet, so production follows its own first prod release.
 4. Deploy. The **worker** now refuses to start if the client id is set but the sender, certificate or key is
    missing, so a half-configured environment fails the deploy instead of quietly queueing mail. The API does not
    check mail at all. With the client id empty the worker starts and logs `Mail is not configured` on every
