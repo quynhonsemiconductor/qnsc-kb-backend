@@ -2,7 +2,7 @@ import uuid
 from typing import Sequence, Any, cast
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.sql.elements import ColumnElement
-from sqlalchemy import select, update, and_, or_, exists, false, true, not_
+from sqlalchemy import select, update, and_, or_, exists, false, true, not_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.article import (
@@ -257,6 +257,7 @@ class ArticleRepository:
         status: str | None = None,
         topic: str | None = None,
         search_query: str | None = None,
+        index_status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> Sequence[Article]:
@@ -286,6 +287,8 @@ class ArticleRepository:
             filters.append(Article.sensitivity == sensitivity)
         if status:
             filters.append(Article.status == status)
+        if index_status:
+            filters.append(Article.index_status == index_status)
         if topic:
             filters.append(
                 ~Article.tags.any()
@@ -309,6 +312,20 @@ class ArticleRepository:
         for article in articles:
             AuthorizationService.restrict_article_metadata(user, article)
         return articles
+
+    async def index_status_counts(self, user: User) -> dict[str, int]:
+        """Published articles the caller may read, counted by search-index state.
+
+        The same visibility predicate as every other read, so a count never reveals that
+        another department's document exists or is still being indexed.
+        """
+        stmt = (
+            select(Article.index_status, func.count(Article.id))
+            .where(and_(*self._authorized_article_filters(user)), Article.status == "published")
+            .group_by(Article.index_status)
+        )
+        result = await self.db.execute(stmt)
+        return {str(state): int(count) for state, count in result.all()}
 
     async def list_related(
         self, user: User, article: Article, limit: int = 6

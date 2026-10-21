@@ -6,7 +6,7 @@ import uuid
 import unicodedata
 from pathlib import Path
 from datetime import date, datetime
-from typing import Annotated, Any, Sequence, cast
+from typing import Annotated, Any, Literal, Sequence, cast
 from fastapi import (
     APIRouter,
     Depends,
@@ -1890,11 +1890,42 @@ async def create_article(
     )
 
 
+INDEX_STATES = ("pending", "processing", "ready", "failed")
+
+
+class IndexSummaryResponse(BaseModel):
+    pending: int = 0
+    processing: int = 0
+    ready: int = 0
+    failed: int = 0
+    total: int = 0
+    # pending + processing + failed: published, but the AI cannot answer from it (yet).
+    not_ready: int = 0
+
+
+# Declared before `/{id}` so "index-summary" is not parsed as an article id.
+@router.get("/index-summary", response_model=IndexSummaryResponse)
+async def article_index_summary(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IndexSummaryResponse:
+    """How many published, readable articles are searchable by the AI, and how many are not."""
+    counts = await ArticleRepository(db).index_status_counts(current_user)
+    known = {state: counts.get(state, 0) for state in INDEX_STATES}
+    total = sum(counts.values())
+    return IndexSummaryResponse(
+        **known,
+        total=total,
+        not_ready=known["pending"] + known["processing"] + known["failed"],
+    )
+
+
 @router.get("/", response_model=list[ArticleResponse])
 async def list_articles(
     dept: str | None = Query(None),
     topic: str | None = Query(None, max_length=80),
     status: str | None = Query(None),
+    index_status: Literal["pending", "processing", "ready", "failed"] | None = Query(None),
     q: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -1908,6 +1939,7 @@ async def list_articles(
         topic=topic,
         status=status,
         search_query=q,
+        index_status=index_status,
         limit=limit,
         offset=offset,
     )
