@@ -58,7 +58,7 @@ permissions:
   contents: read
 
 env:
-  PYTHON_VERSION: '3.11' # matches the Dockerfile's python:3.11-slim base
+  PYTHON_VERSION: '3.13' # matches the Dockerfile's python:3.13-slim base and the pyproject pin
 
 jobs:
   # Does this pull request change anything this workflow tests? A change that touches only files the matching DEPLOY workflow ignores
