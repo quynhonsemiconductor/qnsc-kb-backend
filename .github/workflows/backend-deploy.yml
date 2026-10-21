@@ -252,7 +252,7 @@ jobs:
       id-token: write
       attestations: write
       packages: read # build-push-ecr pulls private @quynhonsemiconductor/* from GitHub Packages
-    uses: quynhonsemiconductor/ci/.github/workflows/backend-deploy.yml@v1
+    uses: quynhonsemiconductor/ci/.github/workflows/backend-deploy.yml@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0
     with:
       product: qnsc-kb
       # ── No registry build cache ────────────────────────────────────────────

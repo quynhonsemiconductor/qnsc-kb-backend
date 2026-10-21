@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   reap:
-    uses: quynhonsemiconductor/ci/.github/workflows/deploy-reaper.yml@v1
+    uses: quynhonsemiconductor/ci/.github/workflows/deploy-reaper.yml@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0
     # A called workflow can only REDUCE the caller's token scope, so actions:write must
     # be granted here or the reusable cannot cancel anything.
     permissions:
