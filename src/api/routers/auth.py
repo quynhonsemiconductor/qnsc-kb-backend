@@ -52,7 +52,7 @@ from src.domain.departments import (
     resolve_active_department,
     normalize_department_name,
 )
-from src.core.rate_limit import auth_rate_limiter
+from src.core.rate_limit import auth_rate_limiter, client_ip_from_request
 from src.domain import entra_auth
 from sqlalchemy import Table, delete, select, func, update
 from sqlalchemy.orm import selectinload
@@ -853,7 +853,7 @@ async def preview_invitation(
     inviter already sent to that address.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     allowed, retry_after = await auth_rate_limiter.allow(f"invite-preview:{client_ip}")
     if not allowed:
         raise HTTPException(
@@ -895,7 +895,7 @@ async def accept_invitation(
     straight in the app rather than bouncing them to a second sign-in.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     allowed, retry_after = await auth_rate_limiter.allow(f"invite-accept:{client_ip}")
     if not allowed:
         raise HTTPException(
@@ -1005,7 +1005,7 @@ async def forgot_password(
     addresses.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     email = str(payload.email).strip().lower()
     address_allowed, address_retry = await auth_rate_limiter.allow(f"forgot:{email}")
     ip_allowed, ip_retry = await auth_rate_limiter.allow(f"forgot-ip:{client_ip}")
@@ -1082,7 +1082,7 @@ async def reset_password(
     does here.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     allowed, retry_after = await auth_rate_limiter.allow(f"reset:{client_ip}")
     if not allowed:
         raise HTTPException(
@@ -2400,7 +2400,7 @@ async def login(
 ) -> Any:
     _reject_cross_site_auth_request(request)
     # OAuth2 request form uses username as email field
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     username = form_data.username.strip().lower()
     if "@" not in username:
         raise HTTPException(
