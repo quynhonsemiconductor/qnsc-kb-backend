@@ -220,6 +220,13 @@ FROM embedding-${API_EMBEDDING} AS api-embedding
 # build time, so this recurs whenever an advisory lands before the upstream tag is rebuilt.
 # `upgrade`, not `dist-upgrade`: patches within the pinned release only.
 # ---------------------------------------------------------------------------
+FROM python-base AS rds-ca
+# The RDS global CA bundle (public certificates only) for DATABASE_SSL_CA. Fetched at
+# build time, unpinned on purpose: the bundle gains CAs over time and a stale local
+# copy would fail verification against new instances instead of being silently wrong.
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /bundle.pem
+RUN chmod 0644 /bundle.pem
+
 FROM python-base AS runtime-base
 
 RUN apt-get update && \
@@ -257,6 +264,14 @@ RUN rm -rf /usr/local/lib/python3*/site-packages/pip* /usr/local/bin/pip*
 # ---------------------------------------------------------------------------
 FROM runtime-base AS api
 
+# Database TLS: the RDS global CA bundle at the path db_ssl.py falls back to in
+# production when DATABASE_SSL_CA is unset (a task definition may still set it —
+# on-prem it MUST, pointing at the CNPG ca.crt). No ENV default here on purpose:
+# a container-level default would leak verify-full into local dev compose, whose
+# database has no TLS. runtime-base stays copy-free (test_dockerfile_image_size),
+# so each shipped stage takes the bundle itself.
+COPY --from=rds-ca /bundle.pem /etc/ssl/rds-global-bundle.pem
+
 COPY --from=deps-onnx /opt/venv /opt/venv
 # pip is build-time only, and its vendored certifi trips the CRITICAL gate
 # (see runtime-base); the venv arrives with it, so it is stripped here.
@@ -278,6 +293,14 @@ CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", \
      "--timeout-keep-alive", "65"]
 
 FROM runtime-base AS worker
+
+# Database TLS: the RDS global CA bundle at the path db_ssl.py falls back to in
+# production when DATABASE_SSL_CA is unset (a task definition may still set it —
+# on-prem it MUST, pointing at the CNPG ca.crt). No ENV default here on purpose:
+# a container-level default would leak verify-full into local dev compose, whose
+# database has no TLS. runtime-base stays copy-free (test_dockerfile_image_size),
+# so each shipped stage takes the bundle itself.
+COPY --from=rds-ca /bundle.pem /etc/ssl/rds-global-bundle.pem
 
 # paddle's native dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -321,6 +344,14 @@ CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
      "-Q", "document-preparation,celery,ingestion,connectors,permissions"]
 
 FROM runtime-base AS migrator
+
+# Database TLS: the RDS global CA bundle at the path db_ssl.py falls back to in
+# production when DATABASE_SSL_CA is unset (a task definition may still set it —
+# on-prem it MUST, pointing at the CNPG ca.crt). No ENV default here on purpose:
+# a container-level default would leak verify-full into local dev compose, whose
+# database has no TLS. runtime-base stays copy-free (test_dockerfile_image_size),
+# so each shipped stage takes the bundle itself.
+COPY --from=rds-ca /bundle.pem /etc/ssl/rds-global-bundle.pem
 
 COPY --from=deps /opt/venv /opt/venv
 # pip is build-time only, and its vendored certifi trips the CRITICAL gate

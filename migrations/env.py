@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from src.core.config import settings
 
 from alembic import context
+
+from src.core.db_ssl import ssl_connect_args
 from src.models.base import Base
 
 config = context.config
@@ -105,6 +107,8 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # verify-full against DATABASE_SSL_CA when set; no TLS locally (db_ssl.py).
+        connect_args=ssl_connect_args(),
     )
 
     async with connectable.connect() as connection:

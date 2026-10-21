@@ -97,6 +97,11 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb"
     MIGRATION_DATABASE_URL: str | None = None
+    # Path to the CA bundle database certificates must chain to (the RDS global bundle,
+    # baked into the image; on-prem the CNPG ca.crt). REQUIRED when ENVIRONMENT=production:
+    # without it the process refuses to connect (see src/core/db_ssl.py) instead of
+    # connecting without TLS. Unset locally: asyncpg connects without TLS, unchanged.
+    DATABASE_SSL_CA: str | None = None
     APP_DATABASE_ROLE: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
 

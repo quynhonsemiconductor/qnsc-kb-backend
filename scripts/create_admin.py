@@ -31,6 +31,8 @@ import sys
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from src.core.db_ssl import ssl_connect_args
 from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
@@ -56,7 +58,9 @@ async def main() -> int:
     # any application role has been granted anything, and it needs to set the RLS bypass
     # below.
     url = settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
-    engine = create_async_engine(url, pool_pre_ping=True)
+    engine = create_async_engine(
+        url, pool_pre_ping=True, connect_args=ssl_connect_args()
+    )
     Session = async_sessionmaker(engine, expire_on_commit=False)
 
     try:
