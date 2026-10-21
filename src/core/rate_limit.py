@@ -18,9 +18,11 @@ def client_ip_from_request(request: Request) -> str:
     every visitor in one shared bucket (and one shared 429). Cloudflare sets
     CF-Connecting-IP from the actual visitor address, overwriting any client-supplied
     value, so it is trustworthy wherever the origin is reachable only through
-    Cloudflare. X-Forwarded-For is deliberately never consulted: any client can append
-    to it, and the proxies in front of the API append rather than overwrite, so the
-    leftmost value is attacker-chosen.
+    Cloudflare — and only there. The header is trusted because the origin has no
+    direct ingress (no ALB or published port): re-enable one and any client can
+    forge it, so this trust moves with the ingress. X-Forwarded-For is deliberately
+    never consulted: any client can append to it, and the proxies in front of the
+    API append rather than overwrite, so the leftmost value is attacker-chosen.
     """
     cf_ip = (request.headers.get("cf-connecting-ip") or "").strip()
     if cf_ip:

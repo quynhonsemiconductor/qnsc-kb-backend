@@ -418,9 +418,7 @@ def test_logout_sets_tenant_context_before_revoking_a_refresh_session():
     db = Db()
     token = create_refresh_token("user@acme.test")
     request = Request({"type": "http", "headers": []})
-    asyncio.run(
-        logout(request, Response(), RefreshRequest(refresh_token=token), None, db)
-    )
+    asyncio.run(logout(request, Response(), RefreshRequest(refresh_token=token), db=db))
     assert "set_config('app.company_domain'" in db.calls[0]
     assert session.revoked_at is not None
     assert db.committed

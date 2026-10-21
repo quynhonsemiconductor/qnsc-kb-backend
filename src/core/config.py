@@ -97,6 +97,11 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb"
     MIGRATION_DATABASE_URL: str | None = None
+    # Path to the CA bundle database certificates must chain to (the RDS global bundle,
+    # baked into the image; on-prem the CNPG ca.crt). REQUIRED when ENVIRONMENT=production:
+    # without it the process refuses to connect (see src/core/db_ssl.py) instead of
+    # connecting without TLS. Unset locally: asyncpg connects without TLS, unchanged.
+    DATABASE_SSL_CA: str | None = None
     APP_DATABASE_ROLE: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -155,7 +160,10 @@ class Settings(BaseSettings):
 
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
-    LLM_TIMEOUT_SECONDS: float = 90.0
+    # 60 s, not 90 s: a proxied request past 100 s gets Cloudflare's body-less 524, so
+    # the extra server-side wait buys nothing the client can see (ONPREM-PLAN §8.2).
+    # validate_production refuses a higher value in deployed environments.
+    LLM_TIMEOUT_SECONDS: float = 60.0
     # Provider rate limits are a condition to manage, not an error to surface (Groq's free tier answers 429 with
     # "Please try again in 27s"). Per PROCESS, because each Celery child and each API worker has its own gate.
     #
@@ -930,6 +938,14 @@ class Settings(BaseSettings):
         environment = self.ENVIRONMENT.lower()
         if environment in {"development", "dev", "local"}:
             return
+        # An answer the client can never see is a pure waste of the 100 s the edge
+        # grants: past it Cloudflare returns a body-less 524 (ONPREM-PLAN §8.2). The
+        # default is already 60 s; refuse a copied 90 s at boot rather than in production.
+        if self.LLM_TIMEOUT_SECONDS > 60.0:
+            raise RuntimeError(
+                "LLM_TIMEOUT_SECONDS must stay at or under 60 s: a proxied request "
+                "past 100 s dies as a Cloudflare 524 with no body"
+            )
         # Local-only switches are refused first, so a copied development value fails with its own name.
         if self.LLM_PROVIDER.strip().lower() == "mock":
             raise RuntimeError(

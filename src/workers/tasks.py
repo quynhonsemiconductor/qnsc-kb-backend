@@ -18,6 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from src.core.db_ssl import ssl_connect_args
 from sqlalchemy.pool import NullPool
 from celery.signals import (
     worker_init,
@@ -248,6 +249,7 @@ def prune_operational_metrics() -> None:
             connect_args={
                 "timeout": 10,
                 "command_timeout": _PRUNE_COMMAND_TIMEOUT_SECONDS,
+                **ssl_connect_args(),
             },
         )
         try:
