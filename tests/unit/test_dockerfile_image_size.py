@@ -59,7 +59,13 @@ def test_each_target_copies_exactly_one_virtualenv_and_no_system_libraries():
     for target, source in expected.items():
         venvs = re.findall(r"COPY --from=(\S+) /opt/venv /opt/venv", code(stage(target)))
         assert venvs == [source], f"{target} copies {venvs}, wanted exactly [{source}]"
-    assert "/usr/local/lib" not in code(TEXT), "libraries are shipped as one venv, not by copying /usr/local"
+    # Substring-matching "/usr/local/lib" is too wide: runtime-base now DELETES the
+    # system pip tree (its vendored certifi trips the CRITICAL gate), so a removal
+    # line mentions the path. The invariant is that nothing system-side is SHIPPED:
+    # no COPY may pull from /usr/local.
+    assert not re.search(r"COPY --from=\S+ /usr/local", code(TEXT)), (
+        "libraries are shipped as one venv, not by copying /usr/local"
+    )
 
 
 def test_the_base_stage_carries_no_libraries_to_be_stored_twice():
