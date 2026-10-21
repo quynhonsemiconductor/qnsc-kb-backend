@@ -3,6 +3,7 @@
 From the develop worker logs (Groq): "groq rate limit reached" on tag suggestion and restructure, and
 "Automatic tag suggestion returned unparseable JSON ... reply=" with an EMPTY reply.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -58,17 +59,25 @@ MSG = [{"role": "user", "content": "x"}]
 
 
 def test_a_short_retry_after_is_waited_out_and_the_call_succeeds(monkeypatch, clean):
-    fake, calls = scripted(ProviderRateLimitError("groq rate limit reached", retry_after=7), ok("done"))
+    fake, calls = scripted(
+        ProviderRateLimitError("groq rate limit reached", retry_after=7), ok("done")
+    )
     monkeypatch.setattr(llm_client, "_complete_once", fake)
 
     text, *_ = asyncio.run(llm_client.complete(MSG, background=True))
 
     assert text == "done" and len(calls) == 2
-    assert any(7 <= s <= 8.5 for s in clean), f"it must wait the Retry-After it was given, plus jitter: {clean}"
+    assert any(
+        7 <= s <= 8.5 for s in clean
+    ), f"it must wait the Retry-After it was given, plus jitter: {clean}"
 
 
-def test_a_long_retry_after_is_raised_with_the_wait_and_the_provider_is_left_alone(monkeypatch):
-    fake, calls = scripted(ProviderRateLimitError("groq rate limit reached", retry_after=600))
+def test_a_long_retry_after_is_raised_with_the_wait_and_the_provider_is_left_alone(
+    monkeypatch,
+):
+    fake, calls = scripted(
+        ProviderRateLimitError("groq rate limit reached", retry_after=600)
+    )
     monkeypatch.setattr(llm_client, "_complete_once", fake)
 
     with pytest.raises(ProviderRateLimitError) as caught:
@@ -107,10 +116,14 @@ def test_concurrent_calls_are_capped(monkeypatch):
     monkeypatch.setattr(llm_client, "_complete_once", slow)
 
     async def many():
-        await asyncio.gather(*(llm_client.complete(MSG, background=True) for _ in range(8)))
+        await asyncio.gather(
+            *(llm_client.complete(MSG, background=True) for _ in range(8))
+        )
 
     asyncio.run(many())
-    assert in_flight["max"] == 2, f"LLM_MAX_CONCURRENCY=2 but {in_flight['max']} background calls ran at once"
+    assert (
+        in_flight["max"] == 2
+    ), f"LLM_MAX_CONCURRENCY=2 but {in_flight['max']} background calls ran at once"
 
 
 def test_an_empty_reply_is_retried_then_succeeds(monkeypatch):
@@ -129,14 +142,18 @@ def test_a_persistently_empty_reply_is_a_failed_call_not_an_empty_answer(monkeyp
 
 
 # ── callers ──────────────────────────────────────────────────────────────────────────────────
-def test_tag_suggestion_reports_an_empty_reply_as_a_failed_call_not_unparseable_json(monkeypatch):
+def test_tag_suggestion_reports_an_empty_reply_as_a_failed_call_not_unparseable_json(
+    monkeypatch,
+):
     import src.domain.llm_client as client
 
     async def empty_after_retries(messages, **_kw):
         raise ProviderEmptyReplyError("groq returned an empty reply 3 times")
 
     monkeypatch.setattr(client, "complete", empty_after_retries)
-    monkeypatch.setattr(client, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq"))
+    monkeypatch.setattr(
+        client, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq")
+    )
 
     with structlog.testing.capture_logs() as logs:
         tags = asyncio.run(auto_tagging.suggest_tags_for_document("T", "body", "doc"))
@@ -147,16 +164,23 @@ def test_tag_suggestion_reports_an_empty_reply_as_a_failed_call_not_unparseable_
     assert not any("unparseable" in event for event in events)
 
 
-def test_tag_suggestion_given_a_bare_empty_string_does_not_call_it_a_parse_error(monkeypatch):
+def test_tag_suggestion_given_a_bare_empty_string_does_not_call_it_a_parse_error(
+    monkeypatch,
+):
     import src.domain.llm_client as client
 
     async def empty(messages, **_kw):
         return "", 0, "m", "groq"
 
     monkeypatch.setattr(client, "complete", empty)
-    monkeypatch.setattr(client, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq"))
+    monkeypatch.setattr(
+        client, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq")
+    )
     with structlog.testing.capture_logs() as logs:
-        assert asyncio.run(auto_tagging.suggest_tags_for_document("T", "body", "doc")) == []
+        assert (
+            asyncio.run(auto_tagging.suggest_tags_for_document("T", "body", "doc"))
+            == []
+        )
     events = [entry["event"] for entry in logs]
     assert "Automatic tag suggestion returned an empty reply" in events
     assert not any("unparseable" in event for event in events)
@@ -167,9 +191,15 @@ def test_restructure_reports_a_rate_limit_as_deferred_with_the_wait(monkeypatch)
         raise ProviderRateLimitError("groq rate limit reached", retry_after=45)
 
     monkeypatch.setattr(content_restructure, "complete", limited)
-    monkeypatch.setattr(content_restructure, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq", model="m"))
+    monkeypatch.setattr(
+        content_restructure,
+        "resolve_provider",
+        lambda *_a, **_k: SimpleNamespace(name="groq", model="m"),
+    )
 
-    result = asyncio.run(content_restructure._restructure_single_document("T", "x" * 200, "m"))
+    result = asyncio.run(
+        content_restructure._restructure_single_document("T", "x" * 200, "m")
+    )
 
     assert result.status == "deferred"
     assert result.retry_after == 45
@@ -180,22 +210,38 @@ def test_any_section_deferred_defers_the_whole_document(monkeypatch):
     async def sections(title, secs, model, deps, background=True):
         return [
             content_restructure._result("a", "a", "llm", "m"),
-            content_restructure._result("b", "b", "deferred", "m", "AI formatting deferred"),
+            content_restructure._result(
+                "b", "b", "deferred", "m", "AI formatting deferred"
+            ),
         ]
 
     monkeypatch.setattr(content_restructure, "_restructure_sections", sections)
-    monkeypatch.setattr(content_restructure, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq", model="m"))
+    monkeypatch.setattr(
+        content_restructure,
+        "resolve_provider",
+        lambda *_a, **_k: SimpleNamespace(name="groq", model="m"),
+    )
     monkeypatch.setattr(content_restructure, "is_already_structured", lambda _t: False)
     monkeypatch.setattr(settings, "RESTRUCTURE_SECTION_CHARS", 100)
     monkeypatch.setattr(settings, "RESTRUCTURE_MAX_SECTIONS", 10)
     monkeypatch.setattr(settings, "RESTRUCTURE_MAX_CHARS", 10_000)
-    monkeypatch.setattr(content_restructure, "_split_oversized_source", lambda text, n: ["a", "b"])
+    monkeypatch.setattr(
+        content_restructure, "_split_oversized_source", lambda text, n: ["a", "b"]
+    )
 
-    result = asyncio.run(content_restructure.restructure_document("T", "y" * 500, enabled=True, background=True))
+    result = asyncio.run(
+        content_restructure.restructure_document(
+            "T", "y" * 500, enabled=True, background=True
+        )
+    )
     assert result.status == "deferred" and result.retry_after
 
     # the same sectioned document for a request handler is the lossless fallback, never "deferred"
-    handler = asyncio.run(content_restructure.restructure_document("T", "y" * 500, enabled=True, background=False))
+    handler = asyncio.run(
+        content_restructure.restructure_document(
+            "T", "y" * 500, enabled=True, background=False
+        )
+    )
     assert handler.status == "fallback_formatting"
 
 
@@ -216,8 +262,13 @@ class FakeDB:
 
 def draft(status="processing", metadata=None):
     return SimpleNamespace(
-        id=uuid.uuid4(), status="pending", restructure_status=status, restructure_error=None, content_metadata=metadata,
-        restructure_decision="x", restructure_model="m",
+        id=uuid.uuid4(),
+        status="pending",
+        restructure_status=status,
+        restructure_error=None,
+        content_metadata=metadata,
+        restructure_decision="x",
+        restructure_model="m",
     )
 
 
@@ -230,11 +281,15 @@ def scheduled(monkeypatch):
     return calls
 
 
-def test_a_rate_limited_draft_is_deferred_with_a_message_and_a_scheduled_retry(scheduled):
+def test_a_rate_limited_draft_is_deferred_with_a_message_and_a_scheduled_retry(
+    scheduled,
+):
     from src.workers import tasks
 
     d = draft()
-    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45, "SOURCE"))
+    asyncio.run(
+        tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45, "SOURCE")
+    )
 
     assert d.restructure_status == "deferred"
     assert "deferred" in d.restructure_error.lower() and "45" in d.restructure_error
@@ -242,17 +297,26 @@ def test_a_rate_limited_draft_is_deferred_with_a_message_and_a_scheduled_retry(s
     assert scheduled == [(str(d.id), "acme.test", "u1", 45)]
 
 
-def test_after_the_deferral_budget_the_lossless_fallback_is_used_and_nothing_is_scheduled(scheduled, monkeypatch):
+def test_after_the_deferral_budget_the_lossless_fallback_is_used_and_nothing_is_scheduled(
+    scheduled, monkeypatch
+):
     from src.workers import tasks
 
     monkeypatch.setattr(settings, "RESTRUCTURE_MAX_DEFERRALS", 2)
     d = draft(metadata={"restructure_deferrals": 2})
-    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45, "SOURCE"))
+    asyncio.run(
+        tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 45, "SOURCE")
+    )
 
     assert d.restructure_status == "fallback_formatting"
     assert "kept rate limiting" in d.restructure_error
-    assert d.restructured_body_md == "SOURCE", "the give-up path must leave something to read, like the failure fallback"
-    assert d.restructure_decision == "lossless_ready" and d.restructure_model == "lossless-markdown"
+    assert (
+        d.restructured_body_md == "SOURCE"
+    ), "the give-up path must leave something to read, like the failure fallback"
+    assert (
+        d.restructure_decision == "lossless_ready"
+        and d.restructure_model == "lossless-markdown"
+    )
     assert scheduled == []
 
 
@@ -261,7 +325,9 @@ def test_a_draft_decided_in_the_meantime_is_not_touched(scheduled):
 
     d = draft(status="llm")
     db = FakeDB(d)
-    asyncio.run(tasks._defer_restructure(db, str(d.id), "acme.test", "u1", 45, "SOURCE"))
+    asyncio.run(
+        tasks._defer_restructure(db, str(d.id), "acme.test", "u1", 45, "SOURCE")
+    )
     assert d.restructure_status == "llm" and scheduled == [] and db.rollbacks == 1
 
 
@@ -271,8 +337,18 @@ def test_deferred_counts_as_ai_busy_and_a_lost_retry_becomes_stalled():
     from src.api.routers.governance import _visible_restructure_state
 
     now = datetime(2026, 1, 1, 12, 0, 0)
-    fresh = SimpleNamespace(restructure_status="deferred", restructure_error="AI formatting deferred", updated_at=now - timedelta(minutes=2), created_at=now)
-    old = SimpleNamespace(restructure_status="deferred", restructure_error="x", updated_at=now - timedelta(minutes=30), created_at=now)
+    fresh = SimpleNamespace(
+        restructure_status="deferred",
+        restructure_error="AI formatting deferred",
+        updated_at=now - timedelta(minutes=2),
+        created_at=now,
+    )
+    old = SimpleNamespace(
+        restructure_status="deferred",
+        restructure_error="x",
+        updated_at=now - timedelta(minutes=30),
+        created_at=now,
+    )
     assert _visible_restructure_state(fresh, now)[0] == "deferred"
     assert _visible_restructure_state(old, now)[0] == "stalled"
 
@@ -280,7 +356,8 @@ def test_deferred_counts_as_ai_busy_and_a_lost_retry_becomes_stalled():
 # ── interactive calls are not gated ──────────────────────────────────────────────────────────
 def test_interactive_calls_are_not_capped(monkeypatch):
     """A chat answer streams for up to LLM_TIMEOUT_SECONDS; with a cap of 2 the third simultaneous user would
-    queue behind two streams, for every provider including one that is not rate limited."""
+    queue behind two streams, for every provider including one that is not rate limited.
+    """
     in_flight = {"now": 0, "max": 0}
 
     async def stream(messages, **_kw):
@@ -294,28 +371,40 @@ def test_interactive_calls_are_not_capped(monkeypatch):
     monkeypatch.setattr(llm_client, "_complete_once", stream)
 
     async def many():
-        await asyncio.gather(*(llm_client.complete(MSG) for _ in range(8)))  # the default: interactive
+        await asyncio.gather(
+            *(llm_client.complete(MSG) for _ in range(8))
+        )  # the default: interactive
 
     asyncio.run(many())
-    assert in_flight["max"] == 8, f"interactive chat was gated to {in_flight['max']} at a time"
+    assert (
+        in_flight["max"] == 8
+    ), f"interactive chat was gated to {in_flight['max']} at a time"
 
 
 def test_an_interactive_429_is_raised_at_once_not_slept_on(monkeypatch, clean):
-    fake, calls = scripted(ProviderRateLimitError("rate", retry_after=7), ok("never reached"))
+    fake, calls = scripted(
+        ProviderRateLimitError("rate", retry_after=7), ok("never reached")
+    )
     monkeypatch.setattr(llm_client, "_complete_once", fake)
 
     with pytest.raises(ProviderRateLimitError) as caught:
         asyncio.run(llm_client.complete(MSG))
 
     assert caught.value.retry_after == 7 and len(calls) == 1
-    assert not any(s >= 7 for s in clean), f"an interactive call must not sleep on Retry-After: {clean}"
+    assert not any(
+        s >= 7 for s in clean
+    ), f"an interactive call must not sleep on Retry-After: {clean}"
 
 
 def test_the_two_background_callers_opt_in():
     import inspect
 
-    assert "background=background" in inspect.getsource(content_restructure._restructure_single_document)
-    assert "background=True" in inspect.getsource(auto_tagging.suggest_tags_for_document)
+    assert "background=background" in inspect.getsource(
+        content_restructure._restructure_single_document
+    )
+    assert "background=True" in inspect.getsource(
+        auto_tagging.suggest_tags_for_document
+    )
     # and chat does not
     from src.domain import ai_service
 
@@ -326,7 +415,9 @@ def test_clearing_the_deferral_count():
     d = draft(metadata={"restructure_deferrals": 3, "type": "doc"})
     content_restructure.clear_restructure_deferrals(d)
     assert d.content_metadata == {"type": "doc"}
-    content_restructure.clear_restructure_deferrals(draft(metadata=None))  # no metadata: no error
+    content_restructure.clear_restructure_deferrals(
+        draft(metadata=None)
+    )  # no metadata: no error
 
 
 def test_a_fresh_queue_generation_starts_with_a_full_budget():
@@ -336,7 +427,10 @@ def test_a_fresh_queue_generation_starts_with_a_full_budget():
     d.restructure_candidate_md = None
     d.updated_at = None
     _queue_draft_restructure(d)
-    assert d.restructure_status == "queued" and "restructure_deferrals" not in d.content_metadata
+    assert (
+        d.restructure_status == "queued"
+        and "restructure_deferrals" not in d.content_metadata
+    )
 
 
 def test_the_retry_countdown_is_capped_below_the_stalled_threshold(monkeypatch):
@@ -344,9 +438,15 @@ def test_the_retry_countdown_is_capped_below_the_stalled_threshold(monkeypatch):
 
     seen = []
     monkeypatch.setattr(settings, "JOB_MODE", "celery")
-    monkeypatch.setattr(tasks.restructure_pending_draft_task, "apply_async", lambda args, countdown: seen.append(countdown))
+    monkeypatch.setattr(
+        tasks.restructure_pending_draft_task,
+        "apply_async",
+        lambda args, countdown: seen.append(countdown),
+    )
 
-    tasks._schedule_restructure("d", "acme.test", "u1", 7200)  # "try again in 2 hours" (a daily quota)
+    tasks._schedule_restructure(
+        "d", "acme.test", "u1", 7200
+    )  # "try again in 2 hours" (a daily quota)
     tasks._schedule_restructure("d", "acme.test", "u1", 45)
     tasks._schedule_restructure("d", "acme.test", "u1", 0)
 
@@ -383,40 +483,64 @@ def test_an_inline_retry_task_is_referenced_until_it_finishes(monkeypatch):
 # ── synchronous callers (manual create / edit / admin re-run) ────────────────────────────────
 def _rate_limited_everywhere(monkeypatch, sleeps):
     """A provider that answers 429 with a Retry-After to every request, through the REAL complete()."""
+
     async def provider(messages, **_kw):
         raise ProviderRateLimitError("groq rate limit reached", retry_after=20)
 
     monkeypatch.setattr(llm_client, "_complete_once", provider)
-    monkeypatch.setattr(content_restructure, "resolve_provider", lambda *_a, **_k: SimpleNamespace(name="groq", model="m"))
+    monkeypatch.setattr(
+        content_restructure,
+        "resolve_provider",
+        lambda *_a, **_k: SimpleNamespace(name="groq", model="m"),
+    )
     monkeypatch.setattr(content_restructure, "is_already_structured", lambda _t: False)
     monkeypatch.setattr(settings, "RESTRUCTURE_ENABLED", True)
 
 
-def test_a_request_handler_never_gets_deferred_and_never_sleeps_on_the_rate_limit(monkeypatch, clean):
+def test_a_request_handler_never_gets_deferred_and_never_sleeps_on_the_rate_limit(
+    monkeypatch, clean
+):
     """articles.py create/edit and the admin re-run persist whatever restructure_document returns, and nothing
-    re-queues for them: a 'deferred' there would block the draft until it shows as stalled."""
+    re-queues for them: a 'deferred' there would block the draft until it shows as stalled.
+    """
     _rate_limited_everywhere(monkeypatch, clean)
     source = "Quy trình mua sắm. " * 40
 
-    result = asyncio.run(content_restructure.restructure_document("T", source, enabled=True, background=False))
+    result = asyncio.run(
+        content_restructure.restructure_document(
+            "T", source, enabled=True, background=False
+        )
+    )
 
     assert result.status == "fallback_formatting", result.status
     assert result.body_md, "a lossless reading view must be returned"
-    assert "rate limited" in result.error and "Retry from Pending Drafts" in result.error
-    assert not any(s >= 15 for s in clean), f"a request handler must not sleep on Retry-After: {clean}"
+    assert (
+        "rate limited" in result.error and "Retry from Pending Drafts" in result.error
+    )
+    assert not any(
+        s >= 15 for s in clean
+    ), f"a request handler must not sleep on Retry-After: {clean}"
 
 
 def test_the_default_is_the_request_handler_behaviour(monkeypatch, clean):
     _rate_limited_everywhere(monkeypatch, clean)
-    result = asyncio.run(content_restructure.restructure_document("T", "x " * 200, enabled=True))
+    result = asyncio.run(
+        content_restructure.restructure_document("T", "x " * 200, enabled=True)
+    )
     assert result.status == "fallback_formatting"
 
 
 def test_the_worker_task_still_gets_deferred_and_waits_inline(monkeypatch, clean):
     _rate_limited_everywhere(monkeypatch, clean)
-    result = asyncio.run(content_restructure.restructure_document("T", "x " * 200, enabled=True, background=True))
+    result = asyncio.run(
+        content_restructure.restructure_document(
+            "T", "x " * 200, enabled=True, background=True
+        )
+    )
     assert result.status == "deferred" and result.retry_after == 20
-    assert any(s >= 20 for s in clean), "the worker waits out a short Retry-After before giving up"
+    assert any(
+        s >= 20 for s in clean
+    ), "the worker waits out a short Retry-After before giving up"
 
 
 def test_every_synchronous_caller_says_so():
@@ -432,20 +556,27 @@ def test_every_synchronous_caller_says_so():
     assert "background=True" in inspect.getsource(tasks.run_restructure_pending_draft)
 
 
-@pytest.mark.parametrize("module,needle", [
-    ("src/domain/department_routing.py", "await complete("),
-    ("src/rag/contextual_header.py", "await complete("),
-    ("src/domain/approval_agent.py", "await complete("),
-    ("src/domain/structured_metadata.py", "await complete("),
-    ("src/domain/entity_extraction.py", "await complete("),
-])
+@pytest.mark.parametrize(
+    "module,needle",
+    [
+        ("src/domain/department_routing.py", "await complete("),
+        ("src/rag/contextual_header.py", "await complete("),
+        ("src/domain/approval_agent.py", "await complete("),
+        ("src/domain/structured_metadata.py", "await complete("),
+        ("src/domain/entity_extraction.py", "await complete("),
+    ],
+)
 def test_other_background_callers_opt_in(module, needle):
     import pathlib
 
-    source = (pathlib.Path(__file__).resolve().parents[2] / module).read_text(encoding="utf-8")
-    call = source[source.index(needle):]
+    source = (pathlib.Path(__file__).resolve().parents[2] / module).read_text(
+        encoding="utf-8"
+    )
+    call = source[source.index(needle) :]
     call = call[: call.index("\n        )\n") if "\n        )\n" in call else len(call)]
-    assert "background=True" in call, f"{module} is not waited on by a user and must pass background=True"
+    assert (
+        "background=True" in call
+    ), f"{module} is not waited on by a user and must pass background=True"
 
 
 def test_a_connector_requeue_starts_with_a_full_deferral_budget():
@@ -454,14 +585,161 @@ def test_a_connector_requeue_starts_with_a_full_deferral_budget():
     d = draft(status="fallback_formatting", metadata={"restructure_deferrals": 4})
     d.created_by = uuid.uuid4()
     queue: list = []
-    cloud_sync._queue_draft_formatting(d, SimpleNamespace(company_domain="acme.test"), queue)
-    assert d.restructure_status == "queued" and "restructure_deferrals" not in (d.content_metadata or {})
+    cloud_sync._queue_draft_formatting(
+        d, SimpleNamespace(company_domain="acme.test"), queue
+    )
+    assert d.restructure_status == "queued" and "restructure_deferrals" not in (
+        d.content_metadata or {}
+    )
 
 
 def test_the_deferral_message_states_the_capped_wait(scheduled):
     from src.workers import tasks
 
     d = draft()
-    asyncio.run(tasks._defer_restructure(FakeDB(d), str(d.id), "acme.test", "u1", 7200, "SOURCE"))
+    asyncio.run(
+        tasks._defer_restructure(
+            FakeDB(d), str(d.id), "acme.test", "u1", 7200, "SOURCE"
+        )
+    )
     assert "about 600 s" in d.restructure_error and "7200" not in d.restructure_error
     assert scheduled[0][3] == 600
+
+
+# ── the whole-call time budget (non-streaming) ───────────────────────────────
+
+
+class _FakeClock:
+    """Real monotonic replacement; only `fake_sleep` and the attempt doubles advance it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+def _install_clock(monkeypatch, pause_jitter=True):
+    clock = _FakeClock()
+    monkeypatch.setattr(llm_client.time, "monotonic", clock.monotonic)
+
+    async def fake_sleep(seconds, *a, **k):
+        clock.now += seconds
+
+    monkeypatch.setattr(llm_client.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm_client.random, "uniform", lambda *_a: 0.0)
+    return clock
+
+
+def test_an_empty_retry_cannot_take_a_second_full_timeout(monkeypatch, clean):
+    """timeout is the WHOLE call's budget: attempt one spends it all, so the retry
+    never runs — 2×60 s behind Cloudflare's 100 s 524 would be invisible anyway."""
+    clock = _install_clock(monkeypatch)
+    seen: list[float] = []
+
+    async def fake(messages, timeout=30.0, **_kw):
+        seen.append(timeout)
+        clock.now += timeout  # the attempt burns its whole timeout
+        return ok("")  # always empty
+
+    monkeypatch.setattr(llm_client, "_complete_once", fake)
+    with pytest.raises(ProviderEmptyReplyError):
+        asyncio.run(llm_client.complete(MSG, timeout=60.0))
+    assert seen == [60.0]  # the second attempt never happened
+
+
+def test_a_retry_gets_the_remaining_budget_not_a_fresh_timeout(monkeypatch, clean):
+    clock = _install_clock(monkeypatch)
+    seen: list[float] = []
+    outcomes = iter([ok(""), ok("fine")])
+
+    async def fake2(messages, timeout=30.0, **_kw):
+        seen.append(timeout)
+        clock.now += 10.0
+        return next(outcomes)
+
+    monkeypatch.setattr(llm_client, "_complete_once", fake2)
+    text, *_ = asyncio.run(llm_client.complete(MSG, timeout=60.0))
+    assert text == "fine"
+    # attempt two: 60 − 10 (attempt one) − 1 (the empty-retry pause), not 60 again.
+    assert seen == [60.0, 49.0]
+
+
+def test_streaming_keeps_its_per_attempt_timeout(monkeypatch, clean):
+    """A healthy stream runs longer than `timeout` in total; a whole-call budget
+    would abort it mid-answer, so streaming is exempt."""
+    clock = _install_clock(monkeypatch)
+    seen: list[float] = []
+
+    async def fake(messages, timeout=30.0, **_kw):
+        seen.append(timeout)
+        clock.now += timeout
+        return ok("")  # always empty, but every attempt gets the full timeout
+
+    monkeypatch.setattr(llm_client, "_complete_once", fake)
+
+    async def on_token(_t):
+        return None
+
+    with pytest.raises(ProviderEmptyReplyError):
+        asyncio.run(llm_client.complete(MSG, timeout=60.0, on_token=on_token))
+    assert len(seen) == 1 + settings.LLM_EMPTY_REPLY_RETRIES
+    assert all(t == 60.0 for t in seen)
+
+
+# ── the budget starts after the concurrency gate, not at function entry ──────
+
+
+def test_a_call_queued_behind_the_gate_gets_a_full_budget(monkeypatch, clean):
+    """A background call waiting on LLM_MAX_CONCURRENCY does not spend its budget in
+    the queue: the clock starts when the gate admits it, so the attempt gets the full
+    timeout — under the entry-started deadline it would have gotten `min(60, 60−30)`
+    and worse, down to ≤ 0 for a long queue."""
+    clock = _install_clock(monkeypatch)
+    seen: list[float] = []
+
+    class _QueuingGate:
+        async def __aenter__(self):
+            clock.now += 30.0  # queued behind two running calls for 30 s
+            return None
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(llm_client, "_gate", lambda: _QueuingGate())
+
+    async def fake(messages, timeout=30.0, **_kw):
+        seen.append(timeout)
+        clock.now += 10.0
+        return ok("done")
+
+    monkeypatch.setattr(llm_client, "_complete_once", fake)
+    text, *_ = asyncio.run(llm_client.complete(MSG, timeout=60.0, background=True))
+    assert text == "done"
+    assert seen == [60.0]
+
+
+def test_a_gate_queue_longer_than_the_timeout_still_gets_its_budget(monkeypatch, clean):
+    """Even queued past `timeout` wall-clock, the admitted attempt runs with a full
+    budget: queue time is the platform's queueing, not the provider call's."""
+    clock = _install_clock(monkeypatch)
+    calls: list[int] = []
+
+    class _QueuingGate:
+        async def __aenter__(self):
+            clock.now += 70.0
+            return None
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(llm_client, "_gate", lambda: _QueuingGate())
+
+    async def fake(messages, timeout=30.0, **_kw):
+        calls.append(1)
+        return ok("done")
+
+    monkeypatch.setattr(llm_client, "_complete_once", fake)
+    text, *_ = asyncio.run(llm_client.complete(MSG, timeout=60.0, background=True))
+    assert text == "done"
+    assert calls == [1]
