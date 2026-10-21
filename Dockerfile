@@ -271,7 +271,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"
 
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# keep-alive 65 s outlives the proxy's 60 s idle timeout (ALB today, cloudflared
+# later), so the proxy never holds a connection the server has already dropped
+# (ONPREM-PLAN §13.1 P0-13).
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--timeout-keep-alive", "65"]
 
 FROM runtime-base AS worker
 

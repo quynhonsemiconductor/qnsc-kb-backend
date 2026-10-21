@@ -993,3 +993,13 @@ async def health_ready():
         # an alert on this field is the way to learn that vector search does not.
         "degraded": embedding_warmup.degraded,
     }
+
+
+@app.get("/readyz", tags=["system"])
+async def readyz():
+    """Alias of `/health/ready`, behaviour identical — including the 503 while the
+    embedding model warms. The platform probe/monitor path is `/readyz` everywhere
+    (ONPREM-PLAN §8.2), so the edge and Synthetic Monitoring point at one name for
+    every product instead of remembering KB's.
+    """
+    return await health_ready()
