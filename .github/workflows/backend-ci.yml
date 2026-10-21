@@ -77,7 +77,7 @@ jobs:
       run: ${{ steps.paths.outputs.run }}
     steps:
       - id: paths
-        uses: quynhonsemiconductor/ci/actions/changed-paths@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0
+        uses: quynhonsemiconductor/ci/actions/changed-paths@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           ignore: |
             **/*.md
@@ -588,7 +588,7 @@ jobs:
       # CRITICAL blocks this job, hence `Backend CI required`; HIGH is reported. This used to be its own job in the security
       # workflow that rebuilt the same image from scratch.
       - name: Container CVE scan (Trivy)
-        uses: quynhonsemiconductor/ci/actions/scan-image@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0
+        uses: quynhonsemiconductor/ci/actions/scan-image@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           image-ref: qnsc-kb-api:scan
 
@@ -677,7 +677,7 @@ jobs:
 
       - name: Detect breaking API changes
         if: github.event_name == 'pull_request'
-        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0 # v1.10.0
+        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0 # v1.10.0
         with:
           current-spec-path: openapi.json
           base-spec-path: /tmp/openapi-base.json
@@ -685,7 +685,7 @@ jobs:
       # Uploaded on every run so the frontend repo has a spec to check its client
       # against, and so a reviewer can read what the API surface became.
       - name: Publish OpenAPI spec
-        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0 # v1.10.0
+        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0 # v1.10.0
         with:
           spec-path: openapi.json
 
@@ -718,12 +718,12 @@ jobs:
       #    empty, this branch runs, and the gate fails: it cannot turn "could not decide" into a pass.
       - name: Every job must have succeeded
         if: ${{ needs.changes.outputs.run == 'true' }}
-        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           results: ${{ join(needs.*.result, ',') }}
 
       - name: Nothing here to test (every changed file is ignorable)
         if: ${{ needs.changes.outputs.run != 'true' }}
-        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@5a57261635f88c46fa1e6e553f9b930a138b4b2e # v1.22.0
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           results: ${{ needs.changes.result }}
