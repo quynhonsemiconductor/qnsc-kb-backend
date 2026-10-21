@@ -1,5 +1,7 @@
 import uuid
-from typing import Sequence, Any
+from typing import Sequence, Any, cast
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy import select, update, and_, or_, exists, false, true, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -87,6 +89,7 @@ class ArticleRepository:
             member_departments = AuthorizationService.member_department_names(user)
             if user.dept:
                 member_departments.add(user.dept)
+            department_scope: ColumnElement[bool]
             if not member_departments:
                 department_scope = false()
             else:
@@ -138,9 +141,13 @@ class ArticleRepository:
             DocumentSource.source_system.in_(SOURCE_ACL_PROVIDERS)
         )
         source_acl_allows: list[Any] = [source_explicit_allow]
-        audience_ids = [department.id for department in getattr(user, "departments", [])]
+        audience_ids = [
+            department.id for department in getattr(user, "departments", [])
+        ]
         if audience_ids:
-            source_acl_allows.append(Article.departments.any(Department.id.in_(audience_ids)))
+            source_acl_allows.append(
+                Article.departments.any(Department.id.in_(audience_ids))
+            )
         filters.append(
             or_(
                 not_(source_acl_article),
@@ -281,7 +288,8 @@ class ArticleRepository:
             filters.append(Article.status == status)
         if topic:
             filters.append(
-                ~Article.tags.any() if topic == "General knowledge"
+                ~Article.tags.any()
+                if topic == "General knowledge"
                 else Article.tags.any(ArticleTag.tag == topic)
             )
         if search_query:
@@ -377,7 +385,7 @@ class ArticleRepository:
         result = await self.db.execute(stmt.values(status="deleted"))
         if commit:
             await self.db.commit()
-        return result.rowcount > 0
+        return cast(CursorResult[Any], result).rowcount > 0
 
     async def create_version(
         self, version: ArticleVersion, *, commit: bool = True

@@ -10,6 +10,7 @@
 name: Security · Scan
 
 on:
+  merge_group:
   push:
     branches: [main]
   pull_request:
@@ -56,9 +57,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@v1
+    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
     with:
       blocking: true
+      combine: true # actionlint + zizmor as ONE job; the required check is now `actions-security / Workflow security (actionlint, zizmor)`
 
   security:
     # A CEILING, not a grant this workflow uses: the reusable's Trivy job declares
@@ -70,10 +72,16 @@ jobs:
       contents: read
       security-events: write # SARIF upload
       packages: read
-    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@v1
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
     with:
       product: qnsc-kb
-      image_target: api
+      # Gitleaks + osv-scanner + Semgrep as ONE job; the required check is now
+      # `security / Security scans (Gitleaks, osv-scanner, Semgrep)`.
+      combine: true
+      # Trivy runs in `Backend CI`'s Docker build job, on the image that job already builds, instead of building it again here.
+      # EXCEPT on the weekly schedule: Backend CI never runs on a schedule, so without this a new CVE in an unchanged image would
+      # go unseen until the next code change. The scheduled run builds and scans the image itself, as before.
+      scan_container: ${{ github.event_name == 'schedule' }}
       # OSV findings block. The dependency surface here is unusually wide — torch,
       # paddlepaddle, paddleocr, pymupdf and their transitive graph — which is an
       # argument for the gate rather than against it.

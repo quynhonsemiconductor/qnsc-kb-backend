@@ -1,5 +1,5 @@
 # PR auto-labeler config — maps changed paths to labels.
-# Used by the labeler workflow (.github/workflows/labeler.yml).
+# Used by the PR-title job (pr-title.yml), through ci actions/pr-labels.
 #
 # Labels must already EXIST in the repo; the action applies them, it does not create
 # them. Paths mirror this repository's layout, not rova's monorepo — a copied config

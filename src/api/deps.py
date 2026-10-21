@@ -7,6 +7,7 @@ from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from src.core.config import settings
+from src.core.db_ssl import ssl_connect_args
 from src.models import User
 from src.repositories.user import UserRepository
 from src.domain.rbac import AuthorizationService, bootstrap_rbac
@@ -18,18 +19,31 @@ engine = create_async_engine(
     connect_args={
         "timeout": 5,
         "command_timeout": 5,
+        # verify-full against DATABASE_SSL_CA when set; no TLS locally (db_ssl.py).
+        **ssl_connect_args(),
     },
 )
-SessionLocal = async_sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine, class_=AsyncSession)
+SessionLocal = async_sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+    bind=engine,
+    class_=AsyncSession,
+)
 
 # OAuth2 scheme point to login route
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login", auto_error=False)
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl=f"{settings.API_V1_STR}/auth/login", auto_error=False
+)
+
 
 async def init_db() -> None:
     # Runtime schema creation and ALTER statements are intentionally forbidden.
     # The deployment entrypoint runs Alembic before the application starts.
     if settings.AUTO_CREATE_SCHEMA:
-        raise RuntimeError("AUTO_CREATE_SCHEMA is disabled; run Alembic migrations before starting the application")
+        raise RuntimeError(
+            "AUTO_CREATE_SCHEMA is disabled; run Alembic migrations before starting the application"
+        )
     async with SessionLocal() as db:
         # Startup bootstrap is an internal maintenance operation.  It must
         # remain able to seed roles after production RLS has been migrated.
@@ -42,6 +56,7 @@ async def init_db() -> None:
         # written nothing.
         await ensure_bootstrap_admin(db)
         await load_runtime_config(db)
+
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
@@ -192,22 +207,42 @@ def _reject_cross_site_cookie_request(request: Request) -> None:
         raise _cross_site_exception()
 
 
+def loaded_user(user: User | None) -> User:
+    """Narrow a re-fetch of a user row that was loaded or written earlier in this request.
+
+    The re-fetch cannot miss in practice. If it ever did, the next attribute access raised
+    AttributeError (a 500); the assert keeps that outcome.
+    """
+    assert user is not None, "user row vanished within the request that loaded it"
+    return user
+
+
 async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
     token: str | None = Depends(oauth2_scheme),
     access_token_cookie: str | None = Cookie(default=None, alias="access_token"),
+    host_access_token_cookie: str | None = Cookie(
+        default=None, alias="__Host-access_token"
+    ),
 ) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if not token and access_token_cookie:
+    # __Host- only in deployed environments: the host-locked name is the one this
+    # deployment sets, and a plain cookie is not — a sibling *.qnsc.vn host can plant
+    # one, which is exactly what the __Host- prefix exists to prevent. The plain name
+    # is therefore accepted only in local development, where it is the generation set.
+    cookie_token = host_access_token_cookie or (
+        access_token_cookie if settings.is_development_environment else None
+    )
+    if not token and cookie_token:
         # Keyed on the cookie, not on the presence of a session: a request that
         # authenticated with an explicit Authorization header proved its own intent.
         _reject_cross_site_cookie_request(request)
-        token = access_token_cookie
+        token = cookie_token
     if not token:
         raise credentials_exception
     try:
@@ -221,7 +256,7 @@ async def get_current_user(
             raise credentials_exception
     except jwt.PyJWTError:
         raise credentials_exception
-        
+
     email = email.strip().lower()
     if "@" not in email:
         raise credentials_exception
@@ -234,12 +269,15 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     if not user.active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been deactivated")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been deactivated",
+        )
     if int(payload.get("av", 0)) != user.auth_version:
         raise credentials_exception
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await user_repo.get_by_email(email)
+        user = loaded_user(await user_repo.get_by_email(email))
     await set_database_context(
         db,
         user.company_domain,
@@ -252,9 +290,16 @@ async def get_current_user(
     )
     return user
 
+
 def require_permission(permission: str, scope: str = "company"):
     def permission_checker(current_user: User = Depends(get_current_user)) -> User:
-        if not AuthorizationService.has_permission(current_user, permission, requested_scope=scope):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing permission: {permission}")
+        if not AuthorizationService.has_permission(
+            current_user, permission, requested_scope=scope
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing permission: {permission}",
+            )
         return current_user
+
     return permission_checker

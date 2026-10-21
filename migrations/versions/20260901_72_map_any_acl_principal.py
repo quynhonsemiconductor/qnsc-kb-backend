@@ -42,7 +42,6 @@ Create Date: 2026-09-01
 from alembic import op
 from sqlalchemy import inspect
 
-
 revision = "20260901_72"
 down_revision = "20260901_71"
 branch_labels = None
@@ -64,7 +63,9 @@ def upgrade() -> None:
             "NOT NULL DEFAULT 'group'"
         )
     if "external_group_id" in columns and "principal_id" not in columns:
-        op.execute(f"ALTER TABLE {TABLE} RENAME COLUMN external_group_id TO principal_id")
+        op.execute(
+            f"ALTER TABLE {TABLE} RENAME COLUMN external_group_id TO principal_id"
+        )
     if "external_group_name" in columns and "principal_name" not in columns:
         op.execute(
             f"ALTER TABLE {TABLE} RENAME COLUMN external_group_name TO principal_name"
@@ -93,7 +94,9 @@ def downgrade() -> None:
         op.execute(f"DELETE FROM {TABLE} WHERE principal_type <> 'group'")
 
     if "principal_id" in columns and "external_group_id" not in columns:
-        op.execute(f"ALTER TABLE {TABLE} RENAME COLUMN principal_id TO external_group_id")
+        op.execute(
+            f"ALTER TABLE {TABLE} RENAME COLUMN principal_id TO external_group_id"
+        )
     if "principal_name" in columns and "external_group_name" not in columns:
         op.execute(
             f"ALTER TABLE {TABLE} RENAME COLUMN principal_name TO external_group_name"

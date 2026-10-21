@@ -54,10 +54,22 @@ locals {
 
   // DKIM verifies the DOMAIN, not the mailbox, so this is the part after "@" — SES signs
   // for any address at it, and the local part of mail_from_email can change later without
-  // a new identity. The regex has a fallback rather than failing plan outright: an
-  // environment with email_provider != "ses" can leave mail_from_email at its own
-  // default, which need not even look like an address.
-  mail_from_domain = var.email_provider == "ses" ? replace(var.mail_from_email, "/^[^@]*@/", "") : ""
+  // a new identity. Keyed on mail_from_email, not on email_provider: the SES send grant must outlive the
+  // switch to Graph (expand/contract: the switch ships first, the grant is deleted in a later change, so a
+  // rollback to an EMAIL_PROVIDER=ses task definition still has the permission it needs).
+  mail_from_domain = var.mail_from_email != "" ? replace(var.mail_from_email, "/^[^@]*@/", "") : ""
+
+  // The mail app is "configured" once the owner has created it and put its client id in the live stack. Until
+  // then NOTHING mail-related is injected, so merging this change before the owner's steps cannot make a task
+  // reference a secret that has no value yet (ResourceInitializationError at boot, a circuit-breaker rollback,
+  // and the next release failing the same way). Order of the owner's steps: the mail secret's value first, THEN the client id.
+  mail_graph_enabled = var.email_provider == "graph" && var.mail_graph_client_id != ""
+
+  // The secret CONTAINER and its resource policy exist for every provider that is not the in-memory fake, NOT only
+  // once the client id is set. Develop is on "ses" until its client id is set, and the runbook tells the owner to put
+  // the value first: put-secret-value on a secret that does not exist yet fails. The injection and the worker's IAM
+  // grant stay gated on mail_graph_enabled, so an empty container references nothing and grants nothing.
+  mail_secret_exists = var.email_provider != "fake"
 
   ecr_base         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
   ecr_api_url      = "${local.ecr_base}/${var.product}-api:${var.image_tag}"
@@ -115,6 +127,7 @@ locals {
     },
     var.microsoft_client_id != "" ? { "microsoft-client-secret" = "Microsoft connector OAuth client secret" } : {},
     var.google_client_id != "" ? { "google-client-secret" = "Google connector OAuth client secret" } : {},
+    // The mail app's certificate and key are NOT in this bundle: see aws_secretsmanager_secret.mail_graph.
   )
   // NOTE: "tunnel-token" is deliberately NOT in that map. The tunnel is created by
   // Terraform (module.tunnel below), which means the connector token is an attribute
@@ -180,7 +193,6 @@ locals {
     { name = "EMBEDDING_MODEL", value = var.embedding_model },
     { name = "EMBEDDING_VERSION", value = var.embedding_version },
     { name = "EMBEDDING_RUNTIME", value = var.embedding_runtime },
-    { name = "GEMINI_MODEL", value = var.gemini_model },
 
     // localhost is correct under awsvpc ONLY because BOTH tasks carry their own ClamAV
     // sidecar. The namespace is shared per TASK, not per cluster: the api and worker are
@@ -205,13 +217,12 @@ locals {
     { name = "MICROSOFT_TENANT_ID", value = var.microsoft_tenant_id },
     { name = "MICROSOFT_REDIRECT_URI", value = var.microsoft_client_id != "" ? "${local.api_base_url}/api/v1/connectors/oauth/callback" : "" },
 
-    // Who application email is sent FROM. Without it every invitation and password reset
-    // queues a notification row that raises "MICROSOFT_GRAPH_SENDER is not configured"
-    // every 30 seconds forever, and the recipient never gets a link. ENVIRONMENT is pinned
-    // to "production" here, so the development FakeEmailSender is never selected and there
-    // is no fallback. validate_production() does not check this, so stating it is the only
-    // thing that makes outbound mail work.
+    // Who application email is sent FROM, and the dedicated Entra app that sends as it (certificate
+    // auth: the key + certificate is the WORKER-ONLY secret MAIL_GRAPH_PEM, see mail_secrets). The
+    // API never refuses to boot over mail; the worker does the checking at its own start (tasks.py): client id
+    // set with the rest missing refuses to start, client id empty logs an error that an alarm watches.
     { name = "MICROSOFT_GRAPH_SENDER", value = var.microsoft_graph_sender },
+    { name = "MAIL_GRAPH_CLIENT_ID", value = var.mail_graph_client_id },
 
     // Only the worker actually calls get_email_sender() (deliver_notification_queue),
     // but this is stated in common_env rather than the worker-only block: api and worker
@@ -231,18 +242,6 @@ locals {
     // raised in the FastAPI lifespan, so uvicorn exited 3 before writing a request log
     // and the service crash-looped with an empty log stream.
     { name = "MICROSOFT_LOGIN_REDIRECT_URI", value = "${local.api_base_url}/api/v1/auth/entra/callback" },
-
-    // Who may sign in, and who arrives as an administrator. Both stated here rather than
-    // inherited from a code default: today develop's access rules happen to be correct
-    // only because config.py defaults to "qnsc.vn", so a change to that default would
-    // silently change who can get an account.
-    //
-    // Anyone in the pinned tenant with a matching domain is auto-provisioned at the
-    // least-privileged Staff role; the addresses below arrive as global administrators
-    // instead. That list is read only when an account is FIRST created, so it never
-    // overrides a role set later in the admin UI.
-    { name = "ENTRA_AUTO_PROVISION_DOMAIN", value = var.entra_auto_provision_domain },
-    { name = "ENTRA_ADMIN_EMAILS", value = join(",", var.entra_admin_emails) },
 
     // Restricts admin-created accounts too. Empty accepts ANY domain, and under
     // company-scoped RLS a non-qnsc.vn address quietly creates a second tenant whose rows
@@ -266,6 +265,15 @@ locals {
     ] : [], var.google_client_id != "" ? [
     { name = "GOOGLE_CLIENT_SECRET", secret_arn = module.secrets.secret_arns["google-client-secret"] },
   ] : [])
+
+  // The mail credential (ONE PEM: private key + certificate) reaches the WORKER container only: it is the only
+  // caller of get_email_sender() (deliver_notification_queue). The API and beat never need it, and a key that is
+  // not in a container cannot be read out of it. It is a STANDALONE secret, not a key of the bundle above: the
+  // bundle's ARN is on the api's execution role too, so anything in it is readable by the api's role. Empty until
+  // mail_graph_client_id is set (mail_graph_enabled).
+  mail_secrets = local.mail_graph_enabled ? [
+    { name = "MAIL_GRAPH_PEM", secret_arn = aws_secretsmanager_secret.mail_graph[0].arn },
+  ] : []
 
   tags = { Environment = var.env }
 }
@@ -402,11 +410,83 @@ resource "aws_secretsmanager_secret" "tunnel_token" {
   tags = local.tags
 }
 
-resource "aws_secretsmanager_secret_version" "tunnel_token" {
+# The connector token's VALUE, written at apply time and never held as a Terraform attribute.
+#
+# The version resource that used to hold it read the value on every refresh, and that needs
+# secretsmanager:GetSecretValue on the plan role. The plan role must not have it, so the
+# container above stays managed here and this resource writes the token into a new version
+# when it changes (a tunnel recreate changes the hash). No plan reads a secret value.
+#
+# The version resource that held the value is forgotten here, not destroyed. A bare `removed` block
+# (OpenTofu 1.9: no `lifecycle` inside it; it forgets by default) takes the old version out of state on
+# apply, and leaves the secret's current version alone. Without it, the removal would plan a DESTROY of
+# the version, which can strip the AWSCURRENT stage the sidecar reads.
+removed {
+  from = aws_secretsmanager_secret_version.tunnel_token
+}
+
+resource "terraform_data" "tunnel_token_value" {
   count = var.tunnel_enabled && var.cloudflare_account_id != "" ? 1 : 0
 
-  secret_id     = aws_secretsmanager_secret.tunnel_token[0].id
-  secret_string = module.tunnel[0].token
+  # A hash, so the token itself never lands in state or in a plan.
+  triggers_replace = sha256(module.tunnel[0].token)
+
+  # The token goes in through the environment and stdin, never argv, and is never echoed. Only the
+  # new version id is printed.
+  provisioner "local-exec" {
+    environment = {
+      TUNNEL_TOKEN = module.tunnel[0].token
+      SECRET_ID    = aws_secretsmanager_secret.tunnel_token[0].id
+    }
+    command = "set -eu; command -v aws >/dev/null || { echo 'aws CLI missing on the runner' >&2; exit 1; }; printf '%s' \"$TUNNEL_TOKEN\" | aws secretsmanager put-secret-value --region ${var.region} --secret-id \"$SECRET_ID\" --secret-string file:///dev/stdin --query VersionId --output text"
+  }
+}
+
+// ── The mail credential: a standalone secret, readable only by the worker's execution role ──────────────────
+// ONE PEM holding the private key and its certificate, so the pair is written and read atomically and can never
+// drift apart. Not a key of the secrets bundle: the bundle's ARN is granted to the api's execution role as well,
+// which would make the key readable by the api's role. This secret is referenced only by the worker container
+// (mail_secrets) and granted only to the worker's execution role (its secret_arns). No TASK role anywhere in
+// this stack can read any secret (task_secret_arns is never passed to ecs-service), so application code, which
+// runs as the task role, cannot read it either.
+//
+// The CONTAINER is created whenever the provider is not the in-memory fake (develop is still "ses" until its client id
+// is set, and the owner writes the value before that), empty and without a version, so the owner can put the
+// value BEFORE setting mail_graph_client_id; it is injected only once that is set (mail_graph_enabled). The value
+// never enters Terraform state. The deploy preflight (ci backend-deploy) lists this secret's versions on every
+// deploy and fails by NAME if it holds none: that is the per-secret check the bundle's keys never had.
+resource "aws_secretsmanager_secret" "mail_graph" {
+  count = local.mail_secret_exists ? 1 : 0
+
+  name                    = "${var.product}/${var.env}/mail-graph-certificate"
+  description             = "Mail app credential for Microsoft Graph: private key and certificate in ONE PEM (MAIL_GRAPH_PEM). Worker only. Value is set out of band: docs/runbooks/email-graph.md."
+  kms_key_id              = local.kms_key_arn
+  recovery_window_in_days = var.secrets_recovery_window_days
+
+  tags = local.tags
+}
+
+// A boundary, not just an absence of grants: nobody may read the value back except the worker's execution role
+// (the ECS agent, at task start). Administrators included; the owner keeps the key file, which is the only copy
+// outside AWS. put-secret-value, describe-secret and list-secret-version-ids are not denied, so the owner can
+// still write it, rotate it and see that it has a version. To read it for a break-glass, delete this policy first.
+resource "aws_secretsmanager_secret_policy" "mail_graph" {
+  count = local.mail_secret_exists ? 1 : 0
+
+  secret_arn = aws_secretsmanager_secret.mail_graph[0].arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "OnlyTheWorkerExecutionRoleReadsTheMailCredential"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "secretsmanager:GetSecretValue"
+      Resource  = "*"
+      Condition = {
+        ArnNotEquals = { "aws:PrincipalArn" = module.worker.execution_role_arn }
+      }
+    }]
+  })
 }
 
 // ── ClamAV sidecar ───────────────────────────────────────────────────────────
@@ -600,9 +680,11 @@ module "worker" {
   health_check_command = "celery -A src.workers.celery_app inspect ping -d celery@$HOSTNAME || exit 1"
 
   environment_vars = local.common_env
-  secrets          = local.common_secrets
+  secrets          = concat(local.common_secrets, local.mail_secrets)
 
-  secret_arns = concat(local.secret_iam_arns, [module.rds.master_secret_arn])
+  // The mail secret is granted here, on the WORKER's execution role, and nowhere else. No task role in this
+  // stack gets any secretsmanager permission (task_secret_arns is never passed).
+  secret_arns = concat(local.secret_iam_arns, [module.rds.master_secret_arn], local.mail_graph_enabled ? [aws_secretsmanager_secret.mail_graph[0].arn] : [])
   kms_key_arn = local.kms_key_arn
 
   additional_containers = concat([
@@ -647,14 +729,14 @@ module "worker" {
 // as the identity, granted below by ARN.
 //
 // Grants the worker task (the only caller of get_email_sender()) permission to send
-// through SES. Only created when email_provider is actually "ses" — the ecs-service
-// module exposes task_role_arn but not a role NAME output, so the role name is derived
-// from the ARN's final path segment. Scoped to the identity above when one exists;
-// mail_from_email set without it (email_provider == "ses" but the address left empty)
-// falls back to "*" rather than a zero-Resource policy statement, which Terraform
-// rejects outright.
+// through SES. Created whenever mail_from_email is set, NOT only while email_provider is "ses": this is the
+// "expand" half of expand/contract (infra/README.md). Switching develop to Graph must not remove the grant in
+// the same apply, because the ECS circuit breaker can roll the service back to a task definition that still
+// says EMAIL_PROVIDER=ses. The grant is deleted in the follow-up change (kb-backend #216) once Graph is proven.
+// The ecs-service module exposes task_role_arn but not a role NAME output, so the role name is derived from
+// the ARN's final path segment. Scoped to the identity above, by ARN.
 resource "aws_iam_role_policy" "worker_ses_send" {
-  count = var.email_provider == "ses" ? 1 : 0
+  count = var.mail_from_email != "" ? 1 : 0
   name  = "ses-send"
   role  = split("/", module.worker.task_role_arn)[1]
 
@@ -664,9 +746,8 @@ resource "aws_iam_role_policy" "worker_ses_send" {
       Sid    = "SendApplicationEmail"
       Effect = "Allow"
       Action = ["ses:SendEmail", "ses:SendRawEmail"]
-      // The shared identity, by ARN (edge's `ses_identity_arn` output builds the same string). "*" only when
-      // email_provider is ses but the address was left empty, which a zero-Resource statement would reject.
-      Resource = local.mail_from_domain != "" ? "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.mail_from_domain}" : "*"
+      // The shared identity, by ARN (edge's `ses_identity_arn` output builds the same string).
+      Resource = "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.mail_from_domain}"
     }]
   })
 }
@@ -1305,6 +1386,70 @@ resource "aws_cloudwatch_metric_alarm" "embedding_model_unhealthy" {
   alarm_description   = "The api could not load the embedding model, or took longer than EMBEDDING_WARMUP_TIMEOUT_SECONDS. Vector search is degraded to keyword search until it loads. Check the api log group for the warm-up lines."
   namespace           = "QNSC/${local.name}"
   metric_name         = "EmbeddingModelUnhealthy"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [module.observability.alarm_topic_arn]
+  tags          = local.tags
+}
+
+// ── Mail alarms: three worker log lines, each an alarm on the shared topic ──────────────────────────────────
+// The worker is where mail is sent (src/workers/tasks.py), so these watch the worker log group. Terms rather
+// than a JSON selector, like embedding_model_unhealthy above, and notBreaching for the same reason (a
+// scheduled-to-zero environment publishes no logs). NOT TESTED against a live log group (no AWS access when
+// written): after the first apply run `aws logs test-metric-filter` with a real line.
+locals {
+  mail_alarms = {
+    not-configured = {
+      metric      = "MailNotConfigured"
+      pattern     = "\"Mail is not configured\""
+      description = "EMAIL_PROVIDER=graph but no mail app is configured (mail_graph_client_id is empty), or the provider is not allowed here: no notification email is being delivered. Logged on every 30 s delivery pass. See docs/runbooks/email-graph.md."
+    }
+    certificate = {
+      metric      = "MailCertificateExpiring"
+      pattern     = "?\"Mail certificate expires soon\" ?\"Mail certificate has expired\""
+      description = "The mail certificate has under 30 days left, has expired, or cannot be read. Checked daily by the worker. Rotate it: docs/runbooks/email-graph.md."
+    }
+    sender-refused = {
+      metric      = "MailSenderRefused"
+      pattern     = "\"Mail sender refused\""
+      description = "Graph refused the app the sender mailbox (HTTP 403 or 404): the Exchange management scope or role assignment is missing or still propagating (up to ~2 hours), or the mailbox does not exist or is not REST-enabled. Nothing is lost: the batch stops and is retried every 15 minutes. See docs/runbooks/email-graph.md, steps 1, 2 and 6."
+    }
+    dead = {
+      metric      = "MailNotificationDead"
+      pattern     = "\"Notification marked dead\""
+      description = "A notification email was given up on: Graph refused the message itself (400/413) or it is older than 24 hours. Find the rows with status 'dead' in notification_queue; last_error says why."
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "mail" {
+  for_each = local.mail_alarms
+
+  name           = "${local.name}-worker-mail-${each.key}"
+  log_group_name = local.worker_log_group
+  pattern        = each.value.pattern
+
+  metric_transformation {
+    name      = each.value.metric
+    namespace = "QNSC/${local.name}"
+    value     = "1"
+  }
+
+  depends_on = [module.worker]
+}
+
+resource "aws_cloudwatch_metric_alarm" "mail" {
+  for_each = local.mail_alarms
+
+  alarm_name          = "${local.name}-worker-mail-${each.key}"
+  alarm_description   = each.value.description
+  namespace           = "QNSC/${local.name}"
+  metric_name         = each.value.metric
   statistic           = "Sum"
   period              = 300
   evaluation_periods  = 1

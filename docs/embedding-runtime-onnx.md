@@ -92,7 +92,7 @@ PR #23 (merged) separated the two concerns:
 
 The ONNX provider is written, the width/normalisation invariants are enforced in one place, and
 `onnxruntime 1.28.0` + `tokenizers 0.22.2` are locked in an optional `onnx` dependency group.
-Default remains `torch`, so nothing has changed in behaviour yet.
+(When this section was written the default was `torch`; it is `onnx` now, see the end of this document.)
 
 ## The ask
 
@@ -118,8 +118,9 @@ Default remains `torch`, so nothing has changed in behaviour yet.
    once instead of twice, and the model loads in ~3 s instead of ~13 s. int8 stays parked until
    a full corpus re-embed (an `EMBEDDING_VERSION` bump) makes its error self-consistent.
    Measured in the image (2026-08-17): onnx warm-up 3.2 s / peak RSS 1.53 GB / query 116 ms;
-   torch warm-up 8.4 s / peak RSS 2.03 GB. The torch path still loads from the baked snapshot,
-   so `EMBEDDING_RUNTIME=torch` remains a working rollback until the `ml` group is dropped.
+   torch warm-up 8.4 s / peak RSS 2.03 GB. At that point the torch path still loaded from the baked snapshot. **It no longer does:** the `ml` group has left
+   every image, so `EMBEDDING_RUNTIME=torch` in a shipped image raises a clean `EmbeddingUnavailable`, and a rollback is
+   an older image tag.
 4. ~~If parity holds: set `EMBEDDING_RUNTIME=onnx`, drop the `ml` group from the api image, re-measure
    RSS, and right-size both tasks~~ — DONE across 2026-08-18 (PRs #51, #53, and the ml-drop). Develop
    flipped to `onnx` and verified live: query embedding at dimension 1024 against the torch-embedded
@@ -133,6 +134,81 @@ Default remains `torch`, so nothing has changed in behaviour yet.
    last image built with the `ml` group and set `embedding_runtime = "torch"` alongside it.
 
 Expect two or three build iterations; each is roughly 25 minutes.
+
+## int8 for the api image — 2026-10-18, on multilingual-e5-large-instruct
+
+Supersedes the int8 rejection under item 3 **for the api image only**. That rejection was
+measured on bge-m3; the model has since changed to `multilingual-e5-large-instruct` and the
+measurement was not re-run.
+
+**The split.** The api embeds one short question per search. The worker embeds every chunk
+that is stored. So the api image bakes an int8 export (`scripts/quantize_embedding.py`, the
+`embedding-int8` Dockerfile stage) and the worker keeps fp32. Stored vectors are unchanged,
+so there is no re-embed and no `EMBEDDING_VERSION` bump. Rollback is rebuilding the api with
+`--build-arg API_EMBEDDING=fp32`.
+
+Measured on a 12-thread AMD laptop running Windows — not on Fargate, so absolute times and
+RSS are indicative; the ratios are the finding. The table below is ONE thread. **The deployed
+tasks run TWO**: `EMBEDDING_ONNX_THREADS` defaults to 2 in `config.py` and Terraform does not
+set it. This section first said one thread was "as in the deployed tasks"; that was wrong,
+and the two-thread numbers are given under the table. The shipped recipe and fp32 were run
+on the onnxruntime in `poetry.lock` (1.29.0);
+the MatMul-only and int4 rows come from an earlier run of the same session on 1.31.0, and
+the fp32 times span both:
+
+```
+                         export size   RSS     one query   one 512-token chunk   mean cosine vs fp32
+fp32 (shipped today)       2,235 MB   1,617 MB  159-236 ms     2.4-3.8 s              1.0000
+int8, MatMul only          1,331 MB     701 MB      -          ~0.9 s                 0.993
+int8 + Gather, per-channel
+  + reduce_range (this PR)   562 MB     700 MB     55 ms        ~1.0 s                0.995
+int4 (MatMulNBits)           447 MB     600 MB    217 ms        2.5 s                 0.981
+```
+
+The same fp32 and shipped-recipe exports at **two threads**, the deployed setting (onnxruntime
+1.29.0, same machine). The ratios hold, so the conclusions above do not change:
+
+```
+                         RSS      one query   one 512-token chunk
+fp32                   1,619 MB     87 ms          1.30 s
+int8 (this change)       701 MB     30 ms          0.48 s      (2.9x and 2.7x faster)
+```
+
+- **The "roughly 600 MB" above was only reachable by quantising the embedding table too, and
+  what that buys is the image, not task memory.** RSS does not track export size: fp32 is
+  2,235 MB on disk but 1,617 MB resident, and MatMul-only int8 is 1,331 MB on disk but 701 MB
+  resident, because rows of the embedding table that no query touches are never paged in. The
+  table is a `Gather`, not a `MatMul`, and is ~1 GB of the 2.2 GB; quantising it takes the api
+  image from 2,235 MB of weights to 562 MB (~1.7 GB less ECR storage and less to pull on
+  every Spot replacement) while leaving RSS where MatMul-only already put it. The script
+  fails the build if the output is over 35% of the fp32 size, which is what catches a recipe
+  that skipped the table.
+- **int4 is rejected**: 114 MB smaller than int8 on disk, but as slow as fp32 on CPU and a
+  worse vector.
+- **`reduce_range` and per-channel are not cosmetic.** Per-tensor with `reduce_range` was the
+  worst variant (mean cosine 0.984, worst 0.977); per-channel with it was the best. It keeps
+  the u8s8 kernels from saturating on CPUs without VNNI, which Fargate's x86 fleet cannot be
+  relied on to have — and the measuring machine may have had it, so this is the conservative
+  choice rather than a measured one.
+
+What the shipped combination — an int8 query against stored fp32 chunks — does to scores,
+through the application's own embedding path: every query-to-chunk score moves by 0.0021 on
+average and 0.0086 at most. That is **not** the `cosine >= 0.999` the fp32 swaps were gated
+on, and it cannot be; the gate for this change is that the stored side does not move at all.
+`VECTOR_DISTANCE_THRESHOLD` and `RAG_MIN_RELEVANCE_SCORE` were tuned on fp32 vectors, so a
+chunk sitting within ~0.01 of either threshold can flip. Nothing here measures how many do.
+
+What the evidence does NOT show. Recall@1 and recall@3 were 1.000 on 24 Vietnamese queries
+over 23 passages, for every variant including int4 — a corpus that small cannot tell the
+variants apart, so those numbers are not a retrieval benchmark and should not be quoted as
+one. `evaluation/golden.json` is six English cases and its live mode needs the whole stack,
+so it could not stand in. The real check is on develop after deploy: search a few queries
+whose answer sits near the relevance threshold and compare against the fp32 image.
+
+Not in this change, deliberately: right-sizing the api task in `infra/live/*/main.tf` (do it
+from measured RSS on the deployed task, not from this table), and any change to the worker.
+Moving the worker to int8 too is a different decision — it changes every stored vector, so
+it needs an `EMBEDDING_VERSION` bump and a full re-embed.
 
 ## Why it is worth it
 

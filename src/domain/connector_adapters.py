@@ -8,6 +8,7 @@ Provider IDENTITY questions — is this Graph, which cursor, which identity
 provider, which ACL key — belong in ``domain/connector_providers.py``, not in
 string comparisons at call sites.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +19,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
@@ -45,10 +46,26 @@ class NormalizedChange:
 
 
 class ConnectorProviderError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = True, code: str | None = None):
+    def __init__(
+        self, message: str, *, retryable: bool = True, code: str | None = None
+    ):
         super().__init__(message)
         self.retryable = retryable
         self.code = code
+
+
+def _microsoft_tenant() -> str:
+    """The pinned Entra tenant for every Microsoft authority URL. Never common/organizations/consumers: those would
+    let an account from any tenant (or a personal account) complete consent and have its files ingested.
+    """
+    tenant = settings.microsoft_tenant
+    if tenant is None:
+        raise ConnectorProviderError(
+            "MICROSOFT_TENANT_ID must be the Entra tenant GUID (not blank, common, organizations or consumers)",
+            retryable=False,
+            code="tenant_not_pinned",
+        )
+    return tenant
 
 
 class ConnectorAdapter:
@@ -62,48 +79,104 @@ class ConnectorAdapter:
     def access_token(self) -> str:
         value = decrypt_secret(self.connector.oauth_access_token)
         if not value:
-            raise ConnectorProviderError("Connector is not authorized", retryable=False, code="not_authorized")
+            raise ConnectorProviderError(
+                "Connector is not authorized", retryable=False, code="not_authorized"
+            )
         return value
 
     def _validate_provider_url(self, url: str) -> None:
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.hostname.lower() not in self.allowed_api_hosts:
-            raise ConnectorProviderError("Provider returned an untrusted API URL", retryable=False, code="untrusted_url")
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.hostname.lower() not in self.allowed_api_hosts
+        ):
+            raise ConnectorProviderError(
+                "Provider returned an untrusted API URL",
+                retryable=False,
+                code="untrusted_url",
+            )
 
     @staticmethod
     def _validate_redirect_url(url: str) -> None:
         parsed = urlsplit(url)
         hostname = (parsed.hostname or "").lower().rstrip(".")
-        if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
-            raise ConnectorProviderError("Provider returned an unsafe download redirect", retryable=False, code="unsafe_redirect")
+        if (
+            parsed.scheme != "https"
+            or not hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise ConnectorProviderError(
+                "Provider returned an unsafe download redirect",
+                retryable=False,
+                code="unsafe_redirect",
+            )
         try:
             address = ipaddress.ip_address(hostname)
         except ValueError:
             address = None
-        if hostname == "localhost" or hostname.endswith(".localhost") or (address is not None and not address.is_global):
-            raise ConnectorProviderError("Provider returned an unsafe download redirect", retryable=False, code="unsafe_redirect")
+        if (
+            hostname == "localhost"
+            or hostname.endswith(".localhost")
+            or (address is not None and not address.is_global)
+        ):
+            raise ConnectorProviderError(
+                "Provider returned an unsafe download redirect",
+                retryable=False,
+                code="unsafe_redirect",
+            )
 
     def _http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=45.0, follow_redirects=False, trust_env=False)
 
-    async def _read_response(self, client: httpx.AsyncClient, method: str, url: str, headers: dict[str, str], **kwargs: Any) -> tuple[int, dict[str, str], bytes]:
+    async def _read_response(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        **kwargs: Any,
+    ) -> tuple[int, dict[str, str], bytes]:
         async with client.stream(method, url, headers=headers, **kwargs) as response:
             response_headers = dict(response.headers)
             if response.is_redirect:
                 return response.status_code, response_headers, b""
-            is_json = "application/json" in response_headers.get("content-type", "").lower()
-            max_bytes = settings.MAX_CONNECTOR_API_RESPONSE_BYTES if is_json else settings.MAX_SOURCE_UPLOAD_BYTES
+            is_json = (
+                "application/json" in response_headers.get("content-type", "").lower()
+            )
+            max_bytes = (
+                settings.MAX_CONNECTOR_API_RESPONSE_BYTES
+                if is_json
+                else settings.MAX_SOURCE_UPLOAD_BYTES
+            )
             content_length = response_headers.get("content-length")
-            if content_length and content_length.isdigit() and int(content_length) > max_bytes:
-                raise ConnectorProviderError("Provider response exceeds the configured size limit", retryable=False, code="response_too_large")
+            if (
+                content_length
+                and content_length.isdigit()
+                and int(content_length) > max_bytes
+            ):
+                raise ConnectorProviderError(
+                    "Provider response exceeds the configured size limit",
+                    retryable=False,
+                    code="response_too_large",
+                )
             body = bytearray()
             async for chunk in response.aiter_bytes(1024 * 1024):
                 body.extend(chunk)
                 if len(body) > max_bytes:
-                    raise ConnectorProviderError("Provider response exceeds the configured size limit", retryable=False, code="response_too_large")
+                    raise ConnectorProviderError(
+                        "Provider response exceeds the configured size limit",
+                        retryable=False,
+                        code="response_too_large",
+                    )
             return response.status_code, response_headers, bytes(body)
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any] | list[Any] | bytes:
+    # Decoded JSON (dict or list), or raw bytes for downloads. JSON stays Any: a union here forced
+    # narrowing at every one of the ~25 JSON call sites in this file. Downloads use _request_bytes.
+    async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
         self._validate_provider_url(url)
         headers = dict(kwargs.pop("headers", {}))
         headers["Authorization"] = f"Bearer {self.access_token}"
@@ -111,19 +184,35 @@ class ConnectorAdapter:
             for attempt in range(4):
                 target = url
                 request_headers = headers
-                status_code, response_headers, body = await self._read_response(client, method, target, request_headers, **kwargs)
+                status_code, response_headers, body = await self._read_response(
+                    client, method, target, request_headers, **kwargs
+                )
                 if 300 <= status_code < 400:
                     location = response_headers.get("location")
                     if method.upper() != "GET" or not location:
-                        raise ConnectorProviderError("Provider returned an unsupported redirect", retryable=False, code="unsafe_redirect")
+                        raise ConnectorProviderError(
+                            "Provider returned an unsupported redirect",
+                            retryable=False,
+                            code="unsafe_redirect",
+                        )
                     target = urljoin(target, location)
                     self._validate_redirect_url(target)
                     # Download CDNs do not need an OAuth bearer token. Never
                     # carry it to a provider-controlled redirect destination.
-                    request_headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
-                    status_code, response_headers, body = await self._read_response(client, method, target, request_headers, **kwargs)
+                    request_headers = {
+                        key: value
+                        for key, value in headers.items()
+                        if key.lower() != "authorization"
+                    }
+                    status_code, response_headers, body = await self._read_response(
+                        client, method, target, request_headers, **kwargs
+                    )
                     if 300 <= status_code < 400:
-                        raise ConnectorProviderError("Provider returned too many redirects", retryable=False, code="unsafe_redirect")
+                        raise ConnectorProviderError(
+                            "Provider returned too many redirects",
+                            retryable=False,
+                            code="unsafe_redirect",
+                        )
                 if status_code in {429, 500, 502, 503, 504}:
                     retry_after = response_headers.get("retry-after")
                     # The provider chooses this number, so it is untrusted input: a
@@ -131,31 +220,67 @@ class ConnectorAdapter:
                     # parks a sync worker for a day. Capped at the top of our own
                     # backoff curve; past the attempt ceiling the durable queue
                     # reschedules the whole request anyway.
-                    delay = min(60.0, float(retry_after)) if retry_after and retry_after.isdigit() else min(16, 2 ** attempt) + secrets.randbelow(500) / 1000
+                    delay = (
+                        min(60.0, float(retry_after))
+                        if retry_after and retry_after.isdigit()
+                        else min(16, 2**attempt) + secrets.randbelow(500) / 1000
+                    )
                     if attempt == 3:
-                        raise ConnectorProviderError(f"Provider retry limit reached ({status_code})", code=str(status_code))
+                        raise ConnectorProviderError(
+                            f"Provider retry limit reached ({status_code})",
+                            code=str(status_code),
+                        )
                     await asyncio.sleep(delay)
                     continue
                 if status_code in {401, 403}:
-                    raise ConnectorProviderError(f"Provider authorization failed ({status_code})", retryable=False, code=str(status_code))
+                    raise ConnectorProviderError(
+                        f"Provider authorization failed ({status_code})",
+                        retryable=False,
+                        code=str(status_code),
+                    )
                 if status_code >= 400:
                     detail = ""
-                    if "application/json" in response_headers.get("content-type", "").lower():
+                    if (
+                        "application/json"
+                        in response_headers.get("content-type", "").lower()
+                    ):
                         try:
                             payload = json.loads(body)
-                            error_payload = payload.get("error") if isinstance(payload, dict) else None
-                            detail = str((error_payload or {}).get("message") or (error_payload or {}).get("code") or "")[:240]
+                            error_payload = (
+                                payload.get("error")
+                                if isinstance(payload, dict)
+                                else None
+                            )
+                            detail = str(
+                                (error_payload or {}).get("message")
+                                or (error_payload or {}).get("code")
+                                or ""
+                            )[:240]
                         except (TypeError, ValueError, json.JSONDecodeError):
                             detail = ""
                     suffix = f": {detail}" if detail else ""
-                    raise ConnectorProviderError(f"Provider request failed ({status_code}){suffix}", code=str(status_code))
-                if "application/json" in response_headers.get("content-type", "").lower():
+                    raise ConnectorProviderError(
+                        f"Provider request failed ({status_code}){suffix}",
+                        code=str(status_code),
+                    )
+                if (
+                    "application/json"
+                    in response_headers.get("content-type", "").lower()
+                ):
                     try:
                         return json.loads(body)
                     except json.JSONDecodeError as exc:
-                        raise ConnectorProviderError("Provider returned invalid JSON", retryable=False, code="invalid_json") from exc
+                        raise ConnectorProviderError(
+                            "Provider returned invalid JSON",
+                            retryable=False,
+                            code="invalid_json",
+                        ) from exc
                 return body
         raise ConnectorProviderError("Provider request failed")
+
+    async def _request_bytes(self, method: str, url: str, **kwargs: Any) -> bytes:
+        # Download endpoints answer with the file body, not JSON, so _request returns bytes here.
+        return cast(bytes, await self._request(method, url, **kwargs))
 
     async def exchange_code(self, code: str) -> dict[str, Any]:
         raise NotImplementedError
@@ -172,7 +297,9 @@ class ConnectorAdapter:
     # cannot enumerate must never have its corpus deleted for being unmentioned.
     full_walk_is_authoritative = False
 
-    async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
+    async def incremental_changes(
+        self, scope: dict[str, Any], cursor: str | None
+    ) -> tuple[list[NormalizedChange], str | None]:
         raise NotImplementedError
 
     async def permissions(self, change: NormalizedChange) -> list[dict[str, str]]:
@@ -198,7 +325,9 @@ class ConnectorAdapter:
         """
         return None
 
-    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+    async def delete_webhook(
+        self, provider_subscription_id: str, resource: str | None = None
+    ) -> None:
         """Retire a subscription at the provider.
 
         Called before a replacement is created, because a provider may refuse a second
@@ -226,7 +355,9 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
     #: Delegated consent scopes. Declared per provider because OneDrive has no use
     #: for Sites.Read.All, and requesting permission a provider does not need is
     #: exactly how least privilege gets lost.
-    oauth_scope = "offline_access openid profile User.Read Files.Read.All Sites.Read.All"
+    oauth_scope = (
+        "offline_access openid profile User.Read Files.Read.All Sites.Read.All"
+    )
     #: The (drive-level, folder-level) ``scope_type`` values this provider emits.
     scope_types: tuple[str, str] = ("sharepoint_library", "sharepoint_folder")
 
@@ -239,12 +370,13 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
             "scope": self.oauth_scope,
             "state": state,
         }
-        return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize?{urlencode(params)}"
+        return f"https://login.microsoftonline.com/{_microsoft_tenant()}/oauth2/v2.0/authorize?{urlencode(params)}"
 
     async def exchange_code(self, code: str) -> dict[str, Any]:
+        tenant = _microsoft_tenant()  # before any network call
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                 data={
                     "client_id": settings.MICROSOFT_CLIENT_ID,
                     "client_secret": settings.MICROSOFT_CLIENT_SECRET,
@@ -255,14 +387,19 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
                 },
             )
             if response.status_code >= 400:
-                raise ConnectorProviderError("Microsoft OAuth exchange failed", retryable=False, code=str(response.status_code))
+                raise ConnectorProviderError(
+                    "Microsoft OAuth exchange failed",
+                    retryable=False,
+                    code=str(response.status_code),
+                )
             return response.json()
 
     async def refresh_token(self) -> dict[str, Any]:
+        tenant = _microsoft_tenant()  # before any network call
         async with httpx.AsyncClient(timeout=30.0) as client:
             if settings.microsoft_connector_auth_mode == "application":
                 response = await client.post(
-                    f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                    f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                     data={
                         "client_id": settings.MICROSOFT_CLIENT_ID,
                         "client_secret": settings.MICROSOFT_CLIENT_SECRET,
@@ -271,17 +408,35 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
                     },
                 )
                 if response.status_code >= 400:
-                    raise ConnectorProviderError("Microsoft application token request failed", retryable=False, code=str(response.status_code))
+                    raise ConnectorProviderError(
+                        "Microsoft application token request failed",
+                        retryable=False,
+                        code=str(response.status_code),
+                    )
                 return response.json()
             refresh = decrypt_secret(self.connector.oauth_refresh_token)
             if not refresh:
-                raise ConnectorProviderError("Microsoft refresh token is missing", retryable=False, code="not_authorized")
+                raise ConnectorProviderError(
+                    "Microsoft refresh token is missing",
+                    retryable=False,
+                    code="not_authorized",
+                )
             response = await client.post(
-                f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
-                data={"client_id": settings.MICROSOFT_CLIENT_ID, "client_secret": settings.MICROSOFT_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh, "scope": self.oauth_scope},
+                f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                data={
+                    "client_id": settings.MICROSOFT_CLIENT_ID,
+                    "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "scope": self.oauth_scope,
+                },
             )
             if response.status_code >= 400:
-                raise ConnectorProviderError("Microsoft token refresh failed", retryable=False, code=str(response.status_code))
+                raise ConnectorProviderError(
+                    "Microsoft token refresh failed",
+                    retryable=False,
+                    code=str(response.status_code),
+                )
             return response.json()
 
     @staticmethod
@@ -309,17 +464,19 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
                 continue
             folder_name = str(folder.get("name") or folder.get("id"))
             label = f"{location} / {folder_name}"
-            result.append({
-                "external_scope_id": f"{drive_id}:{folder['id']}",
-                "scope_type": self.scope_types[1],
-                "display_name": label,
-                "config": {
-                    **base_config,
-                    "folder_id": folder["id"],
-                    "web_url": folder.get("webUrl") or base_config.get("web_url"),
-                    "location_label": label,
-                },
-            })
+            result.append(
+                {
+                    "external_scope_id": f"{drive_id}:{folder['id']}",
+                    "scope_type": self.scope_types[1],
+                    "display_name": label,
+                    "config": {
+                        **base_config,
+                        "folder_id": folder["id"],
+                        "web_url": folder.get("webUrl") or base_config.get("web_url"),
+                        "location_label": label,
+                    },
+                }
+            )
         return result
 
     async def create_webhook(
@@ -329,7 +486,9 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
         lifecycle_callback_url: str | None = None,
     ) -> dict[str, Any]:
         client_state = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES)
+        expires_at = datetime.utcnow() + timedelta(
+            minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES
+        )
         payload: dict[str, Any] = {
             "changeType": "updated",
             "notificationUrl": callback_url,
@@ -362,7 +521,9 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
         # Graph caps a drive subscription at roughly 30 days but rejects anything beyond
         # its own maximum, so this asks for the same hour create_webhook does and leans on
         # the renewal task running far more often than that.
-        expires_at = datetime.utcnow() + timedelta(minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES)
+        expires_at = datetime.utcnow() + timedelta(
+            minutes=settings.MICROSOFT_GRAPH_SUBSCRIPTION_MINUTES
+        )
         await self._request(
             "PATCH",
             f"{self.graph}/subscriptions/{provider_subscription_id}",
@@ -370,15 +531,28 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
         )
         return expires_at
 
-    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+    async def delete_webhook(
+        self, provider_subscription_id: str, resource: str | None = None
+    ) -> None:
         # Graph refuses a second subscription with the same changeType and resource
         # (409 Conflict), so a replacement is only possible once this one is gone.
-        await self._request("DELETE", f"{self.graph}/subscriptions/{provider_subscription_id}")
+        await self._request(
+            "DELETE", f"{self.graph}/subscriptions/{provider_subscription_id}"
+        )
 
-    async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
+    async def incremental_changes(
+        self, scope: dict[str, Any], cursor: str | None
+    ) -> tuple[list[NormalizedChange], str | None]:
         drive_id = scope["config"].get("drive_id", scope["external_scope_id"])
-        root = f"items/{scope['config']['folder_id']}" if scope["config"].get("folder_id") else "root"
-        url = cursor or f"{self.graph}/drives/{drive_id}/{root}/delta?$select=id,name,file,folder,parentReference,eTag,cTag,webUrl,deleted,lastModifiedDateTime"
+        root = (
+            f"items/{scope['config']['folder_id']}"
+            if scope["config"].get("folder_id")
+            else "root"
+        )
+        url = (
+            cursor
+            or f"{self.graph}/drives/{drive_id}/{root}/delta?$select=id,name,file,folder,parentReference,eTag,cTag,webUrl,deleted,lastModifiedDateTime"
+        )
         changes: list[NormalizedChange] = []
         next_cursor: str | None = None
         while url:
@@ -386,13 +560,24 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
             for item in page.get("value", []):  # type: ignore[union-attr]
                 deleted = bool(item.get("deleted"))
                 file_info = item.get("file") or {}
-                changes.append(NormalizedChange(
-                    external_id=item["id"], corpus_id=drive_id, name=item.get("name", item["id"]),
-                    state="deleted" if deleted else "active", content_changed=bool(file_info),
-                    permissions_changed=False, moved=bool(item.get("parentReference")),
-                    revision=item.get("eTag") or item.get("cTag"), mime_type=file_info.get("mimeType"),
-                    parent_external_id=(item.get("parentReference") or {}).get("id"), web_url=item.get("webUrl"), metadata=item,
-                ))
+                changes.append(
+                    NormalizedChange(
+                        external_id=item["id"],
+                        corpus_id=drive_id,
+                        name=item.get("name", item["id"]),
+                        state="deleted" if deleted else "active",
+                        content_changed=bool(file_info),
+                        permissions_changed=False,
+                        moved=bool(item.get("parentReference")),
+                        revision=item.get("eTag") or item.get("cTag"),
+                        mime_type=file_info.get("mimeType"),
+                        parent_external_id=(item.get("parentReference") or {}).get(
+                            "id"
+                        ),
+                        web_url=item.get("webUrl"),
+                        metadata=item,
+                    )
+                )
             url = page.get("@odata.nextLink")  # type: ignore[union-attr]
             next_cursor = page.get("@odata.deltaLink", next_cursor)  # type: ignore[union-attr]
         return changes, next_cursor
@@ -401,7 +586,10 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
         # A connector may select several drives; the normalized corpus is the
         # authoritative drive for this item, not connector-level config.
         drive_id = change.corpus_id
-        data = await self._request("GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/permissions")
+        data = await self._request(
+            "GET",
+            f"{self.graph}/drives/{drive_id}/items/{change.external_id}/permissions",
+        )
         result: list[dict[str, str]] = []
         for item in data.get("value", []):  # type: ignore[union-attr]
             result.extend(sharepoint_permission_principals(item))
@@ -409,7 +597,9 @@ class MicrosoftGraphAdapter(ConnectorAdapter):
 
     async def download(self, change: NormalizedChange) -> bytes:
         drive_id = change.corpus_id
-        return await self._request("GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/content")  # type: ignore[return-value]
+        return await self._request_bytes(
+            "GET", f"{self.graph}/drives/{drive_id}/items/{change.external_id}/content"
+        )
 
 
 class SharePointAdapter(MicrosoftGraphAdapter):
@@ -421,7 +611,9 @@ class SharePointAdapter(MicrosoftGraphAdapter):
         # "Documents". Resolve SharePoint sites first so reviewers can see the
         # real site/library/folder location instead of guessing where it lives.
         auth_mode = settings.microsoft_connector_auth_mode
-        configured_site_ids = self._configured_ids(settings.MICROSOFT_SHAREPOINT_SITE_IDS)
+        configured_site_ids = self._configured_ids(
+            settings.MICROSOFT_SHAREPOINT_SITE_IDS
+        )
         if auth_mode == "application" and not configured_site_ids:
             raise ConnectorProviderError(
                 "Application mode requires MICROSOFT_SHAREPOINT_SITE_IDS",
@@ -437,7 +629,10 @@ class SharePointAdapter(MicrosoftGraphAdapter):
                 for site_id in configured_site_ids
             ]
         else:
-            sites_data = await self._request("GET", f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl")
+            sites_data = await self._request(
+                "GET",
+                f"{self.graph}/sites?search=*&$top=50&$select=id,name,displayName,webUrl",
+            )
             sites = sites_data.get("value", []) if isinstance(sites_data, dict) else []
         result: list[dict[str, Any]] = []
 
@@ -466,14 +661,18 @@ class SharePointAdapter(MicrosoftGraphAdapter):
                     "web_url": drive.get("webUrl") or site_url,
                     "location_label": location,
                 }
-                result.append({
-                    "external_scope_id": drive_id,
-                    "scope_type": self.scope_types[0],
-                    "display_name": location,
-                    "config": drive_config,
-                })
+                result.append(
+                    {
+                        "external_scope_id": drive_id,
+                        "scope_type": self.scope_types[0],
+                        "display_name": location,
+                        "config": drive_config,
+                    }
+                )
                 result.extend(
-                    await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+                    await self._folder_scopes(
+                        drive_id, base_config=drive_config, location=location
+                    )
                 )
 
         if result:
@@ -481,15 +680,31 @@ class SharePointAdapter(MicrosoftGraphAdapter):
 
         # Keep a fallback for tenants where site search is disabled but the
         # delegated token can still enumerate drives.
-        data = await self._request("GET", f"{self.graph}/drives?$select=id,name,driveType,webUrl")
+        data = await self._request(
+            "GET", f"{self.graph}/drives?$select=id,name,driveType,webUrl"
+        )
         for item in data.get("value", []):  # type: ignore[union-attr]
             drive_id = str(item.get("id") or "")
             drive_name = str(item.get("name") or drive_id)
             location = f"Available SharePoint library / {drive_name}"
-            drive_config = {"drive_id": drive_id, "drive_name": drive_name, "web_url": item.get("webUrl"), "location_label": location}
-            result.append({"external_scope_id": drive_id, "scope_type": self.scope_types[0], "display_name": location, "config": drive_config})
+            drive_config = {
+                "drive_id": drive_id,
+                "drive_name": drive_name,
+                "web_url": item.get("webUrl"),
+                "location_label": location,
+            }
+            result.append(
+                {
+                    "external_scope_id": drive_id,
+                    "scope_type": self.scope_types[0],
+                    "display_name": location,
+                    "config": drive_config,
+                }
+            )
             result.extend(
-                await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+                await self._folder_scopes(
+                    drive_id, base_config=drive_config, location=location
+                )
             )
         return result
 
@@ -532,7 +747,10 @@ class OneDriveAdapter(MicrosoftGraphAdapter):
 
     async def discover_scopes(self) -> list[dict[str, Any]]:
         configured_user_ids = self._configured_ids(settings.MICROSOFT_ONEDRIVE_USER_IDS)
-        if settings.microsoft_connector_auth_mode == "application" and not configured_user_ids:
+        if (
+            settings.microsoft_connector_auth_mode == "application"
+            and not configured_user_ids
+        ):
             raise ConnectorProviderError(
                 "Application mode requires MICROSOFT_ONEDRIVE_USER_IDS",
                 retryable=False,
@@ -553,24 +771,36 @@ class OneDriveAdapter(MicrosoftGraphAdapter):
                 "web_url": drive.get("webUrl"),  # type: ignore[union-attr]
                 "location_label": location,
             }
-            result.append({
-                "external_scope_id": drive_id,
-                "scope_type": self.scope_types[0],
-                "display_name": location,
-                "config": drive_config,
-            })
+            result.append(
+                {
+                    "external_scope_id": drive_id,
+                    "scope_type": self.scope_types[0],
+                    "display_name": location,
+                    "config": drive_config,
+                }
+            )
             result.extend(
-                await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+                await self._folder_scopes(
+                    drive_id, base_config=drive_config, location=location
+                )
             )
         if result or configured_user_ids:
             return result
 
-        drive = await self._request("GET", f"{self.graph}/me/drive?$select=id,name,driveType,webUrl,owner")
+        drive = await self._request(
+            "GET", f"{self.graph}/me/drive?$select=id,name,driveType,webUrl,owner"
+        )
         drive_id = str(drive.get("id") or "") if isinstance(drive, dict) else ""
         if not drive_id:
             return result
-        owner = ((drive.get("owner") or {}).get("user") or {}) if isinstance(drive, dict) else {}
-        owner_label = str(owner.get("email") or owner.get("displayName") or "signed-in user")
+        owner = (
+            ((drive.get("owner") or {}).get("user") or {})
+            if isinstance(drive, dict)
+            else {}
+        )
+        owner_label = str(
+            owner.get("email") or owner.get("displayName") or "signed-in user"
+        )
         drive_name = str(drive.get("name") or "OneDrive")
         location = f"OneDrive / {owner_label} / {drive_name}"
         drive_config = {
@@ -580,14 +810,18 @@ class OneDriveAdapter(MicrosoftGraphAdapter):
             "web_url": drive.get("webUrl"),
             "location_label": location,
         }
-        result.append({
-            "external_scope_id": drive_id,
-            "scope_type": self.scope_types[0],
-            "display_name": location,
-            "config": drive_config,
-        })
+        result.append(
+            {
+                "external_scope_id": drive_id,
+                "scope_type": self.scope_types[0],
+                "display_name": location,
+                "config": drive_config,
+            }
+        )
         result.extend(
-            await self._folder_scopes(drive_id, base_config=drive_config, location=location)
+            await self._folder_scopes(
+                drive_id, base_config=drive_config, location=location
+            )
         )
         return result
 
@@ -604,31 +838,71 @@ class GoogleDriveAdapter(ConnectorAdapter):
     full_walk_is_authoritative = False
 
     def oauth_url(self, state: str) -> str:
-        params = {"client_id": settings.GOOGLE_CLIENT_ID or "", "redirect_uri": settings.GOOGLE_REDIRECT_URI or "", "response_type": "code", "access_type": "offline", "prompt": "consent", "scope": "https://www.googleapis.com/auth/drive.readonly openid email profile", "state": state}
+        params = {
+            "client_id": settings.GOOGLE_CLIENT_ID or "",
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI or "",
+            "response_type": "code",
+            "access_type": "offline",
+            "prompt": "consent",
+            "scope": "https://www.googleapis.com/auth/drive.readonly openid email profile",
+            "state": state,
+        }
         return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
 
     async def exchange_code(self, code: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post("https://oauth2.googleapis.com/token", data={"client_id": settings.GOOGLE_CLIENT_ID, "client_secret": settings.GOOGLE_CLIENT_SECRET, "code": code, "grant_type": "authorization_code", "redirect_uri": settings.GOOGLE_REDIRECT_URI})
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                },
+            )
             if response.status_code >= 400:
-                raise ConnectorProviderError("Google OAuth exchange failed", retryable=False, code=str(response.status_code))
+                raise ConnectorProviderError(
+                    "Google OAuth exchange failed",
+                    retryable=False,
+                    code=str(response.status_code),
+                )
             return response.json()
 
     async def refresh_token(self) -> dict[str, Any]:
         refresh = decrypt_secret(self.connector.oauth_refresh_token)
         if not refresh:
-            raise ConnectorProviderError("Google refresh token is missing", retryable=False, code="not_authorized")
+            raise ConnectorProviderError(
+                "Google refresh token is missing",
+                retryable=False,
+                code="not_authorized",
+            )
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post("https://oauth2.googleapis.com/token", data={"client_id": settings.GOOGLE_CLIENT_ID, "client_secret": settings.GOOGLE_CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": refresh})
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                },
+            )
             if response.status_code >= 400:
-                raise ConnectorProviderError("Google token refresh failed", retryable=False, code=str(response.status_code))
+                raise ConnectorProviderError(
+                    "Google token refresh failed",
+                    retryable=False,
+                    code=str(response.status_code),
+                )
             return response.json()
 
     async def discover_scopes(self) -> list[dict[str, Any]]:
         drives: list[dict[str, Any]] = []
         drive_page_token: str | None = None
         while True:
-            query = {"pageSize": "100", "fields": "nextPageToken,drives(id,name,webViewLink)"}
+            query = {
+                "pageSize": "100",
+                "fields": "nextPageToken,drives(id,name,webViewLink)",
+            }
             if drive_page_token:
                 query["pageToken"] = drive_page_token
             page = await self._request("GET", f"{self.api}/drives?{urlencode(query)}")
@@ -637,19 +911,57 @@ class GoogleDriveAdapter(ConnectorAdapter):
             if not drive_page_token:
                 break
 
-        result = [{"external_scope_id": item["id"], "scope_type": "shared_drive", "display_name": item.get("name", item["id"]), "config": {"drive_id": item["id"], "web_url": item.get("webViewLink")}} for item in drives]
-        result.append({"external_scope_id": "user", "scope_type": "drive", "display_name": "My Drive", "config": {"corpus": "user"}})
+        result = [
+            {
+                "external_scope_id": item["id"],
+                "scope_type": "shared_drive",
+                "display_name": item.get("name", item["id"]),
+                "config": {"drive_id": item["id"], "web_url": item.get("webViewLink")},
+            }
+            for item in drives
+        ]
+        result.append(
+            {
+                "external_scope_id": "user",
+                "scope_type": "drive",
+                "display_name": "My Drive",
+                "config": {"corpus": "user"},
+            }
+        )
         for drive in [*drives, {"id": None, "name": "My Drive"}]:
-            params: dict[str, str] = {"q": "mimeType = 'application/vnd.google-apps.folder' and trashed = false", "pageSize": "100", "fields": "nextPageToken,files(id,name,parents,webViewLink,driveId)", "includeItemsFromAllDrives": "true", "supportsAllDrives": "true"}
+            params: dict[str, str] = {
+                "q": "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                "pageSize": "100",
+                "fields": "nextPageToken,files(id,name,parents,webViewLink,driveId)",
+                "includeItemsFromAllDrives": "true",
+                "supportsAllDrives": "true",
+            }
             if drive.get("id"):
                 params.update({"corpora": "drive", "driveId": drive["id"]})
             folder_page_token: str | None = None
             while True:
-                page_params = {**params, **({"pageToken": folder_page_token} if folder_page_token else {})}
-                folders = await self._request("GET", f"{self.api}/files?{urlencode(page_params)}")
+                page_params = {
+                    **params,
+                    **({"pageToken": folder_page_token} if folder_page_token else {}),
+                }
+                folders = await self._request(
+                    "GET", f"{self.api}/files?{urlencode(page_params)}"
+                )
                 for folder in folders.get("files", []):  # type: ignore[union-attr]
                     drive_id = drive.get("id") or "user"
-                    result.append({"external_scope_id": f"{drive_id}:{folder['id']}", "scope_type": "folder", "display_name": f"{drive.get('name', 'My Drive')} / {folder.get('name', folder['id'])}", "config": {"drive_id": drive.get("id"), "folder_id": folder["id"], "corpus": drive_id, "web_url": folder.get("webViewLink")}})
+                    result.append(
+                        {
+                            "external_scope_id": f"{drive_id}:{folder['id']}",
+                            "scope_type": "folder",
+                            "display_name": f"{drive.get('name', 'My Drive')} / {folder.get('name', folder['id'])}",
+                            "config": {
+                                "drive_id": drive.get("id"),
+                                "folder_id": folder["id"],
+                                "corpus": drive_id,
+                                "web_url": folder.get("webViewLink"),
+                            },
+                        }
+                    )
                 folder_page_token = folders.get("nextPageToken")  # type: ignore[union-attr]
                 if not folder_page_token:
                     break
@@ -662,12 +974,34 @@ class GoogleDriveAdapter(ConnectorAdapter):
         lifecycle_callback_url: str | None = None,
     ) -> dict[str, Any]:
         config = scope["config"]
-        start = await self._request("GET", f"{self.api}/changes/startPageToken" + (f"?driveId={config['drive_id']}&supportsAllDrives=true" if config.get("drive_id") else ""))
+        start = await self._request(
+            "GET",
+            f"{self.api}/changes/startPageToken"
+            + (
+                f"?driveId={config['drive_id']}&supportsAllDrives=true"
+                if config.get("drive_id")
+                else ""
+            ),
+        )
         channel_id = str(uuid.uuid4())
         client_state = secrets.token_urlsafe(32)
-        result = await self._request("POST", f"{self.api}/changes/watch", params={"pageToken": start["startPageToken"], "supportsAllDrives": "true"}, json={"id": channel_id, "type": "web_hook", "address": callback_url, "token": client_state})
+        result = await self._request(
+            "POST",
+            f"{self.api}/changes/watch",
+            params={"pageToken": start["startPageToken"], "supportsAllDrives": "true"},
+            json={
+                "id": channel_id,
+                "type": "web_hook",
+                "address": callback_url,
+                "token": client_state,
+            },
+        )
         expiration = result.get("expiration")
-        expires_at = datetime.utcfromtimestamp(int(expiration) / 1000) if expiration else datetime.utcnow() + timedelta(days=1)
+        expires_at = (
+            datetime.utcfromtimestamp(int(expiration) / 1000)
+            if expiration
+            else datetime.utcnow() + timedelta(days=1)
+        )
         # Google sends the channel id in X-Goog-Channel-ID; keep that id as
         # our subscription key so the webhook can resolve the connector. resourceId is
         # stored because channels.stop needs BOTH ids — without it a superseded channel
@@ -680,12 +1014,18 @@ class GoogleDriveAdapter(ConnectorAdapter):
         # repair pass in webhook_subscriptions creates its replacement.
         return None
 
-    async def delete_webhook(self, provider_subscription_id: str, resource: str | None = None) -> None:
+    async def delete_webhook(
+        self, provider_subscription_id: str, resource: str | None = None
+    ) -> None:
         if not resource:
             # Pre-existing rows predate storing resourceId. Nothing can stop the channel;
             # it lapses within a day and the notification inbox deduplicates until then.
             return None
-        await self._request("POST", f"{self.api}/channels/stop", json={"id": provider_subscription_id, "resourceId": resource})
+        await self._request(
+            "POST",
+            f"{self.api}/channels/stop",
+            json={"id": provider_subscription_id, "resourceId": resource},
+        )
 
     async def _parents_of(self, file_id: str, cache: dict[str, list[str]]) -> list[str]:
         """Return a file's parents, memoized for the lifetime of one walk."""
@@ -702,7 +1042,11 @@ class GoogleDriveAdapter(ConnectorAdapter):
             # under. Fail closed: the item is left out of a folder scope rather than
             # pulled into one it may not belong to.
             data = {}
-        parents = [str(item) for item in (data.get("parents") or [])] if isinstance(data, dict) else []
+        parents = (
+            [str(item) for item in (data.get("parents") or [])]
+            if isinstance(data, dict)
+            else []
+        )
         cache[file_id] = parents
         return parents
 
@@ -734,11 +1078,28 @@ class GoogleDriveAdapter(ConnectorAdapter):
                 return True
         return False
 
-    async def incremental_changes(self, scope: dict[str, Any], cursor: str | None) -> tuple[list[NormalizedChange], str | None]:
+    async def incremental_changes(
+        self, scope: dict[str, Any], cursor: str | None
+    ) -> tuple[list[NormalizedChange], str | None]:
         config = scope["config"]
-        params = {"pageToken": cursor or "", "pageSize": "100", "includeRemoved": "true", "supportsAllDrives": "true", "includeItemsFromAllDrives": "true", "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,webViewLink,version,md5Checksum,trashed,modifiedTime))"}
+        params = {
+            "pageToken": cursor or "",
+            "pageSize": "100",
+            "includeRemoved": "true",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+            "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,webViewLink,version,md5Checksum,trashed,modifiedTime))",
+        }
         if not cursor:
-            start = await self._request("GET", f"{self.api}/changes/startPageToken" + (f"?driveId={config['drive_id']}&supportsAllDrives=true" if config.get("drive_id") else ""))
+            start = await self._request(
+                "GET",
+                f"{self.api}/changes/startPageToken"
+                + (
+                    f"?driveId={config['drive_id']}&supportsAllDrives=true"
+                    if config.get("drive_id")
+                    else ""
+                ),
+            )
             params["pageToken"] = start["startPageToken"]  # type: ignore[index]
         changes: list[NormalizedChange] = []
         next_cursor = None
@@ -752,7 +1113,9 @@ class GoogleDriveAdapter(ConnectorAdapter):
                 removed = bool(entry.get("removed")) or bool(file.get("trashed"))
                 if folder_id and not removed:
                     if not await self._within_folder(
-                        [str(item) for item in (file.get("parents") or [])], folder_id, ancestry
+                        [str(item) for item in (file.get("parents") or [])],
+                        folder_id,
+                        ancestry,
                     ):
                         continue
                 # A removal carries no file resource at all, so it has no parents to
@@ -760,9 +1123,26 @@ class GoogleDriveAdapter(ConnectorAdapter):
                 # folder scope and the KB kept serving documents that were gone from
                 # Drive. Emit the tombstone and let the sync layer, which knows what it
                 # actually tracks for this scope, decide whether it is relevant.
-                changes.append(NormalizedChange(
-                    external_id=entry["fileId"], corpus_id=config.get("drive_id", "user"), name=file.get("name", entry["fileId"]), state="deleted" if removed else "active", content_changed=bool(file.get("md5Checksum") or file.get("version")), permissions_changed=False, moved=bool(file.get("parents")), revision=str(file.get("version") or file.get("modifiedTime") or "unknown"), mime_type=file.get("mimeType"), parent_external_id=(file.get("parents") or [None])[0], web_url=file.get("webViewLink"), metadata=file,
-                ))
+                changes.append(
+                    NormalizedChange(
+                        external_id=entry["fileId"],
+                        corpus_id=config.get("drive_id", "user"),
+                        name=file.get("name", entry["fileId"]),
+                        state="deleted" if removed else "active",
+                        content_changed=bool(
+                            file.get("md5Checksum") or file.get("version")
+                        ),
+                        permissions_changed=False,
+                        moved=bool(file.get("parents")),
+                        revision=str(
+                            file.get("version") or file.get("modifiedTime") or "unknown"
+                        ),
+                        mime_type=file.get("mimeType"),
+                        parent_external_id=(file.get("parents") or [None])[0],
+                        web_url=file.get("webViewLink"),
+                        metadata=file,
+                    )
+                )
             if page.get("nextPageToken"):  # type: ignore[union-attr]
                 params["pageToken"] = page["nextPageToken"]  # type: ignore[index]
             else:
@@ -771,7 +1151,10 @@ class GoogleDriveAdapter(ConnectorAdapter):
         return changes, next_cursor
 
     async def permissions(self, change: NormalizedChange) -> list[dict[str, str]]:
-        data = await self._request("GET", f"{self.api}/files/{change.external_id}/permissions?supportsAllDrives=true&fields=permissions(id,type,emailAddress,domain,role,displayName)")
+        data = await self._request(
+            "GET",
+            f"{self.api}/files/{change.external_id}/permissions?supportsAllDrives=true&fields=permissions(id,type,emailAddress,domain,role,displayName)",
+        )
         result = []
         for item in data.get("permissions", []):  # type: ignore[union-attr]
             principal_type = item.get("type", "user")
@@ -779,16 +1162,37 @@ class GoogleDriveAdapter(ConnectorAdapter):
             # useful tenant-local identity for reconciling access to an
             # internal account. Keep the id as a fallback for principals that
             # do not expose an address (for example legacy group entries).
-            principal_id = item.get("emailAddress") or item.get("id") or item.get("domain")
+            principal_id = (
+                item.get("emailAddress") or item.get("id") or item.get("domain")
+            )
             if principal_id:
-                result.append({"principal_type": principal_type, "principal_id": str(principal_id), "role": str(item.get("role", "reader"))})
+                result.append(
+                    {
+                        "principal_type": principal_type,
+                        "principal_id": str(principal_id),
+                        "role": str(item.get("role", "reader")),
+                    }
+                )
         return result
 
     async def download(self, change: NormalizedChange) -> bytes:
-        if change.mime_type and change.mime_type.startswith("application/vnd.google-apps"):
-            export_mime = "application/pdf" if change.mime_type.endswith("document") or change.mime_type.endswith("presentation") else "text/csv"
-            return await self._request("GET", f"{self.api}/files/{change.external_id}/export?mimeType={export_mime}")  # type: ignore[return-value]
-        return await self._request("GET", f"{self.api}/files/{change.external_id}?alt=media&supportsAllDrives=true")  # type: ignore[return-value]
+        if change.mime_type and change.mime_type.startswith(
+            "application/vnd.google-apps"
+        ):
+            export_mime = (
+                "application/pdf"
+                if change.mime_type.endswith("document")
+                or change.mime_type.endswith("presentation")
+                else "text/csv"
+            )
+            return await self._request_bytes(
+                "GET",
+                f"{self.api}/files/{change.external_id}/export?mimeType={export_mime}",
+            )
+        return await self._request_bytes(
+            "GET",
+            f"{self.api}/files/{change.external_id}?alt=media&supportsAllDrives=true",
+        )
 
 
 #: Provider name -> adapter. A table rather than an if-chain so registering a
@@ -803,7 +1207,11 @@ _ADAPTERS: dict[str, type[ConnectorAdapter]] = {
 def adapter_for(connector: Connector) -> ConnectorAdapter:
     adapter = _ADAPTERS.get(connector.system)
     if adapter is None:
-        raise ConnectorProviderError(f"Unsupported connector provider: {connector.system}", retryable=False, code="unsupported_provider")
+        raise ConnectorProviderError(
+            f"Unsupported connector provider: {connector.system}",
+            retryable=False,
+            code="unsupported_provider",
+        )
     return adapter(connector)
 
 

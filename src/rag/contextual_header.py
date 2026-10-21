@@ -23,6 +23,7 @@ is worth. This scopes the win to the dense leg, not the sparse (BM25) leg.
 Deliberately never raises, mirroring auto_tagging.py/entity_extraction.py: an indexing
 pass without a header embeds exactly what today's pipeline already embeds, never worse.
 """
+
 from __future__ import annotations
 
 import structlog
@@ -41,7 +42,9 @@ Return ONLY the header text: one or two sentences, no more than 100 words, no ma
 """
 
 
-async def generate_section_context(title: str, heading: str | None, section_text: str) -> str:
+async def generate_section_context(
+    title: str, heading: str | None, section_text: str
+) -> str:
     """Best-effort context header for one section. Returns "" rather than raising.
 
     Called once per section during indexing; the result is prepended to every child

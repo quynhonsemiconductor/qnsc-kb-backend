@@ -19,6 +19,7 @@ Revises: 20260830_67
 Create Date: 2026-08-30
 
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
@@ -50,7 +51,9 @@ def upgrade() -> None:
             sa.Column("requested_for_email", sa.String(length=255), nullable=False),
             sa.Column("created_at", sa.DateTime(), nullable=False),
             sa.Column("updated_at", sa.DateTime(), nullable=False),
-            sa.UniqueConstraint("token_hash", name="uq_password_reset_tokens_token_hash"),
+            sa.UniqueConstraint(
+                "token_hash", name="uq_password_reset_tokens_token_hash"
+            ),
         )
         op.create_index(
             "ix_password_reset_tokens_user_id", TABLE, ["user_id"], unique=False

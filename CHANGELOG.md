@@ -11,7 +11,7 @@
 * **connectors:** enable the Microsoft connector in develop, and keep its webhooks alive ([6353ab4](https://github.com/QNSC-VN/qnsc-kb-backend/commit/6353ab4406be9579ee8775629851bb49b5f884fd))
 * **embeddings:** drop the ml group from shipped images — torch is build-only ([#54](https://github.com/QNSC-VN/qnsc-kb-backend/issues/54)) ([c6976b8](https://github.com/QNSC-VN/qnsc-kb-backend/commit/c6976b8b3c4d0c48b5cb3ac27b0f3bb097010def))
 * **embeddings:** run bge-m3 on ONNX Runtime in develop, one copy of the weights ([#51](https://github.com/QNSC-VN/qnsc-kb-backend/issues/51)) ([049d9fe](https://github.com/QNSC-VN/qnsc-kb-backend/commit/049d9fed931771850bbfeb2fd0f0d36220f33081))
-* **infra:** add quangld@qnsc.vn and hieuvbm@qnsc.vn to entra_admin_emails ([#61](https://github.com/QNSC-VN/qnsc-kb-backend/issues/61)) ([c2474c6](https://github.com/QNSC-VN/qnsc-kb-backend/commit/c2474c631079ac3c754e1ec0b1ad8b1f896d77aa))
+* **infra:** add alice@example.test and bob@example.test to entra_admin_emails ([#61](https://github.com/QNSC-VN/qnsc-kb-backend/issues/61)) ([c2474c6](https://github.com/QNSC-VN/qnsc-kb-backend/commit/c2474c631079ac3c754e1ec0b1ad8b1f896d77aa))
 * **infra:** move qnsc-kb develop onto the shared Valkey node ([#47](https://github.com/QNSC-VN/qnsc-kb-backend/issues/47)) ([a6c5fc3](https://github.com/QNSC-VN/qnsc-kb-backend/commit/a6c5fc301a3953a8776772d89648c51804db3a30))
 * **infra:** run develop on working hours only ([#46](https://github.com/QNSC-VN/qnsc-kb-backend/issues/46)) ([4bf6887](https://github.com/QNSC-VN/qnsc-kb-backend/commit/4bf688712ab8b7fb22ee8f0f7ac1b58ec0597698))
 * init project ([2b912ac](https://github.com/QNSC-VN/qnsc-kb-backend/commit/2b912ac31354baaf30a147eb656159c4615a1a95))

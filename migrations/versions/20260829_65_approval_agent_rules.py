@@ -23,6 +23,7 @@ Revises: 20260828_64
 Create Date: 2026-08-29
 
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
@@ -72,10 +73,16 @@ def upgrade() -> None:
             ),
             sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
             sa.Column(
-                "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("now()"),
             ),
             sa.Column(
-                "updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
+                "updated_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.text("now()"),
             ),
             sa.ForeignKeyConstraint(
                 ["connector_id"], ["connectors.id"], ondelete="CASCADE"

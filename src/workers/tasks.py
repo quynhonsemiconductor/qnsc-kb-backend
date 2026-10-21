@@ -4,17 +4,43 @@ import structlog
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from typing import Any
-from sqlalchemy import JSON, DateTime, Uuid, delete, exists, literal, select, update
+from typing import Any, TypeGuard, cast
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Uuid,
+    delete,
+    exists,
+    func,
+    literal,
+    select,
+    update,
+)
+from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from src.core.db_ssl import ssl_connect_args
 from sqlalchemy.pool import NullPool
-from celery.signals import worker_ready, worker_process_init, task_prerun, task_failure
+from celery.signals import (
+    worker_init,
+    worker_ready,
+    worker_process_init,
+    task_prerun,
+    task_failure,
+)
 from src.workers.celery_app import celery_app
 from src.api.deps import SessionLocal, engine, set_database_context
 from src.repositories.article import ArticleRepository
 from src.repositories.chunk import ChunkRepository
 from src.core.config import settings
-from src.models.ops import ApiRequestMetric, OutboxEvent, IndexReprocessJob, NotificationQueue, ConnectorJob, Connector
+from src.services import email as email_service
+from src.models.ops import (
+    ApiRequestMetric,
+    OutboxEvent,
+    IndexReprocessJob,
+    NotificationQueue,
+    ConnectorJob,
+    Connector,
+)
 from src.models.connectors import SyncRequest
 from src.domain.connector_providers import (
     REMOTE_PROVIDERS,
@@ -22,7 +48,6 @@ from src.domain.connector_providers import (
 )
 from src.models.governance import PendingDraft
 from src.models.user import User
-from src.services.email import get_email_sender
 from src.models.ai import AiCache
 from src.workers.loop import reset_worker_loop, sync_run
 
@@ -36,9 +61,40 @@ def worker_process_init_handler(**kwargs):
     engine.sync_engine.dispose(close=False)
 
 
+@worker_init.connect
+def worker_init_mail_guard(**kwargs):
+    """Check the mail configuration when the WORKER starts (and only then; the API never does).
+
+    Fail closed where it matters: a worker told to use the mail app (client id set) that lacks the certificate,
+    the key or the sender cannot send anything, so it refuses to start rather than queue mail it can never
+    deliver; likewise `console` outside development, which would write one-time links to the logs. With NO mail
+    app configured at all the worker starts anyway (the knowledge base works without mail) and says so loudly on
+    every delivery pass, which an alarm watches (infra: "Mail is not configured").
+    """
+    fatal, unconfigured = email_service.configuration_problems()
+    if fatal:
+        # SystemExit, NOT an exception: Celery's Signal.send catches and logs an Exception raised by a receiver
+        # and carries on, so the worker would have reached "ready" with mail it can never send. A BaseException
+        # propagates out of the signal and the process exits non-zero, which is what fails the deploy.
+        message = "Mail configuration: " + "; ".join(fatal)
+        logger.critical(message)
+        raise SystemExit(message)
+    if unconfigured:
+        logger.error(
+            "Mail is not configured: EMAIL_PROVIDER=graph but MAIL_GRAPH_CLIENT_ID is empty, so notifications "
+            "will not be delivered (docs/runbooks/email-graph.md)"
+        )
+
+
 @worker_ready.connect
 def worker_ready_handler(sender=None, **kwargs):
     logger.info("Celery worker ready", worker=str(sender))
+    # The certificate check also runs at start. A daily beat schedule counted from beat's own start never fires
+    # in an environment redeployed more than once a day; this makes every deploy a check.
+    try:
+        check_mail_certificate()
+    except Exception:  # a failed check must never keep a worker from serving
+        logger.exception("Mail certificate check failed at worker start")
 
 
 @task_prerun.connect
@@ -112,16 +168,22 @@ def replay_outbox_task():
             # handled twice. skip_locked means a concurrent tick takes different rows
             # instead of blocking, which is the same claim pattern as
             # claim_sync_request and deliver_notification_queue.
-            events = (await db.execute(
-                select(OutboxEvent)
-                .where(
-                    OutboxEvent.status.in_(["pending", "failed", "processing"]),
-                    OutboxEvent.next_attempt_at <= datetime.utcnow(),
+            events = (
+                (
+                    await db.execute(
+                        select(OutboxEvent)
+                        .where(
+                            OutboxEvent.status.in_(["pending", "failed", "processing"]),
+                            OutboxEvent.next_attempt_at <= datetime.utcnow(),
+                        )
+                        .order_by(OutboxEvent.created_at)
+                        .limit(100)
+                        .with_for_update(skip_locked=True)
+                    )
                 )
-                .order_by(OutboxEvent.created_at)
-                .limit(100)
-                .with_for_update(skip_locked=True)
-            )).scalars().all()
+                .scalars()
+                .all()
+            )
             dispatchable: list[tuple[str, dict]] = []
             for event in events:
                 if event.attempts >= OUTBOX_MAX_ATTEMPTS:
@@ -187,6 +249,7 @@ def prune_operational_metrics() -> None:
             connect_args={
                 "timeout": 10,
                 "command_timeout": _PRUNE_COMMAND_TIMEOUT_SECONDS,
+                **ssl_connect_args(),
             },
         )
         try:
@@ -225,22 +288,72 @@ def prune_operational_metrics() -> None:
     sync_run(prune())
 
 
+# Email delivery is bounded, by AGE rather than by a count of attempts. A row that fails is retried with
+# exponential backoff (30 s doubling to a 1 h cap). It becomes status "dead" (logged at ERROR, which an alarm
+# watches, and never selected again) when the message itself is refused (400/413), or when it is older than
+# MAIL_MAX_AGE: a count would kill every queued message after about an hour of any Graph or network outage, while
+# a reset link is worthless after a day anyway. A failure that affects every message (bad credentials, a throttled
+# tenant, a sender Exchange refuses) stops the batch and is NOT charged to the row as an attempt.
+MAIL_MAX_AGE = timedelta(hours=24)
+MAIL_BACKOFF_BASE_SECONDS = 30
+MAIL_BACKOFF_CAP_SECONDS = 3600
+MAIL_STAGE_FAILURE_FLOOR_SECONDS = 300
+
+
+def mail_backoff_seconds(attempts: int) -> int:
+    """30 s, 60 s, 120 s ... capped at an hour, for the Nth failed attempt."""
+    return min(
+        MAIL_BACKOFF_BASE_SECONDS * (2 ** max(0, attempts - 1)),
+        MAIL_BACKOFF_CAP_SECONDS,
+    )
+
+
 @celery_app.task(name="deliver_notification_queue")
 def deliver_notification_queue() -> None:
     """Deliver queued email notifications and persist an auditable outcome."""
+
     async def deliver() -> None:
+        try:
+            sender = email_service.get_email_sender()
+        except RuntimeError as exc:
+            logger.error("Mail is not configured", reason=str(exc))
+            return
+        if (
+            isinstance(sender, email_service.MicrosoftGraphEmailSender)
+            and not (settings.MAIL_GRAPH_CLIENT_ID or "").strip()
+        ):
+            logger.error(
+                "Mail is not configured: EMAIL_PROVIDER=graph but MAIL_GRAPH_CLIENT_ID is empty, so notifications "
+                "are not being delivered (docs/runbooks/email-graph.md)"
+            )
+            return
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            rows = (await db.execute(
-                select(NotificationQueue)
-                .where(NotificationQueue.type == "email", NotificationQueue.status.in_(["pending", "failed"]))
-                .order_by(NotificationQueue.created_at)
-                .limit(100)
-                .with_for_update(skip_locked=True)
-            )).scalars().all()
-            sender = get_email_sender()
+            now = datetime.utcnow()
+            rows = (
+                (
+                    await db.execute(
+                        select(NotificationQueue)
+                        .where(
+                            NotificationQueue.type == "email",
+                            NotificationQueue.status.in_(["pending", "failed"]),
+                            # NULL = never failed. A row that is backing off is not eligible, so rows that keep
+                            # failing leave the head of the batch and cannot starve new mail.
+                            (NotificationQueue.next_attempt_at.is_(None))
+                            | (NotificationQueue.next_attempt_at <= now),
+                        )
+                        .order_by(
+                            NotificationQueue.next_attempt_at.asc().nullsfirst(),
+                            NotificationQueue.created_at,
+                        )
+                        .limit(100)
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             for row in rows:
-                row.attempts += 1
                 payload = row.payload or {}
                 try:
                     await sender.send(
@@ -249,15 +362,123 @@ def deliver_notification_queue() -> None:
                         text=str(payload.get("text") or ""),
                         html=str(payload["html"]) if payload.get("html") else None,
                     )
+                    row.attempts += 1
                     row.status = "sent"
                     row.sent_at = datetime.utcnow()
                     row.last_error = None
+                    row.next_attempt_at = None
                 except Exception as exc:
-                    row.status = "failed"
+                    stops = bool(getattr(exc, "stops_the_batch", False))
                     row.last_error = str(exc)[:1000]
+                    if not stops:
+                        row.attempts += 1  # an outage must not use up the attempts of rows it never let us try
+                    permanent = bool(getattr(exc, "permanent", False))
+                    # Config and token failures are not charged to the row, so its backoff would sit at 30 s for ever:
+                    # give them a floor, so a persistent outage of the credential is retried every 5 minutes, not 30 s.
+                    stage_floor = (
+                        MAIL_STAGE_FAILURE_FLOOR_SECONDS
+                        if getattr(exc, "stage", "send") in {"config", "token"}
+                        else 0
+                    )
+                    wait_seconds = max(
+                        mail_backoff_seconds(max(row.attempts, 1)),
+                        int(getattr(exc, "minimum_wait", 0) or 0),
+                        stage_floor,
+                    )
+                    created = row.created_at or datetime.utcnow()
+                    too_old = datetime.utcnow() - created > MAIL_MAX_AGE
+                    if permanent or too_old:
+                        row.status = "dead"
+                        row.next_attempt_at = None
+                        logger.error(
+                            "Notification marked dead",
+                            notification_id=str(row.id),
+                            attempts=row.attempts,
+                            permanent=permanent,
+                            too_old=too_old,
+                            error=row.last_error,
+                        )
+                    else:
+                        row.status = "failed" if row.attempts else row.status
+                        row.next_attempt_at = datetime.utcnow() + timedelta(
+                            seconds=wait_seconds
+                        )
+                    if getattr(exc, "sender_refused", False):
+                        # The scope is missing or still propagating (up to ~2 h), or the mailbox is missing or not
+                        # REST-enabled. A human has to look; the alarm watches this line.
+                        logger.error(
+                            "Mail sender refused",
+                            status=getattr(exc, "status", None),
+                            code=getattr(exc, "code", None),
+                            request_id=getattr(exc, "request_id", None),
+                        )
+                    if stops:
+                        # Credentials, configuration, throttling or a refused sender: every row would fail the same
+                        # way. Defer EVERY deliverable email row, not just this one, or the other rows (next_attempt_at
+                        # NULL) would be picked up again in 30 s and the sender hit forever, through the very
+                        # Retry-After or 15-minute wait that was meant to stop that. One UPDATE; attempts untouched.
+                        # SessionLocal has autoflush=False: without this the UPDATE sees the table as it was BEFORE this
+                        # batch, so a row marked sent/dead earlier in the batch would get a stray next_attempt_at and a
+                        # row that failed normally earlier would have its longer backoff shortened by greatest().
+                        await db.flush()
+                        until = datetime.utcnow() + timedelta(seconds=wait_seconds)
+                        await db.execute(
+                            update(NotificationQueue)
+                            .where(
+                                NotificationQueue.type == "email",
+                                NotificationQueue.status.in_(["pending", "failed"]),
+                            )
+                            .values(
+                                next_attempt_at=func.greatest(
+                                    func.coalesce(
+                                        NotificationQueue.next_attempt_at,
+                                        datetime.utcnow(),
+                                    ),
+                                    until,
+                                )
+                            )
+                        )
+                        logger.warning(
+                            "Stopping the mail batch",
+                            reason=row.last_error,
+                            deferred_until=until.isoformat(),
+                        )
+                        break
             await db.commit()
 
     sync_run(deliver())
+
+
+@celery_app.task(name="check_mail_certificate")
+def check_mail_certificate() -> None:
+    """Daily: report how long the mail certificate has left (a once-per-process warning is invisible in a worker
+    that lives for weeks). The alarm watches the two WARN/ERROR lines below."""
+    status = email_service.certificate_status()
+    if status is None:
+        return
+    if not status["valid"]:
+        logger.error(
+            "Mail certificate has expired or cannot be read",
+            detail="MAIL_GRAPH_CERT_PEM is not a certificate",
+        )
+    elif status["expired"]:
+        logger.error(
+            "Mail certificate has expired",
+            expires=status["expires"],
+            days_left=status["days_left"],
+        )
+    elif status["days_left"] <= 30:
+        logger.warning(
+            "Mail certificate expires soon",
+            expires=status["expires"],
+            days_left=status["days_left"],
+        )
+    else:
+        logger.info(
+            "Mail certificate is healthy",
+            expires=status["expires"],
+            days_left=status["days_left"],
+        )
 
 
 @celery_app.task(name="verify_review_deadlines")
@@ -265,11 +486,19 @@ def verify_review_deadlines() -> None:
     async def verify() -> None:
         from src.domain.review import ReviewService
         from src.models.article import Article
+
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            domains = (await db.execute(select(Article.company_domain).distinct())).scalars().all()
+            domains = (
+                (await db.execute(select(Article.company_domain).distinct()))
+                .scalars()
+                .all()
+            )
             for domain in domains:
-                await ReviewService(ArticleRepository(db)).verify_review_deadlines(str(domain))
+                await ReviewService(ArticleRepository(db)).verify_review_deadlines(
+                    str(domain)
+                )
+
     sync_run(verify())
 
 
@@ -283,6 +512,7 @@ def link_related_articles_task() -> None:
     articles touched in the last day so a large corpus does not mean an
     every-article-against-every-other-article scan on every run.
     """
+
     async def link() -> None:
         from src.domain.article_linking import find_topical_matches
         from src.models.article import Article
@@ -291,14 +521,18 @@ def link_related_articles_task() -> None:
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             articles = (
-                await db.execute(
-                    select(Article).where(
-                        Article.status == "published",
-                        Article.lifecycle_status == "active",
-                        Article.updated_at >= cutoff,
+                (
+                    await db.execute(
+                        select(Article).where(
+                            Article.status == "published",
+                            Article.lifecycle_status == "active",
+                            Article.updated_at >= cutoff,
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for article in articles:
                 try:
                     matches = await find_topical_matches(db, article)
@@ -319,6 +553,7 @@ def link_related_articles_task() -> None:
                 if merged != sorted(existing):
                     article.related_article_ids = merged
             await db.commit()
+
     sync_run(link())
 
 
@@ -332,15 +567,20 @@ async def _run_approval_agent_sweep() -> None:
     """
     from src.domain import approval_agent
     from src.models.governance import ApprovalRule
+
     async with SessionLocal() as db:
         await set_database_context(db, None, True)
         domains = (
-            await db.execute(
-                select(ApprovalRule.company_domain)
-                .where(ApprovalRule.active.is_(True))
-                .distinct()
+            (
+                await db.execute(
+                    select(ApprovalRule.company_domain)
+                    .where(ApprovalRule.active.is_(True))
+                    .distinct()
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for domain in domains:
             await approval_agent.run(db, str(domain), dry_run=False)
 
@@ -353,18 +593,58 @@ def run_approval_agent() -> None:
 @celery_app.task(name="escalate_overdue_drafts")
 def escalate_overdue_drafts() -> None:
     """Escalate drafts past the approval SLA to their submitter and approver."""
+
     async def escalate() -> None:
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             cutoff = datetime.utcnow() - timedelta(days=settings.REVIEW_SLA_DAYS)
-            drafts = (await db.execute(select(PendingDraft).where(
-                PendingDraft.status == "pending",
-                PendingDraft.assigned_at.is_not(None),
-                PendingDraft.assigned_at < cutoff,
-            ).limit(500))).scalars().all()
-            users = {item.id: item for item in (await db.execute(select(User).where(User.id.in_({uid for draft in drafts for uid in (draft.created_by, draft.assigned_approver_id) if uid})))).scalars().all()} if drafts else {}
+            drafts = (
+                (
+                    await db.execute(
+                        select(PendingDraft)
+                        .where(
+                            PendingDraft.status == "pending",
+                            PendingDraft.assigned_at.is_not(None),
+                            PendingDraft.assigned_at < cutoff,
+                        )
+                        .limit(500)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            users = (
+                {
+                    item.id: item
+                    for item in (
+                        await db.execute(
+                            select(User).where(
+                                User.id.in_(
+                                    {
+                                        uid
+                                        for draft in drafts
+                                        for uid in (
+                                            draft.created_by,
+                                            draft.assigned_approver_id,
+                                        )
+                                        if uid
+                                    }
+                                )
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                }
+                if drafts
+                else {}
+            )
             for draft in drafts:
-                for user_id in {draft.created_by, draft.assigned_approver_id} - {None}:
+                for user_id in {
+                    uid
+                    for uid in (draft.created_by, draft.assigned_approver_id)
+                    if uid is not None
+                }:
                     recipient = users.get(user_id)
                     if not recipient:
                         continue
@@ -390,13 +670,27 @@ def escalate_overdue_drafts() -> None:
                     duplicate = select(NotificationQueue.id).where(
                         NotificationQueue.recipient_user_id == recipient.id,
                         NotificationQueue.type == "email",
-                        NotificationQueue.created_at >= datetime.utcnow() - timedelta(hours=24),
-                        NotificationQueue.payload["event"].as_string() == "draft_overdue",
-                        NotificationQueue.payload["draft_id"].as_string() == str(draft.id),
+                        NotificationQueue.created_at
+                        >= datetime.utcnow() - timedelta(hours=24),
+                        NotificationQueue.payload["event"].as_string()
+                        == "draft_overdue",
+                        NotificationQueue.payload["draft_id"].as_string()
+                        == str(draft.id),
                     )
                     await db.execute(
-                        NotificationQueue.__table__.insert().from_select(
-                            ["id", "recipient_user_id", "type", "payload", "status", "attempts", "created_at", "updated_at"],
+                        cast(Table, NotificationQueue.__table__)
+                        .insert()
+                        .from_select(
+                            [
+                                "id",
+                                "recipient_user_id",
+                                "type",
+                                "payload",
+                                "status",
+                                "attempts",
+                                "created_at",
+                                "updated_at",
+                            ],
                             select(
                                 literal(uuid.uuid4(), type_=Uuid),
                                 literal(recipient.id, type_=Uuid),
@@ -410,6 +704,7 @@ def escalate_overdue_drafts() -> None:
                         )
                     )
             await db.commit()
+
     sync_run(escalate())
 
 
@@ -478,11 +773,11 @@ def cleanup_orphaned_source_objects() -> int:
     return sync_run(_run_orphan_source_cleanup())
 
 
-def _draft_accepts_restructure_result(draft: PendingDraft | None) -> bool:
+def _draft_accepts_restructure_result(
+    draft: PendingDraft | None,
+) -> TypeGuard[PendingDraft]:
     return bool(
-        draft
-        and draft.status == "pending"
-        and draft.restructure_status == "processing"
+        draft and draft.status == "pending" and draft.restructure_status == "processing"
     )
 
 
@@ -498,7 +793,10 @@ async def run_restructure_pending_draft(
     Shared by the Celery task and inline-mode dispatch so the feature works
     identically in both deployment job modes.
     """
-    from src.domain.content_restructure import clear_restructure_deferrals, restructure_document
+    from src.domain.content_restructure import (
+        clear_restructure_deferrals,
+        restructure_document,
+    )
     from src.models import User
     from src.models.governance import AuditLog, DraftCandidate, PendingDraft
     from src.models.user import Department
@@ -583,16 +881,21 @@ async def run_restructure_pending_draft(
                 # Rate limited: re-queue after the wait the provider asked for, before spending any more of the
                 # quota on routing or tags for a document that will be formatted again anyway.
                 await _defer_restructure(
-                    db, draft_id_str, company_domain, user_id_str, result.retry_after or 30, source_text
+                    db,
+                    draft_id_str,
+                    company_domain,
+                    user_id_str,
+                    result.retry_after or 30,
+                    source_text,
                 )
                 return
             # Batch review operates on the formatted reading view, not raw extraction.
             # Compute every optional suggestion without mutating the ORM row: a reviewer or
             # approval agent may decide the draft while the model is running, and those
             # uncommitted mutations must not leak into that already-final decision.
-            is_split_product = (
-                (draft.content_metadata or {}).get("submission_kind") == "split_candidate"
-            )
+            is_split_product = (draft.content_metadata or {}).get(
+                "submission_kind"
+            ) == "split_candidate"
             candidate_items = []
             if not is_split_product:
                 candidate_items = await route_document_candidates_llm(
@@ -741,7 +1044,12 @@ def _schedule_restructure(
 
 
 async def _defer_restructure(
-    db, draft_id_str: str, company_domain: str, user_id_str: str, retry_after: int, source_text: str
+    db,
+    draft_id_str: str,
+    company_domain: str,
+    user_id_str: str,
+    retry_after: int,
+    source_text: str,
 ) -> None:
     """Record that AI formatting is waiting on the provider's rate limit, and schedule the retry.
 
@@ -778,7 +1086,9 @@ async def _defer_restructure(
             "A lossless reading view is shown; retry from Pending Drafts later."
         )
         await db.commit()
-        logger.warning("AI formatting gave up after repeated rate limiting", draft_id=draft_id_str)
+        logger.warning(
+            "AI formatting gave up after repeated rate limiting", draft_id=draft_id_str
+        )
         return
     # The wait that will actually happen, not the raw ask: a provider that says "in 2 hours" is retried in 10 minutes.
     retry_after = max(1, min(int(retry_after), _MAX_DEFERRAL_COUNTDOWN_SECONDS))
@@ -789,7 +1099,10 @@ async def _defer_restructure(
     )
     await db.commit()
     logger.info(
-        "AI formatting deferred", draft_id=draft_id_str, retry_after=retry_after, deferrals=deferrals
+        "AI formatting deferred",
+        draft_id=draft_id_str,
+        retry_after=retry_after,
+        deferrals=deferrals,
     )
     _schedule_restructure(draft_id_str, company_domain, user_id_str, retry_after)
 
@@ -956,15 +1269,21 @@ def recover_stale_index_reprocess_jobs() -> int:
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             cutoff = datetime.utcnow() - timedelta(minutes=INDEX_JOB_STALE_MINUTES)
-            jobs = (await db.execute(
-                select(IndexReprocessJob)
-                .where(
-                    IndexReprocessJob.status == "running",
-                    IndexReprocessJob.updated_at < cutoff,
+            jobs = (
+                (
+                    await db.execute(
+                        select(IndexReprocessJob)
+                        .where(
+                            IndexReprocessJob.status == "running",
+                            IndexReprocessJob.updated_at < cutoff,
+                        )
+                        .limit(20)
+                        .with_for_update(skip_locked=True)
+                    )
                 )
-                .limit(20)
-                .with_for_update(skip_locked=True)
-            )).scalars().all()
+                .scalars()
+                .all()
+            )
             requeued: list[uuid.UUID] = []
             for job in jobs:
                 if job.retry_count >= INDEX_JOB_MAX_RETRIES:
@@ -1055,7 +1374,9 @@ def delete_article_chunks_task(article_id_str: str):
 # same time, each undoing the other's cursor. One authority for retries, and it is the
 # one that survives a worker restart.
 @celery_app.task(name="sync_cloud_connector_task")
-def sync_cloud_connector_task(connector_id_str: str, job_id_str: str, sync_request_id_str: str | None = None):
+def sync_cloud_connector_task(
+    connector_id_str: str, job_id_str: str, sync_request_id_str: str | None = None
+):
     """Run an idempotent provider delta sync from a durable cursor."""
 
     async def process():
@@ -1064,10 +1385,14 @@ def sync_cloud_connector_task(connector_id_str: str, job_id_str: str, sync_reque
 
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
-            sync_request_id = uuid.UUID(sync_request_id_str) if sync_request_id_str else None
+            sync_request_id = (
+                uuid.UUID(sync_request_id_str) if sync_request_id_str else None
+            )
             if sync_request_id:
                 await mark_sync_request_running(db, sync_request_id)
-            sync_request = await db.get(SyncRequest, sync_request_id) if sync_request_id else None
+            sync_request = (
+                await db.get(SyncRequest, sync_request_id) if sync_request_id else None
+            )
             connector = await db.get(Connector, uuid.UUID(connector_id_str))
             job = await db.get(ConnectorJob, uuid.UUID(job_id_str))
             if not connector or not job:
@@ -1186,22 +1511,30 @@ def reconcile_cloud_connectors():
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             connectors = (
-                await db.execute(
-                    select(Connector).where(
-                        Connector.system.in_(sorted(REMOTE_PROVIDERS)),
-                        Connector.status.in_(["active", "error"]),
-                    )
-                )
-            ).scalars().all()
-            for connector in connectors:
-                selected_scopes = (
+                (
                     await db.execute(
-                        select(SourceScope).where(
-                            SourceScope.connector_id == connector.id,
-                            SourceScope.selected.is_(True),
+                        select(Connector).where(
+                            Connector.system.in_(sorted(REMOTE_PROVIDERS)),
+                            Connector.status.in_(["active", "error"]),
                         )
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
+            )
+            for connector in connectors:
+                selected_scopes = (
+                    (
+                        await db.execute(
+                            select(SourceScope).where(
+                                SourceScope.connector_id == connector.id,
+                                SourceScope.selected.is_(True),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
                 for scope in selected_scopes:
                     cursor = (
                         await db.execute(
@@ -1241,22 +1574,31 @@ def dispatch_pending_sync_requests():
     """Recover webhook requests that were persisted before a process restart."""
 
     async def process():
-        from src.domain.sync_queue import claim_sync_request, recover_stale_sync_requests
+        from src.domain.sync_queue import (
+            claim_sync_request,
+            recover_stale_sync_requests,
+        )
 
         async with SessionLocal() as db:
             await set_database_context(db, None, True)
             await recover_stale_sync_requests(db)
             request_ids = (
-                await db.execute(
-                    select(SyncRequest.id)
-                    .where(
-                        SyncRequest.status == "queued",
-                        SyncRequest.available_at <= datetime.utcnow(),
+                (
+                    await db.execute(
+                        select(SyncRequest.id)
+                        .where(
+                            SyncRequest.status == "queued",
+                            SyncRequest.available_at <= datetime.utcnow(),
+                        )
+                        .order_by(
+                            SyncRequest.priority.asc(), SyncRequest.created_at.asc()
+                        )
+                        .limit(25)
                     )
-                    .order_by(SyncRequest.priority.asc(), SyncRequest.created_at.asc())
-                    .limit(25)
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         for request_id in request_ids:
             async with SessionLocal() as claim_db:
                 await set_database_context(claim_db, None, True)
@@ -1300,5 +1642,3 @@ def renew_webhook_subscriptions():
             await repair_webhook_subscriptions(db, set_context=restore_context)
 
     sync_run(process())
-
-

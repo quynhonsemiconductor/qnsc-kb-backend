@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import uuid
 from datetime import datetime
 from sqlalchemy import (
@@ -14,6 +15,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from src.models.user import User
 
 
 class PendingDraft(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -263,8 +267,12 @@ class ConflictRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     contradiction_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     article_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     evidence: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default="open", server_default="open", nullable=False)
-    resolved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(30), default="open", server_default="open", nullable=False
+    )
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -349,7 +357,9 @@ class ApprovalRule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: ApprovalRuleVersion below at the same time, so an AuditLog decision can name which
     #: VERSION of a rule fired, not just which rule id -- a rule that is edited after
     #: firing must not silently rewrite the history of what it decided under.
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class ApprovalRuleVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):

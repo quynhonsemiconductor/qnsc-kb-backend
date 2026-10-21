@@ -1,4 +1,5 @@
 """Extract searchable text from uploaded knowledge sources."""
+
 from __future__ import annotations
 
 import csv
@@ -19,8 +20,21 @@ from src.core.config import settings
 logger = structlog.get_logger()
 
 SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx", ".txt", ".md", ".csv",
-    ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".xlsm",
+    ".pptx",
+    ".txt",
+    ".md",
+    ".csv",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".webp",
 }
 
 
@@ -34,11 +48,13 @@ def _scan_with_clamd(data: bytes) -> None:
     if not host:
         raise SourceExtractionError("Malware scanning is unavailable")
     try:
-        with socket.create_connection((host, settings.MALWARE_SCANNER_PORT), timeout=10) as client:
+        with socket.create_connection(
+            (host, settings.MALWARE_SCANNER_PORT), timeout=10
+        ) as client:
             client.settimeout(30)
             client.sendall(b"zINSTREAM\0")
             for offset in range(0, len(data), 1024 * 1024):
-                chunk = data[offset:offset + 1024 * 1024]
+                chunk = data[offset : offset + 1024 * 1024]
                 client.sendall(struct.pack("!I", len(chunk)) + chunk)
             client.sendall(struct.pack("!I", 0))
             response = client.recv(4096).decode("utf-8", errors="replace")
@@ -60,10 +76,14 @@ def _clean(text: str) -> str:
 
 
 def _token_coverage(original: str, candidate: str) -> float:
-    original_tokens = set(re.findall(r"[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9_-]{3,}", original.lower()))
+    original_tokens = set(
+        re.findall(r"[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9_-]{3,}", original.lower())
+    )
     if not original_tokens:
         return 1.0
-    candidate_tokens = set(re.findall(r"[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9_-]{3,}", candidate.lower()))
+    candidate_tokens = set(
+        re.findall(r"[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9_-]{3,}", candidate.lower())
+    )
     return len(original_tokens & candidate_tokens) / len(original_tokens)
 
 
@@ -72,33 +92,46 @@ def _validate_archive(data: bytes) -> None:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             members = archive.infolist()
             if len(members) > settings.MAX_SOURCE_ARCHIVE_FILES:
-                raise SourceExtractionError("The document archive contains too many files")
+                raise SourceExtractionError(
+                    "The document archive contains too many files"
+                )
             total_size = sum(max(0, item.file_size) for item in members)
             if total_size > settings.MAX_SOURCE_UNCOMPRESSED_BYTES:
-                raise SourceExtractionError("The document archive expands beyond the allowed size")
+                raise SourceExtractionError(
+                    "The document archive expands beyond the allowed size"
+                )
             for item in members:
                 if item.compress_size and item.file_size / item.compress_size > 10_000:
-                    raise SourceExtractionError("The document archive has an unsafe compression ratio")
+                    raise SourceExtractionError(
+                        "The document archive has an unsafe compression ratio"
+                    )
     except zipfile.BadZipFile as exc:
-        raise SourceExtractionError("The uploaded document is not a valid archive") from exc
+        raise SourceExtractionError(
+            "The uploaded document is not a valid archive"
+        ) from exc
 
 
 def _validate_source_bytes(filename: str, data: bytes) -> None:
     extension = Path(filename).suffix.lower()
     if extension in {".docx", ".xlsx", ".xlsm", ".pptx"}:
         if not data.startswith(b"PK"):
-            raise SourceExtractionError("The uploaded Office document has an invalid file signature")
+            raise SourceExtractionError(
+                "The uploaded Office document has an invalid file signature"
+            )
         _validate_archive(data)
     elif extension == ".pdf" and not data.lstrip().startswith(b"%PDF"):
         raise SourceExtractionError("The uploaded PDF has an invalid file signature")
     elif extension in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
         try:
             from PIL import Image
+
             Image.MAX_IMAGE_PIXELS = settings.MAX_SOURCE_IMAGE_PIXELS
             with Image.open(io.BytesIO(data)) as image:
                 image.verify()
         except Exception as exc:
-            raise SourceExtractionError("The uploaded image is invalid or unsafe") from exc
+            raise SourceExtractionError(
+                "The uploaded image is invalid or unsafe"
+            ) from exc
 
     if settings.MALWARE_SCAN_ENABLED:
         if settings.MALWARE_SCANNER_HOST:
@@ -212,7 +245,7 @@ def _convert_pdf_with_pymupdf4llm(data: bytes) -> str:
         return ""
     try:
         import pymupdf
-        import pymupdf4llm
+        import pymupdf4llm  # type: ignore[import-untyped]  # no py.typed or stubs; trusted PDF converter
     except Exception as exc:
         logger.warning(
             "PyMuPDF4LLM is not importable; PDF Markdown structure falls back to MarkItDown",
@@ -262,7 +295,11 @@ def _convert_with_markitdown(filename: str, data: bytes) -> str:
             io.BytesIO(data),
             file_extension=Path(filename).suffix.lower(),
         )
-        value = getattr(result, "markdown", None) or getattr(result, "text_content", None) or ""
+        value = (
+            getattr(result, "markdown", None)
+            or getattr(result, "text_content", None)
+            or ""
+        )
         return _clean(str(value))
     except Exception as exc:
         # MarkItDown is an enhancement layer. A single unsupported or malformed
@@ -286,6 +323,7 @@ def _paddle_ocr() -> Any:
     os.environ.setdefault("FLAGS_use_onednn", "0")
     try:
         import paddle
+
         paddle.set_flags({"FLAGS_use_mkldnn": False, "FLAGS_use_onednn": False})
         from paddleocr import PaddleOCR
     except Exception as exc:
@@ -301,7 +339,12 @@ def _paddle_ocr() -> Any:
             enable_mkldnn=False,
         )
     except TypeError:
-        return PaddleOCR(use_angle_cls=True, lang=settings.PADDLEOCR_LANG, show_log=False, enable_mkldnn=False)
+        return PaddleOCR(
+            use_angle_cls=True,
+            lang=settings.PADDLEOCR_LANG,
+            show_log=False,
+            enable_mkldnn=False,
+        )
 
 
 def _ocr_image(image: Any) -> str:
@@ -310,7 +353,10 @@ def _ocr_image(image: Any) -> str:
     # Result whose JSON payload nests recognition fields under ``res``.
     try:
         import numpy as np
-        image_input = np.asarray(image) if not isinstance(image, (str, np.ndarray)) else image
+
+        image_input = (
+            np.asarray(image) if not isinstance(image, (str, np.ndarray)) else image
+        )
     except Exception:
         image_input = image
 
@@ -377,6 +423,7 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
     failed_pages: list[int] = []
     try:
         from pypdf import PdfReader
+
         reader = PdfReader(io.BytesIO(data))
         _reject_oversized_pdf(len(reader.pages))
         pages: list[dict[str, Any]] = []
@@ -387,7 +434,9 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
                 # A single corrupt content stream must not decide the fate of the other
                 # 400 pages, but it must not vanish either: this page is recorded as
                 # failed and reported upwards.
-                logger.warning("PDF page text extraction failed", page_number=index, error=str(exc))
+                logger.warning(
+                    "PDF page text extraction failed", page_number=index, error=str(exc)
+                )
                 pages.append(_page(index, ""))
                 failed_pages.append(index)
         if any(item["text"] for item in pages):
@@ -395,8 +444,9 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
             # pages instead of silently dropping scanned appendices.
             if any(not item["text"] for item in pages):
                 try:
-                    import fitz
+                    import fitz  # type: ignore[import-untyped]  # PyMuPDF ships no py.typed; no stubs installed
                     from PIL import Image
+
                     document = fitz.open(stream=data, filetype="pdf")
                     for index, item in enumerate(pages):
                         if item["text"]:
@@ -406,10 +456,18 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
                             # No image and no text: genuinely blank, not a failure.
                             continue
                         try:
-                            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                            item["text"] = _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))
+                            pixmap = page.get_pixmap(
+                                matrix=fitz.Matrix(1.5, 1.5), alpha=False
+                            )
+                            item["text"] = _ocr_image(
+                                Image.open(io.BytesIO(pixmap.tobytes("png")))
+                            )
                         except Exception as exc:
-                            logger.warning("PDF page OCR failed", page_number=index + 1, error=str(exc))
+                            logger.warning(
+                                "PDF page OCR failed",
+                                page_number=index + 1,
+                                error=str(exc),
+                            )
                         if not item["text"] and index + 1 not in failed_pages:
                             # An image page that produced nothing is unread content,
                             # whether OCR raised or simply returned empty.
@@ -421,7 +479,8 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
                     # completely extracted.
                     logger.warning("PDF OCR pass unavailable", error=str(exc))
                     failed_pages.extend(
-                        index for index, item in enumerate(pages, start=1)
+                        index
+                        for index, item in enumerate(pages, start=1)
                         if not item["text"] and index not in failed_pages
                     )
             return pages, sorted(set(failed_pages))
@@ -429,11 +488,14 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
         raise
     except Exception as exc:
         # No embedded text could be read at all; fall through to a full OCR pass.
-        logger.info("PDF embedded-text extraction unusable, falling back to OCR", error=str(exc))
+        logger.info(
+            "PDF embedded-text extraction unusable, falling back to OCR", error=str(exc)
+        )
 
     try:
         import fitz
         from PIL import Image
+
         document = fitz.open(stream=data, filetype="pdf")
         _reject_oversized_pdf(document.page_count)
         ocr_pages: list[dict[str, Any]] = []
@@ -441,13 +503,19 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
         for index, page in enumerate(document, start=1):
             try:
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                ocr_pages.append(_page(index, _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))))
+                ocr_pages.append(
+                    _page(
+                        index, _ocr_image(Image.open(io.BytesIO(pixmap.tobytes("png"))))
+                    )
+                )
             except SourceExtractionError:
                 # OCR is not installed. That is not a per-page fault and the whole
                 # document is unreadable without it, so it stays a hard failure.
                 raise
             except Exception as exc:
-                logger.warning("PDF page rasterization failed", page_number=index, error=str(exc))
+                logger.warning(
+                    "PDF page rasterization failed", page_number=index, error=str(exc)
+                )
                 ocr_pages.append(_page(index, ""))
                 ocr_failures.append(index)
         return ocr_pages, ocr_failures
@@ -459,8 +527,11 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
 
 def _extract_docx(data: bytes) -> str:
     from docx import Document
+
     document = Document(io.BytesIO(data))
-    parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+    parts = [
+        paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()
+    ]
     for table in document.tables:
         for row in table.rows:
             parts.append(" | ".join(cell.text.strip() for cell in row.cells))
@@ -469,12 +540,17 @@ def _extract_docx(data: bytes) -> str:
 
 def _extract_xlsx(data: bytes) -> str:
     from openpyxl import load_workbook
+
     workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     parts: list[str] = []
     for sheet in workbook.worksheets:
         parts.append(f"## {sheet.title}")
         for row in sheet.iter_rows(values_only=True):
-            values = [str(value).strip() for value in row if value is not None and str(value).strip()]
+            values = [
+                str(value).strip()
+                for value in row
+                if value is not None and str(value).strip()
+            ]
             if values:
                 parts.append(" | ".join(values))
     return _clean("\n".join(parts))
@@ -482,6 +558,7 @@ def _extract_xlsx(data: bytes) -> str:
 
 def _extract_pptx(data: bytes) -> str:
     from pptx import Presentation
+
     presentation = Presentation(io.BytesIO(data))
     parts: list[str] = []
     for index, slide in enumerate(presentation.slides, start=1):
@@ -494,11 +571,7 @@ def _extract_pptx(data: bytes) -> str:
 
 def extraction_failed_pages(pages: list[dict[str, Any]]) -> list[int]:
     """Page numbers this extraction could not read, for callers that must flag it."""
-    return [
-        int(item["page_number"])
-        for item in pages
-        if item.get("extraction_failed")
-    ]
+    return [int(item["page_number"]) for item in pages if item.get("extraction_failed")]
 
 
 def extract_source_pages(filename: str, data: bytes) -> list[dict[str, Any]]:
@@ -521,12 +594,17 @@ def extract_source_pages(filename: str, data: bytes) -> list[dict[str, Any]]:
         pages = [_page(1, _extract_pptx(data))]
     elif extension == ".csv":
         rows = csv.reader(io.StringIO(data.decode("utf-8-sig", errors="replace")))
-        pages = [_page(1, "\n".join(" | ".join(cell.strip() for cell in row) for row in rows))]
+        pages = [
+            _page(
+                1, "\n".join(" | ".join(cell.strip() for cell in row) for row in rows)
+            )
+        ]
     elif extension in {".txt", ".md"}:
         pages = [_page(1, data.decode("utf-8-sig", errors="replace"))]
     else:
         from PIL import Image
         import numpy as np
+
         Image.MAX_IMAGE_PIXELS = settings.MAX_SOURCE_IMAGE_PIXELS
         image = Image.open(io.BytesIO(data)).convert("RGB")
         pages = [_page(1, _ocr_image(np.asarray(image)))]
@@ -545,7 +623,9 @@ def extract_source_pages(filename: str, data: bytes) -> list[dict[str, Any]]:
     # The page-count ceiling is enforced before extraction for PDFs (_reject_oversized_pdf);
     # this catches the other formats, whose page count is only known once parsed.
     if len(pages) > settings.MAX_SOURCE_PAGES:
-        raise SourceExtractionError(f"Documents are limited to {settings.MAX_SOURCE_PAGES} pages")
+        raise SourceExtractionError(
+            f"Documents are limited to {settings.MAX_SOURCE_PAGES} pages"
+        )
     if sum(len(str(item["text"])) for item in pages) > settings.MAX_SOURCE_TEXT_CHARS:
         raise SourceExtractionError("The extracted document text is too large")
     if not any(item["text"] for item in pages):
@@ -577,7 +657,12 @@ def extract_source_markdown(
     used the page extractor" previously covered three different situations and a
     systematically dead converter looked the same as one awkward document.
     """
-    fallback = _clean("\n\n".join(str(item["text"]) for item in (pages or extract_source_pages(filename, data))))
+    fallback = _clean(
+        "\n\n".join(
+            str(item["text"])
+            for item in (pages or extract_source_pages(filename, data))
+        )
+    )
     converted = ""
     converter_used = "markitdown"
     if Path(filename).suffix.lower() == ".pdf":
@@ -619,4 +704,6 @@ def extract_source_markdown(
 
 def extract_source(filename: str, data: bytes) -> str:
     """Return the legacy flattened representation used by article bodies."""
-    return _clean("\n\n".join(str(item["text"]) for item in extract_source_pages(filename, data)))
+    return _clean(
+        "\n\n".join(str(item["text"]) for item in extract_source_pages(filename, data))
+    )

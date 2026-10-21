@@ -30,7 +30,7 @@ Read the numbers with these limits in mind:
   chunks, ~220 characters each), not your documents. Queries are phrases from a chunk with the title
   words removed. This ranks configurations against each other. It is **not** a retrieval-quality
   score for your content, and it is easy: the top 10 already contains the answer 100% of the time.
-- The database numbers use **synthetic random vectors** in a `pgvector/pgvector:pg16` container on the
+- The database numbers use **synthetic random vectors** in a `pgvector/pgvector:0.8.2-pg18` container on the
   runner, not `db.t4g.small` and not your data.
 
 ## Results

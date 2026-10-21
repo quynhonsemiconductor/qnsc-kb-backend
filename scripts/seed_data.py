@@ -22,7 +22,6 @@ from src.domain.rbac import bootstrap_rbac
 from src.models.rbac import Role, user_roles
 from src.models.user import Department, User, user_departments
 
-
 SEED_USERS = (
     ("kb-admin", "Admin", "Engineering"),
     ("kb-ceo", "CEO", "Engineering"),
@@ -47,18 +46,26 @@ async def seed() -> None:
     company_domain = os.environ.get("SEED_COMPANY_DOMAIN", "acme.test").strip().lower()
     password = os.environ.get("SEED_TEST_PASSWORD", "").strip()
     if not password:
-        raise SystemExit("SEED_TEST_PASSWORD must be set; refusing to create seeded accounts without an explicit password")
+        raise SystemExit(
+            "SEED_TEST_PASSWORD must be set; refusing to create seeded accounts without an explicit password"
+        )
     if "@" in company_domain or not company_domain:
         raise SystemExit("SEED_COMPANY_DOMAIN must be a bare email domain")
 
     async with SessionLocal() as db:
-        for department_name in {item["department"] for item in seed_user_definitions(company_domain)}:
-            department = await db.scalar(select(Department).where(
-                Department.company_domain == company_domain,
-                Department.name == department_name,
-            ))
+        for department_name in {
+            item["department"] for item in seed_user_definitions(company_domain)
+        }:
+            department = await db.scalar(
+                select(Department).where(
+                    Department.company_domain == company_domain,
+                    Department.name == department_name,
+                )
+            )
             if department is None:
-                department = Department(company_domain=company_domain, name=department_name, active=True)
+                department = Department(
+                    company_domain=company_domain, name=department_name, active=True
+                )
                 db.add(department)
         await db.flush()
 
@@ -66,16 +73,20 @@ async def seed() -> None:
         # deterministic identities first so it provisions this tenant's
         # system roles before the association rows are written below.
         for definition in seed_user_definitions(company_domain):
-            user = await db.scalar(select(User).where(User.email == definition["email"]))
+            user = await db.scalar(
+                select(User).where(User.email == definition["email"])
+            )
             if user is None:
-                db.add(User(
-                    email=definition["email"],
-                    name=definition["name"],
-                    password_hash=get_password_hash(password),
-                    company_domain=company_domain,
-                    role=definition["role"],
-                    active=True,
-                ))
+                db.add(
+                    User(
+                        email=definition["email"],
+                        name=definition["name"],
+                        password_hash=get_password_hash(password),
+                        company_domain=company_domain,
+                        role=definition["role"],
+                        active=True,
+                    )
+                )
             else:
                 user.company_domain = company_domain
                 user.role = definition["role"]
@@ -90,20 +101,29 @@ async def seed() -> None:
         # tenants; the global Admin role has one legitimate producer, admin_bootstrap.
         roles = {
             role.name: role
-            for role in (await db.execute(
-                select(Role).where(Role.company_domain == company_domain)
-            )).scalars().all()
+            for role in (
+                await db.execute(
+                    select(Role).where(Role.company_domain == company_domain)
+                )
+            )
+            .scalars()
+            .all()
         }
         departments = {
             department.name: department
-            for department in (await db.execute(
-                select(Department).where(Department.company_domain == company_domain)
-            )).scalars().all()
+            for department in (
+                await db.execute(
+                    select(Department).where(
+                        Department.company_domain == company_domain
+                    )
+                )
+            )
+            .scalars()
+            .all()
         }
         for definition in seed_user_definitions(company_domain):
             user = await db.scalar(
-                select(User)
-                .where(User.email == definition["email"])
+                select(User).where(User.email == definition["email"])
             )
             if user is None:
                 user = User(
@@ -127,13 +147,26 @@ async def seed() -> None:
             user.dept = department.name
             role = roles.get(definition["role"])
             if role is None:
-                raise RuntimeError(f"RBAC bootstrap did not create role {definition['role']}")
-            await db.execute(delete(user_departments).where(user_departments.c.user_id == user.id))
-            await db.execute(insert(user_departments).values(user_id=user.id, department_id=department.id))
+                raise RuntimeError(
+                    f"RBAC bootstrap did not create role {definition['role']}"
+                )
+            await db.execute(
+                delete(user_departments).where(user_departments.c.user_id == user.id)
+            )
+            await db.execute(
+                insert(user_departments).values(
+                    user_id=user.id, department_id=department.id
+                )
+            )
             await db.execute(delete(user_roles).where(user_roles.c.user_id == user.id))
-            await db.execute(insert(user_roles).values(user_id=user.id, role_id=role.id))
+            await db.execute(
+                insert(user_roles).values(user_id=user.id, role_id=role.id)
+            )
         await db.commit()
-    print(f"Seeded {len(SEED_USERS)} users for {company_domain}: " + ", ".join(item[1] for item in SEED_USERS))
+    print(
+        f"Seeded {len(SEED_USERS)} users for {company_domain}: "
+        + ", ".join(item[1] for item in SEED_USERS)
+    )
 
 
 if __name__ == "__main__":

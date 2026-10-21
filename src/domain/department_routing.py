@@ -61,7 +61,13 @@ def _major_sections(title: str, markdown: str) -> list[dict[str, Any]]:
         current.append(line)
     if current and "\n".join(current).strip():
         sections.append("\n".join(current).strip())
-    if len(sections) < 2:
+    # Imported here for the same reason as in _llm_section_departments below.
+    from src.core.config import settings
+
+    if len(sections) < 2 or not settings.DOCUMENT_AUTO_SPLIT_ENABLED:
+        # One section: either the document has only one, or splitting is off and the whole
+        # document is routed as one (see DOCUMENT_AUTO_SPLIT_ENABLED). Everything below
+        # builds the candidate the same way either way.
         sections = [markdown.strip()]
 
     candidates: list[dict[str, Any]] = []
@@ -82,7 +88,8 @@ def _major_sections(title: str, markdown: str) -> list[dict[str, Any]]:
         candidates.append(
             {
                 "position": position,
-                "title": heading or (title if position == 1 else f"{title} — part {position}"),
+                "title": heading
+                or (title if position == 1 else f"{title} — part {position}"),
                 "body_md": body,
                 "source_start": start,
                 "source_end": end,
@@ -162,7 +169,9 @@ def route_document_candidates(
         {
             **section,
             **_assignment(
-                *suggest_departments(section["title"], section["body_md"], department_list)
+                *suggest_departments(
+                    section["title"], section["body_md"], department_list
+                )
             ),
         }
         for section in sections
@@ -253,7 +262,9 @@ def _finalize(
     # If no section can be linked to an existing department, keep the document
     # intact and offer one reviewable new-department suggestion instead.
     if not any(item["department_ids"] for item in routed):
-        ids, suggestions, proposed = suggest_departments(title, markdown, department_list)
+        ids, suggestions, proposed = suggest_departments(
+            title, markdown, department_list
+        )
         return [
             {
                 "position": 1,
@@ -445,7 +456,9 @@ async def _llm_section_departments(
     try:
         chosen = _parse_assignments(reply, len(sections), len(departments))
     except Exception:
-        _logger.warning("LLM department routing returned unreadable JSON", exc_info=True)
+        _logger.warning(
+            "LLM department routing returned unreadable JSON", exc_info=True
+        )
         return _RoutingOutcome(_ROUTING_UNREADABLE, {})
     return _RoutingOutcome(
         _ROUTING_ANSWERED,
@@ -489,7 +502,11 @@ async def route_document_candidates_llm(
             # The model named a real owner, so there is nothing left to propose creating.
             proposed = None
             existing = next(
-                (item for item in suggestions if item["department_id"] == department_id),
+                (
+                    item
+                    for item in suggestions
+                    if item["department_id"] == department_id
+                ),
                 None,
             )
             suggestions = [
@@ -501,10 +518,6 @@ async def route_document_candidates_llm(
                     # No keyword overlap is exactly why the LLM was worth asking.
                     "score": 0,
                 }
-            ] + [
-                item for item in suggestions if item["department_id"] != department_id
-            ]
-        routed.append(
-            {**section, **_assignment(ids, suggestions[:3], proposed)}
-        )
+            ] + [item for item in suggestions if item["department_id"] != department_id]
+        routed.append({**section, **_assignment(ids, suggestions[:3], proposed)})
     return _finalize(title, markdown, department_list, routed)

@@ -42,7 +42,6 @@ Create Date: 2026-09-01
 from alembic import op
 from sqlalchemy import inspect
 
-
 revision = "20260901_71"
 down_revision = "20260831_70"
 branch_labels = None

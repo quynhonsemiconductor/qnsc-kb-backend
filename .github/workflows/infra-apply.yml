@@ -1,5 +1,9 @@
 name: Infrastructure · Apply
 
+# What the run list shows. A dispatch shows its target and whether destructive changes are allowed, so a run that may
+# delete DNS or identity resources is never mistaken for an ordinary one in the list. A push or tag shows its ref.
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Infrastructure · Apply · dispatch · {0}{1}', inputs.target, inputs.allow_destructive && ' · ALLOW DESTRUCTIVE' || '') || format('Infrastructure · Apply · {0}', github.ref_name) }}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Gated the same way as the app deploys:
 #   push to main      → apply _shared + develop (auto)
@@ -28,6 +32,18 @@ on:
       - "infra/modules/**"
       - ".github/workflows/infra-apply.yml"
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Which environment to apply. Prod still requires the `production` environment's approval."
+        type: choice
+        default: develop
+        options:
+          - develop
+          - prod
+      allow_destructive:
+        description: "Let this run delete or replace DNS / identity resources (destructive-guard). Off by default; on a push the label `allow-dns-destroy` on the merged PR does the same."
+        type: boolean
+        default: false
 
 # Serialise by ENVIRONMENT, matching backend-deploy.yml: all prod (tag) applies share
 # one group, all develop (branch) applies share another, and the two run in PARALLEL.
@@ -37,7 +53,7 @@ on:
 # until a human noticed. The one thing that genuinely must not run twice at once is the
 # _shared state, which is fixed at that job instead (see its own concurrency below).
 concurrency:
-  group: infra-apply-${{ github.repository }}-${{ github.ref_type == 'tag' && 'prod' || 'develop' }}
+  group: infra-apply-${{ github.repository }}-${{ (github.ref_type == 'tag' || inputs.target == 'prod') && 'prod' || 'develop' }}
   cancel-in-progress: false # never cancel a running apply
 
 permissions:
@@ -49,14 +65,54 @@ env:
 
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
+  # Preflight: a prod apply needs a release tag. Refuse first, before anything applies.
+  #
+  # A prod apply pins the image to the ref name (TF_VAR_image_tag). Run from a branch, that pin would be a branch name
+  # and the image would be wrong. A dispatch from ANY ref with target=prod is the same risk, so the check reads the ref
+  # and the target together, matching apply-prod's `if`.
+  #
+  # This is a JOB that apply-shared depends on, not a step of apply-prod: a job with `environment: production` waits
+  # for its reviewer before any of its steps run, and apply-shared would already have applied. A refused run here
+  # applies nothing and asks nobody.
+  # ───────────────────────────────────────────────────────────────────────────
+  preflight:
+    name: Preflight (a prod apply needs a release tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Refuse a prod apply that is not for a release tag
+        env:
+          EVENT: ${{ github.event_name }}
+          TARGET: ${{ inputs.target }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Production is applied by a dispatch that asks for it, or by a tag push: exactly apply-prod's `if`.
+          prod=false
+          if [ "$EVENT" = workflow_dispatch ]; then
+            if [ "$TARGET" = prod ]; then prod=true; fi
+          elif [ "$REF_TYPE" = tag ]; then prod=true; fi
+          release=false
+          if [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then release=true; fi
+          if [ "$prod" = true ] && [ "$release" = false ]; then
+            echo "::error title=prod apply refused::This run would apply PRODUCTION from $REF_TYPE '$REF_NAME', which is not a release tag (vX.Y.Z), and would pin the prod image to the ref '$REF_NAME'. Nothing was applied. Run it from a release tag: gh workflow run infra-apply.yml --ref vX.Y.Z -f target=prod"
+            exit 1
+          fi
+          echo "ok: prod=$prod, event=$EVENT, ref=$REF_TYPE '$REF_NAME'"
+
+  # ───────────────────────────────────────────────────────────────────────────
   # Shared (ECR + OIDC roles) — always applies first, on both branch and tag runs.
   # ───────────────────────────────────────────────────────────────────────────
   apply-shared:
+    needs: preflight
     runs-on: ubuntu-latest
     environment: shared
     timeout-minutes: 60
     permissions:
       contents: read
+      pull-requests: read # destructive-guard reads the labels of the PR being merged
       id-token: write # mandatory for the OIDC AssumeRole
 
     # A release pushes main and the vX.Y.Z tag near-simultaneously, so both runs reach
@@ -74,7 +130,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: quynhonsemiconductor/ci/actions/setup-tofu-aws@v1
+      - uses: quynhonsemiconductor/ci/actions/setup-tofu-aws@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/qnsc-kb-github-infra-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -88,21 +144,37 @@ jobs:
         working-directory: infra/live/_shared
         run: tofu validate
 
-      - name: tofu apply
+      # Plan, then apply THAT PLAN. The old single apply planned and applied in one step, so nothing read the plan
+      # before it ran. _shared holds the CI OIDC roles (module.iam_oidc), which destructive-guard protects by address.
+      - name: tofu plan (saved as tfplan)
         working-directory: infra/live/_shared
-        run: tofu apply -input=false -auto-approve
+        run: tofu plan -input=false -out=tfplan
+
+      # Refuse a saved plan that DELETES or REPLACES a DNS, edge, mail-identity, certificate or key resource, or a CI
+      # OIDC role, unless this run is allowed to. See docs/runbooks/infra-destructive-guard.md.
+      - name: destructive-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/destructive-guard@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          working-directory: infra/live/_shared
+          plan-file: tfplan
+          dispatch-allow: ${{ inputs.allow_destructive }}
+
+      - name: tofu apply (the saved plan)
+        working-directory: infra/live/_shared
+        run: tofu apply -input=false tfplan
 
   # ───────────────────────────────────────────────────────────────────────────
   # Develop — only on a branch push to main (never on a tag).
   # ───────────────────────────────────────────────────────────────────────────
   apply-develop:
     needs: apply-shared
-    if: github.ref_type == 'branch'
+    if: github.ref_type == 'branch' && inputs.target != 'prod'
     runs-on: ubuntu-latest
     environment: develop # no approval gate
     timeout-minutes: 45
     permissions:
       contents: read
+      pull-requests: read # destructive-guard reads the labels of the PR being merged
       id-token: write # mandatory for the OIDC AssumeRole
 
     steps:
@@ -110,7 +182,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: quynhonsemiconductor/ci/actions/setup-tofu-aws@v1
+      - uses: quynhonsemiconductor/ci/actions/setup-tofu-aws@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/qnsc-kb-github-infra-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -124,20 +196,33 @@ jobs:
         working-directory: infra/live/develop
         run: tofu validate
 
-      - name: tofu apply
+      # Plan, then apply THAT PLAN. The old single apply planned and applied in one step, so nothing read the plan
+      # before it ran. Org-level variable, so it is NOT environment-scoped and resolves in the plan too, which keeps the
+      # plan honest about the count-gated Cloudflare resources.
+      - name: tofu plan (saved as tfplan)
         working-directory: infra/live/develop
-        run: tofu apply -input=false -auto-approve
+        run: tofu plan -input=false -out=tfplan
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          # Org-level variable, so it is NOT environment-scoped and resolves in the plan
-          # job too — which is what keeps plan and apply honest about the count-gated
-          # Cloudflare resources.
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Refuse a saved plan that DELETES or REPLACES a DNS, edge, mail-identity, certificate or key resource, or a CI
+      # OIDC role, unless this run is allowed to. See docs/runbooks/infra-destructive-guard.md.
+      - name: destructive-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/destructive-guard@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          working-directory: infra/live/develop
+          plan-file: tfplan
+          dispatch-allow: ${{ inputs.allow_destructive }}
+
+      - name: tofu apply (the saved plan)
+        working-directory: infra/live/develop
+        run: tofu apply -input=false tfplan
 
       # Short-lived installation token from the qnsc-automation App, so no long-lived PAT is
       # needed. Requires "Variables: read and write" on BOTH qnsc-kb repos — the
       # frontend's Pages project name is an output of THIS stack.
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: app-token
         if: ${{ vars.QNSC_AUTOMATION_APP_ID != '' }}
         continue-on-error: true
@@ -208,12 +293,13 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   apply-prod:
     needs: apply-shared
-    if: github.ref_type == 'tag'
+    if: (github.event_name != 'workflow_dispatch' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.target == 'prod')
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 45
     permissions:
       contents: read
+      pull-requests: read # destructive-guard reads the labels of the release PR
       id-token: write # mandatory for the OIDC AssumeRole
 
     steps:
@@ -221,7 +307,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: quynhonsemiconductor/ci/actions/setup-tofu-aws@v1
+      - uses: quynhonsemiconductor/ci/actions/setup-tofu-aws@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/qnsc-kb-github-infra-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -235,9 +321,11 @@ jobs:
         working-directory: infra/live/prod
         run: tofu validate
 
-      - name: tofu apply
+      # Plan, then apply THAT PLAN. The old single apply planned and applied in one step, so nothing read the plan
+      # before it ran: a destroy of a secret or database went through a tag with no stop.
+      - name: tofu plan (saved as tfplan)
         working-directory: infra/live/prod
-        run: tofu apply -input=false -auto-approve
+        run: tofu plan -input=false -out=tfplan
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -245,7 +333,30 @@ jobs:
           # infra apply never resets the task definition to :latest.
           TF_VAR_image_tag: ${{ github.ref_name }}
 
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+      # TASK 0.3 / §17b: refuse a prod plan that destroys or replaces a database, secret, parameter group or target
+      # group unless the stack's .allow-data-destroy names that address with a reason. It reads the saved plan, so it
+      # judges exactly what the next step applies.
+      - name: plan-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/plan-guard@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          plan-file: tfplan
+          working-directory: infra/live/prod
+
+      # Refuse a saved plan that DELETES or REPLACES a DNS, edge, mail-identity, certificate or key resource (the
+      # 2026-10-09 outage) unless this run is allowed to: the PR being merged carries the label `allow-dns-destroy`.
+      # Reads the labels of the PR behind the tag, so it needs `pull-requests: read` on this job.
+      - name: destructive-guard (tfplan)
+        uses: quynhonsemiconductor/ci/actions/destructive-guard@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          working-directory: infra/live/prod
+          plan-file: tfplan
+          dispatch-allow: ${{ inputs.allow_destructive }}
+
+      - name: tofu apply (the saved plan)
+        working-directory: infra/live/prod
+        run: tofu apply -input=false tfplan
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: app-token
         if: ${{ vars.QNSC_AUTOMATION_APP_ID != '' }}
         continue-on-error: true

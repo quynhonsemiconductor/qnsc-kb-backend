@@ -49,7 +49,7 @@ class FakeGovernanceRepository:
         self.audits.append(audit)
         return audit
 
-    async def list_drafts(self, status=None, company_domain=None, dept=None, depts=None, assigned_approver_id=None):
+    def _scoped(self, status=None, company_domain=None, dept=None, depts=None, assigned_approver_id=None):
         self.calls.append({
             "status": status,
             "company_domain": company_domain,
@@ -61,6 +61,26 @@ class FakeGovernanceRepository:
         if assigned_approver_id:
             drafts = [item for item in drafts if item.assigned_approver_id in {None, assigned_approver_id}]
         return drafts
+
+    # Mirrors the real signature, keyword-only paging included: a fake that silently
+    # ignored `limit`/`offset` would let a paging bug through every test here.
+    # `search` is accepted for signature parity only: this is a single-draft stub whose job
+    # is to record WHICH SCOPE the service passes, so it does not filter on text. Search
+    # matching is tested against a filtering double in test_pending_draft_pagination.py.
+    async def list_drafts(
+        self, status=None, company_domain=None, dept=None, depts=None,
+        assigned_approver_id=None, *, limit=None, offset=0, search=None,
+    ):
+        drafts = self._scoped(status, company_domain, dept, depts, assigned_approver_id)
+        self.calls[-1].update({"limit": limit, "offset": offset})
+        window = drafts[offset:]
+        return window if limit is None else window[:limit]
+
+    async def count_drafts(
+        self, status=None, company_domain=None, dept=None, depts=None,
+        assigned_approver_id=None, *, search=None,
+    ):
+        return len(self._scoped(status, company_domain, dept, depts, assigned_approver_id))
 
 
 class FakeArticleRepository:

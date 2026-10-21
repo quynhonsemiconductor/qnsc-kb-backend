@@ -5,6 +5,7 @@ Entities and relationships accumulate ACROSS every published article a tenant ha
 -- the same distinction `TagCatalog` draws between a tenant's tag vocabulary and any one
 article's tags.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -53,7 +54,9 @@ async def _get_or_create_entity(
     return entity
 
 
-async def apply_extraction(db: AsyncSession, article: Article, result: ExtractionResult) -> int:
+async def apply_extraction(
+    db: AsyncSession, article: Article, result: ExtractionResult
+) -> int:
     """Merge one document's extraction into the tenant graph. Returns entities touched.
 
     Callers wrap this in the same try/except/rollback shape `governance.py::approve_draft`
@@ -66,7 +69,11 @@ async def apply_extraction(db: AsyncSession, article: Article, result: Extractio
     entities_by_key: dict[str, GraphEntity] = {}
     for extracted in result.entities:
         entity = await _get_or_create_entity(
-            db, article.company_domain, extracted.name, extracted.type, extracted.description
+            db,
+            article.company_domain,
+            extracted.name,
+            extracted.type,
+            extracted.description,
         )
         entities_by_key[normalize_entity_name(extracted.name)] = entity
 
@@ -141,11 +148,14 @@ def _serialize_relationship(edge: GraphRelationship) -> dict[str, Any]:
     }
 
 
-async def entity_exists(db: AsyncSession, company_domain: str, entity_id: uuid.UUID) -> bool:
+async def entity_exists(
+    db: AsyncSession, company_domain: str, entity_id: uuid.UUID
+) -> bool:
     return (
         await db.scalar(
             select(GraphEntity.id).where(
-                GraphEntity.id == entity_id, GraphEntity.company_domain == company_domain
+                GraphEntity.id == entity_id,
+                GraphEntity.company_domain == company_domain,
             )
         )
     ) is not None
@@ -177,46 +187,65 @@ async def get_entity_detail(
         .all()
     )
     neighbor_ids = {
-        edge.target_entity_id if edge.source_entity_id == entity_id else edge.source_entity_id
+        (
+            edge.target_entity_id
+            if edge.source_entity_id == entity_id
+            else edge.source_entity_id
+        )
         for edge in edges
     }
-    neighbors = {
-        neighbor.id: neighbor
-        for neighbor in (
-            (
-                await db.execute(
-                    select(GraphEntity).where(GraphEntity.id.in_(neighbor_ids))
+    neighbors = (
+        {
+            neighbor.id: neighbor
+            for neighbor in (
+                (
+                    await db.execute(
+                        select(GraphEntity).where(GraphEntity.id.in_(neighbor_ids))
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-    } if neighbor_ids else {}
+        }
+        if neighbor_ids
+        else {}
+    )
 
     articles = (
-        (
-            await db.execute(
-                select(Article.id, Article.title, Article.status)
-                .join(ArticleEntityMention, ArticleEntityMention.article_id == Article.id)
-                .where(ArticleEntityMention.entity_id == entity_id)
-                .order_by(Article.title)
-            )
+        await db.execute(
+            select(Article.id, Article.title, Article.status)
+            .join(ArticleEntityMention, ArticleEntityMention.article_id == Article.id)
+            .where(ArticleEntityMention.entity_id == entity_id)
+            .order_by(Article.title)
         )
-        .all()
-    )
+    ).all()
 
     return {
         **_serialize_entity(entity),
         "relationships": [
             {
                 **_serialize_relationship(edge),
-                "other_entity": _serialize_entity(neighbors[
-                    edge.target_entity_id if edge.source_entity_id == entity_id else edge.source_entity_id
-                ])
-                if (edge.target_entity_id if edge.source_entity_id == entity_id else edge.source_entity_id)
-                in neighbors
-                else None,
-                "direction": "outgoing" if edge.source_entity_id == entity_id else "incoming",
+                "other_entity": (
+                    _serialize_entity(
+                        neighbors[
+                            (
+                                edge.target_entity_id
+                                if edge.source_entity_id == entity_id
+                                else edge.source_entity_id
+                            )
+                        ]
+                    )
+                    if (
+                        edge.target_entity_id
+                        if edge.source_entity_id == entity_id
+                        else edge.source_entity_id
+                    )
+                    in neighbors
+                    else None
+                ),
+                "direction": (
+                    "outgoing" if edge.source_entity_id == entity_id else "incoming"
+                ),
             }
             for edge in edges
         ],
@@ -267,11 +296,7 @@ async def get_entity_neighbors(
         frontier = next_frontier
 
     entities = (
-        (
-            await db.execute(
-                select(GraphEntity).where(GraphEntity.id.in_(visited_ids))
-            )
-        )
+        (await db.execute(select(GraphEntity).where(GraphEntity.id.in_(visited_ids))))
         .scalars()
         .all()
     )
@@ -294,7 +319,13 @@ async def list_entities(
     if entity_type:
         stmt = stmt.where(GraphEntity.entity_type == entity_type)
     if query:
-        stmt = stmt.where(GraphEntity.normalized_name.icontains(normalize_entity_name(query)))
-    stmt = stmt.order_by(GraphEntity.mention_count.desc(), GraphEntity.name).limit(limit).offset(offset)
+        stmt = stmt.where(
+            GraphEntity.normalized_name.icontains(normalize_entity_name(query))
+        )
+    stmt = (
+        stmt.order_by(GraphEntity.mention_count.desc(), GraphEntity.name)
+        .limit(limit)
+        .offset(offset)
+    )
     rows = (await db.execute(stmt)).scalars().all()
     return [_serialize_entity(entity) for entity in rows]

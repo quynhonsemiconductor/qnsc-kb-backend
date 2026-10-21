@@ -17,6 +17,7 @@ Revises: 20260829_65
 Create Date: 2026-08-29
 
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
@@ -32,7 +33,9 @@ TABLE = "external_acl_principals"
 def upgrade() -> None:
     columns = {item["name"] for item in inspect(op.get_bind()).get_columns(TABLE)}
     if "principal_name" not in columns:
-        op.add_column(TABLE, sa.Column("principal_name", sa.String(length=255), nullable=True))
+        op.add_column(
+            TABLE, sa.Column("principal_name", sa.String(length=255), nullable=True)
+        )
 
 
 def downgrade() -> None:

@@ -2,7 +2,8 @@ import uuid
 import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, cast
 from fastapi import (
     APIRouter,
     Body,
@@ -20,6 +21,7 @@ import jwt
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import (
+    loaded_user,
     get_db,
     get_current_user,
     require_permission,
@@ -50,9 +52,9 @@ from src.domain.departments import (
     resolve_active_department,
     normalize_department_name,
 )
-from src.core.rate_limit import auth_rate_limiter
+from src.core.rate_limit import auth_rate_limiter, client_ip_from_request
 from src.domain import entra_auth
-from sqlalchemy import delete, select, func, update
+from sqlalchemy import Table, delete, select, func, update
 from sqlalchemy.orm import selectinload
 import structlog
 
@@ -389,7 +391,9 @@ async def _set_primary_role(db: AsyncSession, user: Any, name: str) -> None:
     user.role = name
 
 
-def _validate_role_assignment_authority(current_user: Any, roles: list[Role]) -> None:
+def _validate_role_assignment_authority(
+    current_user: Any, roles: Sequence[Role]
+) -> None:
     """Company managers must never grant a global role or broader permissions."""
     if any(
         role.name.casefold() == LEGACY_DEPARTMENT_OWNER_ROLE.casefold()
@@ -465,7 +469,8 @@ def _refresh_subject_from_token(refresh_value: str) -> str:
 async def _revoke_refresh_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
     """Make every refresh token unusable after a sensitive account change."""
     await db.execute(
-        RefreshSession.__table__.update()
+        cast(Table, RefreshSession.__table__)
+        .update()
         .where(RefreshSession.user_id == user_id, RefreshSession.revoked_at.is_(None))
         .values(revoked_at=datetime.utcnow())
     )
@@ -510,7 +515,11 @@ async def list_departments(
             "contact_email": item.contact_email,
             "owner": next(
                 (
-                    {"id": assignment.user.id, "name": assignment.user.name, "email": assignment.user.email}
+                    {
+                        "id": assignment.user.id,
+                        "name": assignment.user.name,
+                        "email": assignment.user.email,
+                    }
                     for assignment in item.managers
                     if assignment.active and assignment.user and assignment.user.active
                 ),
@@ -551,16 +560,26 @@ async def list_invitations(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    rows = (await db.execute(
-        select(Invitation)
-        .where(Invitation.company_domain == current_user.company_domain)
-        .order_by(Invitation.created_at.desc())
-        .limit(500)
-    )).scalars().all()
+    rows = (
+        (
+            await db.execute(
+                select(Invitation)
+                .where(Invitation.company_domain == current_user.company_domain)
+                .order_by(Invitation.created_at.desc())
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return [_invitation_response(item) for item in rows]
 
 
-@router.post("/invitations", response_model=InvitationResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/invitations",
+    response_model=InvitationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_invitation(
     payload: InvitationCreate,
     current_user: Any = Depends(require_permission("user.manage")),
@@ -568,8 +587,15 @@ async def create_invitation(
 ) -> Any:
     email = str(payload.email).lower()
     domain = email.rsplit("@", 1)[-1]
-    if domain != current_user.company_domain and not AuthorizationService.has_permission(current_user, "user.manage", requested_scope="global"):
-        raise HTTPException(status_code=403, detail="Employee email must remain in the company domain")
+    if (
+        domain != current_user.company_domain
+        and not AuthorizationService.has_permission(
+            current_user, "user.manage", requested_scope="global"
+        )
+    ):
+        raise HTTPException(
+            status_code=403, detail="Employee email must remain in the company domain"
+        )
     if payload.role not in MANAGED_PRIMARY_ROLES:
         raise HTTPException(status_code=422, detail="Unsupported employee role")
     if payload.role in {"Admin", "CEO"} and not _is_global_user_manager(current_user):
@@ -582,9 +608,13 @@ async def create_invitation(
             status_code=403,
             detail="Only global user managers can assign global or executive roles",
         )
-    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    existing = (
+        await db.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
     if existing and existing.active:
-        raise HTTPException(status_code=409, detail="An active account already exists for this email")
+        raise HTTPException(
+            status_code=409, detail="An active account already exists for this email"
+        )
     if is_reset_operator(email):
         # Same reasoning as the rename guard in update_user, but this is the wider hole:
         # an invitation becomes an account whose password the ACCEPTER chooses, so
@@ -597,15 +627,24 @@ async def create_invitation(
         )
     audience_ids = [str(item) for item in (payload.audience_ids or [])]
     if audience_ids:
-        count = int((await db.execute(
-            select(func.count()).select_from(Department).where(
-                Department.id.in_(payload.audience_ids),
-                Department.company_domain == current_user.company_domain,
-                Department.active.is_(True),
-            )
-        )).scalar_one())
+        count = int(
+            (
+                await db.execute(
+                    select(func.count())
+                    .select_from(Department)
+                    .where(
+                        Department.id.in_(payload.audience_ids or []),
+                        Department.company_domain == current_user.company_domain,
+                        Department.active.is_(True),
+                    )
+                )
+            ).scalar_one()
+        )
         if count != len(set(audience_ids)):
-            raise HTTPException(status_code=422, detail="One or more audiences are not available in this company")
+            raise HTTPException(
+                status_code=422,
+                detail="One or more audiences are not available in this company",
+            )
     raw_token = secrets.token_urlsafe(32)
     invitation = Invitation(
         email=email,
@@ -618,21 +657,29 @@ async def create_invitation(
         invited_by=current_user.id,
     )
     db.add(invitation)
-    db.add(NotificationQueue(
-        # Use the inviter as the queue owner for pre-account email delivery;
-        # the actual destination is the payload address.  This also keeps the
-        # existing recipient-scoped notification RLS policy valid.
-        recipient_user_id=current_user.id,
-        type="email",
-        payload={
-            "to": email,
-            "subject": "Your QNSC Knowledge Base invitation",
-            "text": f"You have been invited to QNSC Knowledge Base. Sign in with Microsoft within 7 days: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
-        },
-    ))
+    db.add(
+        NotificationQueue(
+            # Use the inviter as the queue owner for pre-account email delivery;
+            # the actual destination is the payload address.  This also keeps the
+            # existing recipient-scoped notification RLS policy valid.
+            recipient_user_id=current_user.id,
+            type="email",
+            payload={
+                "to": email,
+                "subject": "Your QNSC Knowledge Base invitation",
+                "text": f"You have been invited to QNSC Knowledge Base. Sign in with Microsoft within 7 days: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
+            },
+        )
+    )
     await db.commit()
     await db.refresh(invitation)
-    await AuditRepository(db).record(current_user.id, "invitation_create", "invitation", str(invitation.id), detail={"email": email, "role": payload.role})
+    await AuditRepository(db).record(
+        current_user.id,
+        "invitation_create",
+        "invitation",
+        str(invitation.id),
+        detail={"email": email, "role": payload.role},
+    )
     return _invitation_response(invitation)
 
 
@@ -642,17 +689,38 @@ async def resend_invitation(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    item = (await db.execute(select(Invitation).where(Invitation.id == invitation_id, Invitation.company_domain == current_user.company_domain))).scalar_one_or_none()
+    item = (
+        await db.execute(
+            select(Invitation).where(
+                Invitation.id == invitation_id,
+                Invitation.company_domain == current_user.company_domain,
+            )
+        )
+    ).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Invitation not found")
     if item.used_at or item.revoked_at:
-        raise HTTPException(status_code=409, detail="This invitation can no longer be resent")
+        raise HTTPException(
+            status_code=409, detail="This invitation can no longer be resent"
+        )
     raw_token = secrets.token_urlsafe(32)
     item.token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     item.expires_at = datetime.utcnow() + timedelta(days=7)
-    db.add(NotificationQueue(recipient_user_id=current_user.id, type="email", payload={"to": item.email, "subject": "Your QNSC Knowledge Base invitation", "text": f"Your invitation was renewed. Sign in with Microsoft: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}"}))
+    db.add(
+        NotificationQueue(
+            recipient_user_id=current_user.id,
+            type="email",
+            payload={
+                "to": item.email,
+                "subject": "Your QNSC Knowledge Base invitation",
+                "text": f"Your invitation was renewed. Sign in with Microsoft: {settings.FRONTEND_URL.rstrip('/')}/login?invite={raw_token}",
+            },
+        )
+    )
     await db.commit()
-    await AuditRepository(db).record(current_user.id, "invitation_resend", "invitation", str(item.id))
+    await AuditRepository(db).record(
+        current_user.id, "invitation_resend", "invitation", str(item.id)
+    )
     return _invitation_response(item)
 
 
@@ -662,13 +730,22 @@ async def revoke_invitation(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    item = (await db.execute(select(Invitation).where(Invitation.id == invitation_id, Invitation.company_domain == current_user.company_domain))).scalar_one_or_none()
+    item = (
+        await db.execute(
+            select(Invitation).where(
+                Invitation.id == invitation_id,
+                Invitation.company_domain == current_user.company_domain,
+            )
+        )
+    ).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Invitation not found")
     if not item.used_at:
         item.revoked_at = datetime.utcnow()
     await db.commit()
-    await AuditRepository(db).record(current_user.id, "invitation_revoke", "invitation", str(item.id))
+    await AuditRepository(db).record(
+        current_user.id, "invitation_revoke", "invitation", str(item.id)
+    )
     return _invitation_response(item)
 
 
@@ -776,7 +853,7 @@ async def preview_invitation(
     inviter already sent to that address.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     allowed, retry_after = await auth_rate_limiter.allow(f"invite-preview:{client_ip}")
     if not allowed:
         raise HTTPException(
@@ -796,7 +873,11 @@ async def preview_invitation(
     }
 
 
-@router.post("/invitations/accept", response_model=TokenResponse, response_model_exclude_none=True)
+@router.post(
+    "/invitations/accept",
+    response_model=TokenResponse,
+    response_model_exclude_none=True,
+)
 async def accept_invitation(
     request: Request,
     response: Response,
@@ -814,7 +895,7 @@ async def accept_invitation(
     straight in the app rather than bouncing them to a second sign-in.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     allowed, retry_after = await auth_rate_limiter.allow(f"invite-accept:{client_ip}")
     if not allowed:
         raise HTTPException(
@@ -858,13 +939,19 @@ async def accept_invitation(
 
     if item.audience_ids:
         memberships = (
-            await db.execute(
-                select(Department).where(
-                    Department.id.in_([uuid.UUID(value) for value in item.audience_ids]),
-                    Department.company_domain == user.company_domain,
+            (
+                await db.execute(
+                    select(Department).where(
+                        Department.id.in_(
+                            [uuid.UUID(value) for value in item.audience_ids]
+                        ),
+                        Department.company_domain == user.company_domain,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         user.departments = list(memberships)
         if memberships and not user.dept:
             user.dept = memberships[0].name
@@ -918,7 +1005,7 @@ async def forgot_password(
     addresses.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     email = str(payload.email).strip().lower()
     address_allowed, address_retry = await auth_rate_limiter.allow(f"forgot:{email}")
     ip_allowed, ip_retry = await auth_rate_limiter.allow(f"forgot-ip:{client_ip}")
@@ -995,7 +1082,7 @@ async def reset_password(
     does here.
     """
     _reject_cross_site_auth_request(request)
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     allowed, retry_after = await auth_rate_limiter.allow(f"reset:{client_ip}")
     if not allowed:
         raise HTTPException(
@@ -1016,7 +1103,9 @@ async def reset_password(
     if grant is None:
         raise HTTPException(status_code=404, detail="This reset link is not valid")
     if grant.used_at:
-        raise HTTPException(status_code=410, detail="This reset link has already been used")
+        raise HTTPException(
+            status_code=410, detail="This reset link has already been used"
+        )
     if grant.expires_at <= datetime.utcnow():
         raise HTTPException(status_code=410, detail="This reset link has expired")
 
@@ -1032,7 +1121,8 @@ async def reset_password(
     # Any other outstanding grant for this user is now void too, or a second link from the
     # same mailbox would still work after the password changed.
     await db.execute(
-        PasswordResetToken.__table__.update()
+        cast(Table, PasswordResetToken.__table__)
+        .update()
         .where(
             PasswordResetToken.user_id == user.id,
             PasswordResetToken.used_at.is_(None),
@@ -1041,9 +1131,7 @@ async def reset_password(
     )
     await _revoke_refresh_sessions(db, user.id)
     await db.commit()
-    await AuditRepository(db).record(
-        user.id, "password_reset", "user", str(user.id)
-    )
+    await AuditRepository(db).record(user.id, "password_reset", "user", str(user.id))
     return {"status": "reset"}
 
 
@@ -1140,7 +1228,9 @@ async def create_department(
         name=name,
         description=payload.description.strip(),
         active=True,
-        contact_email=str(payload.contact_email).lower() if payload.contact_email else None,
+        contact_email=(
+            str(payload.contact_email).lower() if payload.contact_email else None
+        ),
     )
     db.add(item)
     await db.commit()
@@ -1179,7 +1269,12 @@ async def update_department(
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     item = await _department_for_management(db, department_id, current_user)
-    if payload.name is None and payload.description is None and payload.active is None and payload.contact_email is None:
+    if (
+        payload.name is None
+        and payload.description is None
+        and payload.active is None
+        and payload.contact_email is None
+    ):
         raise HTTPException(
             status_code=422, detail="Provide a new name, description, or active status"
         )
@@ -1390,7 +1485,8 @@ async def replace_department_members(
     )
     if len(users) != len(unique_ids):
         raise HTTPException(
-            status_code=422, detail="Every department member must be in the same company"
+            status_code=422,
+            detail="Every department member must be in the same company",
         )
     await db.refresh(department, attribute_names=["members"])
     department.members = list(users)
@@ -1411,7 +1507,12 @@ async def list_department_members(
     department = await _department_for_management(db, department_id, current_user)
     await db.refresh(department, attribute_names=["members"])
     return [
-        {"id": str(user.id), "name": user.name, "email": user.email, "active": user.active}
+        {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "active": user.active,
+        }
         for user in sorted(
             department.members, key=lambda item: (item.name.lower(), item.email.lower())
         )
@@ -1424,6 +1525,13 @@ async def create_managed_user(
     current_user: Any = Depends(require_permission("user.manage")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    # The schema makes password optional, but register_user needs one: without this check a
+    # create with no password reached get_password_hash(None) and failed with a 500.
+    if user_in.password is None:
+        raise HTTPException(
+            status_code=422,
+            detail="A password is required to create a user",
+        )
     domain = str(user_in.email).lower().rsplit("@", 1)[-1]
     can_manage_globally = _is_global_user_manager(current_user)
     if not can_manage_globally and domain != current_user.company_domain:
@@ -1513,7 +1621,7 @@ async def create_managed_user(
         allow_privileged_role=True,
     )
     await bootstrap_rbac(db)
-    user = await UserRepository(db).get_by_id(user.id)
+    user = loaded_user(await UserRepository(db).get_by_id(user.id))
     user.departments = memberships
     user.dept = department.name if department else None
     if requested_roles is not None:
@@ -1540,7 +1648,7 @@ async def create_managed_user(
     # _user_response walks user.roles -> role.permissions, which then lazy-loads inside an
     # async request and raises MissingGreenlet. The 500 is reported after the user has
     # already been committed, so it reads as "creation failed" when the row exists.
-    user = await UserRepository(db).get_by_id(user.id)
+    user = loaded_user(await UserRepository(db).get_by_id(user.id))
     await AuditRepository(db).record(
         current_user.id, "user_create", "user", str(user.id)
     )
@@ -1739,7 +1847,10 @@ async def update_managed_user(
                 )
             await db.execute(
                 update(PendingDraft)
-                .where(PendingDraft.assigned_approver_id == user.id, PendingDraft.status == "pending")
+                .where(
+                    PendingDraft.assigned_approver_id == user.id,
+                    PendingDraft.status == "pending",
+                )
                 .values(assigned_approver_id=None, assigned_by=None, assigned_at=None)
             )
         user.active = user_in.active
@@ -1791,7 +1902,10 @@ async def deactivate_user(
     user.active = False
     await db.execute(
         update(PendingDraft)
-        .where(PendingDraft.assigned_approver_id == user.id, PendingDraft.status == "pending")
+        .where(
+            PendingDraft.assigned_approver_id == user.id,
+            PendingDraft.status == "pending",
+        )
         .values(assigned_approver_id=None, assigned_by=None, assigned_at=None)
     )
     await _revoke_refresh_sessions(db, user.id)
@@ -2270,7 +2384,7 @@ async def replace_user_roles(
     # Re-FETCH, not refresh() — same reason as create_managed_user above: refresh discards
     # the eager loads, and _user_response then lazy-loads user.roles inside an async
     # request and raises MissingGreenlet.
-    user = await UserRepository(db).get_by_id(user.id)
+    user = loaded_user(await UserRepository(db).get_by_id(user.id))
     await AuditRepository(db).record(
         current_user.id, "user_roles_update", "user", str(user.id)
     )
@@ -2286,7 +2400,7 @@ async def login(
 ) -> Any:
     _reject_cross_site_auth_request(request)
     # OAuth2 request form uses username as email field
-    client_ip = request.client.host if request and request.client else "unknown"
+    client_ip = client_ip_from_request(request)
     username = form_data.username.strip().lower()
     if "@" not in username:
         raise HTTPException(
@@ -2315,7 +2429,7 @@ async def login(
     )
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await user_repo.get_by_id(user.id)
+        user = loaded_user(await user_repo.get_by_id(user.id))
     token = auth_service.create_token(user)
     refresh = auth_service.create_refresh_token(user)
     await _store_refresh_session(db, user, refresh)
@@ -2328,12 +2442,27 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+def _auth_cookie_names() -> tuple[str, str]:
+    """The auth pair's cookie names: `__Host-`-prefixed when deployed, plain locally.
+
+    The `__Host-` prefix is honoured only with the `Secure` attribute (plus `Path=/`
+    and no `Domain`), and local development serves plain HTTP, where a prefixed
+    cookie would be dropped — so the plain names stay local-only. Every deployed
+    environment gets the host-locked names and `Secure`, dev and prod alike
+    (ONPREM-PLAN §7.2). Readers accept both names for one deploy cycle.
+    """
+    if settings.is_development_environment:
+        return "access_token", "refresh_token"
+    return "__Host-access_token", "__Host-refresh_token"
+
+
 def _set_auth_cookies(
     response: Response, access_token: str, refresh_token: str
 ) -> None:
-    secure = settings.ENVIRONMENT.lower() in {"production", "prod"}
+    access_name, refresh_name = _auth_cookie_names()
+    secure = not settings.is_development_environment
     response.set_cookie(
-        "access_token",
+        access_name,
         access_token,
         httponly=True,
         secure=secure,
@@ -2342,18 +2471,35 @@ def _set_auth_cookies(
         path="/",
     )
     response.set_cookie(
-        "refresh_token",
+        refresh_name,
         refresh_token,
         httponly=True,
         secure=secure,
         samesite="lax",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path=f"{settings.API_V1_STR}/auth",
+        path="/",
     )
+    if access_name != "access_token":
+        # One rename cycle: a browser can still carry the pre-rename plain cookies
+        # (the refresh one at its old /api/v1/auth path). They must not survive the
+        # next issuance — the plain name is not host-locked, and the plain refresh
+        # session behind them is already revoked, so leaving them set only risks
+        # the stale value winning a later read.
+        response.delete_cookie("access_token", path="/")
+        response.delete_cookie("refresh_token", path="/")
+        response.delete_cookie("refresh_token", path=f"{settings.API_V1_STR}/auth")
 
 
 def _clear_auth_cookies(response: Response) -> None:
+    access_name, refresh_name = _auth_cookie_names()
+    response.delete_cookie(access_name, path="/")
+    response.delete_cookie(refresh_name, path="/")
+    # Both generations, whatever this environment sets today: a browser can still
+    # hold the plain names from before the `__Host-` rename, and the refresh cookie
+    # used to live at the narrower `/api/v1/auth` path, which only its own
+    # path-scoped delete clears.
     response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
     response.delete_cookie("refresh_token", path=f"{settings.API_V1_STR}/auth")
 
 
@@ -2363,11 +2509,22 @@ async def refresh_token(
     response: Response,
     req: RefreshRequest | None = None,
     refresh_token_cookie: str | None = Cookie(default=None, alias="refresh_token"),
+    host_refresh_token_cookie: str | None = Cookie(
+        default=None, alias="__Host-refresh_token"
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     _reject_cross_site_auth_request(request)
     refresh_value = (
-        req.refresh_token if req and req.refresh_token else refresh_token_cookie
+        req.refresh_token
+        if req and req.refresh_token
+        else (
+            host_refresh_token_cookie
+            # Same rule as the access cookie: the plain name is dev-only. A deployed
+            # request with only a plain cookie gets no session from it — a sibling
+            # host could have planted it.
+            or (refresh_token_cookie if settings.is_development_environment else None)
+        )
     )
     if not refresh_value:
         raise HTTPException(status_code=401, detail="Refresh token is required")
@@ -2397,7 +2554,7 @@ async def refresh_token(
         raise HTTPException(status_code=401, detail="Account is unavailable")
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
+        user = loaded_user(await UserRepository(db).get_by_id(user.id))
     await set_database_context(
         db,
         user.company_domain,
@@ -2428,11 +2585,22 @@ async def logout(
     response: Response,
     req: RefreshRequest | None = None,
     refresh_token_cookie: str | None = Cookie(default=None, alias="refresh_token"),
+    host_refresh_token_cookie: str | None = Cookie(
+        default=None, alias="__Host-refresh_token"
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     _reject_cross_site_auth_request(request)
     refresh_value = (
-        req.refresh_token if req and req.refresh_token else refresh_token_cookie
+        req.refresh_token
+        if req and req.refresh_token
+        else (
+            host_refresh_token_cookie
+            # Same rule as the access cookie: the plain name is dev-only. A deployed
+            # request with only a plain cookie gets no session from it — a sibling
+            # host could have planted it.
+            or (refresh_token_cookie if settings.is_development_environment else None)
+        )
     )
     session = None
     if refresh_value:
@@ -2543,15 +2711,23 @@ async def entra_callback(
     )
     invitation = None
     if user is None:
-        invitation = (await db.execute(
-            select(Invitation).where(
-                Invitation.email == email,
-                Invitation.company_domain == email.rsplit("@", 1)[-1],
-                Invitation.used_at.is_(None),
-                Invitation.revoked_at.is_(None),
-                Invitation.expires_at > datetime.utcnow(),
-            ).order_by(Invitation.created_at.desc())
-        )).scalars().first()
+        invitation = (
+            (
+                await db.execute(
+                    select(Invitation)
+                    .where(
+                        Invitation.email == email,
+                        Invitation.company_domain == email.rsplit("@", 1)[-1],
+                        Invitation.used_at.is_(None),
+                        Invitation.revoked_at.is_(None),
+                        Invitation.expires_at > datetime.utcnow(),
+                    )
+                    .order_by(Invitation.created_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
     if user is None:
         if invitation is None:
             raise HTTPException(
@@ -2561,7 +2737,8 @@ async def entra_callback(
         domain = invitation.company_domain
         user = User(
             email=email,
-            name=invitation.name or str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
+            name=invitation.name
+            or str(claims.get("name") or email.rsplit("@", 1)[0]).strip()[:255],
             password_hash=get_password_hash(secrets.token_urlsafe(32)),
             company_domain=domain,
             role=invitation.role,
@@ -2570,18 +2747,37 @@ async def entra_callback(
         db.add(user)
         await db.flush()
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
-        if user is None:
+        provisioned = await UserRepository(db).get_by_id(user.id)
+        if provisioned is None:
             raise HTTPException(
                 status_code=500, detail="Could not provision the Microsoft account"
             )
+        user = provisioned
         await AuditRepository(db).record(
-            user.id, "entra_user_provision", "user", str(user.id), outcome="success", detail={"invitation_id": str(invitation.id)}
+            user.id,
+            "entra_user_provision",
+            "user",
+            str(user.id),
+            outcome="success",
+            detail={"invitation_id": str(invitation.id)},
         )
         invitation.used_at = datetime.utcnow()
         invitation.accepted_user_id = user.id
         if invitation.audience_ids:
-            memberships = (await db.execute(select(Department).where(Department.id.in_([uuid.UUID(item) for item in invitation.audience_ids]), Department.company_domain == user.company_domain))).scalars().all()
+            memberships = (
+                (
+                    await db.execute(
+                        select(Department).where(
+                            Department.id.in_(
+                                [uuid.UUID(item) for item in invitation.audience_ids]
+                            ),
+                            Department.company_domain == user.company_domain,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             user.departments = list(memberships)
             if memberships:
                 user.dept = memberships[0].name
@@ -2611,7 +2807,7 @@ async def entra_callback(
         )
     if not user.roles:
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_id(user.id)
+        user = loaded_user(await UserRepository(db).get_by_id(user.id))
     service = AuthService(UserRepository(db))
     access = service.create_token(user)
     refresh = service.create_refresh_token(user)

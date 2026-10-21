@@ -24,6 +24,7 @@ Three terminal outcomes, and only one of them holds the probe:
 
 Liveness (`/health/live`, `/livez`) never reads this. It must not touch a dependency.
 """
+
 from __future__ import annotations
 
 import time

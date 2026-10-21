@@ -1,14 +1,43 @@
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote, urlparse
 import re
-
 
 # The password the bootstrap administrator gets when nothing else is configured. It is
 # written down in this repository on purpose — a local checkout should just work — which
 # is exactly why validate_production refuses to start with it. Defined here rather than
 # beside the bootstrap code so that check has no import cycle to reach it.
 DEVELOPMENT_DEFAULT_PASSWORD = "Admin123@"
+# The fixed key pair the local Garage node imports (docker-compose.yml garage-init, .env.example). It is published in this
+# repository so a fresh clone can start, so a deployed environment must never run with it.
+LOCAL_GARAGE_ACCESS_KEY_ID = "GK000000000000000000000001"
+LOCAL_GARAGE_SECRET_ACCESS_KEY = (
+    "0000000000000000000000000000000000000000000000000000000000000000"
+)
+
+
+def is_local_object_endpoint(value: str | None) -> bool:
+    """Whether a URL is a plain-HTTP S3 emulator on this machine or the compose network.
+
+    Honoured only in a development environment (`Settings.allows_local_object_endpoints`).
+    """
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "http"
+        and hostname in {"localhost", "127.0.0.1", "garage"}
+        and port is not None
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+    )
 
 
 def is_cloudflare_r2_endpoint(value: str | None) -> bool:
@@ -68,6 +97,11 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb"
     MIGRATION_DATABASE_URL: str | None = None
+    # Path to the CA bundle database certificates must chain to (the RDS global bundle,
+    # baked into the image; on-prem the CNPG ca.crt). REQUIRED when ENVIRONMENT=production:
+    # without it the process refuses to connect (see src/core/db_ssl.py) instead of
+    # connecting without TLS. Unset locally: asyncpg connects without TLS, unchanged.
+    DATABASE_SSL_CA: str | None = None
     APP_DATABASE_ROLE: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -95,11 +129,6 @@ class Settings(BaseSettings):
     MIGRATION_DATABASE_USER: str | None = None
     MIGRATION_DATABASE_PASSWORD: str | None = None
 
-    OPENAI_API_KEY: str | None = None
-    GROQ_API_KEY: str | None = None
-    GLM_API_KEY: str | None = None
-    LLM_PROVIDER: str | None = None
-    LLM_BASE_URL: str | None = None
     # Custom endpoints can forward the workspace API key to an arbitrary
     # host. Keep that capability opt-in, even for global administrators.
     LLM_ALLOW_CUSTOM_BASE_URL: bool = False
@@ -114,14 +143,27 @@ class Settings(BaseSettings):
     # else has no effect at all, rather than quietly widening production.
     LLM_ALLOW_LOCAL_ENDPOINTS: bool = False
     GEMINI_API_KEY: str | None = None
-    # A floating `-latest` alias, not a pinned version. Google retires pinned models for
-    # new API keys — the deployed default was gemini-2.5-flash-lite, and every call
-    # returned 404 "no longer available to new users". Nothing validates a model name at
-    # startup, so it surfaced as broken AI answers, not as a failed deploy.
-    GEMINI_MODEL: str = "gemini-flash-lite-latest"
+    # The deterministic local answer provider. `mock` is honoured only in a development environment, and only when no
+    # provider is saved in the admin screen. Refused elsewhere (validate_production).
+    LLM_PROVIDER: str = ""
+
+    @field_validator("LLM_PROVIDER")
+    @classmethod
+    def _only_the_local_answer_switch(cls, value: str) -> str:
+        # The only meaning this setting has is the local `mock` switch. Any other name would be silently ignored, so
+        # a typo or a leftover provider name fails at start instead.
+        if value.strip().lower() not in {"", "mock"}:
+            raise ValueError(
+                "LLM_PROVIDER accepts only 'mock' (local development); save real providers in Admin > AI provider"
+            )
+        return value
+
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_THINKING_LEVEL: str = "minimal"
-    LLM_TIMEOUT_SECONDS: float = 90.0
+    # 60 s, not 90 s: a proxied request past 100 s gets Cloudflare's body-less 524, so
+    # the extra server-side wait buys nothing the client can see (ONPREM-PLAN §8.2).
+    # validate_production refuses a higher value in deployed environments.
+    LLM_TIMEOUT_SECONDS: float = 60.0
     # Provider rate limits are a condition to manage, not an error to surface (Groq's free tier answers 429 with
     # "Please try again in 27s"). Per PROCESS, because each Celery child and each API worker has its own gate.
     #
@@ -270,7 +312,6 @@ class Settings(BaseSettings):
     # It stays False by default, so nothing changes for anyone who does not set it. The
     # guard still fires, and its message names this flag rather than prescribing manual SQL.
     EMBEDDING_REALIGN_DISCARD_VECTORS: bool = False
-    LLM_MODEL: str = "gemma-4-26b-a4b-it"
     RESTRUCTURE_ENABLED: bool = True
     RESTRUCTURE_MODEL: str | None = None
     # GLM-5 has a 200K context window shared by prompt and generation. 120K
@@ -537,25 +578,35 @@ class Settings(BaseSettings):
     RAG_MAX_ANSWER_TOKENS: int | None = None
     OIDC_ISSUER_URL: str | None = None
     OIDC_CLIENT_ID: str | None = None
-    OIDC_CLIENT_SECRET: str | None = None
     OIDC_REDIRECT_URI: str | None = None
     OIDC_SCOPES: str = "openid profile email"
     MICROSOFT_CLIENT_ID: str | None = None
     MICROSOFT_CLIENT_SECRET: str | None = None
-    MICROSOFT_TENANT_ID: str = "common"
+    # The ONE Entra tenant this deployment trusts, as its directory (tenant) GUID. EMPTY by default and the code
+    # fails closed on empty: the multi-tenant authorities "common", "organizations" and "consumers" would let a
+    # work or personal account from ANY tenant complete sign-in or the connector's consent. See
+    # `microsoft_tenant` below, which is what every authority URL and token check goes through.
+    MICROSOFT_TENANT_ID: str = ""
     MICROSOFT_REDIRECT_URI: str | None = None
     MICROSOFT_LOGIN_REDIRECT_URI: str | None = None
-    # Entra is an authentication provider, not an account-provisioning path.
-    # A user must have a matching, unexpired invitation.
-    ENTRA_AUTO_PROVISION_DOMAIN: str = ""
+    # Application email (EMAIL_PROVIDER=graph): the mailbox mail is sent FROM, and the dedicated Entra app
+    # (the environment's "Service app") that sends as it with a CERTIFICATE (no client secret). The app holds no
+    # Entra Graph consent: its only authority is the Exchange "Application Mail.Send" role scoped to this one
+    # mailbox. The PEMs are SecretStr and reach ONLY the worker container, from the secrets bundle; the API
+    # never needs them and never refuses to boot over mail (the worker checks at its own start, see
+    # tasks.py). docs/runbooks/email-graph.md.
     MICROSOFT_GRAPH_SENDER: str | None = None
+    MAIL_GRAPH_CLIENT_ID: str | None = None
+    # Deployed: ONE standalone secret (qnsc-kb/<env>/mail-graph-certificate) holding the private key and the
+    # certificate in a single PEM. Injected into the WORKER container only, and readable only by the worker's
+    # execution role. The two settings below are for a local test and scripts/graph_mail_check.py.
+    MAIL_GRAPH_PEM: SecretStr | None = None
+    MAIL_GRAPH_CERT_PEM: SecretStr | None = None
+    MAIL_GRAPH_PRIVATE_KEY_PEM: SecretStr | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
-    # "graph" keeps the existing Microsoft Graph transport (and its development
-    # fallback to FakeEmailSender below). Set to "ses" to send through AWS SES
-    # instead — useful locally when you want invitations to actually arrive
-    # without an Entra app registration — or "fake" to force the in-memory
-    # sender regardless of environment. get_email_sender() in src/services/email.py
-    # is what reads this.
+    # "graph" sends through Microsoft 365 (certificate auth, see above); "console" logs the message and is
+    # accepted only in development; "fake" is the in-memory sender for tests; "ses" is the legacy AWS path,
+    # present only until Graph is proven. get_email_sender() in src/services/email.py reads this.
     EMAIL_PROVIDER: str = "graph"
     # Required when EMAIL_PROVIDER=ses; SesEmailSender raises without it.
     MAIL_FROM_EMAIL: str | None = None
@@ -579,6 +630,16 @@ class Settings(BaseSettings):
     # Short on purpose. This runs inside document ingest, once per document, and a slow
     # provider must cost a suggestion rather than the import.
     DEPARTMENT_ROUTING_LLM_TIMEOUT: float = 20.0
+    # Whether a document is cut into several review candidates. OFF: every document is ONE
+    # candidate, so one draft and one approval. ON restores the earlier behaviour: an upload
+    # over 48,000 characters is split at paragraph boundaries (document_splitter.py), and a
+    # connector import is split at every `##` heading with each part routed to a department
+    # (department_routing.py), which sends the draft to the "Review sections" page and
+    # commits it into child drafts. Turned off 2026-10-18 at the product owner's request:
+    # reviewing parts and then committing them was more process than the review needed.
+    # Drafts that were ALREADY split keep their candidates and stay reviewable either way,
+    # and the department suggestion is still made, for the document as a whole.
+    DOCUMENT_AUTO_SPLIT_ENABLED: bool = False
     # Master switch for the tenant Knowledge Graph. Keep it off while the product focuses
     # on document retrieval/review: this also prevents publish-time entity extraction from
     # spending an LLM request. Microsoft Graph connectors/email are unrelated and remain on.
@@ -626,7 +687,6 @@ class Settings(BaseSettings):
     FACTORY_RESET_ENABLED: bool = False
     FACTORY_RESET_ALLOWED_EMAILS: str = ""
     SYSTEM_DATA_OWNER_EMAIL: str | None = None
-    DEFAULT_LANGUAGE: str = "vi"
     REVIEW_SLA_DAYS: int = 3
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
@@ -664,7 +724,6 @@ class Settings(BaseSettings):
     # PDF only. MarkItDown stays authoritative for Office formats, where it reads the
     # document's own heading styles and already yields headings, tables and lists.
     PYMUPDF4LLM_ENABLED: bool = True
-    SOURCE_STORAGE_PATH: str = "/app/storage/sources"
     # MVP-1 stores originals in a private Cloudflare R2 bucket.  There is no
     # local-disk fallback because a local fallback would make deployment
     # topology part of the authorization boundary.
@@ -674,6 +733,9 @@ class Settings(BaseSettings):
     SOURCE_ORPHAN_GRACE_HOURS: int = 24
     AWS_REGION: str | None = None
     S3_ENDPOINT_URL: str | None = None
+    # Presigned URLs are signed for, and handed to the browser at, this origin. Local development only (refused in
+    # production): the services reach the emulator by its compose name, the browser needs the published host port.
+    S3_PUBLIC_ENDPOINT_URL: str | None = None
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None
     R2_SECRET_ACCESS_KEY: str | None = None
@@ -793,6 +855,33 @@ class Settings(BaseSettings):
             if dept.strip()
         ]
 
+    #: Authorities that mean "any tenant" (or any personal account). Never acceptable as the pin.
+    MULTI_TENANT_AUTHORITIES: ClassVar[frozenset[str]] = frozenset(
+        {"common", "organizations", "consumers"}
+    )
+    #: An Entra tenant id is a GUID. Shape only: no version or variant nibble, because a tenant id is not
+    #: guaranteed to be an RFC 4122 UUID and a stricter pattern would refuse a real tenant.
+    TENANT_GUID: ClassVar[re.Pattern[str]] = re.compile(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    )
+
+    @property
+    def microsoft_tenant(self) -> str | None:
+        """The pinned tenant GUID, or None when MICROSOFT_TENANT_ID is not one.
+
+        None for blank, for the multi-tenant authorities (common, organizations, consumers) and for anything that
+        is not GUID-shaped. A verified domain name (qnsc.vn) is a valid authority to Entra but can never equal a
+        token's ``tid`` (a GUID), so accepting it would only turn a mistake into sign-in failures; refusing it up
+        front names the mistake.
+
+        The single place the tenant is read for an authority URL or a token check, so that "not pinned" is one
+        condition that every caller refuses, instead of a string each of them compares in its own way.
+        """
+        tenant = (self.MICROSOFT_TENANT_ID or "").strip()
+        if not tenant or tenant.lower() in self.MULTI_TENANT_AUTHORITIES:
+            return None
+        return tenant if self.TENANT_GUID.fullmatch(tenant) else None
+
     @property
     def microsoft_connector_auth_mode(self) -> str:
         """The Microsoft connector auth mode, normalised in ONE place.
@@ -822,6 +911,19 @@ class Settings(BaseSettings):
         }
 
     @property
+    def allows_local_object_endpoints(self) -> bool:
+        """Whether S3 may be reached over plain HTTP on this machine (the local Garage node). Development only, no opt-in flag."""
+        return self.is_development_environment
+
+    @property
+    def uses_mock_llm(self) -> bool:
+        """Answers come from the deterministic local provider. Only in development; `validate_production` refuses it."""
+        return (
+            self.LLM_PROVIDER.strip().lower() == "mock"
+            and self.is_development_environment
+        )
+
+    @property
     def allows_local_llm_endpoints(self) -> bool:
         """Whether a loopback/private LLM endpoint may be configured and called.
 
@@ -836,6 +938,35 @@ class Settings(BaseSettings):
         environment = self.ENVIRONMENT.lower()
         if environment in {"development", "dev", "local"}:
             return
+        # An answer the client can never see is a pure waste of the 100 s the edge
+        # grants: past it Cloudflare returns a body-less 524 (ONPREM-PLAN §8.2). The
+        # default is already 60 s; refuse a copied 90 s at boot rather than in production.
+        if self.LLM_TIMEOUT_SECONDS > 60.0:
+            raise RuntimeError(
+                "LLM_TIMEOUT_SECONDS must stay at or under 60 s: a proxied request "
+                "past 100 s dies as a Cloudflare 524 with no body"
+            )
+        # Local-only switches are refused first, so a copied development value fails with its own name.
+        if self.LLM_PROVIDER.strip().lower() == "mock":
+            raise RuntimeError(
+                "LLM_PROVIDER=mock is for local development only; configure a real provider"
+            )
+        if self.EMBEDDING_MODEL.strip().lower() == "mock":
+            raise RuntimeError(
+                "EMBEDDING_MODEL=mock is for local development only; set the deployed embedding model"
+            )
+        # The local Garage key pair is published in this repository, so it must never sign requests for a deployed environment.
+        if (self.R2_ACCESS_KEY_ID or "").strip() == LOCAL_GARAGE_ACCESS_KEY_ID or (
+            self.R2_SECRET_ACCESS_KEY or ""
+        ).strip() == LOCAL_GARAGE_SECRET_ACCESS_KEY:
+            raise RuntimeError(
+                "R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY are the published local Garage key; set this deployment's own R2 keys"
+            )
+
+        if (self.S3_PUBLIC_ENDPOINT_URL or "").strip():
+            raise RuntimeError(
+                "S3_PUBLIC_ENDPOINT_URL is for local development only; unset it in this environment"
+            )
         # Secret-material checks apply to ANY non-development environment. The
         # committed default SECRET_KEY signs access/refresh JWTs and (without a
         # DEK) encrypts stored connector tokens; a staging/uat/demo deployment
@@ -979,7 +1110,7 @@ class Settings(BaseSettings):
             raise RuntimeError("MALWARE_SCAN_ENABLED must be true in production")
         if not self.MALWARE_SCANNER_HOST:
             raise RuntimeError("MALWARE_SCANNER_HOST is required in production")
-        microsoft_required = (
+        microsoft_required: tuple[str | None, ...] = (
             self.MICROSOFT_CLIENT_ID,
             self.MICROSOFT_CLIENT_SECRET,
             self.MICROSOFT_TENANT_ID,
@@ -991,10 +1122,7 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Microsoft Entra client, tenant, login redirect, and delegated connector redirect settings are required in production"
             )
-        if not re.fullmatch(
-            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
-            self.MICROSOFT_TENANT_ID.strip(),
-        ):
+        if not self.TENANT_GUID.fullmatch(self.MICROSOFT_TENANT_ID.strip()):
             raise RuntimeError(
                 "MICROSOFT_TENANT_ID must be a specific Entra tenant GUID in production"
             )

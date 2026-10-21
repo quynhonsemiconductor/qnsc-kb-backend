@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.connectors import SyncRequest
 from src.models.ops import ConnectorJob
 
-
 ACTIVE_REQUEST_STATES = ("queued", "dispatched", "running")
 
 # Coalescing only onto a request that has NOT started yet. Folding a new notification
@@ -99,7 +98,9 @@ async def enqueue_connector_sync(
 _CONNECTOR_CLAIM_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
 
 
-async def claim_sync_request(db: AsyncSession, request_id: uuid.UUID) -> SyncRequest | None:
+async def claim_sync_request(
+    db: AsyncSession, request_id: uuid.UUID
+) -> SyncRequest | None:
     """Claim a queued request, but only while the connector is otherwise idle.
 
     One provider walk per connector at a time. Nothing enforced that before: polling
@@ -207,26 +208,30 @@ async def recover_stale_sync_requests(
     dispatched_cutoff = now - timedelta(minutes=stale_after_minutes)
     running_cutoff = now - timedelta(minutes=running_stale_after_minutes)
     rows = (
-        await db.execute(
-            select(SyncRequest).where(
-                or_(
-                    and_(
-                        SyncRequest.status == "dispatched",
-                        # A NULL lock is unclaimable rather than fresh: nothing can
-                        # advance it, so it belongs back in the queue.
-                        or_(
-                            SyncRequest.locked_at.is_(None),
-                            SyncRequest.locked_at < dispatched_cutoff,
+        (
+            await db.execute(
+                select(SyncRequest).where(
+                    or_(
+                        and_(
+                            SyncRequest.status == "dispatched",
+                            # A NULL lock is unclaimable rather than fresh: nothing can
+                            # advance it, so it belongs back in the queue.
+                            or_(
+                                SyncRequest.locked_at.is_(None),
+                                SyncRequest.locked_at < dispatched_cutoff,
+                            ),
                         ),
-                    ),
-                    and_(
-                        SyncRequest.status == "running",
-                        SyncRequest.started_at < running_cutoff,
-                    ),
+                        and_(
+                            SyncRequest.status == "running",
+                            SyncRequest.started_at < running_cutoff,
+                        ),
+                    )
                 )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for request in rows:
         request.status = "queued"
         request.available_at = datetime.utcnow()

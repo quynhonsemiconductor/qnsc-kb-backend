@@ -18,6 +18,7 @@ therefore takes effect on the next deploy without a manual ``ALTER ROLE`` — ot
 the application would keep the new password while the role kept the old one, and the
 failure would surface as an authentication error minutes later in a different task.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +46,9 @@ def _asyncpg_dsn(url: str) -> str:
 async def _ensure_role(dsn: str, role: str, password: str) -> None:
     import asyncpg
 
-    connection = await asyncpg.connect(dsn)
+    from src.core.db_ssl import ssl_connect_args
+
+    connection = await asyncpg.connect(dsn, **ssl_connect_args())
     try:
         exists = await connection.fetchval(
             "SELECT 1 FROM pg_roles WHERE rolname = $1", role

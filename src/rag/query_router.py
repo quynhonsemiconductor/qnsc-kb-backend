@@ -9,6 +9,7 @@ subject instead of one for the whole query, but only when comparison intent is a
 signalled: splitting on "and" for every query would fragment plenty of ordinary
 questions ("quy trình đăng ký và phê duyệt") that were never asking to compare two things.
 """
+
 from __future__ import annotations
 
 import re
@@ -19,8 +20,15 @@ from src.rag.reranker import fold_diacritics
 # comparison, not just conjunction ("và" alone is far too common to use as a signal on
 # its own -- see the module docstring).
 COMPARISON_QUERY_MARKERS = (
-    "so sanh", "khac nhau", "khac biet", "hay la", "nen chon",
-    "compare", "comparison", "difference between", "differences between",
+    "so sanh",
+    "khac nhau",
+    "khac biet",
+    "hay la",
+    "nen chon",
+    "compare",
+    "comparison",
+    "difference between",
+    "differences between",
     "versus",
 )
 
@@ -67,7 +75,9 @@ AMBIGUITY_SCORE_MARGIN = 0.85
 MIN_RESULTS_FOR_AMBIGUITY_CHECK = 2
 
 
-def detect_ambiguous_departments(results: list[dict], *, top_n: int = 5) -> list[str] | None:
+def detect_ambiguous_departments(
+    results: list[dict], *, top_n: int = 5
+) -> list[str] | None:
     """Distinct departments among the near-top results, if more than one -- else None.
 
     Used to decide whether a question should be answered directly or asked back as a

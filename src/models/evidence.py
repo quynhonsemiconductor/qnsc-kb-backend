@@ -1,10 +1,24 @@
+from typing import TYPE_CHECKING
 import uuid
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Float, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+if TYPE_CHECKING:
+    from src.models.article import Article, DocumentSource
+    from src.models.chunk import ArticleChunk, ParentChunk
 
 
 class DocumentEvidence(Base, UUIDPrimaryKeyMixin, TimestampMixin):

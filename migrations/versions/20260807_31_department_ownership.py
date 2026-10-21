@@ -9,7 +9,6 @@ import os
 
 from alembic import op
 
-
 revision = "20260807_31"
 down_revision = "20260807_30"
 branch_labels = None
@@ -28,8 +27,12 @@ def upgrade() -> None:
             CONSTRAINT uq_department_manager_assignment UNIQUE (department_id, user_id)
         )
     """)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_department_managers_department_id ON department_managers (department_id)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_department_managers_user_id ON department_managers (user_id)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_department_managers_department_id ON department_managers (department_id)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_department_managers_user_id ON department_managers (user_id)"
+    )
 
     # Preserve the current behavior for existing Department Owners while
     # converting it to explicit data. Future assignments must be deliberate.
@@ -70,5 +73,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if os.getenv("ENABLE_RLS", "false").lower() in {"1", "true", "yes"}:
-        op.execute("DROP POLICY IF EXISTS tenant_department_managers ON department_managers")
+        op.execute(
+            "DROP POLICY IF EXISTS tenant_department_managers ON department_managers"
+        )
     op.execute("DROP TABLE IF EXISTS department_managers")

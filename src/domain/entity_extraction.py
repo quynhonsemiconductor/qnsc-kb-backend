@@ -12,6 +12,7 @@ once per article rather than on every draft revision.
 Deliberately never raises and never blocks publish: a broken or empty extraction here
 must not be why an otherwise-valid draft could not be approved.
 """
+
 from __future__ import annotations
 
 import json
@@ -118,7 +119,9 @@ def normalize_entity_name(value: str) -> str:
         r"\s+",
         " ",
         "".join(
-            ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)
+            ch
+            for ch in unicodedata.normalize("NFKD", value)
+            if not unicodedata.combining(ch)
         )
         .strip()
         .casefold(),
@@ -142,7 +145,11 @@ def _parse_entities(raw_entities: object) -> list[ExtractedEntity]:
             continue
         seen.add(key)
         entities.append(
-            ExtractedEntity(name=name, type=entity_type, description=_clean_description(item.get("description")))
+            ExtractedEntity(
+                name=name,
+                type=entity_type,
+                description=_clean_description(item.get("description")),
+            )
         )
         if len(entities) >= MAX_ENTITIES:
             break
@@ -164,10 +171,16 @@ def _parse_relationships(
         relation = _clean_relation(item.get("relation"))
         if not source or not target or not relation:
             continue
-        source_key, target_key = normalize_entity_name(source), normalize_entity_name(target)
+        source_key, target_key = normalize_entity_name(source), normalize_entity_name(
+            target
+        )
         # A relation naming something outside this same reply's `entities` has nothing
         # to attach to; accepting it would mean silently inventing a bare entity for it.
-        if source_key not in known_keys or target_key not in known_keys or source_key == target_key:
+        if (
+            source_key not in known_keys
+            or target_key not in known_keys
+            or source_key == target_key
+        ):
             continue
         edge_key = (source_key, relation, target_key)
         if edge_key in seen_edges:
@@ -186,7 +199,9 @@ def _parse_relationships(
     return relationships
 
 
-async def extract_entities_and_relationships(title: str, body_md: str) -> ExtractionResult:
+async def extract_entities_and_relationships(
+    title: str, body_md: str
+) -> ExtractionResult:
     """Best-effort graph extraction for one document. Returns [] rather than raising.
 
     Every failure mode (no provider configured, the call fails, the reply is not
@@ -232,11 +247,15 @@ async def extract_entities_and_relationships(title: str, body_md: str) -> Extrac
         payload = json.loads(cleaned)
     except (json.JSONDecodeError, TypeError) as exc:
         logger.warning(
-            "Entity extraction returned unparseable JSON", error=str(exc), reply=cleaned[:200]
+            "Entity extraction returned unparseable JSON",
+            error=str(exc),
+            reply=cleaned[:200],
         )
         return empty
     if not isinstance(payload, dict):
-        logger.warning("Entity extraction returned a non-object JSON payload", reply=cleaned[:200])
+        logger.warning(
+            "Entity extraction returned a non-object JSON payload", reply=cleaned[:200]
+        )
         return empty
 
     entities = _parse_entities(payload.get("entities"))

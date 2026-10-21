@@ -11,7 +11,11 @@ import re
 from typing import Any
 from pathlib import Path
 
-from src.core.config import is_cloudflare_r2_endpoint, settings
+from src.core.config import (
+    is_cloudflare_r2_endpoint,
+    is_local_object_endpoint,
+    settings,
+)
 
 #: Types a browser may be handed for an ORIGINAL upload, chosen for being inert as
 #: documents: images cannot script, a PDF is drawn by the browser's own isolated viewer,
@@ -196,7 +200,7 @@ def create_presigned_source_url(
     expected_prefix = f"{settings.SOURCE_STORAGE_PREFIX.strip('/')}/"
     if bucket != settings.SOURCE_STORAGE_BUCKET or not key.startswith(expected_prefix):
         raise FileNotFoundError("Invalid R2 source key")
-    return _s3_client().generate_presigned_url(
+    return _s3_client(presign=True).generate_presigned_url(
         ClientMethod=operation,
         Params={"Bucket": bucket, "Key": key},
         ExpiresIn=expires_in,
@@ -214,7 +218,7 @@ def head_source(storage_key: str) -> dict[str, Any]:
     }
 
 
-def _s3_client() -> Any:
+def _s3_client(*, presign: bool = False) -> Any:
     bucket = (settings.SOURCE_STORAGE_BUCKET or "").strip()
     access_key = (settings.R2_ACCESS_KEY_ID or "").strip()
     secret_key = (settings.R2_SECRET_ACCESS_KEY or "").strip()
@@ -226,6 +230,10 @@ def _s3_client() -> Any:
         )
     endpoint_url = (settings.S3_ENDPOINT_URL or "").strip()
     account_or_endpoint = (settings.R2_ACCOUNT_ID or "").strip().rstrip("/")
+    public_endpoint = (settings.S3_PUBLIC_ENDPOINT_URL or "").strip()
+    if presign and public_endpoint:
+        # The URL the browser will use. Its host is part of the signature, so it must be the one the browser calls.
+        endpoint_url = public_endpoint
     if not endpoint_url and account_or_endpoint:
         # Accept the dashboard's account ID as well as a full endpoint pasted
         # into the setting.  The latter is common in local .env files.
@@ -234,10 +242,14 @@ def _s3_client() -> Any:
             if account_or_endpoint.startswith(("https://", "http://"))
             else f"https://{account_or_endpoint}.r2.cloudflarestorage.com"
         )
-    if not endpoint_url or not is_cloudflare_r2_endpoint(endpoint_url):
+    local_ok = settings.allows_local_object_endpoints and is_local_object_endpoint(
+        endpoint_url
+    )
+    if not endpoint_url or not (is_cloudflare_r2_endpoint(endpoint_url) or local_ok):
         raise RuntimeError("A Cloudflare R2 endpoint is required for object storage")
     try:
         import boto3
+        from botocore.config import Config
     except ImportError as exc:
         raise RuntimeError("boto3 is required for S3-backed source storage") from exc
     kwargs: dict[str, Any] = {
@@ -254,9 +266,17 @@ def _s3_client() -> Any:
         # AWS region for Secrets Manager and ECS (infra sets it from var.region). So the
         # fallback never fired in a deployment and every R2 call failed. Not just
         # uploads: this client backs put, get, delete, head, list and presign.
-        "region_name": "auto",
+        # A local emulator takes any region; R2 takes only its own hints, so "auto" stays for R2.
+        "region_name": "us-east-1" if local_ok else "auto",
         "endpoint_url": endpoint_url,
     }
+    # SigV4 for every endpoint: botocore presigns SigV2 (AWSAccessKeyId/Expires/Signature) for some
+    # setups, which Garage refuses as anonymous. Path-style only for the local emulator, which has no
+    # virtual-host DNS; R2 keeps its default addressing.
+    kwargs["config"] = Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "path"} if local_ok else {},
+    )
     kwargs.update(
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,

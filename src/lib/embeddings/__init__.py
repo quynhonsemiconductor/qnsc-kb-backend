@@ -23,6 +23,7 @@ width and normalised to unit length in exactly one place. See base.py for why.
 retrieval. Never set it anywhere that serves a person: a zero vector makes an indexing
 outage look healthy.
 """
+
 from __future__ import annotations
 
 import structlog
@@ -103,7 +104,9 @@ _INSTRUCTION_PREFIXES = {
 # to an instruct model instead would still produce valid, unit-norm vectors -- just ones
 # the model was not tuned to place well, the same silent-degradation failure mode this
 # whole prefix seam exists to avoid.
-_RETRIEVAL_INSTRUCTION = "Given a search query, retrieve relevant passages that answer the query"
+_RETRIEVAL_INSTRUCTION = (
+    "Given a search query, retrieve relevant passages that answer the query"
+)
 
 
 def _needs_instruction_prefix() -> bool:
@@ -128,7 +131,9 @@ def _decorate(texts: list[str], task: str) -> list[str]:
         return texts
     if _is_instruct_tuned():
         if task == "RETRIEVAL_QUERY":
-            return [f"Instruct: {_RETRIEVAL_INSTRUCTION}\nQuery: {text}" for text in texts]
+            return [
+                f"Instruct: {_RETRIEVAL_INSTRUCTION}\nQuery: {text}" for text in texts
+            ]
         return list(texts)
     key = "query" if task == "RETRIEVAL_QUERY" else "passage"
     prefix = _INSTRUCTION_PREFIXES[key]
@@ -157,7 +162,9 @@ def get_bge_embedding(text: str) -> list[float]:
     not been BGE-specific for some time.
     """
     if is_mock():
-        return [0.0] * settings.EMBEDDING_DIMENSION
+        dimension = settings.EMBEDDING_DIMENSION
+        assert dimension is not None  # set by configuration whenever the mock is used
+        return [0.0] * dimension
     try:
         return _embed([text], task="RETRIEVAL_QUERY")[0]
     except Exception as exc:
@@ -177,7 +184,9 @@ def get_bge_embeddings(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     if is_mock():
-        return [[0.0] * settings.EMBEDDING_DIMENSION for _ in texts]
+        dimension = settings.EMBEDDING_DIMENSION
+        assert dimension is not None  # set by configuration whenever the mock is used
+        return [[0.0] * dimension for _ in texts]
     try:
         return _embed(texts, task="RETRIEVAL_DOCUMENT")
     except Exception as exc:

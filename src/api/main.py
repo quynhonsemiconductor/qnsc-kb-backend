@@ -9,7 +9,10 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import func, select, text
+from typing import Any, cast
+
+from sqlalchemy import Table, func, select, text
+from sqlalchemy.engine import CursorResult
 from src.core.config import settings
 from src.api.routers import (
     auth,
@@ -91,7 +94,8 @@ async def _preload_embedding_model() -> None:
         late = not done
         seconds = embedding_warmup.finish(READY)
         logger.info(
-            "Embedding model warm-up finished" + (" late, after the readiness timeout" if late else ""),
+            "Embedding model warm-up finished"
+            + (" late, after the readiness timeout" if late else ""),
             seconds=seconds,
         )
     await _check_cross_encoder_budget()
@@ -361,7 +365,8 @@ async def reconcile_published_indexes() -> None:
 
         for article_id in ready_ids:
             await db.execute(
-                Article.__table__.update()
+                cast(Table, Article.__table__)
+                .update()
                 .where(Article.id == article_id)
                 .values(index_status="ready", index_error=None)
             )
@@ -383,8 +388,7 @@ async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
     configure_tracing()
-    # Structured JSON logs to stdout (the production-hardening doc's contract
-    # with the log aggregation pipeline).
+    # Structured JSON logs to stdout (the contract with the log aggregation pipeline).
     from src.lib.observability import setup_logging
 
     setup_logging()
@@ -422,7 +426,7 @@ async def initialize_resources() -> None:
     # after EMBEDDING_WARMUP_TIMEOUT_SECONDS. `begin()` runs HERE, before the task is
     # scheduled, so there is no window in which readiness is true and the load is not
     # yet recorded as in progress.
-    if settings.OPENAI_API_KEY != "mock" and settings.EMBEDDING_MODEL != "mock":
+    if settings.EMBEDDING_MODEL != "mock":
         global _preload_task
         embedding_warmup.begin()
         # Kept in a module variable: the event loop holds only a weak reference to a task, so one
@@ -451,9 +455,7 @@ async def _inline_outbox_recovery_loop() -> None:
             from src.api.deps import SessionLocal
             from src.models.ops import OutboxEvent
 
-            cutoff = datetime.utcnow() - timedelta(
-                days=settings.METRICS_RETENTION_DAYS
-            )
+            cutoff = datetime.utcnow() - timedelta(days=settings.METRICS_RETENTION_DAYS)
             async with SessionLocal() as db:
                 result = await db.execute(
                     sa_delete(OutboxEvent).where(
@@ -462,10 +464,9 @@ async def _inline_outbox_recovery_loop() -> None:
                     )
                 )
                 await db.commit()
-            if result.rowcount:
-                logger.info(
-                    "Pruned terminal outbox events", pruned=result.rowcount
-                )
+            pruned = cast(CursorResult[Any], result).rowcount
+            if pruned:
+                logger.info("Pruned terminal outbox events", pruned=pruned)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -497,22 +498,30 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                     minutes=settings.CONNECTOR_RECONCILE_INTERVAL_MINUTES
                 )
                 connectors = (
-                    await db.execute(
-                        select(Connector).where(
-                            Connector.system.in_(sorted(REMOTE_PROVIDERS)),
-                            Connector.status.in_(["active", "error"]),
-                        )
-                    )
-                ).scalars().all()
-                for connector in connectors:
-                    scopes = (
+                    (
                         await db.execute(
-                            select(SourceScope).where(
-                                SourceScope.connector_id == connector.id,
-                                SourceScope.selected.is_(True),
+                            select(Connector).where(
+                                Connector.system.in_(sorted(REMOTE_PROVIDERS)),
+                                Connector.status.in_(["active", "error"]),
                             )
                         )
-                    ).scalars().all()
+                    )
+                    .scalars()
+                    .all()
+                )
+                for connector in connectors:
+                    scopes = (
+                        (
+                            await db.execute(
+                                select(SourceScope).where(
+                                    SourceScope.connector_id == connector.id,
+                                    SourceScope.selected.is_(True),
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
                     for scope in scopes:
                         cursor = (
                             await db.execute(
@@ -522,7 +531,11 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                                 )
                             )
                         ).scalar_one_or_none()
-                        if cursor and cursor.last_reconcile_at and cursor.last_reconcile_at > reconcile_cutoff:
+                        if (
+                            cursor
+                            and cursor.last_reconcile_at
+                            and cursor.last_reconcile_at > reconcile_cutoff
+                        ):
                             continue
                         if cursor is None:
                             cursor = SyncCursor(
@@ -543,17 +556,24 @@ async def _inline_connector_sync_dispatch_loop() -> None:
                         )
                 await db.commit()
                 request_ids = (
-                    await db.execute(
-                        select(SyncRequest.id)
-                        .where(
-                            SyncRequest.status == "queued",
-                            SyncRequest.available_at <= datetime.utcnow(),
+                    (
+                        await db.execute(
+                            select(SyncRequest.id)
+                            .where(
+                                SyncRequest.status == "queued",
+                                SyncRequest.available_at <= datetime.utcnow(),
+                            )
+                            .order_by(
+                                SyncRequest.priority.asc(), SyncRequest.created_at.asc()
+                            )
+                            .limit(25)
                         )
-                        .order_by(SyncRequest.priority.asc(), SyncRequest.created_at.asc())
-                        .limit(25)
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
             from src.api.routers.connectors import _run_cloud_sync_inline
+
             for request_id in request_ids:
                 async with SessionLocal() as claim_db:
                     await set_database_context(claim_db, None, True)
@@ -611,8 +631,12 @@ async def lifespan(app: FastAPI):
     webhook_maintenance_task: asyncio.Task | None = None
     if settings.JOB_MODE.lower() != "celery":
         recovery_task = asyncio.create_task(_inline_outbox_recovery_loop())
-        connector_dispatch_task = asyncio.create_task(_inline_connector_sync_dispatch_loop())
-        webhook_maintenance_task = asyncio.create_task(_inline_webhook_maintenance_loop())
+        connector_dispatch_task = asyncio.create_task(
+            _inline_connector_sync_dispatch_loop()
+        )
+        webhook_maintenance_task = asyncio.create_task(
+            _inline_webhook_maintenance_loop()
+        )
     try:
         yield
     finally:
@@ -715,7 +739,10 @@ app.add_middleware(
     # That silently broke the whole point of the id: it is the key the operator pastes
     # into /governance/request-failures?request_id=... to find the traceback for the
     # failure a user just reported. A header the client cannot read cannot be reported.
-    expose_headers=["X-Request-ID", "Retry-After"],
+    # X-Total-Count for the same reason: the pending-drafts queue reports its authorized
+    # total there so a client can page, and the frontend is a different origin. Omitted,
+    # the paging control has no idea how many pages exist.
+    expose_headers=["X-Request-ID", "Retry-After", "X-Total-Count"],
 )
 
 
@@ -966,3 +993,13 @@ async def health_ready():
         # an alert on this field is the way to learn that vector search does not.
         "degraded": embedding_warmup.degraded,
     }
+
+
+@app.get("/readyz", tags=["system"])
+async def readyz():
+    """Alias of `/health/ready`, behaviour identical — including the 503 while the
+    embedding model warms. The platform probe/monitor path is `/readyz` everywhere
+    (ONPREM-PLAN §8.2), so the edge and Synthetic Monitoring point at one name for
+    every product instead of remembering KB's.
+    """
+    return await health_ready()

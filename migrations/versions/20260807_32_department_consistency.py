@@ -7,7 +7,6 @@ Create Date: 2026-08-07
 
 from alembic import op
 
-
 revision = "20260807_32"
 down_revision = "20260807_31"
 branch_labels = None
@@ -15,9 +14,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("UPDATE users SET dept = NULL WHERE dept IS NOT NULL AND btrim(dept) = ''")
-    op.execute("UPDATE pending_drafts SET dept = NULL WHERE dept IS NOT NULL AND btrim(dept) = ''")
-    op.execute("UPDATE gaps SET dept = NULL WHERE dept IS NOT NULL AND btrim(dept) = ''")
+    op.execute(
+        "UPDATE users SET dept = NULL WHERE dept IS NOT NULL AND btrim(dept) = ''"
+    )
+    op.execute(
+        "UPDATE pending_drafts SET dept = NULL WHERE dept IS NOT NULL AND btrim(dept) = ''"
+    )
+    op.execute(
+        "UPDATE gaps SET dept = NULL WHERE dept IS NOT NULL AND btrim(dept) = ''"
+    )
     op.execute("""
         INSERT INTO departments (id, created_at, updated_at, company_domain, name, active)
         SELECT gen_random_uuid(), now(), now(), source.company_domain, source.name, TRUE

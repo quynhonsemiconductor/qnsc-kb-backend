@@ -45,22 +45,36 @@ variable "cloudflare_account_id" {
 variable "microsoft_client_id" {
   type        = string
   default     = "dbd99dbb-d20e-4076-8f8b-75c15e733414"
-  description = "Entra application (client) ID for the Microsoft connector. A public identifier. Empty leaves that connector dormant."
+  description = "Entra application (client) ID of the develop app 'KB Dev' (single tenant): Microsoft sign-in AND the user-delegated connector consent. A public identifier. docs/runbooks/entra-apps.md. Empty leaves that connector dormant."
 }
 
 variable "microsoft_graph_sender" {
   type        = string
-  default     = ""
+  default     = "noreply-kb-dev@qnsc.vn"
   description = <<-EOT
-    Mailbox that invitations and password resets are sent FROM, e.g. "no-reply@qnsc.vn".
+    The mailbox application email is sent FROM in develop: its OWN shared mailbox, never the production one.
+    A non-production environment must not send as production's address (users cannot tell the mail apart, a
+    leaked develop credential would speak for production, and develop's mail would count against production's
+    sending reputation). Develop's mail Entra app is scoped by Exchange RBAC to this mailbox only; sending as
+    the production mailbox must return 403 (docs/runbooks/email-graph.md, step 8).
 
-    Left EMPTY deliberately until the mailbox exists and the Entra app has Mail.Send
-    application permission with admin consent. While it is empty, outbound mail is dead:
-    ENVIRONMENT is pinned to "production", so the development FakeEmailSender is never
-    selected, and the Graph sender raises before any HTTP call. Invitations and resets will
-    queue and retry every 30 seconds without ever arriving.
+    The name must end in "-dev@<domain>"; the validation below keeps a copy-paste from pointing develop at
+    production's mailbox.
+  EOT
 
-    Set this before relying on the invite or forgot-password flows.
+  validation {
+    condition     = can(regex("-dev@", lower(var.microsoft_graph_sender)))
+    error_message = "develop's microsoft_graph_sender must be its own mailbox (noreply-<product>-dev@...), never production's."
+  }
+}
+variable "mail_graph_client_id" {
+  type        = string
+  default     = "7b9ae622-4df7-4cc5-bcbb-b8be1256ecaf" # "KB Dev Service"
+  description = <<-EOT
+    Application (client) ID of this environment's mail Entra app, "KB Dev Service" (a public identifier). It was EMPTY until the owner
+    has created the app and the certificate (docs/runbooks/email-graph.md). THIS IS THE SWITCH: it must be
+    set only AFTER the owner has put the mail credential (one PEM: key + certificate) in the standalone secret qnsc-kb/develop/mail-graph-certificate.
+    While empty, nothing mail-related is injected; develop keeps sending through SES.
   EOT
 }
 
@@ -74,19 +88,6 @@ variable "microsoft_tenant_id" {
     connects THEIR SharePoint. Under "common" that is any user in any Microsoft tenant on
     earth, and their documents would be ingested into this knowledge base. Pinning the
     tenant is what limits the flow to qnsc.vn accounts.
-  EOT
-}
-
-variable "email_provider" {
-  type    = string
-  default = "ses"
-
-  description = <<-EOT
-    Overrides the module default ("graph") for this environment: develop sends through
-    AWS SES rather than Microsoft Graph, so outbound mail does not wait on Entra admin
-    consent for Mail.Send. See infra/modules/stack/variables.tf for what switching this
-    requires (mail_from_email below, a verified SES identity, and sandbox/production
-    access for the recipients being invited).
   EOT
 }
 
@@ -119,19 +120,6 @@ variable "allowed_email_domains" {
     Restricts which email domains may be registered. Empty accepts ANY, which under
     company-scoped RLS means an admin-created account on another domain quietly becomes a
     second tenant whose rows nobody else can see.
-  EOT
-}
-
-variable "entra_admin_emails" {
-  type    = list(string)
-  default = ["nghiavt@qnsc.vn", "sinhhpt@qnsc.vn", "quangld@qnsc.vn", "hieuvbm@qnsc.vn"]
-
-  description = <<-EOT
-    Provisioned as GLOBAL administrators on their FIRST Entra sign-in, rather than Staff.
-
-    Read only at account creation, so it never overrides a role changed later in the admin
-    UI, and removing an address does not demote anyone — promote and demote in the UI once
-    an account exists. Add the rest of the admin team here.
   EOT
 }
 

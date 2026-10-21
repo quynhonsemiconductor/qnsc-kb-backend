@@ -9,13 +9,15 @@ try:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 except ImportError:  # Keep local/unit environments lightweight.
-    trace = None
+    trace = None  # type: ignore[assignment]  # OpenTelemetry absent: trace stays None
 
 
 def configure_tracing() -> None:
     if trace is None or not settings.OTEL_EXPORTER_OTLP_ENDPOINT:
         return
-    provider = TracerProvider(resource=Resource.create({"service.name": settings.PROJECT_NAME}))
+    provider = TracerProvider(
+        resource=Resource.create({"service.name": settings.PROJECT_NAME})
+    )
     exporter = OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT)
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)

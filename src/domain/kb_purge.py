@@ -27,14 +27,16 @@ article_chunks, chunk_metadata, article_versions, article_user_permissions, arti
 article_departments, comments, votes, bookmarks, article_followers and
 article_edit_requests. One DELETE on `connectors` removes the entire sync tree.
 """
+
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.engine import CursorResult, Result
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.ai import AiCache, AiConversation, AiUsageLog
@@ -105,6 +107,11 @@ class PurgeCounts:
         )
 
 
+def _rowcount(result: Result[Any]) -> int:
+    """Rows a DELETE touched. execute() is typed as Result; the runtime object is a CursorResult."""
+    return cast(CursorResult[Any], result).rowcount or 0
+
+
 async def _tenant_user_ids(db: AsyncSession, company_domain: str) -> list[Any]:
     """The tenant's users, for the AI tables that carry no company_domain of their own.
 
@@ -112,7 +119,9 @@ async def _tenant_user_ids(db: AsyncSession, company_domain: str) -> list[Any]:
     they can only be reached through this join. Their RLS policies are owner-based too,
     which is why the purge has to run as a global admin to see other users' rows at all.
     """
-    rows = await db.execute(select(User.id).where(User.company_domain == company_domain))
+    rows = await db.execute(
+        select(User.id).where(User.company_domain == company_domain)
+    )
     return list(rows.scalars().all())
 
 
@@ -202,7 +211,9 @@ async def delete_purged_objects(counts: PurgeCounts) -> None:
             counts.storage_objects += 1
         except Exception as exc:  # pragma: no cover - depends on object store
             counts.storage_failures.append(key)
-            logger.warning("Purge could not delete source object", key=key, error=str(exc))
+            logger.warning(
+                "Purge could not delete source object", key=key, error=str(exc)
+            )
 
 
 async def purge_knowledge_base(
@@ -220,7 +231,9 @@ async def purge_knowledge_base(
     """
     counts = PurgeCounts()
     user_ids = await _tenant_user_ids(db, company_domain)
-    article_ids_stmt = select(Article.id).where(Article.company_domain == company_domain)
+    article_ids_stmt = select(Article.id).where(
+        Article.company_domain == company_domain
+    )
     connector_ids_stmt = select(Connector.id).where(
         Connector.company_domain == company_domain
     )
@@ -244,7 +257,9 @@ async def purge_knowledge_base(
         )
         counts.pending_drafts = await _count(
             db,
-            select(PendingDraft.id).where(PendingDraft.company_domain == company_domain),
+            select(PendingDraft.id).where(
+                PendingDraft.company_domain == company_domain
+            ),
         )
         counts.external_documents = await _count(
             db,
@@ -275,7 +290,9 @@ async def purge_knowledge_base(
         )
         counts.sync_cursors_reset = await _count(
             db,
-            select(SyncCursor.id).where(SyncCursor.connector_id.in_(connector_ids_stmt)),
+            select(SyncCursor.id).where(
+                SyncCursor.connector_id.in_(connector_ids_stmt)
+            ),
         )
         if user_ids:
             counts.ai_cache = await _count(
@@ -303,21 +320,21 @@ async def purge_knowledge_base(
         result = await db.execute(
             delete(AiCache).where(AiCache.owner_user_id.in_(user_ids))
         )
-        counts.ai_cache = result.rowcount or 0
+        counts.ai_cache = _rowcount(result)
         result = await db.execute(
             delete(AiConversation).where(AiConversation.user_id.in_(user_ids))
         )
-        counts.ai_conversations = result.rowcount or 0
+        counts.ai_conversations = _rowcount(result)
         result = await db.execute(
             delete(AiUsageLog).where(AiUsageLog.user_id.in_(user_ids))
         )
-        counts.ai_usage_logs = result.rowcount or 0
+        counts.ai_usage_logs = _rowcount(result)
         result = await db.execute(
             delete(NotificationQueue).where(
                 NotificationQueue.recipient_user_id.in_(user_ids)
             )
         )
-        counts.notifications = result.rowcount or 0
+        counts.notifications = _rowcount(result)
 
     # ---- STEP 2. Flat tenant-scoped tables. No incoming FKs, so order among them is free.
     # ingestion_fingerprints is NOT optional: an approved fingerprint outliving its article
@@ -332,13 +349,13 @@ async def purge_knowledge_base(
         result = await db.execute(
             delete(model).where(model.company_domain == company_domain)
         )
-        setattr(counts, attribute, result.rowcount or 0)
+        setattr(counts, attribute, _rowcount(result))
 
     # ---- STEP 3. Drafts, cascading their transitions and candidates.
     result = await db.execute(
         delete(PendingDraft).where(PendingDraft.company_domain == company_domain)
     )
-    counts.pending_drafts = result.rowcount or 0
+    counts.pending_drafts = _rowcount(result)
 
     # ---- STEP 4. document_sources BEFORE articles. This is the trap: the FK is SET NULL,
     # so deleting articles first strands these rows with a NULL article_id, and their RLS
@@ -347,7 +364,7 @@ async def purge_knowledge_base(
     result = await db.execute(
         delete(DocumentSource).where(DocumentSource.article_id.in_(article_ids_stmt))
     )
-    counts.document_sources = result.rowcount or 0
+    counts.document_sources = _rowcount(result)
 
     # ---- STEP 5. Articles. One statement, thirteen dependent tables, all via CASCADE:
     # parent_chunks, article_chunks, chunk_metadata, article_versions,
@@ -356,7 +373,7 @@ async def purge_knowledge_base(
     result = await db.execute(
         delete(Article).where(Article.company_domain == company_domain)
     )
-    counts.articles = result.rowcount or 0
+    counts.articles = _rowcount(result)
 
     # ---- STEP 6. The provider-side skip cache, and the cursors that decide what a sync
     # considers new. Deleting the documents without resetting the cursors is the second
@@ -370,7 +387,7 @@ async def purge_knowledge_base(
             ExternalDocument.connector_id.in_(connector_ids_stmt)
         )
     )
-    counts.external_documents = result.rowcount or 0
+    counts.external_documents = _rowcount(result)
 
     result = await db.execute(
         update(SyncCursor)
@@ -383,20 +400,20 @@ async def purge_knowledge_base(
             last_error=None,
         )
     )
-    counts.sync_cursors_reset = result.rowcount or 0
+    counts.sync_cursors_reset = _rowcount(result)
 
     # Queued work for those connectors would otherwise execute against the state we just
     # removed, re-importing documents moments after the purge returned.
     result = await db.execute(
         delete(SyncRequest).where(SyncRequest.connector_id.in_(connector_ids_stmt))
     )
-    counts.sync_requests = result.rowcount or 0
+    counts.sync_requests = _rowcount(result)
     result = await db.execute(
         delete(ConnectorNotification).where(
             ConnectorNotification.connector_id.in_(connector_ids_stmt)
         )
     )
-    counts.connector_notifications = result.rowcount or 0
+    counts.connector_notifications = _rowcount(result)
 
     # ---- STEP 7. Undispatched outbox events naming content that is now gone. The replay
     # loop runs every 30 seconds and tolerates missing rows, but the work is pointless and
@@ -419,7 +436,7 @@ async def purge_knowledge_base(
                 OutboxEvent.payload["article_id"].as_string().in_(article_ids),
             )
         )
-        counts.outbox_events = result.rowcount or 0
+        counts.outbox_events = _rowcount(result)
 
     # ---- STEP 8. The objects are NOT deleted here. The caller still has an open
     # transaction: if its commit fails, every row above comes back while the R2 objects

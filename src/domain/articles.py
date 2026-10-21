@@ -377,7 +377,9 @@ class ArticleService:
 
         if tags is not None:
             # Re-fetch so the response reflects the persisted tag rows.
-            updated_article = await self.article_repo.get_by_id(updated_article.id)
+            refreshed = await self.article_repo.get_by_id(updated_article.id)
+            assert refreshed is not None  # the row was written earlier in this request
+            updated_article = refreshed
 
         # Trigger events
         if permissions_changed:
@@ -560,7 +562,9 @@ class ArticleService:
                 ),
                 commit=False,
             )
-            await self._audit(user.id, "restore_version", restored_article.id, commit=False)
+            await self._audit(
+                user.id, "restore_version", restored_article.id, commit=False
+            )
             await self.article_repo.db.commit()
         except Exception:
             await self.article_repo.db.rollback()

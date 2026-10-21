@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.rag.evaluator import answer_correctness
 
-
 DEFAULT_FIXTURES = (
     ("staff", "kb-staff"),
     ("reviewer", "kb-reviewer"),

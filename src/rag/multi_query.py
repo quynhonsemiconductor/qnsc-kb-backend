@@ -14,6 +14,7 @@ Deliberately never raises, mirroring contextual_header.py/auto_tagging.py: a cal
 gets [] (or None from the follow-up) back falls through to exactly the single-query
 search it would have run before this feature existed.
 """
+
 from __future__ import annotations
 
 import structlog

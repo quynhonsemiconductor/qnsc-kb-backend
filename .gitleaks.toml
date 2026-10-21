@@ -30,4 +30,7 @@ id = "generic-api-key"
   # `.env.example` would stop scanning the one file people most often paste a real
   # key into by accident; this one only forgives a match that contains no value.
   regexTarget = "match"
-  regexes = ['''[A-Z0-9_]+=""\n[A-Z0-9_]+="''']
+  # Pinned image tags in the dev compose file, e.g. `valkey:7.2.14-alpine`. The tag has enough entropy to trip
+  # generic-api-key ("valkey" contains "key"). This rule's allowlist targets the MATCH, so the anchor is on
+  # `valkey:` plus a bare version. A secret would not match it.
+  regexes = ['''[A-Z0-9_]+=""\n[A-Z0-9_]+="''', '''^valkey:\d+\.\d+\.\d+-alpine$''']

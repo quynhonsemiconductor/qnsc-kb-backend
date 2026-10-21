@@ -60,7 +60,11 @@ def callback_urls(connector: Connector) -> tuple[str, str | None]:
         )
     callback = f"{base}/api/v1/connectors/webhooks/{connector.system.replace('_', '-')}"
     # Only Graph sends lifecycle events (subscriptionRemoved, reauthorizationRequired).
-    lifecycle = f"{callback}/lifecycle" if supports_lifecycle_webhooks(connector.system) else None
+    lifecycle = (
+        f"{callback}/lifecycle"
+        if supports_lifecycle_webhooks(connector.system)
+        else None
+    )
     return callback, lifecycle
 
 
@@ -123,7 +127,8 @@ async def ensure_webhook_subscriptions(
         healthy = [
             subscription
             for subscription in existing
-            if subscription.expires_at is not None and subscription.expires_at > deadline
+            if subscription.expires_at is not None
+            and subscription.expires_at > deadline
         ]
         if healthy and not force:
             continue
@@ -144,7 +149,10 @@ async def ensure_webhook_subscriptions(
             old.active = False
 
         result = await adapter.create_webhook(
-            {"external_scope_id": scope.external_scope_id, "config": scope.config_json or {}},
+            {
+                "external_scope_id": scope.external_scope_id,
+                "config": scope.config_json or {},
+            },
             callback,
             lifecycle,
         )

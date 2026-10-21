@@ -22,6 +22,7 @@ master database credential and the application code:
 Idempotent: an existing address is reported and left alone, so a re-run after a partial
 failure is safe.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,8 @@ import sys
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from src.core.db_ssl import ssl_connect_args
 from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
@@ -45,14 +48,19 @@ async def main() -> int:
     password = os.getenv("ADMIN_PASSWORD") or ""
 
     if not email or not name or not password:
-        print("ADMIN_EMAIL, ADMIN_NAME and ADMIN_PASSWORD are all required", file=sys.stderr)
+        print(
+            "ADMIN_EMAIL, ADMIN_NAME and ADMIN_PASSWORD are all required",
+            file=sys.stderr,
+        )
         return 1
 
     # The MASTER credential, not the application role: this writes identity rows before
     # any application role has been granted anything, and it needs to set the RLS bypass
     # below.
     url = settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
-    engine = create_async_engine(url, pool_pre_ping=True)
+    engine = create_async_engine(
+        url, pool_pre_ping=True, connect_args=ssl_connect_args()
+    )
     Session = async_sessionmaker(engine, expire_on_commit=False)
 
     try:

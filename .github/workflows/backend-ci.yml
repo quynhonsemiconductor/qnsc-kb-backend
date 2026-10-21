@@ -14,6 +14,7 @@
 name: Backend · CI
 
 on:
+  merge_group:
   push:
     branches: [main]
   pull_request:
@@ -58,14 +59,42 @@ permissions:
   contents: read
 
 env:
-  PYTHON_VERSION: '3.11' # matches the Dockerfile's python:3.11-slim base
+  PYTHON_VERSION: '3.13' # matches the Dockerfile's python:3.13-slim base and the pyproject pin
 
 jobs:
+  # Does this pull request change anything this workflow tests? A change that touches only files the matching DEPLOY workflow ignores
+  # (its `paths-ignore`) cannot affect what this workflow builds, so the heavy jobs are skipped and one cheap gate reports instead.
+  # A push to main ALWAYS runs everything (deploys wait for that run), and every doubt (API error, empty file list, any file not on
+  # the list) runs everything too: see actions/changed-paths in the ci repo.
+  changes:
+    name: Which parts changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      - id: paths
+        uses: quynhonsemiconductor/ci/actions/changed-paths@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          ignore: |
+            **/*.md
+            docs/**
+          # A release-please PR: only when the author is the release bot (a branch name is chosen by whoever opens the PR, so the
+          # prefix alone proves nothing) AND the diff is the changelog, the manifest and `version` lines. The push to main it becomes
+          # runs everything. Renovate PRs are NOT skipped: an action bump must be exercised on its PR.
+          skip-heads: |
+            release-please--@qnsc-automation[bot]=CHANGELOG.md,.release-please-manifest.json,version-only:pyproject.toml
+
   # ─────────────────────────────────────────────────────────────────────────
   # 1. Format, lint, typecheck — fast gate, no services needed.
   # ─────────────────────────────────────────────────────────────────────────
   quality:
     name: Format & typecheck
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -83,27 +112,13 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      # black and mypy have been dev dependencies since the project began and nothing ever
-      # ran either, so both start ADVISORY. This codebase has never been formatted, and a
-      # blocking gate would fail every PR on a whole-repo backlog that has nothing to do
-      # with the change under review.
-      #
-      # Promote to blocking after one dedicated `style: format with black` commit. Doing
-      # that reformat inside a feature branch would bury the actual change under every
-      # file in the repository, which is why it is not done here.
-      #
-      # An advisory check nobody ever promotes is decoration — this one has a specific
-      # next step, and it should be taken.
-      - name: Format check (black, advisory)
-        continue-on-error: true
+      # Black is blocking: the codebase was formatted in one dedicated commit, so every later PR is checked.
+      - name: Format check (black)
         run: poetry run black --check src migrations scripts
 
-      # Advisory to begin with: this codebase has never been type-checked, so a blocking
-      # gate would fail on a large backlog that has nothing to do with the PR in front of
-      # it. Make it blocking once the existing errors are cleared — an advisory check
-      # nobody ever promotes is decoration.
-      - name: Typecheck (mypy, advisory)
-        continue-on-error: true
+      # Blocking. `mypy src` is clean. The package layout is set in pyproject ([tool.mypy]); each module
+      # override and each `type: ignore` carries its reason where it is declared.
+      - name: Typecheck (mypy)
         run: poetry run mypy src
 
       # Cheap catch-all that needs no configuration: every module must at least parse.
@@ -118,12 +133,14 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   test:
     name: Tests
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.2-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -135,17 +152,20 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # Valkey, the engine production runs on ElastiCache (same protocol; REDIS_URL unchanged). Service name kept.
       redis:
-        image: redis:7-alpine
+        image: valkey/valkey:8.1.10-alpine
         ports: ['6379:6379']
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
 
     env:
       PYTHONPATH: .
+      # CI talks to a plaintext Postgres; db_ssl.py must not fail closed here.
+      ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb_test
       REDIS_URL: redis://localhost:6379/0
       # DO NOT set EMBEDDING_MODEL=mock here, however tempting it looks as a way to avoid
@@ -183,6 +203,52 @@ jobs:
 
       - name: Unit tests
         run: poetry run pytest -q
+
+      # Proves the DATABASE_SSL_CA decision (src/core/db_ssl.py) against a real Postgres
+      # speaking TLS with a self-signed CA (SAN localhost): verify-full connects, a CA the
+      # server does not chain to is refused. The fail-closed-in-production case needs no
+      # server: it is tests/unit/test_db_ssl.py.
+      - name: DB TLS verify-full against a self-signed CA
+        run: |
+          mkdir certs
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/ca.key -out certs/ca.crt -days 2 \
+            -subj "/CN=db-tls-test-ca" -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" -addext "subjectKeyIdentifier=hash"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/rogue.key -out certs/rogue.crt -days 2 \
+            -subj "/CN=rogue-ca" -addext "basicConstraints=critical,CA:TRUE"
+          openssl req -newkey rsa:2048 -nodes -keyout certs/server.key -out certs/server.csr -subj "/CN=localhost"
+          printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid,issuer\nsubjectKeyIdentifier=hash\n' > certs/server.ext
+          openssl x509 -req -in certs/server.csr -CA certs/ca.crt -CAkey certs/ca.key \
+            -CAcreateserial -out certs/server.crt -days 2 -extfile certs/server.ext
+          openssl req -newkey rsa:2048 -nodes -keyout certs/noip.key -out certs/noip.csr -subj "/CN=no-ip-san"
+          printf 'subjectAltName=DNS:unrelated-host.internal\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid,issuer\nsubjectKeyIdentifier=hash\n' > certs/noip.ext
+          openssl x509 -req -in certs/noip.csr -CA certs/ca.crt -CAkey certs/ca.key \
+            -CAcreateserial -out certs/noip.crt -days 2 -extfile certs/noip.ext
+          docker run -d --name pg-tls \
+            -v "$PWD/certs:/certs" \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:15432:5432 \
+            postgres:18.6 bash -c "chown 999:999 /certs/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key"
+          n=0
+          until docker exec pg-tls pg_isready -U postgres >/dev/null 2>&1; do
+            n=$((n + 1)); [ "$n" -gt 30 ] && echo "postgres never became ready" && exit 1
+            sleep 1
+          done
+          docker run -d --name pg-wrongname \
+            -v "$PWD/certs:/certs" \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:15433:5432 \
+            postgres:18.6 bash -c "chown 999:999 /certs/noip.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/noip.crt -c ssl_key_file=/certs/noip.key"
+          n=0
+          until docker exec pg-wrongname pg_isready -U postgres >/dev/null 2>&1; do
+            n=$((n + 1)); [ "$n" -gt 30 ] && echo "wrongname postgres never became ready" && exit 1
+            sleep 1
+          done
+          PG_TLS_URL='postgresql://postgres:postgres@127.0.0.1:15432/postgres' \
+          PG_TLS_CA_FILE="$PWD/certs/ca.crt" \
+          PG_TLS_ROGUE_CA_FILE="$PWD/certs/rogue.crt" \
+          PG_TLS_WRONG_HOST_URL='postgresql://postgres:postgres@127.0.0.1:15433/postgres' \
+            poetry run pytest -q tests/integration/test_db_ssl_integration.py
 
       # Offline mode only sanity-checks the scoring functions against
       # fixtures — it deliberately does NOT claim to measure RAG quality.
@@ -244,12 +310,14 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   migrations:
     name: Migration upgrade path
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.2-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -263,6 +331,7 @@ jobs:
 
     env:
       PYTHONPATH: .
+      ENVIRONMENT: development # CI talks to a plaintext Postgres; db_ssl.py must not fail closed here
       MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb_upgrade
       # Exercises the branch that production runs: the RLS policies and the GRANTs to
       # the application role are skipped entirely when this is false, so a CI run
@@ -363,6 +432,108 @@ jobs:
         run: poetry run alembic -c migrations/alembic.ini check
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Local quickstart — the README's commands, from the example env and nothing else.
+  # A newcomer's first hour is the most expensive hour this project has, and it breaks silently: the
+  # example env drifts from Settings, compose drifts from the env (a `localhost` URL the container cannot
+  # reach, a port another stack owns), or a service reports unhealthy forever. This boots the real compose
+  # stack (db, redis, migrator, api, worker, beat) from `.env.example` and proves the health endpoint
+  # and one authenticated call, so that drift fails a pull request instead of the next person's afternoon.
+  # Garage is part of the stack: uploads go to its bucket, and garage-init proves the bucket and its CORS before the API starts.
+  #
+  # NOT proven here: the real embedding model. The ~2.3 GB bake is skipped (KB_BAKE_EMBEDDING_MODEL=false)
+  # and EMBEDDING_MODEL is set to `mock`, so search quality is untested; that path has its own tests and the
+  # deployed images carry the model. Everything else is the file as shipped.
+  # ─────────────────────────────────────────────────────────────────────────
+  quickstart:
+    name: Local quickstart
+    needs: [changes]
+    if: ${{ needs.changes.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Copy the example env (the only configuration)
+        run: |
+          cp .env.example .env
+          # The only edits, and only for CI speed: no model bake, zero-vector embeddings.
+          sed -i 's/^EMBEDDING_MODEL=.*/EMBEDDING_MODEL="mock"/' .env
+          echo 'KB_BAKE_EMBEDDING_MODEL=false' >> .env
+
+      - name: Start Postgres, Redis and Garage
+        # garage-init is a one-shot: `--wait` on it flakes, and the app services already wait on its completion.
+        run: docker compose up -d --build --wait db redis garage
+
+      - name: Migrate
+        run: docker compose --profile migrate run --rm migrator
+
+      - name: Start the API, the worker and beat
+        run: docker compose up -d --build api worker beat
+
+      - name: Health endpoint
+        run: |
+          for i in $(seq 1 60); do
+            if body="$(curl -fsS http://localhost:8000/health/ready 2>/dev/null)"; then
+              echo "ready after ~$((i * 3))s: $body"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::/health/ready never answered 200"
+          exit 1
+
+      - name: Authenticated call (the bootstrap administrator from .env.example)
+        run: |
+          set -euo pipefail
+          email="$(sed -n 's/^BOOTSTRAP_ADMIN_EMAIL="\(.*\)"/\1/p' .env.example)"
+          password="$(sed -n 's/^BOOTSTRAP_ADMIN_PASSWORD="\(.*\)"/\1/p' .env.example)"
+          # Responses go to files and are parsed from there: a `curl | interpreter` pipe is the pattern Semgrep
+          # (rightly) flags, and here it would hide a failed request behind the interpreter's exit code.
+          curl -fsS -X POST http://localhost:8000/api/v1/auth/login \
+            --data-urlencode "username=$email" --data-urlencode "password=$password" -o login.json
+          token="$(python3 -c 'import json; print(json.load(open("login.json"))["access_token"])')"
+          curl -fsS -H "Authorization: Bearer $token" http://localhost:8000/api/v1/auth/me -o me.json
+          python3 -c 'import json; d=json.load(open("me.json")); print("signed in as", d["email"], d["role"]); assert d["role"] == "Admin"'
+
+      - name: Presigned upload through Garage (signature, host and region, end to end)
+        # The browser's path, without a browser: the API signs a PUT for the public endpoint, curl sends it to that
+        # host, and the object is read back with a presigned GET. A wrong signing version, signature host or region fails
+        # here, not in a user's upload.
+        run: |
+          set -euo pipefail
+          key="s3://qnsc-kb-sources-local/qnsc-sources/ci/proof-$GITHUB_RUN_ID.txt"
+          put_url="$(docker compose exec -T api python -c "from src.domain import source_storage as s; print(s.create_presigned_source_url('$key', operation='put_object'))")"
+          get_url="$(docker compose exec -T api python -c "from src.domain import source_storage as s; print(s.create_presigned_source_url('$key', operation='get_object'))")"
+          printf 'garage proof %s\n' "$GITHUB_RUN_ID" > proof.txt
+          status="$(curl -sS -o put.out -w '%{http_code}' -X PUT -H 'Content-Type: text/plain' --data-binary @proof.txt "$put_url")"
+          test "$status" = "200" || { echo "::error::presigned PUT answered $status"; cat put.out; exit 1; }
+          curl -fsS "$get_url" -o got.txt
+          cmp proof.txt got.txt && echo "presigned PUT and GET round-trip through Garage"
+
+      - name: The worker answers and beat is scheduling
+        run: |
+          set -euo pipefail
+          docker compose exec -T worker celery -A src.workers.celery_app inspect ping
+          for _ in $(seq 1 20); do
+            if docker compose logs beat 2>&1 | grep -q "Scheduler: Sending due task"; then echo "beat is sending tasks"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::beat never sent a task"
+          exit 1
+
+      - name: Service logs (on failure)
+        if: failure()
+        run: docker compose ps -a; docker compose logs --no-color --tail=120
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ─────────────────────────────────────────────────────────────────────────
   # 4. Docker build — all three targets the deploy pipeline ships.
   # ─────────────────────────────────────────────────────────────────────────
   build:
@@ -370,31 +541,41 @@ jobs:
     runs-on: ubuntu-latest
     needs: [quality, test]
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+      security-events: write # Trivy SARIF upload (no-op on the free plan, lights up after GHAS)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # BAKE_EMBEDDING_MODEL=false: this job proves the Dockerfile BUILDS, and baking
       # ~2.3 GB of weights into the api and worker images would push that through the
       # GitHub Actions cache twice per run for no extra signal. The deploy pipeline
       # builds with the default (true) so the shipped image carries them and no task
       # pays a multi-minute download on its first search.
+      # THE CACHE IS WRITTEN FROM main ONLY. Every PR push used to write a mode=max cache for each of the images, into a repository-wide
+      # 10 GB cap shared with everything else, and a PR's entry is readable by that PR alone. Writing it evicted the entries main's
+      # builds (and every PR's `cache-from`, which falls back to main's) depend on. PRs still READ the cache; a PR's later pushes
+      # reuse main's layers. An empty `cache-to` is "do not export".
       - name: Build api image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: api
           push: false
+          load: true            # the image Trivy scans below; a second build in the security workflow is gone
+          tags: qnsc-kb-api:scan
           build-args: |
             BAKE_EMBEDDING_MODEL=false
           cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=api' || '' }}
 
       - name: Build worker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: worker
@@ -402,16 +583,23 @@ jobs:
           build-args: |
             BAKE_EMBEDDING_MODEL=false
           cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=worker' || '' }}
+
+      # CRITICAL blocks this job, hence `Backend CI required`; HIGH is reported. This used to be its own job in the security
+      # workflow that rebuilt the same image from scratch.
+      - name: Container CVE scan (Trivy)
+        uses: quynhonsemiconductor/ci/actions/scan-image@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          image-ref: qnsc-kb-api:scan
 
       - name: Build migrator image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: migrator
           push: false
           cache-from: type=gha,scope=migrator
-          cache-to: type=gha,mode=max,scope=migrator
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=migrator' || '' }}
 
   # ─────────────────────────────────────────────────────────────────────────
   # 5. OpenAPI contract.
@@ -431,6 +619,7 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONPATH: .
+      ENVIRONMENT: development # imports src.api.deps, whose engine must not fail closed on a missing CA
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -488,7 +677,7 @@ jobs:
 
       - name: Detect breaking API changes
         if: github.event_name == 'pull_request'
-        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@v1 # v1.10.0
+        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0 # v1.10.0
         with:
           current-spec-path: openapi.json
           base-spec-path: /tmp/openapi-base.json
@@ -496,7 +685,7 @@ jobs:
       # Uploaded on every run so the frontend repo has a spec to check its client
       # against, and so a reviewer can read what the API surface became.
       - name: Publish OpenAPI spec
-        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@v1 # v1.10.0
+        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0 # v1.10.0
         with:
           spec-path: openapi.json
 
@@ -519,10 +708,22 @@ jobs:
   ci-required:
     name: Backend CI required
     if: always()
-    needs: [quality, test, migrations, build, openapi]
+    needs: [changes, quality, test, migrations, build, openapi, quickstart]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@v1
+      # No `allow-skipped`, so a renamed or removed job still fails loudly. The two branches are exclusive:
+      #  * `changes` said run: every job must be `success`;
+      #  * otherwise: only `changes` itself must be `success` (the rest are skipped by design). If `changes` FAILED its output is
+      #    empty, this branch runs, and the gate fails: it cannot turn "could not decide" into a pass.
+      - name: Every job must have succeeded
+        if: ${{ needs.changes.outputs.run == 'true' }}
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           results: ${{ join(needs.*.result, ',') }}
+
+      - name: Nothing here to test (every changed file is ignorable)
+        if: ${{ needs.changes.outputs.run != 'true' }}
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          results: ${{ needs.changes.result }}

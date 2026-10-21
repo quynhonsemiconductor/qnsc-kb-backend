@@ -1,4 +1,5 @@
 """Citation parsing compatible with DocNexus and legacy QNSC answers."""
+
 import re
 
 
@@ -115,5 +116,7 @@ def split_cited_sentences(answer: str) -> list[tuple[str, list[str]]]:
     an empty ID list) so a caller can tell "no claim was made here" apart from "a claim
     was made but never checked".
     """
-    sentences = [part for part in _SENTENCE_SPLIT_RE.split((answer or "").strip()) if part]
+    sentences = [
+        part for part in _SENTENCE_SPLIT_RE.split((answer or "").strip()) if part
+    ]
     return [(sentence, extract_citation_ids(sentence)) for sentence in sentences]

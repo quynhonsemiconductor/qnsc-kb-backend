@@ -375,9 +375,12 @@ variable "embedding_runtime" {
   default     = "onnx"
   description = <<-EOT
     HOW the embedding model executes — orthogonal to embedding_model. "onnx" runs the
-    weights on the fp32 ONNX export baked into the image; parity against the torch
-    reference was proven at cosine 1.000000 by tests/unit/test_embedding_backends.py,
-    and int8 was measured and rejected (0.908-0.987 against the gate's 0.999). The
+    ONNX export baked into the image: fp32 in the worker, which writes every stored
+    vector (parity against the torch reference was proven at cosine 1.000000 by
+    tests/unit/test_embedding_backends.py), and int8 in the api, which only embeds a
+    search query against those stored fp32 vectors — see docs/embedding-runtime-onnx.md
+    for why that split is safe and what was measured. int8 for the WORKER too stays
+    rejected: it would change every stored vector. The
     default is onnx because NO SHIPPED IMAGE INSTALLS THE ML GROUP — an environment
     that sets "torch" gets a clean EmbeddingUnavailable at load, since the torch
     backend now exists only in a local checkout with `poetry install --with ml`,
@@ -386,53 +389,62 @@ variable "embedding_runtime" {
   EOT
 }
 
-variable "gemini_model" {
-  type        = string
-  default     = "gemini-flash-lite-latest"
-  description = <<-EOT
-    The text GENERATION model (RAG answers), not the embedding model.
-
-    A floating `-latest` alias on purpose. The previous default pinned
-    gemini-2.5-flash-lite, and Google retired that whole family for new keys — every
-    generateContent call returned 404 "no longer available to new users", which surfaces
-    as broken AI features rather than as a deploy failure, because nothing validates a
-    model name at apply time. An alias survives that; the cost is that the model can move
-    under you, which retrieval quality is far more tolerant of than a dead endpoint.
-
-    Verify a change before applying it:
-      curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/MODEL:generateContent?key=KEY" \
-        -H 'Content-Type: application/json' -d '{"contents":[{"parts":[{"text":"hi"}]}]}'
-  EOT
-}
-
 variable "microsoft_tenant_id" {
   type        = string
-  default     = "common"
-  description = "Entra tenant for the Microsoft connector's OAuth flow (connectors only — this application has no SSO login path yet)."
+  default     = ""
+  description = <<-EOT
+    The Entra tenant (directory) GUID that Microsoft sign-in AND the connector's OAuth consent are pinned to. No
+    default and no "common": under "common", "organizations" or "consumers" an account from any tenant (or a
+    personal one) could complete sign-in or consent. The application also refuses to boot in production with
+    anything but a GUID, and verifies every ID token's tid and iss against it (docs/runbooks/entra-apps.md).
+  EOT
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.microsoft_tenant_id))
+    error_message = "microsoft_tenant_id must be the Entra tenant GUID, never common, organizations or consumers, and never empty."
+  }
 }
 
 variable "microsoft_client_id" {
   type        = string
   default     = ""
-  description = "Public identifier, not a secret. Empty leaves the Microsoft connector dormant."
+  description = <<-EOT
+    Public identifier, not a secret. Application (client) ID of THIS environment's own single-tenant Entra app
+    ("KB Dev" for develop, "KB Prod" for production; never shared between environments). It serves both the
+    Microsoft sign-in and the user-delegated connector consent. Empty leaves both dormant.
+    docs/runbooks/entra-apps.md.
+  EOT
 }
 
 variable "microsoft_graph_sender" {
   type        = string
   default     = ""
   description = <<-EOT
-    The mailbox Graph sends application email FROM — invitations and password resets.
-    A UPN or objectId, e.g. "no-reply@qnsc.vn".
+    The mailbox Graph sends application email FROM: invitations and password resets. A UPN, e.g.
+    "noreply-kb@qnsc.vn" in production and "noreply-kb-dev@qnsc.vn" in develop (a non-production environment
+    never sends from the production mailbox; a shared mailbox is enough and needs no licence).
 
-    Empty leaves outbound mail DEAD, silently. ENVIRONMENT is pinned to "production" in
-    every environment, so get_email_sender() never returns the development FakeEmailSender;
-    it returns the Graph sender, which raises "MICROSOFT_GRAPH_SENDER is not configured"
-    before any HTTP call. deliver_notification_queue then retries every 30 seconds forever
-    and the invitee never receives a link. Nothing in validate_production() catches this,
-    which is why it is stated here rather than left to the code default.
+    The Entra app (mail_graph_client_id) holds NO Graph consent. Its only authority is the Exchange Online
+    role "Application Mail.Send", assigned with a management scope that names this one mailbox, so the app
+    can send as this address and as nobody else. See docs/runbooks/email-graph.md.
 
-    The Entra app needs Mail.Send application permission with admin consent, and the
-    mailbox must exist in the tenant.
+    Empty is no longer a silent failure: with email_provider "graph" the WORKER refuses to start when
+    mail_graph_client_id is set and this or either secret is missing (the API never refuses to boot over mail).
+  EOT
+}
+
+variable "mail_graph_client_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Application (client) ID of the dedicated Entra app that sends mail (one per environment, separate from
+    the SSO/connector app in microsoft_client_id). A public identifier, not a secret. Authenticates with the
+    certificate whose PRIVATE KEY lives in a standalone secret (<product>/<env>/mail-graph-certificate); there is no client
+    secret. Empty until the owner has created the app (docs/runbooks/email-graph.md).
+
+    THIS IS THE SWITCH. While it is empty the (empty) secret container exists but nothing is injected, so this
+    module can be applied before the owner's steps. The owner puts the value in the secret FIRST, then sets
+    this, in that order. The deploy preflight names the secret if it still has no value.
   EOT
 }
 
@@ -441,15 +453,14 @@ variable "email_provider" {
   default = "graph"
 
   description = <<-EOT
-    Selects get_email_sender()'s transport (src/services/email.py): "graph" (default)
-    keeps the Microsoft Graph path above; "ses" sends through AWS SES instead, so
-    outbound mail no longer depends on Entra admin consent. "fake" forces the in-memory
-    sender and is not expected to be used here.
+    Selects get_email_sender()'s transport (src/services/email.py). "graph" (default, and what every
+    deployed environment uses) sends through Microsoft 365 with certificate auth (the mail secret is
+    injected into the worker once mail_graph_client_id is set). "ses" is the legacy AWS path, kept only until Graph is proven in develop
+    and then removed. "fake" is the in-memory sender for tests. "console" exists in the application but is
+    refused outside development and is not accepted here.
 
-    Switching to "ses" also requires mail_from_email below, an SES-verified sender
-    identity for that address (or its domain) in this account/region, and — if the
-    account is still in the SES sandbox — either verifying every recipient or
-    requesting production access, or every send fails with MessageRejected.
+    Switching away from "graph" destroys the empty-or-not mail secret container (recoverable for
+    secrets_recovery_window_days); the plan guard stops that unless it is acknowledged.
   EOT
 
   validation {
@@ -647,18 +658,3 @@ variable "alarm_thresholds" {
   EOT
 }
 
-variable "entra_auto_provision_domain" {
-  type        = string
-  default     = "qnsc.vn"
-  description = "Email domain auto-provisioned on Entra sign-in, at the Staff role. Stated explicitly so develop's access rules do not depend on a code default."
-}
-
-variable "entra_admin_emails" {
-  type        = list(string)
-  default     = []
-  description = <<-EOT
-    Addresses provisioned as GLOBAL administrators on first Entra sign-in, instead of
-    Staff. Read only when the account is first created, so it never overrides a role set
-    later in the admin UI, and removing an address here does not demote anyone.
-  EOT
-}

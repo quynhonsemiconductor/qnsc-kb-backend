@@ -29,7 +29,7 @@ from src.api.routers.governance import (
 )
 from src.core.config import settings
 
-OPERATOR = "sinhhpt@qnsc.vn"
+OPERATOR = "alice@example.test"
 
 
 class _Caller:

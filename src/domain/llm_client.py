@@ -113,7 +113,9 @@ async def _guarded_request_target(
     resolved = await validate_public_endpoint_resolution(provider.url)
     parsed = urlsplit(url)
     if (parsed.hostname or "").lower().rstrip(".") != resolved.hostname:
-        raise RuntimeError("The provider request host changed after endpoint validation")
+        raise RuntimeError(
+            "The provider request host changed after endpoint validation"
+        )
     address = f"[{resolved.address}]" if ":" in resolved.address else resolved.address
     # The port has to survive the rewrite. Dropping it was invisible while every custom
     # endpoint was public HTTPS on the default 443, but a locally hosted model listens
@@ -131,10 +133,14 @@ async def _guarded_request_target(
 
 async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
     """Test one exact candidate without changing the active runtime configuration."""
-    url = _gemini_url(provider, streaming=False) if provider.native_gemini else provider.url
-    request_url, host_headers, extensions = await _guarded_request_target(
-        provider, url
+    if provider.name == "mock":
+        return 0  # the local mock has no endpoint to reach
+    url = (
+        _gemini_url(provider, streaming=False)
+        if provider.native_gemini
+        else provider.url
     )
+    request_url, host_headers, extensions = await _guarded_request_target(provider, url)
     payload = _payload(
         provider,
         [
@@ -164,7 +170,9 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
                         "The provider redirected the request; use its final HTTPS Chat Completions endpoint"
                     )
                 if response.status_code in (401, 403):
-                    raise ProviderAuthError("The provider rejected the configured API key")
+                    raise ProviderAuthError(
+                        "The provider rejected the configured API key"
+                    )
                 if response.status_code == 429:
                     raise ProviderRateLimitError(
                         "The provider rate limited the connection test"
@@ -177,7 +185,9 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > 262_144:
-                        raise RuntimeError("The provider response was unexpectedly large")
+                        raise RuntimeError(
+                            "The provider response was unexpectedly large"
+                        )
     except httpx.TimeoutException as exc:
         raise RuntimeError(
             "The provider did not respond before the connection test timed out"
@@ -210,9 +220,8 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
     return latency_ms
 
 
-
 def _gemini_contents(
-    messages: list[dict[str, str]]
+    messages: list[dict[str, str]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     system_message = next(
         (item for item in messages if item.get("role") == "system"), None
@@ -262,7 +271,10 @@ def _payload(
         # failure mode (see the `thinking` flag below).
         if max_tokens is not None:
             generation_config["maxOutputTokens"] = max_tokens
-        payload: dict[str, Any] = {"contents": contents, "generationConfig": generation_config}
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": generation_config,
+        }
         if system_instruction:
             payload["systemInstruction"] = system_instruction
         return payload
@@ -397,7 +409,9 @@ def _extract_usage(data: dict[str, Any]) -> int:
 # ── rate-limit management ────────────────────────────────────────────────────────────────
 # Gates are per event loop: a Celery task runs each coroutine on a fresh loop (`sync_run`), and an asyncio
 # primitive created on one loop cannot be awaited on another.
-_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
 # time.monotonic() before which the provider has asked not to be called again (process-wide, any loop).
 _rate_limited_until = 0.0
 
@@ -444,24 +458,57 @@ async def complete(
     Both modes: while the provider has asked not to be called (a recent 429), a call fails fast with the
     remaining wait instead of spending a request to find out (a background call waits it out when it is
     short), and an empty reply is a failed call, retried and then raised as ProviderEmptyReplyError.
+
+    NON-STREAMING calls only (`on_token is None`): `timeout` is the WHOLE call's budget, not per
+    attempt — every retry runs against the remaining budget, so a retried interactive call can never
+    take two full timeouts. That matters behind Cloudflare: a 60 s timeout retried once is 121 s, past
+    the 100 s the edge grants, so the second attempt would produce an answer the client can never see
+    (a 524 with no body). Streaming keeps its per-attempt read timeout: a healthy stream runs longer
+    than `timeout` in total while chunks keep arriving, and a total budget would abort it mid-answer.
     """
     rate_retries = 0
     empty_retries = 0
+    # Which wait most recently consumed budget, so an exhausted budget raises the error
+    # that names the real cause rather than a generic empty-reply failure.
+    last_wait: str | None = None
+    # Starts when the first attempt actually starts — AFTER the `_gate()` wait, not at
+    # function entry: a background call queued behind LLM_MAX_CONCURRENCY would
+    # otherwise arrive at the provider with a budget already spent in the queue.
+    deadline: float | None = None
     while True:
         remaining = _rate_limited_until - time.monotonic()
         if remaining > 0:
-            if not background or remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS:
+            if (
+                not background
+                or remaining > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS
+            ):
                 raise ProviderRateLimitError(
-                    "The provider asked us to wait; not calling it again yet", retry_after=int(remaining) + 1
+                    "The provider asked us to wait; not calling it again yet",
+                    retry_after=int(remaining) + 1,
                 )
             await asyncio.sleep(remaining + random.uniform(0, 1))
         pause: float | None = None
-        async with (_gate() if background else _NoGate()):
+        async with _gate() if background else _NoGate():
+            if deadline is None and on_token is None:
+                deadline = time.monotonic() + timeout
+            if deadline is not None and deadline - time.monotonic() <= 0:
+                if last_wait == "rate":
+                    raise ProviderRateLimitError(
+                        "The provider's rate-limit wait consumed the call's time budget",
+                        retry_after=int(_rate_limited_until - time.monotonic()) + 1,
+                    )
+                raise ProviderEmptyReplyError(
+                    "No time budget left in the call for another attempt"
+                )
             try:
                 result = await _complete_once(
                     messages,
                     model_override=model_override,
-                    timeout=timeout,
+                    timeout=(
+                        min(timeout, deadline - time.monotonic())
+                        if deadline is not None
+                        else timeout
+                    ),
                     thinking=thinking,
                     max_tokens=max_tokens,
                     on_token=on_token,
@@ -473,19 +520,33 @@ async def complete(
                     or wait > settings.LLM_RATE_LIMIT_INLINE_WAIT_SECONDS
                     or rate_retries >= settings.LLM_RATE_LIMIT_MAX_INLINE_RETRIES
                 ):
-                    logger.warning("LLM rate limited; giving up on this call", retry_after=wait, retries=rate_retries)
+                    logger.warning(
+                        "LLM rate limited; giving up on this call",
+                        retry_after=wait,
+                        retries=rate_retries,
+                    )
                     raise
                 rate_retries += 1
                 pause = wait + random.uniform(0, 1)
-                logger.info("LLM rate limited; waiting and retrying", retry_after=wait, attempt=rate_retries)
+                last_wait = "rate"
+                logger.info(
+                    "LLM rate limited; waiting and retrying",
+                    retry_after=wait,
+                    attempt=rate_retries,
+                )
             else:
                 if result[0].strip():
                     return result
                 if empty_retries >= settings.LLM_EMPTY_REPLY_RETRIES:
-                    raise ProviderEmptyReplyError(f"{result[3]} returned an empty reply {empty_retries + 1} times")
+                    raise ProviderEmptyReplyError(
+                        f"{result[3]} returned an empty reply {empty_retries + 1} times"
+                    )
                 empty_retries += 1
                 pause = 1.0 * empty_retries
-                logger.warning("LLM returned an empty reply; retrying", attempt=empty_retries)
+                last_wait = "empty"
+                logger.warning(
+                    "LLM returned an empty reply; retrying", attempt=empty_retries
+                )
         # The gate is released while sleeping, so a waiting call does not hold a slot.
         await asyncio.sleep(pause or 0)
 
@@ -500,6 +561,38 @@ class _NoGate:
         return None
 
 
+def _mock_completion(messages: list[dict[str, str]]) -> tuple[str, int, str, str]:
+    """A deterministic local stand-in for the model. No network, no key.
+
+    Only the grounded-answer prompt gets an answer. That prompt asks for the ``<<<GROUNDED>>>`` sentinel, so the mock keys on
+    it: with an authorized passage it answers from the first one and cites it; without one it returns the standard refusal,
+    after the sentinel. Every other call (contextual headers, query rewrites, judges) gets a neutral stub, never the refusal,
+    so those features keep working locally. Used only when ``Settings.uses_mock_llm`` is set and no provider is saved.
+    """
+    system_and_user = "\n".join(str(m.get("content", "")) for m in messages)
+    if "<<<GROUNDED>>>" not in system_and_user:
+        text = "[mock: no answer for this call]"
+    else:
+        user = next(
+            (
+                m.get("content", "")
+                for m in reversed(messages)
+                if m.get("role") == "user"
+            ),
+            "",
+        )
+        document = re.search(r'<authorized-document id="(C\d{1,3})">', user)
+        if document is None:
+            text = "<<<GROUNDED>>>\nI could not produce a grounded answer from the authorized Knowledge Base sources."
+        else:
+            passage = re.search(
+                r"<untrusted-passage>\n(.*?)\n</untrusted-passage>", user, re.DOTALL
+            )
+            excerpt = " ".join((passage.group(1) if passage else "").split())[:300]
+            text = f"<<<GROUNDED>>>\n[mock answer: local development only] {excerpt} [{document.group(1)}]"
+    return text, len(text.split()), "mock", "mock"
+
+
 async def _complete_once(
     messages: list[dict[str, str]],
     *,
@@ -510,6 +603,12 @@ async def _complete_once(
     on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, int, str, str]:
     """One provider request, no retry policy. Use ``complete``."""
+    runtime = get_runtime_config()
+    if runtime is not None and runtime.provider == "mock":
+        text, tokens, model, provider_name = _mock_completion(messages)
+        if on_token is not None:
+            await on_token(text)
+        return text, tokens, model, provider_name
     provider = resolve_provider(model_override)
     if provider is None:
         raise RuntimeError("No LLM provider is configured.")
@@ -773,6 +872,11 @@ async def complete_multimodal(
     max_tokens: int | None = None,
 ) -> tuple[str, int, str, str]:
     """Complete against bounded, server-selected images; never accepts client URLs."""
+    runtime = get_runtime_config()
+    if runtime is not None and runtime.provider == "mock":
+        raise RuntimeError(
+            "The local mock provider does not read images; leave EVIDENCE_VISION_ENABLED off"
+        )
     # Validate caller-controlled shape before configuration. An unsupported media type is
     # invalid regardless of whether this deployment happens to have a provider configured,
     # and resolving credentials first made this guard impossible to test or reason about.
@@ -781,7 +885,10 @@ async def complete_multimodal(
     allowed_types = {"image/png", "image/jpeg", "image/webp"}
     if any(mime not in allowed_types for mime, _data in images):
         raise ValueError("unsupported evidence image type")
-    if sum(len(data) for _mime, data in images) > settings.EVIDENCE_VISION_MAX_TOTAL_BYTES:
+    if (
+        sum(len(data) for _mime, data in images)
+        > settings.EVIDENCE_VISION_MAX_TOTAL_BYTES
+    ):
         raise ValueError("evidence images exceed the request size limit")
     provider = resolve_provider()
     if provider is None:
@@ -833,9 +940,7 @@ async def complete_multimodal(
             payload["max_tokens"] = max_tokens
         url = provider.url
 
-    request_url, host_headers, extensions = await _guarded_request_target(
-        provider, url
-    )
+    request_url, host_headers, extensions = await _guarded_request_target(provider, url)
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,
@@ -852,7 +957,9 @@ async def complete_multimodal(
                 "The provider redirected the request; configure its final HTTPS endpoint"
             )
         if response.status_code in (400, 404, 415, 422):
-            raise RuntimeError("The configured provider does not support evidence images")
+            raise RuntimeError(
+                "The configured provider does not support evidence images"
+            )
         if response.status_code in (401, 403):
             raise ProviderAuthError("The provider rejected the configured API key")
         if response.status_code == 429:
@@ -862,5 +969,9 @@ async def complete_multimodal(
             )
         response.raise_for_status()
         result = response.json()
-    answer = _extract_gemini_text(result) if provider.native_gemini else _extract_openai_text(result)
+    answer = (
+        _extract_gemini_text(result)
+        if provider.native_gemini
+        else _extract_openai_text(result)
+    )
     return answer, _extract_usage(result), provider.model, provider.name
