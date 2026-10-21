@@ -8,11 +8,12 @@
 name: PR title
 
 on:
+  merge_group:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
 concurrency:
-  group: pr-title-${{ github.event.pull_request.number }}
+  group: pr-title-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -21,6 +22,9 @@ permissions:
 
 jobs:
   pr-title:
+    # The semantic-PR action throws without a pull_request payload, and a merge_group run has
+    # none. Skipped is passing for a required check, so the queue entry reports green.
+    if: github.event_name != 'merge_group'
     name: PR title (conventional commits)
     runs-on: ubuntu-latest
     timeout-minutes: 5
