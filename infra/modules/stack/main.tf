@@ -669,8 +669,12 @@ module "worker" {
   // connection, which is the failure worth catching.
   health_check_command = "celery -A src.workers.celery_app inspect ping -d celery@$HOSTNAME || exit 1"
 
-  environment_vars = local.common_env
-  secrets          = concat(local.common_secrets, local.mail_secrets)
+  // The worker alone raises the embedding thread count: it holds the 4 vCPU task and writes
+  // every stored vector, while the api's 2 vCPU already matches the default of 2.
+  environment_vars = concat(local.common_env, [
+    { name = "EMBEDDING_ONNX_THREADS", value = tostring(var.worker_embedding_threads) },
+  ])
+  secrets = concat(local.common_secrets, local.mail_secrets)
 
   // The mail secret is granted here, on the WORKER's execution role, and nowhere else. No task role in this
   // stack gets any secretsmanager permission (task_secret_arns is never passed).
