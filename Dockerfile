@@ -97,17 +97,20 @@ COPY pyproject.toml poetry.lock ./
 
 # migrator
 FROM builder AS deps
-RUN /opt/poetry/bin/poetry install --no-root --only main
+RUN /opt/poetry/bin/poetry install --no-root --only main && \
+    rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 
 # api: ONNX Runtime + tokenizers. Not optional in practice: the api embeds the search query in-process, and the
 # failure without it is a lazy import inside the model singleton, invisible until the first search.
 FROM builder AS deps-onnx
-RUN /opt/poetry/bin/poetry install --no-root --only main,onnx
+RUN /opt/poetry/bin/poetry install --no-root --only main,onnx && \
+    rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 
 # worker: the same, plus OCR. src/domain/source_extraction.py imports paddle INSIDE the functions that use it, so
 # an image without it serves every other path and fails loudly only if asked to OCR - which the api never is.
 FROM builder AS deps-onnx-ocr
-RUN /opt/poetry/bin/poetry install --no-root --only main,onnx,ocr
+RUN /opt/poetry/bin/poetry install --no-root --only main,onnx,ocr && \
+    rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 
 # ---------------------------------------------------------------------------
 # hub - huggingface_hub and nothing else, so downloading the 2.2 GB export does not depend on the application's
@@ -245,6 +248,15 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN useradd --create-home --uid 10001 appuser && \
     mkdir -p /app/storage/sources /app/storage/connectors "$HF_HOME" && \
     chown -R appuser:appuser /app "$HF_HOME"
+
+# pip is build-time only (poetry installs into the venv in the deps stages), and it
+# cannot simply be upgraded away: its vendored certifi copy ships without dist-info,
+# so the scanner pins the version from the PEM bundle and a CRITICAL stands no matter
+# what the real certifi says. Nothing at runtime installs packages, so both pip trees
+# (the system one and the venv's, each with its vendored certifi) are removed here.
+RUN rm -rf /usr/local/lib/python3*/site-packages/pip* \
+           /opt/venv/lib/python3*/site-packages/pip* \
+           /usr/local/bin/pip* /opt/venv/bin/pip*
 
 # ---------------------------------------------------------------------------
 # targets. Order inside each: libraries, then the (identical-digest) model, then code last (rule A).
