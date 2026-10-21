@@ -113,7 +113,7 @@ black = "^26.0.0"
 mypy = "^1.10.0"
 celery-types = "^0.26.0"
 types-openpyxl = "^3.1.5.20261017"
-boto3-stubs = {version = "^1.43.114", extras = ["s3", "sesv2"]}
+boto3-stubs = {version = "^1.43.114", extras = ["s3"]}
 
 [tool.mypy]
 # `src/` is the import root, and `src` is a package. Without this mypy resolves src/api/deps.py as both `api.deps`

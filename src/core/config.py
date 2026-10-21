@@ -605,12 +605,9 @@ class Settings(BaseSettings):
     MAIL_GRAPH_PRIVATE_KEY_PEM: SecretStr | None = None
     MICROSOFT_GRAPH_SCOPE: str = "https://graph.microsoft.com/.default"
     # "graph" sends through Microsoft 365 (certificate auth, see above); "console" logs the message and is
-    # accepted only in development; "fake" is the in-memory sender for tests; "ses" is the legacy AWS path,
-    # present only until Graph is proven. get_email_sender() in src/services/email.py reads this.
+    # accepted only in development; "fake" is the in-memory sender for tests. get_email_sender() in
+    # src/services/email.py reads this. (AWS SES was removed once Graph was proven in develop.)
     EMAIL_PROVIDER: str = "graph"
-    # Required when EMAIL_PROVIDER=ses; SesEmailSender raises without it.
-    MAIL_FROM_EMAIL: str | None = None
-    MAIL_FROM_NAME: str = "QNSC Knowledge Base"
     # ``delegated`` keeps the interactive OAuth flow. ``application`` uses the
     # tenant-approved client-credentials flow for unattended 24/7 ingestion.
     MICROSOFT_CONNECTOR_AUTH_MODE: str = "delegated"
@@ -731,7 +728,6 @@ class Settings(BaseSettings):
     SOURCE_STORAGE_BUCKET: str | None = None
     SOURCE_STORAGE_PREFIX: str = "qnsc-sources"
     SOURCE_ORPHAN_GRACE_HOURS: int = 24
-    AWS_REGION: str | None = None
     S3_ENDPOINT_URL: str | None = None
     # Presigned URLs are signed for, and handed to the browser at, this origin. Local development only (refused in
     # production): the services reach the emulator by its compose name, the browser needs the published host port.

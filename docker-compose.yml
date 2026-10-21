@@ -255,13 +255,8 @@ services:
       # get_email_sender() (src/services/email.py) picks the transport from EMAIL_PROVIDER. Locally the
       # default is `console`: the message, links included, is written to this container's log, so no mail
       # server or Entra app is needed. `graph` sends through Microsoft 365 with a certificate (set the
-      # MAIL_GRAPH_* values in .env, docs/runbooks/email-graph.md); `ses` is the legacy AWS path.
+      # MAIL_GRAPH_* values in .env, docs/runbooks/email-graph.md).
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-console}
-      - MAIL_FROM_EMAIL=${MAIL_FROM_EMAIL:-}
-      - MAIL_FROM_NAME=${MAIL_FROM_NAME:-QNSC Knowledge Base}
-      - AWS_REGION=${AWS_REGION:-}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - OMP_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - TOKENIZERS_PARALLELISM=false
