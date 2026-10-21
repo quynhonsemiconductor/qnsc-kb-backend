@@ -144,24 +144,24 @@ def test_no_operator_is_authorised_by_default(monkeypatch):
     """Fail closed. An unconfigured deployment must not carry a loaded gun."""
     monkeypatch.setattr(settings, "FACTORY_RESET_ALLOWED_EMAILS", "")
     assert allowed_reset_emails() == frozenset()
-    assert is_reset_operator("sinhhpt@qnsc.vn") is False
+    assert is_reset_operator("alice@example.test") is False
 
 
 def test_the_configured_operator_is_matched_case_insensitively(monkeypatch):
-    monkeypatch.setattr(settings, "FACTORY_RESET_ALLOWED_EMAILS", "sinhhpt@qnsc.vn")
-    assert is_reset_operator("sinhhpt@qnsc.vn") is True
+    monkeypatch.setattr(settings, "FACTORY_RESET_ALLOWED_EMAILS", "alice@example.test")
+    assert is_reset_operator("alice@example.test") is True
     # Postgres stores what it was given; the routes lowercase, but a legacy row or a
     # hand-edited value must not sidestep the check on capitalisation alone.
-    assert is_reset_operator("SinhHPT@QNSC.VN") is True
-    assert is_reset_operator("  sinhhpt@qnsc.vn  ") is True
+    assert is_reset_operator("ALICE@EXAMPLE.TEST") is True
+    assert is_reset_operator("  alice@example.test  ") is True
 
 
 def test_nobody_else_is_authorised(monkeypatch):
-    monkeypatch.setattr(settings, "FACTORY_RESET_ALLOWED_EMAILS", "sinhhpt@qnsc.vn")
+    monkeypatch.setattr(settings, "FACTORY_RESET_ALLOWED_EMAILS", "alice@example.test")
     assert is_reset_operator("attacker@qnsc.vn") is False
     # Not a prefix or substring match: a similar-looking address is a different one.
-    assert is_reset_operator("sinhhpt@qnsc.vn.evil.test") is False
-    assert is_reset_operator("xsinhhpt@qnsc.vn") is False
+    assert is_reset_operator("alice@example.test.evil.test") is False
+    assert is_reset_operator("xalice@example.test") is False
     assert is_reset_operator(None) is False
     assert is_reset_operator("") is False
 
@@ -177,9 +177,9 @@ def test_the_allowlist_is_re_read_rather_than_cached(monkeypatch):
 
 def test_several_operators_can_be_configured(monkeypatch):
     monkeypatch.setattr(
-        settings, "FACTORY_RESET_ALLOWED_EMAILS", "sinhhpt@qnsc.vn, ops@qnsc.vn"
+        settings, "FACTORY_RESET_ALLOWED_EMAILS", "alice@example.test, ops@qnsc.vn"
     )
-    assert is_reset_operator("sinhhpt@qnsc.vn") is True
+    assert is_reset_operator("alice@example.test") is True
     assert is_reset_operator("ops@qnsc.vn") is True
 
 
