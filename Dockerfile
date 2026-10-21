@@ -97,20 +97,17 @@ COPY pyproject.toml poetry.lock ./
 
 # migrator
 FROM builder AS deps
-RUN /opt/poetry/bin/poetry install --no-root --only main && \
-    rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
+RUN /opt/poetry/bin/poetry install --no-root --only main
 
 # api: ONNX Runtime + tokenizers. Not optional in practice: the api embeds the search query in-process, and the
 # failure without it is a lazy import inside the model singleton, invisible until the first search.
 FROM builder AS deps-onnx
-RUN /opt/poetry/bin/poetry install --no-root --only main,onnx && \
-    rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
+RUN /opt/poetry/bin/poetry install --no-root --only main,onnx
 
 # worker: the same, plus OCR. src/domain/source_extraction.py imports paddle INSIDE the functions that use it, so
 # an image without it serves every other path and fails loudly only if asked to OCR - which the api never is.
 FROM builder AS deps-onnx-ocr
-RUN /opt/poetry/bin/poetry install --no-root --only main,onnx,ocr && \
-    rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
+RUN /opt/poetry/bin/poetry install --no-root --only main,onnx,ocr
 
 # ---------------------------------------------------------------------------
 # hub - huggingface_hub and nothing else, so downloading the 2.2 GB export does not depend on the application's
@@ -249,14 +246,11 @@ RUN useradd --create-home --uid 10001 appuser && \
     mkdir -p /app/storage/sources /app/storage/connectors "$HF_HOME" && \
     chown -R appuser:appuser /app "$HF_HOME"
 
-# pip is build-time only (poetry installs into the venv in the deps stages), and it
-# cannot simply be upgraded away: its vendored certifi copy ships without dist-info,
-# so the scanner pins the version from the PEM bundle and a CRITICAL stands no matter
-# what the real certifi says. Nothing at runtime installs packages, so both pip trees
-# (the system one and the venv's, each with its vendored certifi) are removed here.
-RUN rm -rf /usr/local/lib/python3*/site-packages/pip* \
-           /opt/venv/lib/python3*/site-packages/pip* \
-           /usr/local/bin/pip* /opt/venv/bin/pip*
+# The system pip is build-time only, and its vendored certifi copy ships without
+# dist-info, so Trivy pins its version from the PEM bundle and a CRITICAL stands no
+# matter what the venv's real certifi says. There is no /opt/venv in this stage yet —
+# each target strips the pip that arrives inside the COPIED venv.
+RUN rm -rf /usr/local/lib/python3*/site-packages/pip* /usr/local/bin/pip*
 
 # ---------------------------------------------------------------------------
 # targets. Order inside each: libraries, then the (identical-digest) model, then code last (rule A).
@@ -264,6 +258,9 @@ RUN rm -rf /usr/local/lib/python3*/site-packages/pip* \
 FROM runtime-base AS api
 
 COPY --from=deps-onnx /opt/venv /opt/venv
+# pip is build-time only, and its vendored certifi trips the CRITICAL gate
+# (see runtime-base); the venv arrives with it, so it is stripped here.
+RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=api-embedding /opt/embedding-export /opt/embedding-onnx
 COPY --chown=appuser:appuser . .
 
@@ -286,6 +283,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps-onnx-ocr /opt/venv /opt/venv
+# pip is build-time only, and its vendored certifi trips the CRITICAL gate
+# (see runtime-base); the venv arrives with it, so it is stripped here.
+RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=model /opt/embedding-export /opt/embedding-onnx
 COPY --chown=appuser:appuser . .
 
@@ -319,6 +319,9 @@ CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
 FROM runtime-base AS migrator
 
 COPY --from=deps /opt/venv /opt/venv
+# pip is build-time only, and its vendored certifi trips the CRITICAL gate
+# (see runtime-base); the venv arrives with it, so it is stripped here.
+RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --chown=appuser:appuser . .
 
 USER appuser
