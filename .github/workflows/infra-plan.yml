@@ -7,7 +7,6 @@
 name: Infrastructure · Plan
 
 on:
-  merge_group:
   pull_request:
     # NO `branches:` filter here, deliberately — see `push` above, which keeps one.
     #
