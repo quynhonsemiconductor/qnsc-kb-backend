@@ -5,8 +5,7 @@ What they pin, each one a review finding on kb#215:
     merging before the owner's steps references nothing that has no value yet;
   * it reaches the WORKER container only, is granted to the worker's execution role only, no task role can read
     any secret, and a resource policy denies everyone else;
-  * develop stays on SES until the client id is set;
-  * the SES send grant is NOT keyed on the provider (expand/contract: it outlives the switch to Graph);
+  * (this branch is the CONTRACT half) develop has no provider override and no SES send grant remains;
   * the three mail alarms exist.
 """
 
@@ -48,7 +47,7 @@ def test_the_mail_credential_is_not_a_key_of_the_shared_bundle():
 def test_the_mail_credential_is_a_standalone_secret_created_before_the_client_id_is_set():
     secret = block(STACK, 'resource "aws_secretsmanager_secret" "mail_graph"')
     assert "count = local.mail_secret_exists ? 1 : 0" in secret
-    assert 'mail_secret_exists = var.email_provider != "fake"' in STACK  # develop is "ses" until its client id is set
+    assert 'mail_secret_exists = var.email_provider != "fake"' in STACK
     assert "count = local.mail_secret_exists ? 1 : 0" in block(STACK, 'resource "aws_secretsmanager_secret_policy" "mail_graph"')
     assert 'name                    = "${var.product}/${var.env}/mail-graph-certificate"' in secret
     assert "kms_key_id" in secret
@@ -93,15 +92,11 @@ def test_only_the_worker_container_receives_it_and_only_the_worker_execution_rol
     assert "MAIL_GRAPH" not in block(STACK, "common_secrets = concat(")
 
 
-def test_develop_stays_on_ses_until_the_client_id_is_set():
-    assert 'email_provider        = var.mail_graph_client_id != "" ? "graph" : "ses"' in DEVELOP
-
-
-def test_the_ses_grant_is_not_keyed_on_the_provider():
-    grant = block(STACK, 'resource "aws_iam_role_policy" "worker_ses_send"')
-    assert 'count = var.mail_from_email != "" ? 1 : 0' in grant
-    assert "email_provider" not in grant
-    assert 'mail_from_domain = var.mail_from_email != "" ?' in STACK
+def test_develop_has_no_provider_override_and_there_is_no_ses_grant_any_more():
+    """The contract half of expand/contract (kb#216): develop is plain `graph`, and nothing grants ses:SendEmail."""
+    assert "email_provider" not in DEVELOP
+    assert 'resource "aws_iam_role_policy" "worker_ses_send"' not in STACK
+    assert '"ses:SendEmail"' not in STACK and "var.mail_from" not in STACK and "local.mail_from" not in STACK
 
 
 def test_the_three_mail_alarms_watch_the_worker_log_group():
@@ -117,3 +112,18 @@ def test_each_environment_keeps_its_own_mailbox_rule():
     # lower(): noreply-kb-DEV@ must not slip past either rule
     assert 'can(regex("-dev@", lower(var.microsoft_graph_sender)))' in DEV_VARS
     assert '!can(regex("-dev@", lower(var.microsoft_graph_sender)))' in PROD_VARS
+
+
+def test_develop_cannot_lose_its_mail_app_id():
+    """SES is removed here, so an empty client id would leave develop with no mail transport at all."""
+    variable = block(DEV_VARS, 'variable "mail_graph_client_id"')
+    assert 'condition     = var.mail_graph_client_id != ""' in variable
+    assert variable.split("default")[1].split('"')[1], "the default client id itself must be non-empty"
+
+
+def test_prod_has_no_hard_mail_app_id_gate():
+    """The prod app does not exist yet (KB has no production), so a non-empty validation there could
+    never be satisfied; prod stays on main's optional semantics (empty = mail not configured, alarmed)."""
+    variable = block(PROD_VARS, 'variable "mail_graph_client_id"')
+    assert 'condition     = var.mail_graph_client_id != ""' not in variable
+    assert 'condition' not in variable

@@ -52,13 +52,6 @@ locals {
   kms_key_arn        = data.terraform_remote_state.shared.outputs.kms_key_arn
   cloudflare_zone_id = try(data.terraform_remote_state.shared.outputs.cloudflare_zone_id, "")
 
-  // DKIM verifies the DOMAIN, not the mailbox, so this is the part after "@" — SES signs
-  // for any address at it, and the local part of mail_from_email can change later without
-  // a new identity. Keyed on mail_from_email, not on email_provider: the SES send grant must outlive the
-  // switch to Graph (expand/contract: the switch ships first, the grant is deleted in a later change, so a
-  // rollback to an EMAIL_PROVIDER=ses task definition still has the permission it needs).
-  mail_from_domain = var.mail_from_email != "" ? replace(var.mail_from_email, "/^[^@]*@/", "") : ""
-
   // The mail app is "configured" once the owner has created it and put its client id in the live stack. Until
   // then NOTHING mail-related is injected, so merging this change before the owner's steps cannot make a task
   // reference a secret that has no value yet (ResourceInitializationError at boot, a circuit-breaker rollback,
@@ -166,7 +159,6 @@ locals {
     // an environment that does not run those checks cannot prove production will pass
     // them.
     { name = "ENVIRONMENT", value = "production" },
-    { name = "AWS_REGION", value = var.region },
     { name = "REDIS_URL", value = local.redis_url },
 
     // Celery, not in-process: JOB_MODE=inline would run ingestion inside the request
@@ -229,8 +221,6 @@ locals {
     // must agree on config the way EMBEDDING_MODEL does above, and a future path that
     // sends mail from the api would otherwise silently pick up a different transport.
     { name = "EMAIL_PROVIDER", value = var.email_provider },
-    { name = "MAIL_FROM_EMAIL", value = var.mail_from_email },
-    { name = "MAIL_FROM_NAME", value = var.mail_from_name },
 
     // SSO sign-in, a DIFFERENT callback from the connector one above: that consents to
     // SharePoint content, this authenticates a person. Both must be registered on the
@@ -450,8 +440,8 @@ resource "terraform_data" "tunnel_token_value" {
 // this stack can read any secret (task_secret_arns is never passed to ecs-service), so application code, which
 // runs as the task role, cannot read it either.
 //
-// The CONTAINER is created whenever the provider is not the in-memory fake (develop is still "ses" until its client id
-// is set, and the owner writes the value before that), empty and without a version, so the owner can put the
+// The CONTAINER is created whenever the provider is not the in-memory fake (and the owner writes the value
+// before setting the client id), empty and without a version, so the owner can put the
 // value BEFORE setting mail_graph_client_id; it is injected only once that is set (mail_graph_enabled). The value
 // never enters Terraform state. The deploy preflight (ci backend-deploy) lists this secret's versions on every
 // deploy and fails by NAME if it holds none: that is the per-secret check the bundle's keys never had.
@@ -722,35 +712,10 @@ module "worker" {
   tags = local.tags
 }
 
-// The SES identity and its DKIM CNAME records are NOT declared here. qnsc-infra's `edge` stack owns the one
-// identity for qnsc.vn that every product shares (an SES identity is per account and region), with the three
-// DKIM records in Cloudflare. This stack declared them as well for a while, so two states owned the same
-// objects and each apply rewrote the other's tags, comment and TTL. The product only needs permission to send
-// as the identity, granted below by ARN.
-//
-// Grants the worker task (the only caller of get_email_sender()) permission to send
-// through SES. Created whenever mail_from_email is set, NOT only while email_provider is "ses": this is the
-// "expand" half of expand/contract (infra/README.md). Switching develop to Graph must not remove the grant in
-// the same apply, because the ECS circuit breaker can roll the service back to a task definition that still
-// says EMAIL_PROVIDER=ses. The grant is deleted in the follow-up change (kb-backend #216) once Graph is proven.
-// The ecs-service module exposes task_role_arn but not a role NAME output, so the role name is derived from
-// the ARN's final path segment. Scoped to the identity above, by ARN.
-resource "aws_iam_role_policy" "worker_ses_send" {
-  count = var.mail_from_email != "" ? 1 : 0
-  name  = "ses-send"
-  role  = split("/", module.worker.task_role_arn)[1]
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid    = "SendApplicationEmail"
-      Effect = "Allow"
-      Action = ["ses:SendEmail", "ses:SendRawEmail"]
-      // The shared identity, by ARN (edge's `ses_identity_arn` output builds the same string).
-      Resource = "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.mail_from_domain}"
-    }]
-  })
-}
+// There is no SES here any more: application mail goes through Microsoft 365 Graph with a certificate (see the
+// mail secrets above and docs/runbooks/email-graph.md). The shared SES identity for qnsc.vn and its DKIM records
+// are still owned by qnsc-infra's `edge` stack, which other products use; this stack neither declares them nor
+// holds a ses:SendEmail grant. The worker's ses:SendEmail grant, kept by #215 so a rollback to an EMAIL_PROVIDER=ses revision still worked, is deleted here (the "contract" half of expand/contract, infra/README.md): merge this only after Graph mail is proven on develop.
 
 // ── Migrator — one-shot task run by the deploy pipeline before rolling services ──
 module "migrator" {
@@ -768,7 +733,6 @@ module "migrator" {
 
   environment = {
     ENVIRONMENT   = "production"
-    AWS_REGION    = var.region
     DATABASE_HOST = module.rds.address
     DATABASE_PORT = tostring(module.rds.port)
     DATABASE_NAME = module.rds.db_name

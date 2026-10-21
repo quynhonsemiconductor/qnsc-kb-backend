@@ -607,7 +607,6 @@ files = [
 [package.dependencies]
 botocore-stubs = "*"
 mypy-boto3-s3 = {version = ">=1.43.0,<1.44.0", optional = true, markers = "extra == \"s3\""}
-mypy-boto3-sesv2 = {version = ">=1.43.0,<1.44.0", optional = true, markers = "extra == \"sesv2\""}
 types-s3transfer = "*"
 
 [package.extras]
@@ -3379,18 +3378,6 @@ groups = ["dev"]
 files = [
     {file = "mypy_boto3_s3-1.43.106-py3-none-any.whl", hash = "sha256:e233d04dbcf3925522dff4346e75c37344ec3d1cbb82337e5eed2af263847668"},
     {file = "mypy_boto3_s3-1.43.106.tar.gz", hash = "sha256:731195f15830699a36e29d3c8abb2918bccd3587eb2edcb233f8046967893279"},
-]
-
-[[package]]
-name = "mypy-boto3-sesv2"
-version = "1.43.110"
-description = "Type annotations for boto3 SESV2 1.43.110 service generated with mypy-boto3-builder 8.12.0"
-optional = false
-python-versions = ">=3.9"
-groups = ["dev"]
-files = [
-    {file = "mypy_boto3_sesv2-1.43.110-py3-none-any.whl", hash = "sha256:26ad1faf751aa0ef7c7e3ef65d171d9221b4b766f03d35460b7ffb4ddf780445"},
-    {file = "mypy_boto3_sesv2-1.43.110.tar.gz", hash = "sha256:72ac73bab29fc1bad5c185fdf505db6d5a5fd64b9d5e13f53e41457f43d840ff"},
 ]
 
 [[package]]
@@ -6857,4 +6844,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "2bd53b5f6c072bae669c0708f785df4592f432dc754d121620474b152002981d"
+content-hash = "8f766f5d6e53ff344324a66a15398e74b19e47a589ad9152240c2e6e64911ff1"
