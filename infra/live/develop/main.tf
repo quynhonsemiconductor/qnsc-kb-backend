@@ -127,8 +127,12 @@ module "stack" {
     // NOT reduced: its daily CPU maximum reaches 91% of 4 vCPU, and Fargate will not take
     // 4 vCPU below 8 GB anyway. Only ~1 hour of int8 data existed when this was written, so
     // watch api MemoryUtilization after the roll; prod/main.tf carries the same pair.
+    //
+    // RAISED BACK 2026-10-21 to 2048/8192 at the owner's request, for headroom. The
+    // measurements above still stand (int8 uses ~1.7 GB); this is a choice to spend the
+    // ~$5/mo (Spot) rather than a response to an OOM.
     cpu                = 2048
-    memory             = 4096
+    memory             = 8192
     min_count          = 0
     max_count          = 2
     enable_autoscaling = false

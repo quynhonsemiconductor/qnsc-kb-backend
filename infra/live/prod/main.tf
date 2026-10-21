@@ -145,11 +145,11 @@ module "stack" {
     // this is up to 12 GB of duplicated signature database — the point at which one clamd
     // behind Service Connect becomes the cheaper shape.
     //
-    // 4096, the same as develop, which measured it: see the comment on develop's api block.
-    // This one is on-demand, so the 4 GB saved is worth roughly $16/mo once it is serving
-    // (an estimate from list prices, not a bill).
+    // 8192, the same as develop: see the comment on develop's api block. The int8 export
+    // would fit in 4096 (an estimate worth roughly $16/mo on-demand, from list prices, not a
+    // bill), but the owner chose headroom on 2026-10-21.
     cpu                = 2048
-    memory             = 4096
+    memory             = 8192
     min_count          = 0
     max_count          = 6
     enable_autoscaling = false
