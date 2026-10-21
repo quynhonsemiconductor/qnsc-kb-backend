@@ -246,12 +246,21 @@ RUN useradd --create-home --uid 10001 appuser && \
     mkdir -p /app/storage/sources /app/storage/connectors "$HF_HOME" && \
     chown -R appuser:appuser /app "$HF_HOME"
 
+# The system pip is build-time only, and its vendored certifi copy ships without
+# dist-info, so Trivy pins its version from the PEM bundle and a CRITICAL stands no
+# matter what the venv's real certifi says. There is no /opt/venv in this stage yet —
+# each target strips the pip that arrives inside the COPIED venv.
+RUN rm -rf /usr/local/lib/python3*/site-packages/pip* /usr/local/bin/pip*
+
 # ---------------------------------------------------------------------------
 # targets. Order inside each: libraries, then the (identical-digest) model, then code last (rule A).
 # ---------------------------------------------------------------------------
 FROM runtime-base AS api
 
 COPY --from=deps-onnx /opt/venv /opt/venv
+# pip is build-time only, and its vendored certifi trips the CRITICAL gate
+# (see runtime-base); the venv arrives with it, so it is stripped here.
+RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=api-embedding /opt/embedding-export /opt/embedding-onnx
 COPY --chown=appuser:appuser . .
 
@@ -278,6 +287,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps-onnx-ocr /opt/venv /opt/venv
+# pip is build-time only, and its vendored certifi trips the CRITICAL gate
+# (see runtime-base); the venv arrives with it, so it is stripped here.
+RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=model /opt/embedding-export /opt/embedding-onnx
 COPY --chown=appuser:appuser . .
 
@@ -311,6 +323,9 @@ CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
 FROM runtime-base AS migrator
 
 COPY --from=deps /opt/venv /opt/venv
+# pip is build-time only, and its vendored certifi trips the CRITICAL gate
+# (see runtime-base); the venv arrives with it, so it is stripped here.
+RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --chown=appuser:appuser . .
 
 USER appuser
