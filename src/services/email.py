@@ -220,7 +220,7 @@ def _credential() -> _Credential:
     if cached:
         return cached
     from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     try:
