@@ -1925,7 +1925,9 @@ async def list_articles(
     dept: str | None = Query(None),
     topic: str | None = Query(None, max_length=80),
     status: str | None = Query(None),
-    index_status: Literal["pending", "processing", "ready", "failed"] | None = Query(None),
+    index_status: Literal["pending", "processing", "ready", "failed"] | None = Query(
+        None
+    ),
     q: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),

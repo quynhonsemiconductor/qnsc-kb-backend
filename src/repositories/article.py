@@ -321,7 +321,10 @@ class ArticleRepository:
         """
         stmt = (
             select(Article.index_status, func.count(Article.id))
-            .where(and_(*self._authorized_article_filters(user)), Article.status == "published")
+            .where(
+                and_(*self._authorized_article_filters(user)),
+                Article.status == "published",
+            )
             .group_by(Article.index_status)
         )
         result = await self.db.execute(stmt)
