@@ -48,6 +48,11 @@ openpyxl = "^3.1.5"
 python-pptx = "^1.0.2"
 pillow = "^13.0.0"
 pymupdf = "^1.25.3"
+# Noto Sans for text drawn into a PDF when a stored original is corrected in place
+# (source_edit.py): the built-in Helvetica has no Vietnamese diacritics. SIL OFL, PyMuPDF's own font pack.
+pymupdf-fonts = "^1.0.5"
+# Edited directly for Word/Excel/PowerPoint originals; already installed by python-docx and python-pptx.
+lxml = "^6.1.1"
 # Markdown structure for PDFs, over the pymupdf above rather than a new engine: it
 # reads PyMuPDF's layout model, so it emits real headings where MarkItDown's pdfminer
 # path emits none. Headings are what ``split_into_chunks`` splits on and what decides
