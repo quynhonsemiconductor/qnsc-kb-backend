@@ -4749,6 +4749,18 @@ files = [
 ]
 
 [[package]]
+name = "pymupdf-fonts"
+version = "1.0.5"
+description = "Collection of font binaries for use in PyMuPDF"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "pymupdf_fonts-1.0.5-py3-none-any.whl", hash = "sha256:8e4bb70a4a8f6bb895ef8f3b77b98f6c43e2f39c31cfdec5fd21c3d512c38b25"},
+    {file = "pymupdf_fonts-1.0.5.tar.gz", hash = "sha256:ac12e3ec4affa35e9a0aca29135ef41c23bdbe5758c3355dac236986309e6bc6"},
+]
+
+[[package]]
 name = "pymupdf4llm"
 version = "0.2.9"
 description = "PyMuPDF Utilities for LLM/RAG"
@@ -6823,4 +6835,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "f3390ca4ebc13ced0b5a6789d2fbf2051f85ed388aa387165e7095deaaccdefa"
+content-hash = "84f2eb25793dd06a899ed86b518c7af4e8d57cc96542c35a494a37a75d297905"

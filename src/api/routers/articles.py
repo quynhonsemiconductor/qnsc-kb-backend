@@ -34,6 +34,13 @@ from src.domain.source_extraction import (
     extract_source_pages,
     extraction_failed_pages,
 )
+from src.domain.source_edit import (
+    MAX_REPLACEMENTS,
+    MAX_TEXT_LENGTH,
+    Replacement,
+    SourceEditError,
+    apply_source_edits,
+)
 from src.domain.source_storage import (
     save_source,
     delete_source,
@@ -377,6 +384,33 @@ class DraftSubmissionResponse(BaseModel):
     status: str
     workflow: str
     message: str
+
+
+class SourceEditItem(BaseModel):
+    find: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+    replace: str = Field(max_length=MAX_TEXT_LENGTH)
+
+
+class SourceEditRequest(BaseModel):
+    replacements: list[SourceEditItem] = Field(
+        min_length=1, max_length=MAX_REPLACEMENTS
+    )
+    # The article version the client was looking at, so an edit made against a file that has
+    # since been replaced is refused instead of silently applied to the newer one.
+    version: int | None = Field(default=None, ge=1)
+
+
+class SourceEditPreview(BaseModel):
+    #: How many places each replacement matched, in the order given.
+    counts: list[int]
+    notes: list[str] = []
+
+
+class SourceEditResponse(DraftSubmissionResponse):
+    counts: list[int]
+    notes: list[str] = []
+    #: True when the article text could not be edited in place and was re-read from the file.
+    text_regenerated: bool = False
 
 
 class SourceUploadIntent(BaseModel):
@@ -2049,6 +2083,165 @@ async def create_article_edit_request(
     )
 
 
+async def _load_editable_source(
+    id: uuid.UUID, body: SourceEditRequest, current_user: User, db: AsyncSession
+) -> tuple[Article, DocumentSource, str, bytes]:
+    article = await ArticleService(
+        ArticleRepository(db), UserRepository(db)
+    ).get_article(current_user, id)
+    if not PermissionService.can_edit_article(current_user, article):
+        raise HTTPException(
+            status_code=403, detail="Not authorized to edit this article"
+        )
+    if body.version is not None and body.version != article.version:
+        raise HTTPException(
+            status_code=409,
+            detail="This article changed while you were editing it. Reload and try again.",
+        )
+    result = await db.execute(
+        select(DocumentSource)
+        .where(DocumentSource.article_id == article.id)
+        .order_by(DocumentSource.ingested_at.desc())
+    )
+    source = result.scalars().first()
+    if not source or not source.storage_key:
+        raise HTTPException(
+            status_code=404, detail="Original source is not available for this article"
+        )
+    filename = source.original_filename or ""
+    if not Path(filename).suffix:
+        # Titles carry no extension; the storage key does, because it ends in the file name.
+        filename = Path(source.storage_key).name
+    try:
+        data = await asyncio.to_thread(load_source, source.storage_key)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404, detail="Original source file is missing"
+        ) from exc
+    return article, source, filename, data
+
+
+def _edit_replacements(body: SourceEditRequest) -> list[Replacement]:
+    return [Replacement(item.find, item.replace) for item in body.replacements]
+
+
+def _missing_text_error(body: SourceEditRequest, counts: list[int]) -> HTTPException:
+    missing = [
+        item.find for item, count in zip(body.replacements, counts) if count == 0
+    ]
+    return HTTPException(
+        status_code=422,
+        detail={
+            "code": "text_not_found",
+            "message": "Some of the text to change was not found in the original file.",
+            "missing": missing,
+        },
+    )
+
+
+@router.post("/{id}/source-edits/preview", response_model=SourceEditPreview)
+async def preview_source_edit(
+    id: uuid.UUID,
+    body: SourceEditRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SourceEditPreview:
+    """Count where each change would land in the original, without changing anything."""
+    _, _, filename, data = await _load_editable_source(id, body, current_user, db)
+    try:
+        outcome = await asyncio.to_thread(
+            apply_source_edits, filename, data, _edit_replacements(body), write=False
+        )
+    except SourceEditError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return SourceEditPreview(counts=outcome.counts, notes=outcome.notes)
+
+
+@router.post(
+    "/{id}/source-edits",
+    response_model=SourceEditResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def edit_article_source(
+    id: uuid.UUID,
+    body: SourceEditRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SourceEditResponse:
+    """Correct text inside the stored original and submit the corrected file as a new version.
+
+    The change goes through the same approval as any other edit, and the original file as
+    uploaded stays stored. The article's reading text gets the same replacements; when they
+    do not all apply to it (the Markdown was reformatted), it is re-read from the corrected
+    file instead.
+    """
+    article, _, filename, data = await _load_editable_source(id, body, current_user, db)
+    replacements = _edit_replacements(body)
+    try:
+        outcome = await asyncio.to_thread(
+            apply_source_edits, filename, data, replacements, write=True
+        )
+    except SourceEditError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if any(count == 0 for count in outcome.counts) or outcome.data is None:
+        raise _missing_text_error(body, outcome.counts)
+    corrected = outcome.data
+    try:
+        pages = await asyncio.to_thread(extract_source_pages, filename, corrected)
+    except SourceExtractionError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"The corrected file could not be read: {exc}"
+        ) from exc
+
+    text = article.body_md or ""
+    in_place = all(item.find in text for item in replacements)
+    if in_place:
+        for item in replacements:
+            text = text.replace(item.find, item.replace)
+    else:
+        text = await asyncio.to_thread(
+            extract_source_markdown, filename, corrected, pages
+        )
+
+    file_hash = hashlib.sha256(corrected).hexdigest()
+    try:
+        storage_key = await asyncio.to_thread(
+            save_source, file_hash, filename, corrected, article.company_domain
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        logger.exception(
+            "Corrected source storage failed", filename=filename, error=str(exc)
+        )
+        raise HTTPException(
+            status_code=503, detail="Private R2 upload storage is unavailable"
+        ) from exc
+    try:
+        submission = await _submit_article_update(
+            id,
+            ArticleUpdate(body_md=text, version=article.version),
+            current_user,
+            db,
+            source_attachment={
+                "storage_key": storage_key,
+                "original_filename": filename,
+                "mime_type": safe_source_media_type(filename),
+                "page_texts": pages,
+            },
+        )
+    except Exception:
+        # The file is only referenced by a draft that was never created.
+        await asyncio.to_thread(delete_source, storage_key)
+        raise
+    return SourceEditResponse(
+        **DraftSubmissionResponse.model_validate(
+            submission, from_attributes=True
+        ).model_dump(),
+        counts=outcome.counts,
+        notes=outcome.notes,
+        text_regenerated=not in_place,
+    )
+
+
 @router.put("/{id}", response_model=DraftSubmissionResponse)
 async def update_article(
     id: uuid.UUID,
@@ -2056,6 +2249,23 @@ async def update_article(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    return await _submit_article_update(id, article_in, current_user, db)
+
+
+async def _submit_article_update(
+    id: uuid.UUID,
+    article_in: ArticleUpdate,
+    current_user: User,
+    db: AsyncSession,
+    source_attachment: dict[str, Any] | None = None,
+) -> Any:
+    """Submit an edit through the draft-and-approve workflow.
+
+    `source_attachment` carries a corrected copy of the stored original (its storage key,
+    file name, media type and page texts). It rides on the draft, so the reviewer sees the
+    corrected file and approval records it as the article's newest source; the file as first
+    uploaded is kept.
+    """
     article_repo = ArticleRepository(db)
     user_repo = UserRepository(db)
     article_service = ArticleService(article_repo, user_repo, AuditRepository(db))
@@ -2270,6 +2480,7 @@ async def update_article(
         similarity_matches=matches,
         requires_update_confirmation=True,
         update_target_article_id=current.id,
+        **(source_attachment or {}),
         tags=submitted_tags,
         content_metadata={
             "external_id": current.external_id,

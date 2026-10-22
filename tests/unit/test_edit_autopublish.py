@@ -33,7 +33,7 @@ from src.domain.governance import GovernanceService
 
 
 def _update_article_tree() -> ast.FunctionDef:
-    source = textwrap.dedent(inspect.getsource(articles_router.update_article))
+    source = textwrap.dedent(inspect.getsource(articles_router._submit_article_update))
     tree = ast.parse(source)
     func = tree.body[0]
     assert isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -156,7 +156,7 @@ def test_the_actor_id_is_a_plain_value_not_the_user_instance():
 
 def test_both_outcomes_report_a_workflow_the_client_can_branch_on():
     """The UI routes on this: a published edit must not land on the review queue."""
-    source = inspect.getsource(articles_router.update_article)
+    source = inspect.getsource(articles_router._submit_article_update)
     assert 'workflow="published"' in source
     assert 'workflow="pending_approval"' in source
 
@@ -229,7 +229,7 @@ def test_the_draft_is_still_submitted_so_the_history_survives_a_refusal():
     That is what makes the fallback's promise honest: it tells the editor the change is
     queued, and the row is genuinely there to be reviewed.
     """
-    source = inspect.getsource(articles_router.update_article)
+    source = inspect.getsource(articles_router._submit_article_update)
     assert "submit_draft" in source
     submit_at = source.index("submit_draft")
     approve_at = source.index("approve_draft")
