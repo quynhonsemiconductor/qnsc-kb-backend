@@ -57,17 +57,20 @@ concurrency:
 jobs:
   # A dispatch runs from whatever ref it is given, and `--ref vX.Y.Z` means
   # ref_type=tag — where the reusable would select production and only the reviewer
-  # gate would stand in the way. KB has no prod: refuse here, and everything that
-  # `needs` this job is skipped with it.
+  # gate would stand in the way. KB has no prod: this job runs on EVERY trigger and
+  # fails the run from a tag ref, so everything that `needs` it is skipped with it.
+  # (No job-level `if`: a skipped gate would skip everything that waits on it —
+  # including the ordinary main-push deploys.)
   develop-only:
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - run: |
-          echo "::error title=develop only::Backend · Deploy runs on main pushes and develop dispatches only. A tag ref selects production, and KB has no production environment — release tags deploy nothing." >&2
-          exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "::error title=develop only::Backend · Deploy runs on main pushes and develop dispatches only. A tag ref selects production, and KB has no production environment — release tags deploy nothing." >&2
+            exit 1
+          fi
   # ───────────────────────────────────────────────────────────────────────────
   # Ordering gate — never roll the app ahead of its own infrastructure.
   #
@@ -147,6 +150,7 @@ jobs:
   # trigger; see this file's history if prod ever returns.)
   # ---------------------------------------------------------------------------
   wait-for-ci:
+    needs: develop-only
     name: Wait for Backend · CI
     runs-on: ubuntu-latest
     timeout-minutes: 45

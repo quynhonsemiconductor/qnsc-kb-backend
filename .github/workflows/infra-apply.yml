@@ -100,7 +100,7 @@ jobs:
           echo "ok: prod=$prod, event=$EVENT, ref=$REF_TYPE '$REF_NAME'"
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Shared (ECR + OIDC roles) — always applies first, on both branch and tag runs.
+  # Shared (ECR + OIDC roles) — always applies first, on every run.
   # ───────────────────────────────────────────────────────────────────────────
   apply-shared:
     needs: preflight
@@ -160,7 +160,7 @@ jobs:
         run: tofu apply -input=false tfplan
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Develop — only on a branch push to main (never on a tag).
+  # Develop — on the main push, and on any dispatch that did not ask for prod.
   # ───────────────────────────────────────────────────────────────────────────
   apply-develop:
     needs: apply-shared
