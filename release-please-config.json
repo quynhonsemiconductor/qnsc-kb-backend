@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "last-release-sha": "eaafea6b4a4a0d10481e3ef5e8aa1f012ee6d682",
   "packages": {
     ".": {
       "release-type": "python",
@@ -25,7 +26,7 @@
     }
   },
   "pull-request-title-pattern": "chore(release): ${version}",
-  "pull-request-header": "🤖 This PR was opened by Release Please. Merging it will create a release tag and trigger a production deploy.",
+  "pull-request-header": "🤖 This PR was opened by Release Please. Merging it creates the vX.Y.Z tag and GitHub Release. The tag triggers the Backend · Deploy prod pipeline, which stays gated by the production GitHub Environment — KB is dev-stage today, so nothing deploys to prod.",
   "include-v-in-tag": true,
   "separate-pull-requests": false
 }
