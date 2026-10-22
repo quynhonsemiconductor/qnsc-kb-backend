@@ -1,7 +1,7 @@
 name: Infrastructure · Apply
 
 # What the run list shows. A dispatch shows its target and whether destructive changes are allowed, so a run that may
-# delete DNS or identity resources is never mistaken for an ordinary one in the list. A push or tag shows its ref.
+# delete DNS or identity resources is never mistaken for an ordinary one in the list. A push shows its ref.
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Infrastructure · Apply · dispatch · {0}{1}', inputs.target, inputs.allow_destructive && ' · ALLOW DESTRUCTIVE' || '') || format('Infrastructure · Apply · {0}', github.ref_name) }}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ on:
 # until a human noticed. The one thing that genuinely must not run twice at once is the
 # _shared state, which is fixed at that job instead (see its own concurrency below).
 concurrency:
-  group: infra-apply-${{ github.repository }}-${{ (github.ref_type == 'tag' || inputs.target == 'prod') && 'prod' || 'develop' }}
+  group: infra-apply-${{ github.repository }}-${{ inputs.target == 'prod' && 'prod' || 'develop' }}
   cancel-in-progress: false # never cancel a running apply
 
 permissions:
@@ -88,11 +88,9 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Production is applied by a dispatch that asks for it, or by a tag push: exactly apply-prod's `if`.
+          # Production is applied only by a dispatch that asks for it: exactly apply-prod's `if`.
           prod=false
-          if [ "$EVENT" = workflow_dispatch ]; then
-            if [ "$TARGET" = prod ]; then prod=true; fi
-          elif [ "$REF_TYPE" = tag ]; then prod=true; fi
+          if [ "$EVENT" = workflow_dispatch ] && [ "$TARGET" = prod ]; then prod=true; fi
           release=false
           if [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then release=true; fi
           if [ "$prod" = true ] && [ "$release" = false ]; then
@@ -114,12 +112,11 @@ jobs:
       pull-requests: read # destructive-guard reads the labels of the PR being merged
       id-token: write # mandatory for the OIDC AssumeRole
 
-    # A release pushes main and the vX.Y.Z tag near-simultaneously, so both runs reach
-    # this job and would apply the same _shared state concurrently — a state-lock failure
-    # on every release. A CONSTANT group here (not keyed on ref) serialises that while
-    # leaving the per-environment applies free to run in parallel. The production
-    # approval gate lives on apply-prod, a separate job, so a release awaiting a reviewer
-    # does not hold this lock.
+    # A CONSTANT group here (not keyed on ref or target): two overlapping runs — a push
+    # and a dispatch, say — would apply the same _shared state concurrently and deadlock
+    # on the state lock. Serialising here leaves the per-environment applies free to run
+    # in parallel. The production approval gate lives on apply-prod, a separate job, so
+    # a run awaiting a reviewer does not hold this lock.
     concurrency:
       group: infra-apply-shared-${{ github.repository }}
       cancel-in-progress: false
@@ -292,7 +289,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   apply-prod:
     needs: apply-shared
-    if: (github.event_name != 'workflow_dispatch' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.target == 'prod')
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'prod'
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 45

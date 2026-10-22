@@ -26,7 +26,7 @@
     }
   },
   "pull-request-title-pattern": "chore(release): ${version}",
-  "pull-request-header": "🤖 This PR was opened by Release Please. Merging it creates the vX.Y.Z tag and GitHub Release; deploys nothing — KB has no production environment, so the deploy workflows' tag triggers are removed until it gets one.",
+  "pull-request-header": "🤖 This PR was opened by Release Please. Merging it creates the vX.Y.Z tag and GitHub Release; deploys nothing to production. The merge itself redeploys develop like any push to main.",
   "include-v-in-tag": true,
   "separate-pull-requests": false
 }
