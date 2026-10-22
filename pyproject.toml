@@ -32,9 +32,9 @@ pyjwt = {extras = ["crypto"], version = "^2.15.0"}
 python-multipart = "^0.0.32"
 httpx = ">=0.27,<0.29"
 structlog = ">=24.2,<27.0"
-opentelemetry-api = "^1.27.0"
-opentelemetry-sdk = "^1.27.0"
-opentelemetry-exporter-otlp-proto-http = "^1.27.0"
+opentelemetry-api = "^1.45.1"
+opentelemetry-sdk = "^1.45.1"
+opentelemetry-exporter-otlp-proto-http = "^1.45.1"
 bcrypt = "5.0.0"
 # Unpinned since the torch images left (PR #54): the <2 ceiling existed for the
 # local Paddle/Torch OCR stack, and paddle 3.x declares numpy with no upper bound.
