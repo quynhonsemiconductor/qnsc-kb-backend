@@ -45,6 +45,14 @@ data "terraform_remote_state" "storage" {
 }
 
 locals {
+  // The worker alone raises the embedding thread count: it holds the 4 vCPU task and writes
+  // every stored vector, while the api's 2 vCPU already matches the default of 2.
+  worker_env = concat(local.common_env, [
+    { name = "EMBEDDING_ONNX_THREADS", value = tostring(var.worker_embedding_threads) },
+  ])
+}
+
+locals {
   name         = "${var.product}-${var.env_slug}"
   app_base_url = "https://${var.app_domain}"
   api_base_url = "https://${var.api_domain}"
@@ -669,12 +677,8 @@ module "worker" {
   // connection, which is the failure worth catching.
   health_check_command = "celery -A src.workers.celery_app inspect ping -d celery@$HOSTNAME || exit 1"
 
-  // The worker alone raises the embedding thread count: it holds the 4 vCPU task and writes
-  // every stored vector, while the api's 2 vCPU already matches the default of 2.
-  environment_vars = concat(local.common_env, [
-    { name = "EMBEDDING_ONNX_THREADS", value = tostring(var.worker_embedding_threads) },
-  ])
-  secrets = concat(local.common_secrets, local.mail_secrets)
+  environment_vars = local.worker_env
+  secrets          = concat(local.common_secrets, local.mail_secrets)
 
   // The mail secret is granted here, on the WORKER's execution role, and nowhere else. No task role in this
   // stack gets any secretsmanager permission (task_secret_arns is never passed).
