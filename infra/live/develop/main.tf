@@ -342,6 +342,10 @@ module "stack" {
   // Parity-gated ONNX flip (cosine 1.000000 vs torch, tests/unit/test_embedding_backends.py).
   // Rollback until the ml group leaves the images: set back to "torch" and redeploy.
   embedding_runtime = "onnx"
+  // The worker has 4 vCPU but ran 2 ONNX threads (a value set when the task had 2). 3 uses most of it
+  // and leaves one vCPU for clamd, beat, the health-check ping and OCR. NOT measured yet: compare
+  // chunks/second and the worker's CPU peaks before going to 4.
+  worker_embedding_threads = 3
 
   alarm_emails           = var.alarm_emails
   cloudflare_account_id  = var.cloudflare_account_id

@@ -324,6 +324,24 @@ variable "embedding_model" {
   EOT
 }
 
+variable "worker_embedding_threads" {
+  type        = number
+  default     = 2
+  description = <<-EOT
+    ONNX Runtime intra-op threads for the WORKER's embedding pass (EMBEDDING_ONNX_THREADS on
+    the worker task only; the api keeps the code default of 2). The worker embeds every
+    stored vector in fp32, which is the slow part of ingestion, and runs on CPU alone, so
+    this is the main speed dial. It is a ceiling tied to the task's vCPU, not a free
+    setting: leave at least one vCPU for clamd, beat, the Celery control channel that
+    answers the health check, and PaddleOCR. Must be 1 or more and no more than the
+    worker's vCPU count.
+  EOT
+  validation {
+    condition     = var.worker_embedding_threads >= 1 && var.worker_embedding_threads <= 16
+    error_message = "worker_embedding_threads must be between 1 and 16."
+  }
+}
+
 variable "embedding_version" {
   type        = string
   default     = "gemini-embedding-001-768-v1"
