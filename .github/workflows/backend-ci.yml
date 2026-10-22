@@ -75,7 +75,30 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ steps.paths.outputs.run }}
+      quickstart: ${{ steps.quickstart-paths.outputs.run }}
     steps:
+      # The local quickstart is DENYLIST-gated, never allowlisted: skip it only when EVERY
+      # changed file matches a known-safe ignore glob. An ignore entry missed costs one
+      # extra run; an allowlist entry missed silently lets a breaking change merge (the
+      # first review of the allowlist shape found a dozen such paths). changed-paths fails
+      # open on every doubt (API error, empty list, 3,000-file ceiling) and always runs off
+      # pull_request — push to main and merge-queue entries never skip.
+      - id: quickstart-paths
+        name: Quickstart relevance (skip only on known-safe paths)
+        # Only a PR can skip the quickstart; on merge_group changed-paths WOULD list the
+        # queue's files and could return false — the queue entry must always run it. The
+        # skipped step leaves the output empty and the gate's `!= 'false'` branch runs it.
+        if: github.event_name == 'pull_request'
+        uses: quynhonsemiconductor/ci/actions/changed-paths@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
+        with:
+          ignore: |
+            **/*.md
+            docs/**
+            .claude/**
+            .github/ISSUE_TEMPLATE/**
+            tests/unit/**
+            **/test_*.py
+            **/*_test.py
       - id: paths
         uses: quynhonsemiconductor/ci/actions/changed-paths@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
@@ -447,7 +470,7 @@ jobs:
   quickstart:
     name: Local quickstart
     needs: [changes]
-    if: ${{ needs.changes.outputs.run == 'true' }}
+    if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -717,10 +740,27 @@ jobs:
       #  * otherwise: only `changes` itself must be `success` (the rest are skipped by design). If `changes` FAILED its output is
       #    empty, this branch runs, and the gate fails: it cannot turn "could not decide" into a pass.
       - name: Every job must have succeeded
-        if: ${{ needs.changes.outputs.run == 'true' }}
+        if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart != 'false' }}
         uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
         with:
           results: ${{ join(needs.*.result, ',') }}
+
+      # NEW JOBS: add them to `needs:` above AND to the explicit results list in the
+      # "Everything but the quickstart" branch below — the join() in branch 1 covers
+      # them only while the quickstart actually runs; branch 2 is the one that runs
+      # when the quickstart was skipped.
+      - name: Everything but the quickstart must have succeeded
+        if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart == 'false' }}
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          results: ${{ needs.changes.result }},${{ needs.quality.result }},${{ needs.test.result }},${{ needs.migrations.result }},${{ needs.build.result }},${{ needs.openapi.result }}
+
+      - name: The quickstart was skipped by its path filter (and only by that)
+        if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart == 'false' }}
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        with:
+          results: ${{ needs.quickstart.result }}
+          allow-skipped: true
 
       - name: Nothing here to test (every changed file is ignorable)
         if: ${{ needs.changes.outputs.run != 'true' }}
