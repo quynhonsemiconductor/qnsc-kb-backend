@@ -7,11 +7,12 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('Infrastructure
 # ─────────────────────────────────────────────────────────────────────────────
 # Gated the same way as the app deploys:
 #   push to main      → apply _shared + develop (auto)
-#   push a v*.*.* tag → apply _shared + prod    (prod also behind the "production"
-#                       GitHub Environment's required reviewer)
 #
-# Prod infra can NOT be applied by an ordinary merge to main — only by a deliberate
-# semver tag, so an accidental push can never touch production.
+#   prod path         → DORMANT. KB has no production environment, so the semver-tag
+#                       trigger is removed (opshub did the same in v0.4.x): a release
+#                       tag applies nothing. The dispatch's target=prod choice stays
+#                       and is still gated by the "production" Environment's required
+#                       reviewer.
 #
 # PREREQUISITE: the platform shared-runtime stacks in qnsc-infra (runtime-dev for
 # develop, runtime-prod for prod) own the shared VPC/NAT/SGs and MUST be applied first.
@@ -21,8 +22,6 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('Infrastructure
 on:
   push:
     branches: [main]
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
     paths:
       - "infra/live/**"
       # modules/** matters too: `module "stack"` is a LOCAL path module, so editing it
@@ -45,8 +44,8 @@ on:
         type: boolean
         default: false
 
-# Serialise by ENVIRONMENT, matching backend-deploy.yml: all prod (tag) applies share
-# one group, all develop (branch) applies share another, and the two run in PARALLEL.
+# Serialise by ENVIRONMENT, matching backend-deploy.yml: prod applies share one group,
+# develop applies another, and the two run in PARALLEL.
 #
 # A single repo-wide group would make DEVELOP queue behind PROD — and prod waits on a
 # required reviewer, so an unapproved production apply would freeze every develop apply
@@ -288,8 +287,8 @@ jobs:
           fi
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Production — only on a v*.*.* tag, and only after a reviewer approves the
-  # "production" Environment.
+  # Production — only via a dispatch with target=prod (the tag trigger is dormant;
+  # KB has no prod), and only after a reviewer approves the "production" Environment.
   # ───────────────────────────────────────────────────────────────────────────
   apply-prod:
     needs: apply-shared

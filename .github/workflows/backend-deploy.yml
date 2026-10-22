@@ -3,8 +3,11 @@
 #
 # Triggers:
 #   develop → push to main (auto)
-#   prod    → push a semver tag v*.*.* (gated by the "production" GitHub Environment's
-#             required reviewer, enforced inside the reusable)
+#
+#   prod    → DORMANT. KB has no production environment, so the semver-tag trigger is
+#             removed (opshub did the same in v0.4.x): merging a release PR creates the
+#             tag and GitHub Release and deploys nothing. The tag-side jobs below are
+#             kept — restoring the trigger is a two-line change when prod exists.
 #
 # The reusable builds and attests on main, promotes that exact image on a tag, runs the
 # migrator task, then rolls the ECS services. All ECS_*/RDS/APP_URL configuration is
@@ -31,11 +34,9 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+' # semver only — no -rc suffix
 
-  # Manual redeploy of whatever main currently holds. DEVELOP ONLY — a prod deploy still
-  # requires a semver tag, so this cannot skip that gate. Exists because a merged fix can
+  # Manual redeploy of whatever main currently holds. DEVELOP ONLY — with the tag
+  # trigger dormant there is no prod deploy to skip the gate of. Exists because a merged fix can
   # otherwise become undeployable: if its CI run was cancelled, the fail-closed gate
   # below correctly refuses, and re-running the deploy cannot help because the missing
   # CI run is the problem. An empty commit is no substitute — paths-ignore is evaluated
