@@ -1,0 +1,61 @@
+# =============================================================================
+# GHCR · Publish — on-prem image delivery trigger for kb (ONPREM-PLAN §11.1).
+#
+# On every merge to main this builds each service image, PRE-PUSH scans it
+# (CRITICAL fixable vulns + ANY secret), and pushes
+# ghcr.io/quynhonsemiconductor/kb-<service> with the immutable sha-<commit>
+# tag. It runs ALONGSIDE backend-deploy.yml (ECS) and k8s-deploy.yml, which
+# keep pushing to ECR until the AWS cutover; the reusable refuses any ref
+# except refs/heads/main.
+#
+# The reusable's `digests` output (JSON, service → sha256) is what the later
+# gitops bump writes into tags.dev.yaml; that wiring lands with the k8s-deploy
+# move off ECR. Until then the run's step summary records the digests.
+#
+# ── ONE IMAGE PER DOCKERFILE STAGE ────────────────────────────────────────────
+# The reusable passes `build-target: <service>`, which the Dockerfile REQUIRES:
+# it has one stage per service (`api`, `worker`, `migrator`), and with no
+# target Docker builds the LAST one — k8s-deploy.yml records the incident where
+# every repository silently held three copies of the migrator.
+# =============================================================================
+name: GHCR · Publish
+
+on:
+  push:
+    branches: [main]
+    # Same develop-path filter as backend-deploy.yml, in lockstep: skip when a
+    # merge touches ONLY paths this product does not ship (docs and the web
+    # app). paths-ignore fires only if EVERY changed file matches — a shared
+    # change still builds, so under-deploy is impossible.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.claude/**'
+      - 'apps/web/**'
+
+  # Manual run of whatever main currently holds.
+  workflow_dispatch:
+
+concurrency:
+  # One GHCR publish per product at a time (the reusable declares the same
+  # group); a push racing a workflow_dispatch serialises instead of racing.
+  group: ghcr-publish-backend-kb
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Ceiling for the reusable's inner grants: packages: write is the GHCR
+    # push AND the Dockerfile's pull of private @quynhonsemiconductor/*.
+    permissions:
+      contents: read
+      packages: write
+    # SHA-pinned, NOT @v1 — ci's v1 tag moves on every merge, and a moving ref
+    # would let a ci merge change this product's publish pipeline unseen.
+    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@034964c48e181ab2ccb13e09f2f7cec302e2bb33
+    with:
+      product: kb
+      services-json: '["api","worker","migrator"]'
+      # The on-prem k3s host is amd64; native amd64 runner (a QEMU build of
+      # this pnpm + Nest compile fails — see the reusable's build_runner note).
+      platforms: linux/amd64
+      build_runner: ubuntu-24.04
