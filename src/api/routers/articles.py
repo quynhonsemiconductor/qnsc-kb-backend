@@ -35,11 +35,13 @@ from src.domain.source_extraction import (
     extraction_failed_pages,
 )
 from src.domain.source_edit import (
+    MAX_CONTEXT_LENGTH,
     MAX_REPLACEMENTS,
     MAX_TEXT_LENGTH,
     Replacement,
     SourceEditError,
     apply_source_edits,
+    replace_in_text,
 )
 from src.domain.source_storage import (
     save_source,
@@ -389,6 +391,11 @@ class DraftSubmissionResponse(BaseModel):
 class SourceEditItem(BaseModel):
     find: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
     replace: str = Field(max_length=MAX_TEXT_LENGTH)
+    # Set when the reader selected one occurrence: the text just around it (and the PDF
+    # page), so only that occurrence is changed. Absent = change every match.
+    before: str = Field(default="", max_length=MAX_CONTEXT_LENGTH)
+    after: str = Field(default="", max_length=MAX_CONTEXT_LENGTH)
+    page: int | None = Field(default=None, ge=1)
 
 
 class SourceEditRequest(BaseModel):
@@ -2122,7 +2129,10 @@ async def _load_editable_source(
 
 
 def _edit_replacements(body: SourceEditRequest) -> list[Replacement]:
-    return [Replacement(item.find, item.replace) for item in body.replacements]
+    return [
+        Replacement(item.find, item.replace, item.before, item.after, item.page)
+        for item in body.replacements
+    ]
 
 
 def _missing_text_error(body: SourceEditRequest, counts: list[int]) -> HTTPException:
@@ -2194,11 +2204,13 @@ async def edit_article_source(
         ) from exc
 
     text = article.body_md or ""
-    in_place = all(item.find in text for item in replacements)
-    if in_place:
-        for item in replacements:
-            text = text.replace(item.find, item.replace)
-    else:
+    in_place = True
+    for item in replacements:
+        text, applied = replace_in_text(text, item)
+        if applied == 0:
+            in_place = False
+            break
+    if not in_place:
         text = await asyncio.to_thread(
             extract_source_markdown, filename, corrected, pages
         )

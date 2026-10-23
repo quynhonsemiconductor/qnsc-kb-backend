@@ -355,3 +355,108 @@ def test_pdf_two_changes_on_one_line_are_both_made_and_counted():
         and "12/03" not in text
         and "15/03" not in text
     )
+
+
+# ── changing only the occurrence a reader selected ────────────────────────────────────────
+
+
+def pick(filename, data, find, replace, before="", after="", page=None, write=True):
+    return apply_source_edits(
+        filename, data, [Replacement(find, replace, before, after, page)], write=write
+    )
+
+
+def test_replace_in_text_changes_only_the_occurrence_with_matching_surroundings():
+    from src.domain.source_edit import replace_in_text
+
+    text = "Lương 1234 cho A. Phụ cấp 1234 cho B. Thưởng 1234 cho C."
+    changed, count = replace_in_text(
+        text, Replacement("1234", "1244", "Phụ cấp ", " cho B")
+    )
+    assert count == 1
+    assert changed == "Lương 1234 cho A. Phụ cấp 1244 cho B. Thưởng 1234 cho C."
+    assert (
+        replace_in_text(text, Replacement("1234", "9"))[1] == 3
+    )  # no context: every match
+
+
+def test_surroundings_are_compared_with_whitespace_collapsed():
+    from src.domain.source_edit import matching_starts
+
+    assert matching_starts(
+        "Phụ   cấp\n1234  cho B", Replacement("1234", "x", "Phụ cấp", "cho B")
+    )
+
+
+def test_a_selection_at_the_start_or_end_of_a_line_still_matches():
+    from src.domain.source_edit import matching_starts
+
+    # The reader's context reaches into the previous line; this line begins at the match.
+    assert matching_starts(
+        "1234 cho B", Replacement("1234", "x", "dòng trước đó ", " cho B")
+    )
+    assert matching_starts(
+        "Phụ cấp 1234", Replacement("1234", "x", "Phụ cấp ", " dòng sau")
+    )
+    # But a side that DOES exist and disagrees rules the occurrence out.
+    assert not matching_starts(
+        "Thưởng 1234 cho B", Replacement("1234", "x", "Phụ cấp ", "")
+    )
+
+
+def test_docx_changes_only_the_selected_paragraph():
+    document = docx.Document()
+    document.add_paragraph("Lương 1234 cho A")
+    document.add_paragraph("Phụ cấp 1234 cho B")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    outcome = pick("a.docx", buffer.getvalue(), "1234", "1244", "Phụ cấp ", " cho B")
+    assert outcome.counts == [1]
+    texts = _docx_texts(outcome.data)
+    assert "Lương 1234 cho A" in texts and "Phụ cấp 1244 cho B" in texts
+
+
+def test_a_selection_that_is_not_in_the_file_matches_nothing():
+    outcome = pick(
+        "a.docx", _docx(), "đồng", "VNĐ", "không có trong tệp ", "", write=False
+    )
+    assert outcome.counts == [0]
+
+
+def test_text_file_changes_only_the_selected_occurrence():
+    outcome = pick("a.txt", b"a 1234 b\nc 1234 d", "1234", "1244", "c ", " d")
+    assert outcome.data == b"a 1234 b\nc 1244 d" and outcome.counts == [1]
+
+
+def test_pdf_changes_only_the_selected_page():
+    outcome = pick("a.pdf", _pdf(), "1234", "1244", page=2)
+    assert outcome.counts == [1]
+    with pymupdf.open(stream=outcome.data, filetype="pdf") as document:
+        assert "1234" in document[0].get_text() and "1244" not in document[0].get_text()
+        assert "1244" in document[1].get_text() and "1234" not in document[1].get_text()
+
+
+def test_pdf_changes_only_the_selected_line_on_a_page():
+    original = _pdf(("Lương 1234 cho A\n", "x"))
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_font(fontname="notos", fontbuffer=pymupdf_fonts.myfont("notos"))
+    page.insert_text((72, 100), "Lương 1234 cho A", fontname="notos", fontsize=14)
+    page.insert_text((72, 140), "Phụ cấp 1234 cho B", fontname="notos", fontsize=14)
+    outcome = pick("a.pdf", document.tobytes(), "1234", "1244", "Phụ cấp ", " cho B")
+    assert outcome.counts == [1]
+    # Read the words back in visual order. The extractor's own block order puts text added by
+    # an edit after the text it sits between, which is why the reading text is edited in place
+    # rather than re-extracted from the file.
+    with pymupdf.open(stream=outcome.data, filetype="pdf") as edited:
+        words = sorted(
+            edited[0].get_text("words"), key=lambda w: (round(w[1] / 10), w[0])
+        )
+    visual = " ".join(w[4] for w in words)
+    assert "Lương 1234 cho A" in visual and "Phụ cấp 1244 cho B" in visual
+    assert original  # fixture built above only to reuse the helper's font setup
+
+
+def test_context_longer_than_the_limit_is_refused():
+    with pytest.raises(SourceEditError):
+        validate_replacements([Replacement("a", "b", before="x" * 201)])

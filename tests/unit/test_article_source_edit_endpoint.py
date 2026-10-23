@@ -289,3 +289,51 @@ def test_both_routes_are_registered():
     paths = [route.path for route in router.router.routes]
     assert "/{id}/source-edits" in paths
     assert "/{id}/source-edits/preview" in paths
+
+
+def test_only_the_selected_occurrence_is_changed_in_the_file_and_the_reading_text(
+    world,
+):
+    world.loaded = b"Luong 1234 cho A.\nPhu cap 1234 cho B."
+    world.article = _article(body="Luong 1234 cho A. Phu cap 1234 cho B.")
+    body = SourceEditRequest(
+        replacements=[
+            SourceEditItem(
+                find="1234", replace="1244", before="Phu cap ", after=" cho B"
+            )
+        ]
+    )
+    response = run(edit_article_source(ARTICLE_ID, body, world.user, world.db))
+    ((article_in, attachment),) = world.submitted
+    assert article_in.body_md == "Luong 1234 cho A. Phu cap 1244 cho B."
+    assert (
+        attachment["page_texts"][0]["text"] == "Luong 1234 cho A.\nPhu cap 1244 cho B."
+    )
+    assert response.counts == [1] and response.text_regenerated is False
+
+
+def test_a_selection_whose_surroundings_are_not_in_the_file_changes_nothing(world):
+    body = SourceEditRequest(
+        replacements=[
+            SourceEditItem(find="1234", replace="1244", before="khong co o day ")
+        ]
+    )
+    with pytest.raises(HTTPException) as error:
+        run(edit_article_source(ARTICLE_ID, body, world.user, world.db))
+    assert status_of(error) == 422 and world.stored == []
+
+
+def test_the_selected_context_may_not_fit_the_reformatted_reading_text(world):
+    world.article = _article(body="**Muc luong** 1234 dong (dinh dang khac)")
+    body = SourceEditRequest(
+        replacements=[
+            SourceEditItem(
+                find="1234", replace="1244", before="Muc luong ", after=" dong."
+            )
+        ]
+    )
+    response = run(edit_article_source(ARTICLE_ID, body, world.user, world.db))
+    ((article_in, _),) = world.submitted
+    assert (
+        article_in.body_md.startswith("REREAD:") and response.text_regenerated is True
+    )
