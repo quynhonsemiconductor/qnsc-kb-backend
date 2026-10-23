@@ -1,10 +1,14 @@
 # Default owner for everything in this repo.
 # Enforced via the main-protection ruleset (require_code_owner_review).
-* @quynhonsemiconductor/kb-maintainers
+#
+# The paths below change what runs in production, not just what the code does — a
+# wrong value here is applied by CI with no further review. They map to the same
+# team, so they are kept visible for the reason, not for a different owner.
+# Org docs: quynhonsemiconductor/.github → docs/ORG-GOVERNANCE.md (the area-team model).
 
-# Infrastructure and the deploy pipeline change what runs in production, not just what
-# the code does — a wrong value here is applied by CI with no further review.
-/infra/           @quynhonsemiconductor/kb-maintainers
-/.github/         @quynhonsemiconductor/kb-maintainers
-/Dockerfile       @quynhonsemiconductor/kb-maintainers
-/migrations/      @quynhonsemiconductor/kb-maintainers
+*                                  @quynhonsemiconductor/kb-leads
+
+/infra/           @quynhonsemiconductor/kb-leads
+/.github/         @quynhonsemiconductor/kb-leads
+/Dockerfile       @quynhonsemiconductor/kb-leads
+/migrations/      @quynhonsemiconductor/kb-leads
