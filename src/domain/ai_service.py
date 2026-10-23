@@ -18,6 +18,7 @@ from src.repositories.ai import AIRepository
 from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
 from src.domain.search_service import SearchService
+from src.domain.agent import AgentRun, is_chart_question
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
 from src.rag.citations import extract_citation_ids, strip_unknown_markers
@@ -819,6 +820,7 @@ class AIService:
         conversation_id: uuid.UUID | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
         on_replace: Callable[[str], Awaitable[None]] | None = None,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         language: str = "vi",
         article_id: uuid.UUID | None = None,
         confirm_edit: bool = False,
@@ -1116,7 +1118,9 @@ class AIService:
         # reuse a permission-fingerprinted standalone answer in that case.
         # Follow-up turns retain history and must bypass the cache so earlier
         # conversation context cannot change the answer semantics.
-        evidence_enrichment_requested = _is_visual_question(question) or any(
+        evidence_enrichment_requested = (
+            _is_visual_question(question) or is_chart_question(question)
+        ) or any(
             marker in " ".join(question.lower().split())
             for _operation, markers in _ANALYTICS_OPERATIONS
             for marker in markers
@@ -1228,6 +1232,29 @@ class AIService:
                 ),
             }
 
+        # Agentic answering (src/domain/agent). When it is off for this user `agent` is None and
+        # every branch below behaves exactly as it did before it existed.
+        agent = await AgentRun.start(
+            db=getattr(self.ai_repo, "db", None),
+            feature_flags=getattr(self.search_service, "feature_flags", None),
+            user=user,
+            question=question,
+            history_text=history_text,
+            has_history=bool(conversation_messages),
+            on_event=on_event,
+        )
+        if agent is not None:
+            clarification = agent.clarification(conversation_messages)
+            if clarification is not None:
+                clarification_text, clarification_choices = clarification
+                return _answer_payload(
+                    clarification_text,
+                    prompt_version=settings.PROMPT_VERSION,
+                    retrieval_version="agent-clarification",
+                    clarification_options=clarification_choices,
+                    agent_trace=agent.tracer.steps,
+                )
+
         # 3. Retrieve relevant chunks (filtered by permissions)
         # Search returns formatted results list containing title, chunk_text, parent_text, score, section_ref, article_id etc.
         # Search the current question first. Previous turns are useful to the
@@ -1247,9 +1274,21 @@ class AIService:
                 original_length=len(question),
                 rewritten_length=len(retrieval_query),
             )
-        retrieved_results = await self.search_service.search(
-            user, retrieval_query, limit=settings.RAG_RERANK_LIMIT
-        )
+        if agent is not None and not agent.fast:
+            # Planned search: one search per sub-question, with a bounded retry when one
+            # of them found nothing solid. Same result shape as a single search.
+            outcome = await agent.retrieve(self.search_service, user, question)
+            retrieved_results = outcome.results
+            self.search_service.vector_search_degraded = outcome.degraded
+            retrieval_query = " | ".join(agent.plan.sub_queries) or question
+        else:
+            if agent is not None:
+                await agent.tracer.emit("search", "running")
+            retrieved_results = await self.search_service.search(
+                user, retrieval_query, limit=settings.RAG_RERANK_LIMIT
+            )
+            if agent is not None:
+                await agent.tracer.emit("search", "done", hits=len(retrieved_results))
         if (
             not retrieved_results
             and conversation_messages
@@ -1317,6 +1356,12 @@ class AIService:
 
         top_score = max(float(item.get("score") or 0.0) for item in retrieved_results)
         if top_score < settings.RAG_MIN_CONTEXT_SCORE:
+            if agent is not None:
+                # "Not in the approved documents" is a content gap the owners should see.
+                try:
+                    await self.search_service._record_gap(user, question)
+                except Exception as exc:
+                    logger.warning("Could not record the content gap", error=str(exc))
             logger.info(
                 "AI retrieval below confidence threshold",
                 question_hash=question_hash,
@@ -1476,6 +1521,11 @@ class AIService:
         visual_description, visual_status = await _visual_evidence_context(
             getattr(self.ai_repo, "db", None), user, question, context_results
         )
+        artifacts: list[dict[str, Any]] = []
+        if agent is not None and (agent.plan.wants_chart or agent.plan.wants_figure):
+            artifacts = await agent.attach_artifacts(
+                getattr(self.ai_repo, "db", None), user, question, context_results
+            )
         evidence_status = None
         if _is_visual_question(question):
             evidence_status = {
@@ -1498,6 +1548,10 @@ class AIService:
             f"result: {item['result']}</verified-calculation>"
             for item in analytics_results
         )
+        if agent is not None and agent.artifacts:
+            trusted_analysis = "\n".join(
+                value for value in (trusted_analysis, agent.artifact_notes()) if value
+            )
         visual_context = (
             "<untrusted-visual-description>\n"
             f"{fence_untrusted(visual_description)}\n"
@@ -1539,6 +1593,8 @@ class AIService:
             f"<user-question>{fence_untrusted(question)}</user-question>"
         )
 
+        if agent is not None:
+            await agent.tracer.emit("answer", "running")
         # 5. Invoke LLM
         answer = ""
         streamed_answer = ""
@@ -1890,6 +1946,14 @@ class AIService:
                     error=str(exc),
                 )
 
+        unverified_numbers: list[str] = []
+        if agent is not None:
+            if citations:
+                unverified_numbers = await agent.verify_numbers(
+                    grounded_answer, context_results, analytics_results
+                )
+            await agent.tracer.emit("answer", "done")
+
         # 8. Log usage
         log = AiUsageLog(
             user_id=user.id,
@@ -1927,7 +1991,9 @@ class AIService:
                     await on_token(rendered_answer[start : start + 48])
 
         # 9. Cache answer if cache-worthy (not empty and valid)
-        if not is_refusal and len(citations) > 0:
+        # An answer with a chart or a marked figure is not cached: the cache holds text
+        # only, and a replay would silently drop the visual the question was about.
+        if not is_refusal and len(citations) > 0 and not artifacts:
             cached_answer = grounded_answer
             if settings.RAG_CACHE_EXTENDED_SECTION and extended_answer:
                 cached_answer = f"{GROUNDED_SENTINEL}\n{grounded_answer}\n{EXTENDED_SENTINEL}\n{extended_answer}"
@@ -1977,6 +2043,12 @@ class AIService:
             unverified_claims=unverified_claims,
             analytics_results=analytics_results,
             evidence_status=evidence_status,
+            artifacts=artifacts,
+            unverified_numbers=unverified_numbers,
+            agent_trace=agent.tracer.steps if agent is not None else [],
+            agent_plan=(
+                agent.plan.public() if agent is not None and not agent.fast else None
+            ),
         )
 
     async def submit_feedback(
