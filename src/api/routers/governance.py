@@ -371,6 +371,11 @@ MANAGED_FEATURE_FLAGS = {
         "description": "Restructure uploaded content into a lossless Markdown reading view before indexing.",
         "default_enabled": settings.RESTRUCTURE_ENABLED,
     },
+    "ai.agent": {
+        "label": "Agentic AI assistant",
+        "description": "Plan before searching, search once per sub-question, check the evidence is enough, draw charts from retrieved tables, mark regions of retrieved figures and verify numbers. Turning it off returns to the plain one-pass answer for the selected users.",
+        "default_enabled": settings.AGENT_ENABLED,
+    },
     "rag.cross_encoder_reranker": {
         "label": "Cross-encoder reranker",
         "description": "Rescore search results with a cross-encoder model after hybrid search, on top of the always-on keyword reranker. Needs the optional 'ml' dependency group (torch), which no deployed image installs, so it is unavailable in deployed images and only runs in a local checkout with CROSS_ENCODER_RERANKER_ENABLED set.",

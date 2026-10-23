@@ -226,6 +226,11 @@ def _answer_provenance(data: dict[str, Any]) -> dict[str, Any] | None:
         stored["analytics_results"] = data["analytics_results"]
     if data.get("evidence_status"):
         stored["evidence_status"] = data["evidence_status"]
+    # The agent's extras live with the same metadata, so they are scrubbed together with it
+    # when a cited source is no longer readable (get_conversation_messages).
+    for key in ("artifacts", "unverified_numbers", "agent_trace", "agent_plan"):
+        if data.get(key):
+            stored[key] = data[key]
     return stored or None
 
 
@@ -615,6 +620,9 @@ async def ask_question_stream(
             async def on_replace(content: str) -> None:
                 await queue.put({"type": "replace", "content": content})
 
+            async def on_event(event: dict[str, Any]) -> None:
+                await queue.put(event)
+
             task = asyncio.create_task(
                 get_ai_service(stream_db).ask(
                     stream_user,
@@ -626,6 +634,7 @@ async def ask_question_stream(
                     edit_instruction=req.edit_instruction,
                     on_token=on_token,
                     on_replace=on_replace,
+                    on_event=on_event,
                 )
             )
             streamed_content = False
@@ -677,7 +686,7 @@ async def ask_question_stream(
                 _answer_provenance(data),
             )
             yield f"data: {json.dumps({'type': 'sources', 'sources': data.get('citations', [])})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request'), 'clarification_options': data.get('clarification_options'), 'confidence': data.get('confidence'), 'unverified_claims': data.get('unverified_claims'), 'analytics_results': data.get('analytics_results', []), 'evidence_status': data.get('evidence_status')})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request'), 'clarification_options': data.get('clarification_options'), 'confidence': data.get('confidence'), 'unverified_claims': data.get('unverified_claims'), 'analytics_results': data.get('analytics_results', []), 'evidence_status': data.get('evidence_status'), 'artifacts': data.get('artifacts', []), 'unverified_numbers': data.get('unverified_numbers', []), 'agent_trace': data.get('agent_trace', []), 'agent_plan': data.get('agent_plan')})}\n\n"
 
     return StreamingResponse(
         event_stream(),

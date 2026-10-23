@@ -506,6 +506,33 @@ class Settings(BaseSettings):
     # adaptive loop must still have a worst-case cost. 0 disables the follow-up round
     # without disabling the sub-query expansion above.
     MULTI_QUERY_MAX_FOLLOWUPS: int = 1
+    # ── Agentic answering (src/domain/agent) ───────────────────────────────────────────────
+    # The assistant plans before it searches (what is being asked, which documents, which
+    # tools), searches once per sub-question, checks it found enough, then may draw a chart
+    # from a retrieved table or mark a region of a retrieved figure, and finally checks the
+    # numbers in its answer against its sources. Also gated per user by the `ai.agent`
+    # feature flag, so a department can be rolled in or out without a deploy.
+    AGENT_ENABLED: bool = True
+    # A short, single-topic question with no chart/figure/comparison/calculation wording
+    # skips planning and runs the plain pipeline, so it is no slower than before.
+    AGENT_FAST_PATH_ENABLED: bool = True
+    AGENT_PLAN_TIMEOUT_SECONDS: float = 12.0
+    AGENT_MAX_SUBQUERIES: int = 3
+    # Extra retrieval rounds after the first when some sub-question found nothing solid.
+    AGENT_MAX_RETRIEVAL_ROUNDS: int = 2
+    # Ceiling on the agent's OWN model calls per question (plan, reformulate, chart, figure);
+    # the final answer call is not counted. Past it, the agent carries on without that step.
+    AGENT_MAX_LLM_CALLS: int = 6
+    AGENT_CLARIFICATION_ENABLED: bool = True
+    AGENT_CHART_ENABLED: bool = True
+    AGENT_CHART_MAX_POINTS: int = 60
+    # Marking a region of a figure sends the image to the LLM provider, so it also needs
+    # EVIDENCE_VISION_ENABLED, and is refused for documents above this sensitivity
+    # (public < internal < confidential < restricted).
+    AGENT_FIGURE_ANNOTATION_ENABLED: bool = True
+    AGENT_IMAGE_MAX_SENSITIVITY: str = "internal"
+    # Numbers in the answer that appear nowhere in the cited material are flagged.
+    AGENT_NUMBER_VERIFICATION_ENABLED: bool = True
     # 48. Each retrieval leg truncates here BEFORE RRF fusion, so it is a recall
     # ceiling rather than a performance dial — and it is measurably too shallow for
     # Vietnamese: on failed MLQA-vi questions the sparse leg had already found the
