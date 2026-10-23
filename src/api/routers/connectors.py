@@ -1052,14 +1052,14 @@ async def list_acl_principals(
             else None
         )
         active_mapping = bool(mapping and mapping["active"])
-        key = principal_key(principal_type, principal_id)
-        resolved = auto.resolved.get(key)
+        auto_key = principal_key(principal_type, principal_id)
+        resolved = auto.resolved.get(auto_key)
         auto_user_id = auto.users.get(principal_id)
         if active_mapping or mapped_user_id:
             status = "mapped"
         elif resolved:
             status = "auto"
-        elif key in auto.ignored:
+        elif auto_key in auto.ignored:
             status = "ignored"
         elif principal_id in auto.without_account:
             status = "no_account"
