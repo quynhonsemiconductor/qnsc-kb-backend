@@ -247,6 +247,18 @@ def _gemini_contents(
     )
 
 
+def _accepts_temperature(provider: Provider) -> bool:
+    """Whether the model takes a `temperature` at all.
+
+    Claude's newer models reject it outright (HTTP 400 "`temperature` is deprecated for this
+    model"), and every call this app makes sends one, so connecting such a model failed the
+    connection test and every later call. For those models the parameter is left out and the
+    model's own default applies. Matched on the model name rather than the host, because a
+    Claude model is reached through gateways as well as through api.anthropic.com.
+    """
+    return not provider.model.strip().lower().startswith("claude")
+
+
 def _payload(
     provider: Provider,
     messages: list[dict[str, str]],
@@ -281,8 +293,9 @@ def _payload(
     payload = {
         "model": provider.model,
         "messages": messages,
-        "temperature": temperature,
     }
+    if _accepts_temperature(provider):
+        payload["temperature"] = temperature
     if thinking is not None and provider.name == "glm":
         # `level`, never `{"type": "disabled"}`. Newer GLM models cannot turn thinking
         # off and reject that payload outright with HTTP 400 code 1210 ("This model
@@ -934,8 +947,9 @@ async def complete_multimodal(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
-            "temperature": 0.0,
         }
+        if _accepts_temperature(provider):
+            payload["temperature"] = 0.0
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         url = provider.url
