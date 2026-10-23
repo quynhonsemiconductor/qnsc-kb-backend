@@ -232,21 +232,17 @@ def sanitize_plan(
     """Keep only what the lists allow; fall back field by field, never fail the whole plan."""
     intent = str(raw.get("intent") or "lookup").strip().lower()
     queries: list[str] = []
-    for value in (
-        raw.get("sub_queries") if isinstance(raw.get("sub_queries"), list) else []
-    ):
+    raw_queries = raw.get("sub_queries")
+    for value in raw_queries if isinstance(raw_queries, list) else []:
         text = " ".join(str(value).split())[:300]
         if text and text.casefold() not in {item.casefold() for item in queries}:
             queries.append(text)
         if len(queries) >= max(1, settings.AGENT_MAX_SUBQUERIES):
             break
+    raw_options = raw.get("clarification_options")
     options = [
         " ".join(str(item).split())[:80]
-        for item in (
-            raw.get("clarification_options")
-            if isinstance(raw.get("clarification_options"), list)
-            else []
-        )
+        for item in (raw_options if isinstance(raw_options, list) else [])
         if str(item).strip()
     ][:4]
     clarification = " ".join(str(raw.get("clarification_question") or "").split())[:300]

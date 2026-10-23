@@ -159,12 +159,8 @@ def build_chart_artifact(
         chart_type = "bar"
     columns: list[str] = table["columns"]
     x_name = str(choice.get("x_column") or "")
-    y_names = [
-        str(name)
-        for name in (
-            choice.get("y_columns") if isinstance(choice.get("y_columns"), list) else []
-        )
-    ]
+    raw_y = choice.get("y_columns")
+    y_names = [str(name) for name in (raw_y if isinstance(raw_y, list) else [])]
     if x_name not in columns:
         return None
     y_names = [
