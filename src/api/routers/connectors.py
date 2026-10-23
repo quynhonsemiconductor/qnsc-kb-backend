@@ -41,6 +41,12 @@ from src.repositories.user import UserRepository
 from src.domain.connectors import sync_local_folder
 from src.core.config import settings
 from src.domain.rbac import AuthorizationService
+from src.domain.acl_auto import (
+    auto_resolve,
+    company_departments,
+    principal_key,
+    suggest_department,
+)
 from src.domain.connector_adapters import adapter_for, ConnectorProviderError
 from src.domain.connector_availability import available_providers, provider_availability
 from src.domain.connector_providers import (
@@ -896,6 +902,39 @@ async def list_acl_principals(
         .scalars()
         .all()
     )
+    # The stored snapshots carry what the table does not (the provider's e-mail and login
+    # name), which is what lets a person be matched to their KB account automatically.
+    snapshot_rows = (
+        (
+            await db.execute(
+                select(PermissionSnapshot.permissions_json)
+                .join(
+                    ExternalDocument,
+                    ExternalDocument.id == PermissionSnapshot.external_document_id,
+                )
+                .where(
+                    ExternalDocument.connector_id == connector.id,
+                    ExternalDocument.state != "deleted",
+                    PermissionSnapshot.active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    extras: dict[tuple[str, str], dict[str, str]] = {}
+    for permissions_json in snapshot_rows:
+        for item in permissions_json if isinstance(permissions_json, list) else []:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                str(item.get("principal_type") or ""),
+                str(item.get("principal_id") or ""),
+            )
+            slot = extras.setdefault(key, {})
+            for field in ("principal_email", "principal_login"):
+                if item.get(field) and not slot.get(field):
+                    slot[field] = str(item[field])
     by_principal: dict[tuple[str, str], dict[str, Any]] = {}
     for principal in principals:
         key = (principal.principal_type, principal.principal_id)
@@ -972,6 +1011,34 @@ async def list_acl_principals(
             {str(item.email).lower(): str(item.id) for item in email_users}
         )
 
+    # Exactly what the sync decides, from the same function: the panel and the approval gate
+    # used to disagree when each resolved identities its own way.
+    explicit = {key for key, mapping in group_mappings.items() if mapping["active"]}
+    already_resolved = set(explicit)
+    for principal_type, principal_id in by_principal:
+        if principal_type in {"user", "siteUser"} and (
+            mapped_users.get(principal_id)
+            or mapped_users.get(str(principal_id).lower())
+        ):
+            already_resolved.add((principal_type, principal_id))
+    auto = await auto_resolve(
+        db,
+        connector,
+        [
+            {
+                "principal_type": principal_type,
+                "principal_id": principal_id,
+                "principal_name": entry["principal_name"],
+                **extras.get((principal_type, principal_id), {}),
+            }
+            for (principal_type, principal_id), entry in by_principal.items()
+        ],
+        already_resolved=already_resolved,
+        matched_users=mapped_users,
+    )
+    departments = await company_departments(db, connector.company_domain)
+    department_names = dict(departments)
+
     response: list[dict[str, Any]] = []
     for (principal_type, principal_id), entry in sorted(by_principal.items()):
         # Every observed principal can be mapped to a department, whatever its type. A
@@ -985,14 +1052,42 @@ async def list_acl_principals(
             else None
         )
         active_mapping = bool(mapping and mapping["active"])
+        key = principal_key(principal_type, principal_id)
+        resolved = auto.resolved.get(key)
+        auto_user_id = auto.users.get(principal_id)
+        if active_mapping or mapped_user_id:
+            status = "mapped"
+        elif resolved:
+            status = "auto"
+        elif key in auto.ignored:
+            status = "ignored"
+        elif principal_id in auto.without_account:
+            status = "no_account"
+        else:
+            status = "unmapped"
+        suggestion = (
+            suggest_department(entry["principal_name"] or "", departments)
+            if status == "unmapped" and principal_type in {"group", "siteGroup"}
+            else None
+        )
         response.append(
             {
                 "principal_type": principal_type,
                 "principal_id": principal_id,
                 "principal_name": entry["principal_name"],
                 "roles": sorted(entry["roles"]),
-                "mapping_status": (
-                    "mapped" if active_mapping or mapped_user_id else "unmapped"
+                "mapping_status": status,
+                # How an automatic resolution was reached ("email", "name", "company"), and the
+                # closest department for a group still waiting for a person to decide.
+                "auto_via": resolved["via"] if resolved else None,
+                "auto_department_name": (
+                    department_names.get(resolved["department_id"])
+                    if resolved and resolved.get("department_id")
+                    else None
+                ),
+                "suggested_department_id": suggestion,
+                "suggested_department_name": (
+                    department_names.get(suggestion) if suggestion else None
                 ),
                 # Server-owned policy: the client must not re-derive who is mappable from the
                 # principal type.
@@ -1003,7 +1098,7 @@ async def list_acl_principals(
                 "department_name": (
                     mapping["department_name"] if mapping and active_mapping else None
                 ),
-                "internal_user_id": mapped_user_id,
+                "internal_user_id": mapped_user_id or auto_user_id,
             }
         )
     return response

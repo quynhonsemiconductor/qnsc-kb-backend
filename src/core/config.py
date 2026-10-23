@@ -647,6 +647,10 @@ class Settings(BaseSettings):
     CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS: int = 30
     CONNECTOR_RECONCILE_INTERVAL_MINUTES: int = 360
     CONNECTOR_AUTO_PUBLISH_MODE: str = "governed"
+    # Resolve provider permission principals (people by e-mail, groups by department name, whole-
+    # organisation and non-human principals by rule) instead of asking an administrator to map each
+    # one. See domain/acl_auto.py. A connector can opt out with config_json.acl_auto_resolve=false.
+    CONNECTOR_ACL_AUTO_RESOLVE: bool = True
     # Department routing asks the LLM first and falls back to keyword ranking. The
     # fallback is not a degraded mode: it is what runs whenever no provider is
     # configured, and it is what every existing deployment already had.
