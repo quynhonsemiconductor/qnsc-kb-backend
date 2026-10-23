@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
+from src.domain.acl_auto import auto_resolve, principal_key
 from src.domain.connector_adapters import (
     ConnectorProviderError,
     NormalizedChange,
@@ -801,6 +802,28 @@ async def _save_permissions(
         mapped_user_ids.update(
             {str(item.email).lower(): str(item.id) for item in email_users}
         )
+    # Whatever an administrator did not have to decide: people matched by e-mail, groups
+    # matched to a department by name, whole-organisation principals, and principals that can
+    # never sign in. Only what is still unresolved after the explicit mappings and the identity
+    # table is looked at (domain/acl_auto.py).
+    already_resolved = set(mapped_by_principal)
+    for item in permissions:
+        identifier = str(item.get("principal_id") or "")
+        if (
+            item.get("principal_type") in {"user", "siteUser"}
+            and identifier
+            and (identifier in mapped_user_ids or identifier.lower() in mapped_user_ids)
+        ):
+            already_resolved.add((str(item["principal_type"]), identifier))
+    auto = await auto_resolve(
+        db,
+        connector,
+        permissions,
+        already_resolved=already_resolved,
+        matched_users=mapped_user_ids,
+    )
+    mapped_user_ids.update(auto.users)
+    auto_keys = auto.keys()
     # A principal an administrator has explicitly mapped is resolved, whatever its type.
     # This used to be computed with no reference to the mapping table at all, so every
     # `unknown`/`link`/`domain` principal stayed in the blocking set permanently.
@@ -809,6 +832,7 @@ async def _save_permissions(
         for principal_type, principal_id in observed_principals
         if principal_type not in {"group", "siteGroup", "user", "siteUser"}
         and (principal_type, principal_id) not in mapped_by_principal
+        and principal_key(principal_type, principal_id) not in auto_keys
     )
     previous_metadata = document.metadata_json or {}
     acl_present_key = provider_acl_present_key(connector.system)
@@ -816,12 +840,15 @@ async def _save_permissions(
         **previous_metadata,
         acl_present_key: True,
         "provider_acl_present": True,
-        "mapped_department_ids": sorted({str(item.department_id) for item in mappings}),
+        "mapped_department_ids": sorted(
+            {str(item.department_id) for item in mappings} | auto.department_ids
+        ),
         "unmapped_group_ids": sorted(
             principal_id
             for principal_type, principal_id in observed_principals
             if principal_type in {"group", "siteGroup"}
             and (principal_type, principal_id) not in mapped_by_principal
+            and principal_key(principal_type, principal_id) not in auto.resolved
         ),
         "mapped_source_user_ids": sorted(
             mapped_user_ids[item] for item in user_ids if item in mapped_user_ids
@@ -835,9 +862,15 @@ async def _save_permissions(
             for principal_type, principal_id in observed_principals
             if principal_type in {"user", "siteUser"}
             and principal_id not in mapped_user_ids
+            and principal_id not in auto.without_account
             and (principal_type, principal_id) not in mapped_by_principal
         ),
         "unmapped_principal_ids": unmapped_principal_ids,
+        # Informational: how the automatic rules resolved what they did, and which provider
+        # people have no KB account (they grant nothing; the next sync matches them once one
+        # exists). Capped so a very large ACL cannot bloat the row.
+        "auto_resolved": dict(sorted(auto.resolved.items())[:100]),
+        "source_users_without_account": sorted(auto.without_account)[:200],
     }
     document.metadata_json = next_metadata
     mapping_changed = any(
@@ -850,6 +883,8 @@ async def _save_permissions(
             "mapped_source_user_ids",
             "unmapped_source_user_ids",
             "unmapped_principal_ids",
+            "auto_resolved",
+            "source_users_without_account",
         )
     )
     return acl_changed or mapping_changed

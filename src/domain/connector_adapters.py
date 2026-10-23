@@ -1271,16 +1271,21 @@ def sharepoint_permission_principals(item: dict) -> list[dict[str, str]]:
             identity = identity_set.get(key)
             if not isinstance(identity, dict) or not identity.get("id"):
                 continue
-            principals.append(
-                {
-                    "principal_type": kind,
-                    "principal_id": str(identity["id"]),
-                    "principal_name": str(
-                        identity.get("displayName") or identity.get("email") or ""
-                    ),
-                    "role": role,
-                }
-            )
+            principal = {
+                "principal_type": kind,
+                "principal_id": str(identity["id"]),
+                "principal_name": str(
+                    identity.get("displayName") or identity.get("email") or ""
+                ),
+                "role": role,
+            }
+            # What lets a person be matched to their KB account without anyone mapping them:
+            # the address Graph reports and, for a site user, the claims login name.
+            if identity.get("email"):
+                principal["principal_email"] = str(identity["email"])
+            if identity.get("loginName"):
+                principal["principal_login"] = str(identity["loginName"])
+            principals.append(principal)
     if principals:
         return principals
 
@@ -1336,4 +1341,7 @@ def _dedupe_principals(principals: list[dict[str, str]]) -> list[dict[str, str]]
         existing["principal_name"] = existing.get("principal_name") or principal.get(
             "principal_name", ""
         )
+        for extra in ("principal_email", "principal_login"):
+            if principal.get(extra) and not existing.get(extra):
+                existing[extra] = principal[extra]
     return list(seen.values())

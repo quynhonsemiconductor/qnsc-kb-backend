@@ -214,7 +214,7 @@ def test_acl_mapping_change_reconciles_even_when_provider_acl_hash_is_unchanged(
     assert document.metadata_json["unmapped_group_ids"] == []
 
 
-def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval():
+def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval(monkeypatch):
     """An `unknown` principal used to be permanently unresolvable.
 
     `_save_permissions` only ever looked up ids drawn from `group`/`siteGroup`, and
@@ -226,6 +226,11 @@ def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval():
 
     Mapping such a principal now grants through its department like any other.
     """
+    from src.core.config import settings
+
+    # Automatic resolution (domain/acl_auto.py) is covered in test_acl_auto.py; here the switch is
+    # off so these tests keep proving what an explicit mapping does and that nothing else resolves.
+    monkeypatch.setattr(settings, "CONNECTOR_ACL_AUTO_RESOLVE", False)
     from src.models.connectors import ExternalDocument, ExternalGroupMapping
 
     connector_id = uuid.uuid4()
@@ -381,7 +386,12 @@ def test_unsupported_provider_principal_is_retained_as_unmapped():
     assert "link" not in {"group", "siteGroup", "user", "siteUser"}
 
 
-def test_unsupported_provider_principal_is_persisted_as_unmapped():
+def test_unsupported_provider_principal_is_persisted_as_unmapped(monkeypatch):
+    from src.core.config import settings
+
+    # Automatic resolution (domain/acl_auto.py) is covered in test_acl_auto.py; here the switch is
+    # off so these tests keep proving what an explicit mapping does and that nothing else resolves.
+    monkeypatch.setattr(settings, "CONNECTOR_ACL_AUTO_RESOLVE", False)
     from src.models.connectors import ExternalDocument
 
     connector = Connector(id=uuid.uuid4(), company_domain="acme.test")
