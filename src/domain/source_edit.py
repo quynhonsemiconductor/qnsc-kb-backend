@@ -27,6 +27,12 @@ needs to know:
 
 Matching is exact (case and accents significant) and replacements apply in order, each to the
 result of the one before.
+
+By default a replacement changes EVERY match. To change only the occurrence a reader selected,
+give it ``before`` / ``after`` (the text just around the selection) and, for a PDF, the
+``page``: only matches whose surroundings agree are changed. Surroundings are compared with
+whitespace collapsed, and a side that runs past the start or end of the line / paragraph /
+cell it was found in is compared only as far as that line goes.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ from typing import Any, Iterable
 
 MAX_REPLACEMENTS = 20
 MAX_TEXT_LENGTH = 500
+MAX_CONTEXT_LENGTH = 200
 
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -59,6 +66,52 @@ class SourceEditError(ValueError):
 class Replacement:
     find: str
     replace: str
+    #: Text just before / after the selected occurrence. Both empty means "every match".
+    before: str = ""
+    after: str = ""
+    #: PDF only: 1-based page the selection is on; other pages are left alone.
+    page: int | None = None
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _side_matches(available: str, wanted: str, *, tail: bool) -> bool:
+    """Whether what surrounds a match agrees with the selection's surroundings.
+
+    `available` is what the file has on that side within the same line / paragraph / cell. When
+    it is shorter than `wanted` (the selection sat at the start or end of the line) only the
+    part that exists can be compared.
+    """
+    have, want = _norm(available), _norm(wanted)
+    if not want:
+        return True
+    if tail:
+        return have.endswith(want) or want.endswith(have)
+    return have.startswith(want) or want.startswith(have)
+
+
+def matching_starts(text: str, item: Replacement) -> list[int]:
+    """Start offsets of the non-overlapping matches of `item.find` that agree with its context."""
+    starts: list[int] = []
+    position = text.find(item.find)
+    while position != -1:
+        end = position + len(item.find)
+        if _side_matches(text[:position], item.before, tail=True) and _side_matches(
+            text[end:], item.after, tail=False
+        ):
+            starts.append(position)
+        position = text.find(item.find, end)
+    return starts
+
+
+def replace_in_text(text: str, item: Replacement) -> tuple[str, int]:
+    """`text` with the matching occurrences replaced, and how many there were."""
+    starts = matching_starts(text, item)
+    for start in reversed(starts):
+        text = text[:start] + item.replace + text[start + len(item.find) :]
+    return text, len(starts)
 
 
 @dataclass
@@ -84,6 +137,13 @@ def validate_replacements(replacements: Iterable[Replacement]) -> list[Replaceme
             raise SourceEditError("The text to find cannot be empty.")
         if len(item.find) > MAX_TEXT_LENGTH or len(item.replace) > MAX_TEXT_LENGTH:
             raise SourceEditError(f"Text is limited to {MAX_TEXT_LENGTH} characters.")
+        if (
+            len(item.before) > MAX_CONTEXT_LENGTH
+            or len(item.after) > MAX_CONTEXT_LENGTH
+        ):
+            raise SourceEditError(
+                f"The surrounding text is limited to {MAX_CONTEXT_LENGTH} characters."
+            )
         if item.find == item.replace:
             raise SourceEditError("The new text is the same as the old text.")
     return items
@@ -132,8 +192,8 @@ def _edit_text(data: bytes, items: list[Replacement], write: bool) -> EditOutcom
         ) from exc
     counts: list[int] = []
     for item in items:
-        counts.append(text.count(item.find))
-        text = text.replace(item.find, item.replace)
+        text, count = replace_in_text(text, item)
+        counts.append(count)
     if not write:
         return EditOutcome(counts, None)
     encoded = text.encode("utf-8")
@@ -198,13 +258,9 @@ def _replace_in_paragraph(
     for index, item in enumerate(items):
         pieces = [node.text or "" for node in texts]
         joined = "".join(pieces)
-        if item.find not in joined:
+        starts = matching_starts(joined, item)
+        if not starts:
             continue
-        starts = []
-        position = joined.find(item.find)
-        while position != -1:
-            starts.append(position)
-            position = joined.find(item.find, position + len(item.find))
         offsets = []
         running = 0
         for piece in pieces:
@@ -365,16 +421,15 @@ def _union(pymupdf: Any, chars: list[tuple[str, Any, dict[str, Any]]]) -> Any:
 
 
 def _line_occurrences(
-    joined: str, items: list[Replacement], counts: list[int]
+    joined: str, items: list[Replacement], counts: list[int], page_number: int
 ) -> list[tuple[int, int, str]]:
     """Non-overlapping matches in a line as (start, end, replacement), left to right."""
     found: list[tuple[int, int, str, int]] = []
     for index, item in enumerate(items):
-        position = joined.find(item.find)
-        while position != -1:
-            end = position + len(item.find)
-            found.append((position, end, item.replace, index))
-            position = joined.find(item.find, end)
+        if item.page is not None and item.page != page_number:
+            continue
+        for position in matching_starts(joined, item):
+            found.append((position, position + len(item.find), item.replace, index))
     found.sort(key=lambda entry: (entry[0], entry[3]))
     kept: list[tuple[int, int, str]] = []
     last_end = 0
@@ -409,7 +464,7 @@ def _find_hits(
                 continue
             has_text = True
             joined = "".join(c for c, _, _ in chars)
-            occurrences = _line_occurrences(joined, items, counts)
+            occurrences = _line_occurrences(joined, items, counts, page.number + 1)
             cursor = 0
             for number, (start, end, replacement) in enumerate(occurrences):
                 size, color, bold, italic = _style(chars[start][2])
