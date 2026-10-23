@@ -1,13 +1,16 @@
 # =============================================================================
 # Release Please — opens a "chore(release): vX.Y.Z" PR on every push to main, then
-# tags when that PR is merged. The tag is what triggers the production deploy.
+# creates the tag and GitHub Release when that PR is merged. The tag deploys NOTHING:
+# KB has no production environment, so the deploy workflows' tag triggers are removed
+# (opshub did the same in v0.4.x) until KB gets prod.
 #
 # Delegates to the shared reusable in ci so release logic stays identical across
 # products. QNSC_AUTOMATION_APP_ID (org variable) is read by the reusable;
 # QNSC_AUTOMATION_PRIVATE_KEY is passed explicitly.
 #
 # The App token is not a convenience: a tag pushed with the default GITHUB_TOKEN does
-# NOT trigger other workflows, so the release would tag and then silently never deploy.
+# NOT trigger other workflows, so when the prod deploy triggers return, a release would
+# tag and then silently never deploy.
 # =============================================================================
 name: Release
 

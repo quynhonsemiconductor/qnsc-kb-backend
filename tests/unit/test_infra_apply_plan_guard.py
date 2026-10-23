@@ -87,14 +87,13 @@ def test_every_apply_job_waits_for_the_preflight():
     assert "    needs: apply-shared\n" in job_block(text, "apply-develop")
 
 
-def test_prod_runs_on_a_tag_push_or_a_dispatch_that_asks_for_prod_and_nothing_else():
-    """A dispatch from a tag with target=develop must not reach apply-prod."""
+def test_prod_runs_only_on_a_dispatch_that_asks_for_prod():
+    """The tag trigger is gone (KB has no prod), so apply-prod fires on exactly one
+    condition. A dispatch from a tag with target=develop must not reach apply-prod."""
     condition = next(
         line for line in job_block(read(), "apply-prod").splitlines() if line.strip().startswith("if:")
     )
-    assert "github.event_name != 'workflow_dispatch' && github.ref_type == 'tag'" in condition
-    assert "github.event_name == 'workflow_dispatch' && inputs.target == 'prod'" in condition
-    assert "github.ref_type == 'tag' ||" not in condition
+    assert condition.strip() == "if: github.event_name == 'workflow_dispatch' && inputs.target == 'prod'"
 
 
 def test_preflight_refuses_prod_from_anything_but_a_release_tag():

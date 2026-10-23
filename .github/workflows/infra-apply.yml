@@ -1,17 +1,18 @@
 name: Infrastructure · Apply
 
 # What the run list shows. A dispatch shows its target and whether destructive changes are allowed, so a run that may
-# delete DNS or identity resources is never mistaken for an ordinary one in the list. A push or tag shows its ref.
+# delete DNS or identity resources is never mistaken for an ordinary one in the list. A push shows its ref.
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Infrastructure · Apply · dispatch · {0}{1}', inputs.target, inputs.allow_destructive && ' · ALLOW DESTRUCTIVE' || '') || format('Infrastructure · Apply · {0}', github.ref_name) }}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Gated the same way as the app deploys:
 #   push to main      → apply _shared + develop (auto)
-#   push a v*.*.* tag → apply _shared + prod    (prod also behind the "production"
-#                       GitHub Environment's required reviewer)
 #
-# Prod infra can NOT be applied by an ordinary merge to main — only by a deliberate
-# semver tag, so an accidental push can never touch production.
+#   prod path         → DORMANT. KB has no production environment, so the semver-tag
+#                       trigger is removed (opshub did the same in v0.4.x): a release
+#                       tag applies nothing. The dispatch's target=prod choice stays
+#                       and is still gated by the "production" Environment's required
+#                       reviewer.
 #
 # PREREQUISITE: the platform shared-runtime stacks in qnsc-infra (runtime-dev for
 # develop, runtime-prod for prod) own the shared VPC/NAT/SGs and MUST be applied first.
@@ -21,8 +22,6 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('Infrastructure
 on:
   push:
     branches: [main]
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
     paths:
       - "infra/live/**"
       # modules/** matters too: `module "stack"` is a LOCAL path module, so editing it
@@ -45,15 +44,15 @@ on:
         type: boolean
         default: false
 
-# Serialise by ENVIRONMENT, matching backend-deploy.yml: all prod (tag) applies share
-# one group, all develop (branch) applies share another, and the two run in PARALLEL.
+# Serialise by ENVIRONMENT, matching backend-deploy.yml: prod applies share one group,
+# develop applies another, and the two run in PARALLEL.
 #
 # A single repo-wide group would make DEVELOP queue behind PROD — and prod waits on a
 # required reviewer, so an unapproved production apply would freeze every develop apply
 # until a human noticed. The one thing that genuinely must not run twice at once is the
 # _shared state, which is fixed at that job instead (see its own concurrency below).
 concurrency:
-  group: infra-apply-${{ github.repository }}-${{ (github.ref_type == 'tag' || inputs.target == 'prod') && 'prod' || 'develop' }}
+  group: infra-apply-${{ github.repository }}-${{ inputs.target == 'prod' && 'prod' || 'develop' }}
   cancel-in-progress: false # never cancel a running apply
 
 permissions:
@@ -89,11 +88,9 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Production is applied by a dispatch that asks for it, or by a tag push: exactly apply-prod's `if`.
+          # Production is applied only by a dispatch that asks for it: exactly apply-prod's `if`.
           prod=false
-          if [ "$EVENT" = workflow_dispatch ]; then
-            if [ "$TARGET" = prod ]; then prod=true; fi
-          elif [ "$REF_TYPE" = tag ]; then prod=true; fi
+          if [ "$EVENT" = workflow_dispatch ] && [ "$TARGET" = prod ]; then prod=true; fi
           release=false
           if [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then release=true; fi
           if [ "$prod" = true ] && [ "$release" = false ]; then
@@ -103,7 +100,7 @@ jobs:
           echo "ok: prod=$prod, event=$EVENT, ref=$REF_TYPE '$REF_NAME'"
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Shared (ECR + OIDC roles) — always applies first, on both branch and tag runs.
+  # Shared (ECR + OIDC roles) — always applies first, on every run.
   # ───────────────────────────────────────────────────────────────────────────
   apply-shared:
     needs: preflight
@@ -115,12 +112,11 @@ jobs:
       pull-requests: read # destructive-guard reads the labels of the PR being merged
       id-token: write # mandatory for the OIDC AssumeRole
 
-    # A release pushes main and the vX.Y.Z tag near-simultaneously, so both runs reach
-    # this job and would apply the same _shared state concurrently — a state-lock failure
-    # on every release. A CONSTANT group here (not keyed on ref) serialises that while
-    # leaving the per-environment applies free to run in parallel. The production
-    # approval gate lives on apply-prod, a separate job, so a release awaiting a reviewer
-    # does not hold this lock.
+    # A CONSTANT group here (not keyed on ref or target): two overlapping runs — a push
+    # and a dispatch, say — would apply the same _shared state concurrently and deadlock
+    # on the state lock. Serialising here leaves the per-environment applies free to run
+    # in parallel. The production approval gate lives on apply-prod, a separate job, so
+    # a run awaiting a reviewer does not hold this lock.
     concurrency:
       group: infra-apply-shared-${{ github.repository }}
       cancel-in-progress: false
@@ -164,7 +160,7 @@ jobs:
         run: tofu apply -input=false tfplan
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Develop — only on a branch push to main (never on a tag).
+  # Develop — on the main push, and on any dispatch that did not ask for prod.
   # ───────────────────────────────────────────────────────────────────────────
   apply-develop:
     needs: apply-shared
@@ -288,12 +284,12 @@ jobs:
           fi
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Production — only on a v*.*.* tag, and only after a reviewer approves the
-  # "production" Environment.
+  # Production — only via a dispatch with target=prod (the tag trigger is dormant;
+  # KB has no prod), and only after a reviewer approves the "production" Environment.
   # ───────────────────────────────────────────────────────────────────────────
   apply-prod:
     needs: apply-shared
-    if: (github.event_name != 'workflow_dispatch' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.target == 'prod')
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'prod'
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 45

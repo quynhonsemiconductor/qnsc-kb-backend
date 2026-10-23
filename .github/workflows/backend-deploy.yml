@@ -3,11 +3,14 @@
 #
 # Triggers:
 #   develop → push to main (auto)
-#   prod    → push a semver tag v*.*.* (gated by the "production" GitHub Environment's
-#             required reviewer, enforced inside the reusable)
 #
-# The reusable builds and attests on main, promotes that exact image on a tag, runs the
-# migrator task, then rolls the ECS services. All ECS_*/RDS/APP_URL configuration is
+#   prod    → DORMANT. KB has no production environment, so the semver-tag trigger is
+#             removed (opshub did the same in v0.4.x): merging a release PR creates the
+#             tag and GitHub Release and deploys nothing. A dispatch is refused from a
+#             tag ref by the `develop-only` gate below.
+#
+# The reusable builds and attests on main, runs the migrator task, then rolls the ECS
+# services. (It can also promote a tagged image — the dormant prod path.) All ECS_*/RDS/APP_URL configuration is
 # read from environment-scoped GitHub variables published by infra-apply.yml; only the
 # AWS account id is passed explicitly (least privilege — no `secrets: inherit`).
 # =============================================================================
@@ -31,25 +34,43 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+' # semver only — no -rc suffix
 
-  # Manual redeploy of whatever main currently holds. DEVELOP ONLY — a prod deploy still
-  # requires a semver tag, so this cannot skip that gate. Exists because a merged fix can
+  # Manual redeploy of whatever main currently holds. DEVELOP ONLY — enforced by the
+  # `develop-only` gate below, because a dispatch from a tag ref (`--ref vX.Y.Z`,
+  # ref_type=tag) would otherwise make the reusable select production. Exists because a merged fix can
   # otherwise become undeployable: if its CI run was cancelled, the fail-closed gate
   # below correctly refuses, and re-running the deploy cannot help because the missing
   # CI run is the problem. An empty commit is no substitute — paths-ignore is evaluated
   # against the changed-file list, and a commit that changes nothing matches every rule.
   workflow_dispatch:
 
+# Job-level permissions below widen this where needed (the reusable deploy declares
+# id-token/attestations/packages); everything else gets read-only.
+permissions:
+  contents: read
+
 concurrency:
-  # Serialise by ENVIRONMENT, not by raw ref: all prod (tag) deploys share one group so
-  # prod migrations never run concurrently; develop shares another. The two still run in
-  # parallel.
-  group: deploy-backend-${{ startsWith(github.ref, 'refs/tags/') && 'prod' || 'develop' }}
+  # Develop only (the tag trigger is gone): one group, serialised, never cancelled.
+  group: deploy-backend-develop
   cancel-in-progress: false # never cancel a running deploy
 
 jobs:
+  # A dispatch runs from whatever ref it is given, and `--ref vX.Y.Z` means
+  # ref_type=tag — where the reusable would select production and only the reviewer
+  # gate would stand in the way. KB has no prod: this job runs on EVERY trigger and
+  # fails the run from a tag ref, so everything that `needs` it is skipped with it.
+  # (No job-level `if`: a skipped gate would skip everything that waits on it —
+  # including the ordinary main-push deploys.)
+  develop-only:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "::error title=develop only::Backend · Deploy runs on main pushes and develop dispatches only. A tag ref selects production, and KB has no production environment — release tags deploy nothing." >&2
+            exit 1
+          fi
   # ───────────────────────────────────────────────────────────────────────────
   # Ordering gate — never roll the app ahead of its own infrastructure.
   #
@@ -63,11 +84,9 @@ jobs:
   #   - commit DOES touch them                     → wait for that run on THIS sha
   # ───────────────────────────────────────────────────────────────────────────
   wait-for-infra:
+    needs: develop-only
     name: Wait for infrastructure
     runs-on: ubuntu-latest
-    # Generous: on a tag this waits for apply-prod, which sits behind the production
-    # environment's required reviewer. Timing out here is safe — the deploy is
-    # re-runnable — but it must not fire just because an approver stepped away.
     timeout-minutes: 120
     permissions:
       contents: read
@@ -81,13 +100,6 @@ jobs:
       - name: Does this commit change infrastructure?
         id: touched
         run: |
-          # Tags ALWAYS gate: apply-prod is `if: ref_type == 'tag'`, so a tag is the only
-          # thing that applies prod infra — and the prod deploy fires on the same tag.
-          # Path filters are not applied to tag pushes either, so infra-apply always runs
-          # for a tag regardless of what the commit touched.
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "infra=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
           # infra/modules/** counts too: `module "stack"` is a LOCAL path module, so a
           # module-only commit changes the plan and triggers infra-apply.
           if git diff --name-only HEAD~1 HEAD | grep -qE '^infra/(live|modules)/'; then
@@ -125,54 +137,20 @@ jobs:
           gh run watch --repo "$GITHUB_REPOSITORY" "$ID" --exit-status
           echo "Infrastructure applied; deploy may proceed."
 
-  # ───────────────────────────────────────────────────────────────────────────
-  # CI gate — a red main must not deploy.
+  # ---------------------------------------------------------------------------
+  # CI gate - a red main must not deploy.
   #
-  #   - push to main → wait for Backend · CI on this sha; `gh run watch --exit-status`
-  #     propagates its conclusion, so a failed CI blocks deploy.
-  #   - tag push → wait for the DEVELOP deploy of this sha instead. See below.
+  # Waits for Backend CI on this sha; `gh run watch --exit-status` propagates its
+  # conclusion, so a failed CI blocks deploy.
   #
   # Fails CLOSED: with no CI run found for the sha, block rather than ship blind.
   #
-  # WHY THE TAG BRANCH WAITS ON THE DEVELOP DEPLOY, AND NO LONGER EXITS 0.
-  # It used to `exit 0` on the grounds that Backend · CI does not run on tags and prod is
-  # gated by the production Environment reviewer. Both halves are true and neither is the
-  # precondition that matters: a prod deploy does not build, it PROMOTES the sha-<sha>
-  # image the develop deploy pushed. So the tag run's real precondition is "develop
-  # already built and deployed this sha" — exactly what the promote action's own failure
-  # message states ("The commit must be merged to main and deployed to develop before
-  # tagging a release"). And the Environment reviewer gates the DEPLOY job, which sits
-  # after promote, so it cannot protect promote from running too early.
-  #
-  # With no gate the two runs race. PORTED FROM ROVA, where prod lost that race on
-  # v0.7.13 (2026-08-31): a release merge fires both runs on the same commit, the tag run
-  # cleared this gate in 3 seconds while the main run sat here for 15m16s waiting on
-  # Backend · CI, and prod then exhausted the promote step's poll budget waiting for an
-  # image that did not exist yet — failing 21 seconds before that gate cleared. Nothing
-  # half-deployed (promote runs before the deploy job, and it is idempotent), but the
-  # release needed a manual re-run and the error named the symptom rather than the cause.
-  # qnsc-kb-backend shares the reusable workflow, the promote action and this gate
-  # verbatim, so it had the same defect and simply had not cut a release slow enough to
-  # expose it.
-  #
-  # Waiting on the whole develop RUN rather than only its build jobs is deliberate: it is
-  # the documented contract, it is one `gh run watch` instead of per-job polling, and it
-  # means prod can never ship an image develop itself failed to deploy.
-  #
-  # NOT-FOUND WARNS RATHER THAN BLOCKING, unlike the main branch below. This workflow's
-  # paths-ignore is only `**/*.md` and `docs/**`, so a release commit — which always
-  # changes package.json and the release manifest — cannot be skipped, and absence means
-  # something unusual: a hand-cut tag, or a deleted run. The promote step's ECR poll is
-  # still the backstop, and blocking would turn this gate into a new way to make a
-  # release un-shippable. Same warn-and-proceed shape as wait-for-infra above. A develop
-  # run that EXISTS and FAILED does block, which is the diagnostic this adds: prod now
-  # says "develop deploy failed" in seconds instead of "not found in ECR" after the full
-  # poll budget.
-  #
-  # `timeout-minutes: 45` below already covers awaiting a full develop deploy, so unlike
-  # the rova and opshub ports this needed no change.
-  # ───────────────────────────────────────────────────────────────────────────
+  # (The tag branch this gate once carried - watching the develop deploy so prod could
+  # promote its image, after rova lost that race on v0.7.13 - was deleted with the tag
+  # trigger; see this file's history if prod ever returns.)
+  # ---------------------------------------------------------------------------
   wait-for-ci:
+    needs: develop-only
     name: Wait for Backend · CI
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -181,7 +159,6 @@ jobs:
       actions: read
     steps:
       - name: Wait for Backend · CI on this commit
-        if: github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -202,44 +179,8 @@ jobs:
           gh run watch --repo "$GITHUB_REPOSITORY" "$ID" --exit-status
           echo "Backend · CI succeeded; deploy may proceed."
 
-      # Prod promotes the image the develop deploy pushed, so this is the tag run's real
-      # precondition. See the block comment above this job for the race it closes.
-      - name: Wait for the develop deploy of this commit
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # `--branch main` is what excludes THIS run: the develop deploy's headBranch is
-          # `main` while the tag run's is the tag ref, so the two never match each other
-          # despite sharing a workflow file and a commit. Without it this would find
-          # itself and wait forever.
-          #
-          # `|| ID=""` on the assignment, matching the gates above and for the same
-          # reason: runners use `set -e`, an assignment takes its command substitution's
-          # exit status, so a rate-limited `gh run list` would skip the retry loop.
-          for _ in $(seq 1 12); do
-            ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow backend-deploy.yml \
-                   --branch main --commit "$GITHUB_SHA" \
-                   --limit 1 --json databaseId --jq '.[0].databaseId // empty') || ID=""
-            [ -n "$ID" ] && break
-            sleep 10
-          done
-
-          if [ -z "${ID:-}" ]; then
-            echo "::warning::No develop Backend · Deploy run found for $GITHUB_SHA — proceeding, the promote step's ECR poll is the backstop."
-            exit 0
-          fi
-
-          echo "Waiting on develop Backend · Deploy run $ID …"
-          if ! gh run watch --repo "$GITHUB_REPOSITORY" "$ID" --exit-status; then
-            echo "::error::The develop deploy of $GITHUB_SHA did not succeed (run $ID). Prod promotes the image that run pushes, so there is nothing to promote. Fix develop, then re-run this deploy."
-            exit 1
-          fi
-          echo "Develop deployed this commit; the sha image exists and prod may promote it."
-
   deploy:
-    needs: [wait-for-infra, wait-for-ci]
+    needs: [develop-only, wait-for-infra, wait-for-ci]
     # Must match the UNION of every inner job's own permissions in the reusable
     # backend-deploy.yml, not just its top-level default (contents: read) —
     # GitHub validates a reusable call's whole permission chain at trigger
