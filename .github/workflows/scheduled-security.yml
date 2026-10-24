@@ -1,0 +1,23 @@
+# Daily scheduled security scan (gitleaks + osv-scanner) against the default branch.
+# The PR/push gates scan the branch under test; this schedule is the net for
+# advisories published AFTER a dependency landed. Renovate does not automerge
+# production dependencies (owner decision 2026-10-24), so a new advisory must
+# surface here: findings FAIL the run and GitHub notifies.
+# Scan now: gh workflow run scheduled-security.yml
+name: Scheduled · Security Scan
+
+on:
+  schedule:
+    - cron: '15 1 * * *' # UTC; staggered per product so the runner fleet doesn't stack
+  workflow_dispatch:
+
+permissions:
+  contents: read # read-only: the scheduled run changes nothing
+
+jobs:
+  security:
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
+    with:
+      product: qnsc-kb
+      scan_container: false # image CVEs are gated on push; the schedule is source scans only
+      osv_blocking: true
