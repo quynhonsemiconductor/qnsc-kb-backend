@@ -10,12 +10,21 @@ on:
   schedule:
     - cron: '15 1 * * *' # UTC; staggered per product so the runner fleet doesn't stack
   workflow_dispatch:
+  pull_request:
+    paths: ['.github/workflows/scheduled-security.yml'] # exercise the workflow when it changes
 
 permissions:
   contents: read # read-only: the scheduled run changes nothing
 
 jobs:
   security:
+    # Job-level permissions REPLACE the inherited set: the reusable's jobs need
+    # security-events (SARIF upload) and packages (private @quynhonsemiconductor/*
+    # during the image build). A caller granting only contents: read dies at startup.
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
     uses: quynhonsemiconductor/ci/.github/workflows/security.yml@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
     with:
       product: qnsc-kb
