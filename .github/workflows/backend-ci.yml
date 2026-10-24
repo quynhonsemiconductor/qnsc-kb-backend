@@ -100,7 +100,7 @@ jobs:
             **/test_*.py
             **/*_test.py
       - id: paths
-        uses: quynhonsemiconductor/ci/actions/changed-paths@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+        uses: quynhonsemiconductor/ci/actions/changed-paths@1fcb7f019a6c5482d30b2ece6caa416965c32bbe # ci#245 force-run; bump to the release tag on merge
         with:
           ignore: |
             **/*.md
@@ -110,7 +110,12 @@ jobs:
           # runs everything. Renovate PRs are NOT skipped: an action bump must be exercised on its PR.
           skip-heads: |
             release-please--@qnsc-automation[bot]=CHANGELOG.md,.release-please-manifest.json,version-only:pyproject.toml
-
+          # Dependency files always run CI: a resolution change can pull
+          # different code even when every other path is ignorable.
+          force-run: |
+            poetry.lock
+            pyproject.toml
+            **/pyproject.toml
   # ─────────────────────────────────────────────────────────────────────────
   # 1. Format, lint, typecheck — fast gate, no services needed.
   # ─────────────────────────────────────────────────────────────────────────
