@@ -5,6 +5,7 @@ the whole embedding pass (the worker ran 2 threads on a 4 vCPU task); as many th
 starves clamd, beat and the Celery ping the health check relies on. Like the sibling tests this
 reads the Terraform as text, because the failure mode is a mismatch between files.
 """
+
 from __future__ import annotations
 
 import re
@@ -18,19 +19,26 @@ REPO = Path(__file__).parents[2]
 def _stack_exists(environment: str) -> bool:
     """The aws-exit destroy (E1, 2026-10-31) strips a stack to its provider blocks
     (product-docs/platform/runbooks/aws-exit-teardown.md); a stripped main.tf sets no
-    worker size, so it drops out of the pinned pairs instead of failing as a broken config."""
-    return 'module "stack"' in (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+    worker size, so it drops out of the pinned pairs instead of failing as a broken config.
+    """
+    return 'module "stack"' in (
+        REPO / "infra" / "live" / environment / "main.tf"
+    ).read_text(encoding="utf-8")
 
 
 ENVIRONMENTS = tuple(env for env in ("develop", "prod") if _stack_exists(env))
 
 
 def _tf(environment: str) -> str:
-    return (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+    return (REPO / "infra" / "live" / environment / "main.tf").read_text(
+        encoding="utf-8"
+    )
 
 
 def _threads(environment: str) -> int:
-    match = re.search(r"(?m)^  worker_embedding_threads\s*=\s*(\d+)\s*$", _tf(environment))
+    match = re.search(
+        r"(?m)^  worker_embedding_threads\s*=\s*(\d+)\s*$", _tf(environment)
+    )
     assert match, f"{environment}/main.tf does not set worker_embedding_threads"
     return int(match.group(1))
 
@@ -58,6 +66,8 @@ def test_threads_leave_a_vcpu_for_the_rest_of_the_task(environment: str) -> None
 
 
 def test_the_module_applies_it_to_the_worker_only() -> None:
-    stack = (REPO / "infra" / "modules" / "stack" / "main.tf").read_text(encoding="utf-8")
+    stack = (REPO / "infra" / "modules" / "stack" / "main.tf").read_text(
+        encoding="utf-8"
+    )
     assert stack.count("EMBEDDING_ONNX_THREADS") == 1
     assert "var.worker_embedding_threads" in stack

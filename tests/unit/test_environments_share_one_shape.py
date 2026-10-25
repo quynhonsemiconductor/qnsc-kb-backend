@@ -19,6 +19,7 @@ guards those against being "synced" away by accident.
 Like test_embedding_config_matches_image.py these read the source files as text: the bug was
 a mismatch BETWEEN files, so reading one of them twice would prove nothing.
 """
+
 from __future__ import annotations
 
 import re
@@ -36,14 +37,18 @@ def _stack_exists(environment: str) -> bool:
     (product-docs/platform/runbooks/aws-exit-teardown.md). A stripped main.tf declares no
     services, so it drops out of the pinned pairs instead of failing as a broken config;
     the surviving environment keeps its assertions."""
-    return 'module "stack"' in (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+    return 'module "stack"' in (
+        REPO / "infra" / "live" / environment / "main.tf"
+    ).read_text(encoding="utf-8")
 
 
 ENVIRONMENTS = tuple(env for env in ("develop", "prod") if _stack_exists(env))
 
 
 def _tf(environment: str) -> str:
-    return (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+    return (REPO / "infra" / "live" / environment / "main.tf").read_text(
+        encoding="utf-8"
+    )
 
 
 def _block(environment: str, name: str) -> str:
@@ -86,16 +91,22 @@ def test_both_environments_size_each_service_the_same(service, key):
 
 
 def test_both_environments_use_the_same_database_class():
-    classes = {env: _value(_block(env, "rds"), "instance_class") for env in ENVIRONMENTS}
+    classes = {
+        env: _value(_block(env, "rds"), "instance_class") for env in ENVIRONMENTS
+    }
     assert len(set(classes.values())) == 1, classes
 
 
-@pytest.mark.parametrize("key", ["embedding_model", "embedding_version", "embedding_runtime"])
+@pytest.mark.parametrize(
+    "key", ["embedding_model", "embedding_version", "embedding_runtime"]
+)
 def test_both_environments_state_the_same_embedding_setting(key):
     """embedding_runtime is stated in BOTH, not left to the module default in one of them:
     a default that moves would otherwise move one environment and not the other."""
     values = {env: _top_level(env, key) for env in ENVIRONMENTS}
-    assert None not in values.values(), f"{key} is not stated in every environment: {values}"
+    assert (
+        None not in values.values()
+    ), f"{key} is not stated in every environment: {values}"
     assert len(set(values.values())) == 1, values
 
 
@@ -113,12 +124,12 @@ def test_syncing_size_did_not_touch_production_policy():
     """Pinning compute equal must not drag the durability and cost-posture settings along."""
     prod_rds = _block("prod", "rds")
     assert _value(prod_rds, "deletion_protection") == "true"
-    assert int(_value(prod_rds, "backup_retention_days")) >= 30, (
-        "single-AZ is only safe with 30-day point-in-time recovery; see the comment in prod/main.tf"
-    )
-    assert _value(_block("prod", "api"), "use_spot") == "false", (
-        "a Spot interruption is a dropped request and a broken response mid-answer"
-    )
+    assert (
+        int(_value(prod_rds, "backup_retention_days")) >= 30
+    ), "single-AZ is only safe with 30-day point-in-time recovery; see the comment in prod/main.tf"
+    assert (
+        _value(_block("prod", "api"), "use_spot") == "false"
+    ), "a Spot interruption is a dropped request and a broken response mid-answer"
     # Production idles until go-live: floors stay at zero here.
     assert _value(_block("prod", "api"), "min_count") == "0"
     assert _value(_block("prod", "worker"), "min_count") == "0"
@@ -152,8 +163,8 @@ def test_env_example_embeds_the_way_the_deployed_code_does(name):
         # The active local default is the deterministic mock, so its zero vectors and version never mix with real ones.
         # The real value stays documented as the opt-in, and that one must be what the deployed tasks run.
         assert _env_example(name) == local_default[name]
-        assert f'{name}="{_setting_default(name)}"' in ENV_EXAMPLE, (
-            f"the documented real {name} in .env.example is not the deployed value"
-        )
+        assert (
+            f'{name}="{_setting_default(name)}"' in ENV_EXAMPLE
+        ), f"the documented real {name} in .env.example is not the deployed value"
         return
     assert _env_example(name) == str(_setting_default(name))
