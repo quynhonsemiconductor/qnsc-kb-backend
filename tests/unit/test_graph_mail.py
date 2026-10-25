@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import datetime as dt
 import email.utils as email_utils
 import hashlib
@@ -239,8 +240,8 @@ def test_a_rejected_assertion_surfaces_the_token_endpoint_error(world):
     ({"MICROSOFT_GRAPH_SENDER": ""}, "MICROSOFT_GRAPH_SENDER"),
     ({"MAIL_GRAPH_CLIENT_ID": ""}, "MAIL_GRAPH_CLIENT_ID"),
     ({"MICROSOFT_TENANT_ID": "common"}, "tenant GUID"),
-    ({"MAIL_GRAPH_CERT_PEM": ""}, "MAIL_GRAPH_PEM"),
-    ({"MAIL_GRAPH_PRIVATE_KEY_PEM": ""}, "MAIL_GRAPH_PEM"),
+    ({"MAIL_GRAPH_CERT_PEM": ""}, "AZURE_CLIENT_CERTIFICATE_PATH"),
+    ({"MAIL_GRAPH_PRIVATE_KEY_PEM": ""}, "AZURE_CLIENT_CERTIFICATE_PATH"),
     ({"MAIL_GRAPH_CERT_PEM": "not a pem"}, "could not be parsed"),
 ])
 def test_misconfiguration_fails_with_the_name_of_the_setting(world, monkeypatch, override, needle):
@@ -379,17 +380,20 @@ def test_no_mail_app_configured_is_reported_but_not_fatal(monkeypatch):
 
 @pytest.mark.parametrize("missing,needle", [
     ("MICROSOFT_GRAPH_SENDER", "MICROSOFT_GRAPH_SENDER"),
-    ("certificate", "a certificate in MAIL_GRAPH_PEM"),
-    ("key", "a private key in MAIL_GRAPH_PEM"),
-    ("both", "MAIL_GRAPH_PEM"),
+    ("certificate", "a certificate in the file at AZURE_CLIENT_CERTIFICATE_PATH"),
+    ("key", "a private key in the file at AZURE_CLIENT_CERTIFICATE_PATH"),
+    ("both", "AZURE_CLIENT_CERTIFICATE_PATH"),
 ])
-def test_a_client_id_without_the_rest_is_fatal(monkeypatch, missing, needle):
-    """The deployed form is ONE secret, MAIL_GRAPH_PEM, with the key and the certificate in it: either block
-    absent, or the whole thing empty, is fatal for a worker that was told to use the mail app."""
+def test_a_client_id_without_the_rest_is_fatal(monkeypatch, tmp_path, missing, needle):
+    """The deployed form is ONE file (AZURE_CLIENT_CERTIFICATE_PATH) with the key and the certificate in it:
+    either block absent, or the whole file missing or empty, is fatal for a worker that was told to use the
+    mail app."""
     cert, key = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----", "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----"
     pem = {"certificate": key, "key": cert, "both": ""}.get(missing, key + "\n" + cert)
-    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_PEM=pem,
-                  MICROSOFT_TENANT_ID=TENANT)
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text(pem)
+    values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER,
+                  AZURE_CLIENT_CERTIFICATE_PATH=str(pem_path) if pem else "", MICROSOFT_TENANT_ID=TENANT)
     if missing == "MICROSOFT_GRAPH_SENDER":
         values["MICROSOFT_GRAPH_SENDER"] = ""
     monkeypatch.setattr(email, "settings", settings_for(**values))
@@ -397,14 +401,17 @@ def test_a_client_id_without_the_rest_is_fatal(monkeypatch, missing, needle):
     assert unconfigured is False and fatal and needle in " ".join(fatal)
 
 
-def test_the_deployed_form_one_pem_with_the_key_and_the_certificate_sends(world, monkeypatch):
-    """What ECS injects: MAIL_GRAPH_PEM only. Either order of the two blocks, real or literal-\\n newlines."""
+def test_the_deployed_form_the_file_with_the_key_and_the_certificate_sends(world, monkeypatch, tmp_path):
+    """What a deployment mounts: AZURE_CLIENT_CERTIFICATE_PATH only. Either order of the two blocks, real or
+    literal-\\n newlines, and an unreadable path is the same as no file."""
+    pem_path = tmp_path / "graph-cert.pem"
     for combined in (world["key_pem"] + world["cert_pem"], world["cert_pem"] + "\n" + world["key_pem"],
                      (world["key_pem"] + world["cert_pem"]).strip().replace("\n", "\\n")):
         email._credential_cache.clear()
-        only_the_secret = world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None,
-                                                              "MAIL_GRAPH_PEM": combined})
-        monkeypatch.setattr(email, "settings", only_the_secret)
+        pem_path.write_text(combined)
+        only_the_file = world["settings"].model_copy(update={"MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None,
+                                                             "AZURE_CLIENT_CERTIFICATE_PATH": str(pem_path)})
+        monkeypatch.setattr(email, "settings", only_the_file)
         fake = FakeMicrosoft(world["cert"])
         send(fake)
         assert len(fake.graph_calls) == 1
@@ -412,24 +419,62 @@ def test_the_deployed_form_one_pem_with_the_key_and_the_certificate_sends(world,
         assert email.configuration_problems() == ([], False)
 
 
-def test_a_pem_whose_key_and_certificate_do_not_match_is_refused(world, monkeypatch):
+def test_an_unreadable_certificate_file_is_named_with_its_path(world, monkeypatch, tmp_path):
+    """A file that exists but cannot be read must not masquerade as "not configured"."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a 000 file; the permission failure cannot be simulated")
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text(world["key_pem"] + world["cert_pem"])
+    pem_path.chmod(0o000)
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={
+        "MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None,
+        "AZURE_CLIENT_CERTIFICATE_PATH": str(pem_path)}))
+    with pytest.raises(email.MailSendError, match="unreadable at"):
+        send(FakeMicrosoft(world["cert"]))
+
+
+def test_an_unreadable_certificate_file_is_fatal_for_the_worker(world, monkeypatch, tmp_path):
+    """The fail-closed path: an unreadable file must reach worker_init as a FATAL problem (it turns into
+    SystemExit there), because Celery's Signal.send would swallow a raised Exception and boot the worker
+    to "ready" with mail it can never send."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a 000 file; the permission failure cannot be simulated")
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text(world["key_pem"] + world["cert_pem"])
+    pem_path.chmod(0o000)
+    monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={
+        "MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None,
+        "AZURE_CLIENT_CERTIFICATE_PATH": str(pem_path)}))
+    fatal, unconfigured = email.configuration_problems()
+    assert unconfigured is False and fatal
+    assert "unreadable at" in fatal[0] and str(pem_path) in fatal[0]
+
+    status = email.certificate_status()
+    assert status["valid"] is False and "unreadable at" in (status.get("error") or "")
+
+
+def test_a_pem_whose_key_and_certificate_do_not_match_is_refused(world, monkeypatch, tmp_path):
     other_key, other_cert, other_cert_pem, other_key_pem = make_credential()
     email._credential_cache.clear()
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text(world["key_pem"] + other_cert_pem)
     monkeypatch.setattr(email, "settings", world["settings"].model_copy(update={
-        "MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None, "MAIL_GRAPH_PEM": world["key_pem"] + other_cert_pem}))
+        "MAIL_GRAPH_CERT_PEM": None, "MAIL_GRAPH_PRIVATE_KEY_PEM": None, "AZURE_CLIENT_CERTIFICATE_PATH": str(pem_path)}))
     with pytest.raises(email.MailSendError, match="does not belong"):
         send(FakeMicrosoft(world["cert"]))
 
 
 def test_the_pem_secret_never_appears_in_a_repr_or_a_dump():
-    s = settings_for(MAIL_GRAPH_PEM="PEMBODY")
+    s = settings_for(MAIL_GRAPH_CERT_PEM="PEMBODY")
     assert "PEMBODY" not in repr(s) and "PEMBODY" not in str(s.model_dump())
 
 
-def test_a_complete_configuration_has_no_problems(monkeypatch):
+def test_a_complete_configuration_has_no_problems(monkeypatch, tmp_path):
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----")
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT,
                                                         MICROSOFT_GRAPH_SENDER=SENDER,
-                                                        MICROSOFT_TENANT_ID=TENANT, MAIL_GRAPH_PEM="-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"))
+                                                        MICROSOFT_TENANT_ID=TENANT, AZURE_CLIENT_CERTIFICATE_PATH=str(pem_path)))
     assert email.configuration_problems() == ([], False)
 
 
@@ -438,10 +483,12 @@ def test_a_complete_configuration_has_no_problems(monkeypatch):
     ("MICROSOFT_GRAPH_SENDER", "<KB_PROD_MAILBOX>"),
     ("MICROSOFT_TENANT_ID", "<ENTRA_TENANT_ID>"),
 ])
-def test_an_unreplaced_placeholder_is_fatal_and_named_without_its_value(monkeypatch, field, value):
+def test_an_unreplaced_placeholder_is_fatal_and_named_without_its_value(monkeypatch, tmp_path, field, value):
     """A release template's placeholder must stop the worker at start-up, and the message names the setting only."""
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----")
     values = dict(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT, MICROSOFT_GRAPH_SENDER=SENDER,
-                  MICROSOFT_TENANT_ID=TENANT, MAIL_GRAPH_PEM="-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----")
+                  MICROSOFT_TENANT_ID=TENANT, AZURE_CLIENT_CERTIFICATE_PATH=str(pem_path))
     values[field] = value
     monkeypatch.setattr(email, "settings", settings_for(**values))
     fatal, unconfigured = email.configuration_problems()
@@ -656,11 +703,12 @@ def test_the_check_script_fails_on_any_role_claim(tmp_path, monkeypatch, capsys,
 
 
 @pytest.mark.parametrize("tenant", ["", "common", "organizations", "consumers", "qnsc.vn", "not-a-guid"])
-def test_a_client_id_without_a_pinned_tenant_is_fatal_for_the_worker(monkeypatch, tenant):
+def test_a_client_id_without_a_pinned_tenant_is_fatal_for_the_worker(monkeypatch, tmp_path, tenant):
     """Otherwise every token request fails at the config stage and stops every batch for ever; refuse at start."""
-    pem = "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----"
+    pem_path = tmp_path / "graph-cert.pem"
+    pem_path.write_text("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----")
     monkeypatch.setattr(email, "settings", settings_for(ENVIRONMENT="production", MAIL_GRAPH_CLIENT_ID=CLIENT,
-                                                        MICROSOFT_GRAPH_SENDER=SENDER, MAIL_GRAPH_PEM=pem,
+                                                        MICROSOFT_GRAPH_SENDER=SENDER, AZURE_CLIENT_CERTIFICATE_PATH=str(pem_path),
                                                         MICROSOFT_TENANT_ID=tenant))
     fatal, unconfigured = email.configuration_problems()
     assert unconfigured is False and len(fatal) == 1 and "MICROSOFT_TENANT_ID" in fatal[0]
