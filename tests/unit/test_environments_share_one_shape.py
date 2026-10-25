@@ -29,7 +29,17 @@ import pytest
 from src.core.config import Settings
 
 REPO = Path(__file__).parents[2]
-ENVIRONMENTS = ("develop", "prod")
+
+
+def _stack_exists(environment: str) -> bool:
+    """The aws-exit destroy (E1, 2026-10-31) strips a stack to its provider blocks
+    (product-docs/platform/runbooks/aws-exit-teardown.md). A stripped main.tf declares no
+    services, so it drops out of the pinned pairs instead of failing as a broken config;
+    the surviving environment keeps its assertions."""
+    return 'module "stack"' in (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+
+
+ENVIRONMENTS = tuple(env for env in ("develop", "prod") if _stack_exists(env))
 
 
 def _tf(environment: str) -> str:

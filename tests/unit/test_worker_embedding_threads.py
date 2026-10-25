@@ -13,7 +13,16 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).parents[2]
-ENVIRONMENTS = ("develop", "prod")
+
+
+def _stack_exists(environment: str) -> bool:
+    """The aws-exit destroy (E1, 2026-10-31) strips a stack to its provider blocks
+    (product-docs/platform/runbooks/aws-exit-teardown.md); a stripped main.tf sets no
+    worker size, so it drops out of the pinned pairs instead of failing as a broken config."""
+    return 'module "stack"' in (REPO / "infra" / "live" / environment / "main.tf").read_text(encoding="utf-8")
+
+
+ENVIRONMENTS = tuple(env for env in ("develop", "prod") if _stack_exists(env))
 
 
 def _tf(environment: str) -> str:
@@ -35,7 +44,7 @@ def _worker_vcpus(environment: str) -> float:
 
 
 def test_environments_use_the_same_worker_thread_count() -> None:
-    assert _threads("develop") == _threads("prod")
+    assert len({_threads(env) for env in ENVIRONMENTS}) == 1
 
 
 @pytest.mark.parametrize("environment", ENVIRONMENTS)
