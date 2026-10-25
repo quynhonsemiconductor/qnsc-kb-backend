@@ -10,7 +10,7 @@ services:
   edge:
     logging: *default-logging
     mem_limit: 256m
-    image: caddy:2.8-alpine
+    image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     restart: unless-stopped
     ports:
       - "80:80"
@@ -41,7 +41,7 @@ services:
     logging: *default-logging
     mem_limit: 2g
     mem_reservation: 512m
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
@@ -62,7 +62,7 @@ services:
     logging: *default-logging
     mem_limit: 256m
     mem_reservation: 64m
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
     volumes:
@@ -76,7 +76,7 @@ services:
   clamav:
     logging: *default-logging
     mem_limit: 3g
-    image: clamav/clamav:1.4
+    image: clamav/clamav:1.4@sha256:3bba6dd5ac6663d55b80f86a3126e146612d93b593cc2617188d13f637d91260
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "clamdscan --ping 1"]

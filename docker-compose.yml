@@ -17,7 +17,7 @@ services:
     # directory and on the old /data mount. Run `docker compose down -v` once to drop the old pgdata,
     # then re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
     # database nobody needs to keep.
-    image: pgvector/pgvector:0.8.2-pg18
+    image: pgvector/pgvector:0.8.2-pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
       # be reachable from the LAN. The HOST port is KB_DB_PORT (default 5432): set it in
@@ -42,7 +42,7 @@ services:
   # The service keeps the name `redis` (REDIS_URL points at redis:6379 inside the network). The engine is Valkey, the
   # one production runs on ElastiCache; it speaks the Redis protocol, so REDIS_URL is unchanged.
   redis:
-    image: valkey/valkey:8.1.10-alpine
+    image: valkey/valkey:8.1.10-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
     ports:
       - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
     command: ["valkey-server", "--requirepass", "${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}"]
@@ -63,7 +63,7 @@ services:
   # (LocalStack's community edition does not). The app containers reach it as garage:3900; the browser reaches presigned
   # URLs at localhost:${STORAGE_HOST_PORT}. Its setup runs once in garage-init, which also proves the bucket and CORS.
   garage:
-    image: dxflrs/garage:v1.3.1
+    image: dxflrs/garage:v1.3.1@sha256:58e68794286868230708803e50495bfe7d1d1c7b696e0c2dee99b03c524fc960
     ports:
       - "127.0.0.1:${STORAGE_HOST_PORT:-4570}:3900"
     volumes:
@@ -79,7 +79,7 @@ services:
     mem_limit: 512m
 
   garage-init:
-    image: amazon/aws-cli:2.17.50
+    image: amazon/aws-cli:2.17.50@sha256:ac68e76ae4bbb804b0c36d56c6fdc8e6800adb46d29867ac2b73280225a7b719
     entrypoint: ["/bin/bash", "/init/init.sh"]
     depends_on:
       garage:
