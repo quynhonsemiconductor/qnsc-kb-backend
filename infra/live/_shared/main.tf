@@ -34,13 +34,153 @@ provider "aws" {
   }
 }
 
+locals {
+  github_org = var.github_org
+}
+
+data "aws_caller_identity" "current" {}
+
+# ── Read shared platform outputs from qnsc-infra bootstrap ───────────────────
+# Gives us: kms_key_arn, artifacts_bucket_name, oidc_provider_arn.
+# Dependency: qnsc-infra/live/bootstrap must be applied before this stack. The OIDC
+# provider in particular is an ACCOUNT SINGLETON — AWS permits one per issuer URL —
+# so this product must consume it and must never create its own.
+data "terraform_remote_state" "platform" {
+  backend = "s3"
+  config = {
+    bucket = "qnsc-tofu-state"
+    key    = "platform/bootstrap/terraform.tfstate"
+    region = "ap-southeast-1"
+  }
+}
+
 // ============================================================================
-// AWS EXIT (E1, 2026-10-31): the shared stack is being destroyed.
+// AWS EXIT (E1, 2026-10-31): the shared stack is being destroyed — IN TWO CUTS.
 //
-// ECR (image fallback is GHCR), the GitHub OIDC provider + deploy roles go.
-// kb has no production AWS state (never applied), so nothing depends on this
-// stack after the develop destroy lands.
+// THIS PR destroys only the ECR repositories (image fallback lives in GHCR).
+// force_delete is NOT set here, so THE OWNER EMPTIES THE REPOS FIRST (runbook
+// step 4) — otherwise the apply dies mid-run on RepositoryNotEmpty.
 //
-// MERGE ORDER: strictly AFTER the develop-stack destroy PR. CI deploys to
-// kb develop stop with this merge. Draft until the owner's go.
+// DELIBERATELY KEPT: the GitHub OIDC provider, the deploy/push/infra CI roles
+// and the RDS wake-guard policy. This apply assumes the infra plan/apply
+// roles — destroying them in the same run is self-revocation with no retry.
+// The roles are destroyed LAST, owner-side with admin creds (runbook step 6),
+// after the kb prod state (never applied — verified against the state bucket)
+// and the develop state are confirmed empty.
+//
+// MERGE ORDER: strictly AFTER the develop-stack destroy PR (#292). Draft until
+// the owner's go; merge needs `allow-dns-destroy` (the plan-guard protects the
+// module.iam_oidc roles, so the default guard would refuse this plan).
 // ============================================================================
+# ── GitHub OIDC ───────────────────────────────────────────────────────────────
+# Owns every qnsc-kb AWS role: per-environment deploy, ECR push, infra plan/apply.
+# Keyless — no access keys exist for CI to leak.
+#
+# v3.0.1, and both parts of that version matter.
+#
+# v3 adds ssm:DescribeParameters to the deploy role, which the shared deploy workflow's
+# secret preflight needs to verify that SSM SecureString parameters were populated —
+# metadata only (names and version numbers, never values). rova still pins v2.1.0.
+#
+# v3.0.1 trusts BOTH shapes of the GitHub OIDC subject, and THIS REPOSITORY REQUIRES IT.
+# GitHub issues newer repositories an ID-augmented subject:
+#
+#   repo:quynhonsemiconductor@297362956/qnsc-kb-backend@1312007613:pull_request
+#
+# while older ones like rova emit `repo:quynhonsemiconductor/rova:...`. Nobody configures this — it
+# is fixed by GitHub at repository creation, and both repos report identical, default
+# settings. On v3.0.0 every job here failed with "Not authorized to perform
+# sts:AssumeRoleWithWebIdentity", which names neither the subject nor the mismatch; the
+# presented claim is only visible in CloudTrail's userIdentity.userName.
+module "iam_oidc" {
+  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/iam-oidc?ref=iam-oidc-v3.0.1"
+
+  product           = "qnsc-kb"
+  github_org        = local.github_org
+  oidc_provider_arn = data.terraform_remote_state.platform.outputs.oidc_provider_arn
+
+  environments = {
+    develop = {
+      allowed_subjects = [
+        "repo:${local.github_org}/qnsc-kb-backend:ref:refs/heads/main",
+        "repo:${local.github_org}/qnsc-kb-backend:environment:develop"
+      ]
+    }
+    production = {
+      allowed_subjects = [
+        "repo:${local.github_org}/qnsc-kb-backend:ref:refs/heads/main",
+        "repo:${local.github_org}/qnsc-kb-backend:ref:refs/tags/v*",
+        "repo:${local.github_org}/qnsc-kb-backend:environment:production"
+      ]
+    }
+  }
+
+  # Both are the BACKEND repo: qnsc-kb splits frontend and backend across two repos,
+  # but infra lives beside the backend (infra/ in this repo), exactly as rova's lives
+  # in its monorepo. The frontend repo is absent on purpose — it deploys to Cloudflare
+  # Pages and assumes no AWS role, so listing it would grant access nothing uses.
+  app_repo_names         = ["qnsc-kb-backend"]
+  infra_repo_name        = "qnsc-kb-backend"
+  ecr_repository_pattern = "qnsc-kb-*"
+  ecs_passrole_pattern   = "qnsc-kb-*" # shared ecs-service names roles <cluster>-<service>-task
+  tags                   = { Layer = "shared" }
+
+  # infra_plan_subjects / infra_apply_subjects: the infra-apply jobs run in the
+  # shared/develop/production GitHub Environments, which match the module defaults —
+  # no override needed.
+
+  # Blast-radius guardrail: an explicit Deny on this product's infra-apply role, so a
+  # buggy qnsc-kb apply cannot destroy the platform's foundations (state bucket, lock
+  # table, OIDC provider, CMK, artifacts bucket) or mint IAM users. Those are owned by
+  # qnsc-infra bootstrap and shared with every other product — the one place where a
+  # mistake here would take rova and opshub down with it.
+  infra_apply_guardrail = {
+    state_bucket_arn     = "arn:aws:s3:::qnsc-tofu-state"
+    lock_table_arn       = "arn:aws:dynamodb:ap-southeast-1:${data.aws_caller_identity.current.account_id}:table/qnsc-tofu-locks"
+    oidc_provider_arn    = data.terraform_remote_state.platform.outputs.oidc_provider_arn
+    kms_key_arn          = data.terraform_remote_state.platform.outputs.kms_key_arn
+    artifacts_bucket_arn = data.terraform_remote_state.platform.outputs.artifacts_bucket_arn
+  }
+}
+
+# ── RDS wake guard — develop deploy role only ────────────────────────────────
+# develop runs at min_count = 0 with its database STOPPED off-hours (idle_schedule in
+# live/develop), so a deploy landing on a sleeping environment must be able to start it.
+# The shared deploy reusable's `ensure_rds` step does exactly that, and this grant is
+# what lets it.
+#
+# Start and Describe only — never Stop. Stopping is the scheduler's job, under its own
+# narrowly-scoped role; a deploy role that can stop a database is a deploy that can
+# cause an outage.
+#
+# Scoped to develop and deliberately ABSENT from the production role: production is
+# meant to be running, so a deploy needing to start it is an anomaly that should be
+# loud rather than silently handled.
+#
+# The ARN is built from account + region + a fixed identifier rather than looked up
+# with a data source. A lookup fails hard whenever the instance does not exist yet —
+# a first apply, or a full teardown/redeploy — which would make this stack unable to
+# apply independently of develop's RDS lifecycle. A string needs no resource.
+locals {
+  qnsc_kb_develop_rds_arn = "arn:aws:rds:ap-southeast-1:${data.aws_caller_identity.current.account_id}:db:qnsc-kb-develop"
+}
+
+resource "aws_iam_role_policy" "deploy_rds_dev_guard" {
+  name = "qnsc-kb-deploy-develop-rds-guard"
+  role = split("/", module.iam_oidc.deploy_role_arns["develop"])[1]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "RDSDevGuard"
+        Effect = "Allow"
+        Action = [
+          "rds:DescribeDBInstances",
+          "rds:StartDBInstance",
+        ]
+        Resource = local.qnsc_kb_develop_rds_arn
+      }
+    ]
+  })
+}
