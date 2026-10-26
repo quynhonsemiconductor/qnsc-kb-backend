@@ -42,8 +42,8 @@ def test_compose_names_no_fixed_container_and_sets_one_project_name():
 
 def test_compose_images_match_production_engines():
     compose = _read("docker-compose.yml")
-    assert re.search(r"(?m)^\s+image: pgvector/pgvector:\d+\.\d+\.\d+-pg18$", compose)
-    assert re.search(r"(?m)^\s+image: valkey/valkey:8\.1\.\d+-alpine$", compose)
+    assert re.search(r"(?m)^\s+image: pgvector/pgvector:\d+\.\d+\.\d+-pg18(@sha256:[0-9a-f]{64})?$", compose)
+    assert re.search(r"(?m)^\s+image: valkey/valkey:8\.1\.\d+-alpine(@sha256:[0-9a-f]{64})?$", compose)
     assert not re.search(r"image: \S+:(latest|pg18|pg16|8-alpine|8|7\.2\.\d+-alpine)\s*$", compose, flags=re.MULTILINE)
 
 
