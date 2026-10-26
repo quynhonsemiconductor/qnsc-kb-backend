@@ -231,5 +231,3 @@ jobs:
       # too, which is what readiness is for. If a load ever approaches ~60 s, go back to /health/deps
       # (database and Redis only) rather than raising a timeout you do not own.
       health_path: /health/ready
-    # Least privilege: pass only what the reusable declares (no `secrets: inherit`).
-    secrets:
