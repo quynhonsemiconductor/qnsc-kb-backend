@@ -290,4 +290,4 @@ def test_the_caption_band_is_the_configured_fraction(monkeypatch):
 def test_the_extraction_version_moved_so_old_rows_are_identifiable():
     """v1 rows hold a page-sized box. They are replaced by a reindex, not upgraded in
     place, so the version has to distinguish them."""
-    assert EXTRACTION_VERSION == "evidence-v2"
+    assert EXTRACTION_VERSION == "evidence-v3"

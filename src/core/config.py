@@ -412,6 +412,10 @@ class Settings(BaseSettings):
     EVIDENCE_FIGURE_TEMPLATE_PAGE_FRACTION: float = 0.25
     # Below this, "on a quarter of the pages" is one or two pages and says nothing.
     EVIDENCE_FIGURE_TEMPLATE_MIN_PAGES: int = 4
+    # Images covering at least this share of a page make it a scan: the picture is the
+    # sheet itself, so it is not cited as a figure. Scanners leave a small margin, which
+    # is why this is below 1.
+    EVIDENCE_SCAN_PAGE_COVERAGE: float = 0.85
     # How far above and below a figure to read its caption, as a fraction of page height.
     EVIDENCE_FIGURE_CAPTION_MARGIN: float = 0.06
     # Only this many rows are embedded in citations/SSE/history. The complete bounded
