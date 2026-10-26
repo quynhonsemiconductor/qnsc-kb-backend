@@ -14,7 +14,8 @@ from src.core.config import settings
 # v2 crops visual evidence to each figure instead of to the whole page. Rows written by
 # v1 carry a page-sized bounding box and are not upgraded in place: `rebuild_article_index`
 # deletes and recreates an article's evidence, so a reindex is what replaces them.
-EXTRACTION_VERSION = "evidence-v2"
+# v3 stops treating a page-sized scan image as a figure.
+EXTRACTION_VERSION = "evidence-v3"
 
 
 def select_page_figures(
@@ -92,6 +93,44 @@ def select_page_figures(
     # PDF happened to list first.
     kept.sort(key=lambda item: (round(item[1][1], 1), round(item[1][0], 1)))
     return kept
+
+
+def page_is_image_scan(
+    placements: Sequence[tuple[int, tuple[float, float, float, float]]],
+    *,
+    page_width: float,
+    page_height: float,
+) -> bool:
+    """Whether embedded images cover the page, which makes it a scan and not a figure page.
+
+    A scanner (or a "print to PDF" of a photographed page) produces a page that is one
+    picture of the whole sheet, so the picture is the page and says nothing about whether
+    the sheet held a diagram. Treating it as a figure labelled every scanned page
+    "Figure 1 on page N" and crowded out the figures that really are figures. Its text is
+    still read by OCR; this only stops the page being cited as a figure.
+
+    Pure for the same reason as `select_page_figures`. Coverage is the summed area of each
+    image's placement clipped to the page, so a page scanned as stacked strips counts as
+    covered although no single strip is. Two images drawn over each other are counted
+    twice, which can only make an ordinary page look more covered, and a page whose images
+    overlap that much is not a layout this is meant to distinguish.
+    """
+    page_area = max(page_width, 0.0) * max(page_height, 0.0)
+    if page_area <= 0 or not placements:
+        return False
+    covered = 0.0
+    seen: set[tuple[float, ...]] = set()
+    for xref, rect in placements:
+        key = (float(xref), *(round(float(value), 1) for value in rect))
+        if key in seen:
+            continue
+        seen.add(key)
+        x0, y0, x1, y1 = (float(value) for value in rect)
+        width = min(max(x0, x1), page_width) - max(min(x0, x1), 0.0)
+        height = min(max(y0, y1), page_height) - max(min(y0, y1), 0.0)
+        if width > 0 and height > 0:
+            covered += width * height
+    return covered / page_area >= settings.EVIDENCE_SCAN_PAGE_COVERAGE
 
 
 def figure_caption_text(
@@ -265,11 +304,21 @@ def _pdf_evidence(data: bytes) -> list[dict[str, Any]]:
                     break
             if len(specs) >= settings.EVIDENCE_MAX_ARTIFACTS_PER_DOCUMENT:
                 break
+            placements = _page_image_placements(page)
+            if page_is_image_scan(
+                placements,
+                page_width=float(page.rect.width),
+                page_height=float(page.rect.height),
+            ):
+                # A scanned page: the image is the page, not a figure on it. Its text is
+                # read by OCR and the original is still viewable as the source page, so
+                # there is nothing here to cite as a figure.
+                continue
             # Each real figure, cropped to itself. The whole page used to be stored as
             # one artifact, which meant a citation showed the figure plus everything
             # else that happened to share the page.
             figures = select_page_figures(
-                _page_image_placements(page),
+                placements,
                 page_width=float(page.rect.width),
                 page_height=float(page.rect.height),
                 page_count=document.page_count,
