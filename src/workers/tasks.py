@@ -1165,9 +1165,20 @@ def generate_embeddings_task(article_id_str: str):
     logger.info("Generating embeddings for article", article_id=article_id)
 
     async def process():
+        from src.domain.digest import ensure_digest
         from src.domain.indexing import index_article
 
         await index_article(article_id)
+        # Awaited here, not scheduled: `sync_run` closes its loop when this returns, which
+        # would cancel a background task. A digest that cannot be made is a missing
+        # convenience and must not fail the indexing job, so it is guarded. Not done by
+        # `run_reprocess_index_job`: re-indexing unchanged text must not start a bulk spend.
+        try:
+            await ensure_digest(article_id)
+        except Exception:
+            logger.warning(
+                "Digest generation failed", article_id=article_id, exc_info=True
+            )
 
     try:
         sync_run(process())

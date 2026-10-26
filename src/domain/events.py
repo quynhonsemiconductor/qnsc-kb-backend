@@ -203,6 +203,11 @@ class EventBus:
 
             if event_type in ("ArticlePublished", "ArticleUpdated"):
                 await index_article(article_id)
+                # After indexing succeeds, and in its own task: a digest that cannot be
+                # made is a missing convenience, never a reason to fail the lifecycle.
+                from src.domain.digest import enqueue_digest
+
+                enqueue_digest(article_id)
             elif event_type == "PermissionChanged":
                 await recompute_article_permissions(article_id)
             elif event_type == "ArticleDeleted":
