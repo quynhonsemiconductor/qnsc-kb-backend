@@ -320,6 +320,26 @@ class Settings(BaseSettings):
     EMBEDDING_REALIGN_DISCARD_VECTORS: bool = False
     RESTRUCTURE_ENABLED: bool = True
     RESTRUCTURE_MODEL: str | None = None
+    # A short digest of each published document, made once per version of its text and reused
+    # (src/domain/digest.py). Questions that span many documents read digests, not documents.
+    # Off: none are made, and such questions fall back to the ordinary answer path.
+    DIGEST_ENABLED: bool = True
+    # Empty uses RESTRUCTURE_MODEL, then the default provider. A cheaper model is the point.
+    DIGEST_MODEL: str | None = None
+    # Bump to regenerate every digest (a changed prompt makes the old ones stale).
+    DIGEST_PROMPT_VERSION: str = "v1"
+    # Longer documents are sent as their outline plus up to DIGEST_MAX_WINDOWS excerpts spread
+    # from start to end, so one digest is always one bounded model call.
+    DIGEST_INPUT_MAX_CHARS: int = 12000
+    DIGEST_MAX_WINDOWS: int = 6
+    # A document the model keeps failing on is retried this many times, no sooner than the
+    # backoff apart, instead of on every publish and every backfill.
+    DIGEST_MAX_ATTEMPTS: int = 3
+    DIGEST_RETRY_BACKOFF_SECONDS: int = 3600
+    DIGEST_TIMEOUT_SECONDS: float = 60.0
+    # Documents above this sensitivity are never sent to the model for a digest
+    # (public < internal < confidential < restricted).
+    DIGEST_MAX_SENSITIVITY: str = "confidential"
     # GLM-5 has a 200K context window shared by prompt and generation. 120K
     # characters leaves practical headroom for the system prompt and a 64K
     # lossless Markdown response, even for token-dense source languages.

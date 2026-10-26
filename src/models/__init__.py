@@ -19,6 +19,7 @@ from src.models.article import (
 )
 from src.models.chunk import ParentChunk, ArticleChunk, ChunkMetadata
 from src.models.evidence import DocumentEvidence
+from src.models.digest import ArticleDigest
 from src.models.interaction import Comment, Vote, Bookmark, ArticleFollower
 from src.models.governance import (
     PendingDraft,
@@ -93,6 +94,7 @@ __all__ = [
     "ArticleChunk",
     "ChunkMetadata",
     "DocumentEvidence",
+    "ArticleDigest",
     "Comment",
     "Vote",
     "Bookmark",

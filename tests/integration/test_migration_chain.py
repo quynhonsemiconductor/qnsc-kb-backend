@@ -15,4 +15,4 @@ def test_migrations_have_one_current_head():
     # re-index after adding contextual chunk headers (78), conflict_records.contradiction_type
     # (79), approval_rules.risk_tiers/version plus the approval_rule_versions history
     # table (80), and article_chunks.content_hash for skip-if-unchanged re-embedding (81).
-    assert script.get_heads() == ["20261026_85"]
+    assert script.get_heads() == ["20261027_86"]
