@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     # the extra server-side wait buys nothing the client can see (ONPREM-PLAN §8.2).
     # validate_production refuses a higher value in deployed environments.
     LLM_TIMEOUT_SECONDS: float = 60.0
+    # Stream an answer from any OpenAI-compatible provider (OpenAI, Groq, a custom endpoint such as
+    # Anthropic's) when the caller wants tokens as they arrive. Before this only GLM streamed: every
+    # other provider was a single non-streaming call held to LLM_TIMEOUT_SECONDS in total, so the
+    # reader saw nothing for the whole generation, then the whole answer at once, and a long answer
+    # that needed more than the cap was lost. Turn off only for a gateway that cannot stream.
+    LLM_STREAM_ANSWERS: bool = True
     # Provider rate limits are a condition to manage, not an error to surface (Groq's free tier answers 429 with
     # "Please try again in 27s"). Per PROCESS, because each Celery child and each API worker has its own gate.
     #

@@ -669,7 +669,13 @@ async def _complete_once(
                     tokens = _extract_usage(data)
             return answer, tokens, provider.model, provider.name
 
-        if provider.name == "glm":
+        # Any OpenAI-compatible provider streams when the caller wants tokens as they arrive. Only
+        # GLM did, so everyone else (OpenAI, Groq, a custom endpoint such as Anthropic's) made one
+        # non-streaming call held to `timeout` in total: the reader saw nothing for the whole
+        # generation and then the whole answer at once, and an answer that needed longer than the
+        # cap was lost. Non-streaming calls (no `on_token`) are unchanged.
+        stream_tokens = on_token is not None and settings.LLM_STREAM_ANSWERS
+        if provider.name == "glm" or stream_tokens:
             # GLM's synchronous endpoint returns only after it has completed
             # both its internal reasoning and final content. For a lossless
             # document rewrite that can leave an otherwise healthy connection

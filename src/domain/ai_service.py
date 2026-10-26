@@ -732,6 +732,42 @@ async def _authorized_conversation_history(
     return safe_messages
 
 
+def _related_sources(
+    context_results: list[dict[str, Any]], limit: int = 3
+) -> list[dict[str, Any]]:
+    """The documents nearest to a question the assistant declined to answer.
+
+    Offered UNDER a refusal so the reader can open the source and judge for themselves, in the
+    same shape as a citation so the same viewer opens it. They are not citations: nothing here
+    claims a passage supports an answer, and the answer carries no marker for them.
+    """
+    related: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in context_results:
+        article_id = str(item.get("article_id") or "")
+        if not article_id or article_id in seen:
+            continue
+        seen.add(article_id)
+        text = strip_citation_markers(str(item.get("context_text") or "").strip())
+        related.append(
+            {
+                "source_id": str(item.get("source_id") or ""),
+                "article_id": article_id,
+                "title": item.get("title"),
+                "section_ref": item.get("section_ref"),
+                "heading": item.get("heading"),
+                "page_number": item.get("page_number"),
+                "source_url": item.get("source_url"),
+                "excerpt": compress_context(text, max_characters=400),
+                "highlight_text": str(item.get("chunk_text") or "")[:500],
+                "score": round(float(item.get("score") or 0.0), 3),
+            }
+        )
+        if len(related) >= limit:
+            break
+    return related
+
+
 def _answer_payload(
     grounded: str,
     extended: str = "",
@@ -1352,6 +1388,7 @@ class AIService:
                 ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
+                refused=True,
             )
 
         top_score = max(float(item.get("score") or 0.0) for item in retrieved_results)
@@ -1377,6 +1414,7 @@ class AIService:
                 ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
+                refused=True,
             )
 
         # Off by default -- see the setting's own comment in core/config.py. When on:
@@ -1417,6 +1455,7 @@ class AIService:
                 ),
                 prompt_version=settings.PROMPT_VERSION,
                 retrieval_version=settings.RETRIEVAL_VERSION,
+                refused=True,
             )
 
         explicit_conflicts = _detect_explicit_conflicts(context_results)
@@ -1803,12 +1842,15 @@ class AIService:
         top_context_score = (
             float(context_results[0].get("score") or 0.0) if context_results else 0.0
         )
+        refusal_text = grounded_answer if is_refusal else ""
+        related_sources: list[dict[str, Any]] = []
         if (
             is_refusal
             and context_results
             and not citation_guard_failed
             and top_context_score >= settings.RAG_LOW_CONFIDENCE_SCORE
         ):
+            related_sources = _related_sources(context_results)
             # The model declined, so nothing here is a grounded answer. This used to
             # replace the refusal with the top passage attributed as `[C1]`, which
             # presented unverified retrieved text as a cited answer — the marker asserts
@@ -2043,6 +2085,9 @@ class AIService:
             unverified_claims=unverified_claims,
             analytics_results=analytics_results,
             evidence_status=evidence_status,
+            refused=is_refusal,
+            refusal_text=refusal_text if is_refusal else "",
+            related_sources=related_sources if is_refusal else [],
             artifacts=artifacts,
             unverified_numbers=unverified_numbers,
             agent_trace=agent.tracer.steps if agent is not None else [],
