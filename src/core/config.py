@@ -575,6 +575,27 @@ class Settings(BaseSettings):
     # are folded into "other".
     CATALOG_LIST_LIMIT: int = 50
     CATALOG_MAX_GROUPS: int = 30
+    # Questions that span many documents are answered from their digests (domain/digest.py),
+    # not from the nearest passages. Off: they are answered the ordinary way.
+    CORPUS_ENABLED: bool = True
+    # Bumping this invalidates every cached "which documents matter" outcome.
+    CORPUS_VERSION: str = "v1"
+    # The most digests ever considered for one question, and (of those) the most that become
+    # sources of the answer. With the batch size below this bounds the input of one question.
+    CORPUS_MAX_DOCS: int = 120
+    CORPUS_FINAL_DOCS: int = 25
+    # Digests are packed into batches of about this many tokens; when they all fit one batch no
+    # model call is spent choosing between them.
+    CORPUS_BATCH_TOKENS: int = 6000
+    # Empty uses DIGEST_MODEL, then RESTRUCTURE_MODEL, then the default provider.
+    CORPUS_MAP_MODEL: str | None = None
+    CORPUS_MAP_CONCURRENCY: int = 3
+    CORPUS_MAP_TIMEOUT_SECONDS: float = 40.0
+    # Ceiling on the model calls spent choosing documents for ONE question (the answer call is
+    # not counted). Past it the remaining batches are not read, and the answer says so.
+    CORPUS_MAX_LLM_CALLS: int = 12
+    CORPUS_CACHE_TTL_HOURS: int = 24
+    CORPUS_MAX_PER_USER_PER_HOUR: int = 10
     # 48. Each retrieval leg truncates here BEFORE RRF fusion, so it is a recall
     # ceiling rather than a performance dial — and it is measurably too shallow for
     # Vietnamese: on failed MLQA-vi questions the sparse leg had already found the

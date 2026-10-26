@@ -69,13 +69,15 @@ class AgentRun:
             return None
         tracer = Tracer(on_event)
         budget = Budget(settings.AGENT_MAX_LLM_CALLS)
-        if (
-            settings.AGENT_CORPUS_ROUTING_ENABLED
-            and detect_corpus_intent(question) == "catalog"
+        if settings.AGENT_CORPUS_ROUTING_ENABLED and detect_corpus_intent(question) in (
+            "catalog",
+            "corpus",
         ):
-            # About the collection itself: counted in SQL, so there is nothing for a
-            # planner to decide and no model call is spent on it.
-            await tracer.emit("understand", "skipped", detail="catalog")
+            # About the collection itself, or spanning many documents: either way the wording
+            # alone decides, so no planner call is spent. A catalog question is counted in SQL;
+            # a corpus one reads digests (agent/corpus.py).
+            detected = detect_corpus_intent(question) or "catalog"
+            await tracer.emit("understand", "skipped", detail=detected)
             try:
                 departments = await allowed_department_names(db, user)
             except Exception as exc:  # noqa: BLE001 - the names only narrow the count
@@ -83,7 +85,7 @@ class AgentRun:
                 departments = []
             folded = _folded(question)
             plan = AgentPlan(
-                intent="catalog",
+                intent=detected,
                 sub_queries=[question.strip()],
                 doc_types=match_doc_types(folded),
                 departments=match_departments(folded, departments),
