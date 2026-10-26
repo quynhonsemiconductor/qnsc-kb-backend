@@ -193,7 +193,7 @@ jobs:
       id-token: write
       attestations: write
       packages: read # build-push-ecr pulls private @quynhonsemiconductor/* from GitHub Packages
-    uses: quynhonsemiconductor/ci/.github/workflows/backend-deploy.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+    uses: quynhonsemiconductor/ci/.github/workflows/backend-deploy.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
     with:
       product: qnsc-kb
       # ── No registry build cache ────────────────────────────────────────────
@@ -231,6 +231,3 @@ jobs:
       # too, which is what readiness is for. If a load ever approaches ~60 s, go back to /health/deps
       # (database and Redis only) rather than raising a timeout you do not own.
       health_path: /health/ready
-    # Least privilege: pass only what the reusable declares (no `secrets: inherit`).
-    secrets:
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
