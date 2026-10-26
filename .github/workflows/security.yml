@@ -57,7 +57,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
     with:
       blocking: true
       combine: true # actionlint + zizmor as ONE job; the required check is now `actions-security / Workflow security (actionlint, zizmor)`
@@ -72,7 +72,7 @@ jobs:
       contents: read
       security-events: write # SARIF upload
       packages: read
-    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
     with:
       product: qnsc-kb
       # Gitleaks + osv-scanner + Semgrep as ONE job; the required check is now
