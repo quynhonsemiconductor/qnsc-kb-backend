@@ -421,6 +421,11 @@ class Settings(BaseSettings):
     EVIDENCE_PREVIEW_MAX_BYTES: int = 5000000
     EVIDENCE_ANALYTICS_ENABLED: bool = True
     EVIDENCE_ANALYTICS_MAX_ROWS: int = 500
+    # Show the figures and tables that sit on the pages an answer cites, beside the claim
+    # that cites them, even when retrieval matched the paragraph and not the picture.
+    ANSWER_PAGE_EVIDENCE_ENABLED: bool = True
+    ANSWER_PAGE_EVIDENCE_PER_CITATION: int = 3
+    ANSWER_PAGE_EVIDENCE_MAX: int = 8
     EVIDENCE_VISION_ENABLED: bool = False
     EVIDENCE_VISION_MAX_IMAGES: int = 2
     EVIDENCE_VISION_MAX_TOTAL_BYTES: int = 8000000
@@ -566,7 +571,7 @@ class Settings(BaseSettings):
     RAG_CONTEXT_MAX_TOKENS: int = 17500
     RAG_PARENT_CONTEXT_CHARS: int = 2400
     RAG_MAX_PARENTS_PER_ARTICLE: int = 15
-    PROMPT_VERSION: str = "v2.1-query-language-grounded-extended-sections"
+    PROMPT_VERSION: str = "v2.2-page-visuals"
     # Part of the ai_cache key (src/domain/ai_service.py:917-924), so this MUST move
     # whenever retrieval behaviour changes, or a cached answer from the old pipeline is
     # served for six hours as if it came from the new one. Bumped for the

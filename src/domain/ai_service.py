@@ -48,6 +48,7 @@ from src.domain.evidence_analytics import (
     AnalyticsPlan,
     execute_analytics_plan,
 )
+from src.domain.page_evidence import attach_page_evidence
 from src.domain.evidence_extraction import (
     render_evidence_preview,
     table_evidence_preview,
@@ -116,6 +117,12 @@ nothing else. Never restate a source's last-reviewed date, owner email, page or 
 the answer — the interface shows those beside each cited source. Do not add a References
 section. Never place citations inside fenced code blocks. Always return balanced Markdown
 fences.
+
+3c. A source may list `<visuals>`: figures or tables on its page. The interface shows them
+to the reader beside the answer wherever you cite that source, and they can enlarge, sort
+and download them. When they help, refer to them (for example "see the figure below").
+Never say the Knowledge Base cannot show images, figures or tables, and never describe
+what a figure looks like beyond what the passages say.
 
 3a. If two authorized passages make incompatible claims about the same fact, do not
 choose a winner. State that the Knowledge Base contains conflicting information,
@@ -1237,6 +1244,13 @@ class AIService:
             )
             if _is_grounding_refusal(cached_grounded):
                 cached_citations = []
+            else:
+                # A cached answer predates (or never asked for) the figures and tables on
+                # its pages; they are looked up now, like a fresh answer's.
+                try:
+                    await attach_page_evidence(self.ai_repo.db, user, cached_citations)
+                except Exception as exc:
+                    logger.warning("Page evidence attach failed", error=str(exc))
             cached_log = AiUsageLog(
                 user_id=user.id,
                 question=REDACTED_OPERATIONAL_CONTENT,
@@ -1538,6 +1552,14 @@ class AIService:
             )
 
         # 4. Construct context for LLM with Source tags
+        # Figures and tables on the retrieved pages: listed so the answer can point at them,
+        # because the reader will see them. Best-effort; never costs the answer.
+        try:
+            await attach_page_evidence(
+                self.ai_repo.db, user, context_results, unique=False
+            )
+        except Exception as exc:
+            logger.warning("Page evidence lookup failed", error=str(exc))
         context_blocks = []
         for res in context_results:
             # Every field here is document-controlled: the passage, the article title the
@@ -1551,7 +1573,19 @@ class AIService:
                 f"<title>{fence_untrusted(res['title'])}</title>\n"
                 f"<section>{fence_untrusted(res.get('heading') or res['section_ref'] or 'General')}</section>\n"
                 f"<page>{res.get('page_number') or 'unknown'}</page>\n"
-                f"<last-reviewed>{res.get('last_reviewed') or 'unknown'}</last-reviewed>\n"
+                + (
+                    "<visuals>"
+                    + fence_untrusted(
+                        "; ".join(
+                            str(item.get("label") or item.get("kind"))
+                            for item in res["page_evidence"]
+                        )
+                    )
+                    + "</visuals>\n"
+                    if res.get("page_evidence")
+                    else ""
+                )
+                + f"<last-reviewed>{res.get('last_reviewed') or 'unknown'}</last-reviewed>\n"
                 f"<owner-email>{fence_untrusted(res.get('owner_email') or settings.SYSTEM_DATA_OWNER_EMAIL or 'unknown')}</owner-email>\n"
                 f"<untrusted-passage>\n{fence_untrusted(res['context_text'])}\n</untrusted-passage>\n"
                 f"</authorized-document>\n"
@@ -1953,6 +1987,11 @@ class AIService:
                         ),
                     }
                 )
+
+        try:
+            await attach_page_evidence(self.ai_repo.db, user, citations)
+        except Exception as exc:
+            logger.warning("Page evidence attach failed", error=str(exc))
 
         # Analysis metadata is evidence only when the final answer retained the source
         # marker through every citation/refusal guard above. Do not render a detached

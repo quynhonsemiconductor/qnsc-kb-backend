@@ -14,6 +14,7 @@ import structlog
 from src.api.deps import SessionLocal, get_current_user, get_db, set_database_context
 from src.domain.ai_service import AIService, normalize_answer_markdown
 from src.domain.evidence_extraction import table_evidence_preview
+from src.domain.page_evidence import attach_page_evidence
 from src.rag.answer_sections import strip_source_metadata
 from src.domain.search_service import SearchService
 from src.domain.rbac import AuthorizationService
@@ -177,6 +178,10 @@ async def _hydrate_citations(
         # Every persisted citation must identify a concrete retrieved chunk.
         # Do not preserve metadata-only or malformed entries: they can carry
         # forged excerpts, titles, or source URLs and cannot be re-authorized.
+    try:
+        await attach_page_evidence(db, user, hydrated)
+    except Exception as exc:
+        logger.warning("Page evidence attach failed", error=str(exc))
     return hydrated
 
 
