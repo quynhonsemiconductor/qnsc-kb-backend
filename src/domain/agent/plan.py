@@ -12,6 +12,7 @@ to what the user may read.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,7 +40,17 @@ DOCUMENT_TYPES = (
     "PLAYBOOK",
     "REFERENCE",
 )
-INTENTS = ("lookup", "explain", "compare", "calculate", "visualize", "locate", "other")
+INTENTS = (
+    "lookup",
+    "explain",
+    "compare",
+    "calculate",
+    "visualize",
+    "locate",
+    "catalog",
+    "corpus",
+    "other",
+)
 
 # Matched against text with diacritics folded. A question carrying any of these is not "simple".
 _COMPLEX_MARKERS = (
@@ -111,6 +122,113 @@ _FIGURE_MARKERS = (
 
 def _folded(question: str) -> str:
     return fold_diacritics(" ".join(question.lower().split())) + " "
+
+
+# Questions about the collection itself, matched on diacritic-folded text. A question that
+# is about the library ("how many documents are there") is counted, not retrieved: the
+# nearest passages to it are a sample of the text, never a census of the documents.
+_COLLECTION_NOUN = r"(tai lieu|van ban|bai viet|sop|chinh sach|quy trinh|file|tep)"
+_CATALOG_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        rf"\bbao nhieu {_COLLECTION_NOUN}\b",
+        r"\bso luong (tai lieu|van ban|bai viet)\b",
+        r"\b(thong ke|tong ket|tong quan|thong tin)( ve)?( toan bo| tat ca| het)?( cac)?"
+        r" (tai lieu|van ban|kho tri thuc|co so tri thuc)\b",
+        r"\b(liet ke|danh sach|cho (toi|minh) (xem|biet))( toan bo| tat ca| het)?( cac)?"
+        r" (danh sach )?(tai lieu|van ban)\b",
+        r"\bco nhung (tai lieu|van ban) nao\b",
+        r"\b(tai lieu|van ban) (moi nhat|gan day|vua (them|nhap|cap nhat))\b",
+        r"\bhow many (documents|files|articles|policies|sops)\b",
+        r"\b(list|show) (me )?(all |every |the )?(documents|files|articles)\b",
+        r"\bdocument (statistics|inventory|overview|count)\b",
+        r"\bwhat documents (do we|are there|are available|exist)\b",
+    )
+)
+_CORPUS_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(tom tat|tong hop|tong ket)( lai)?( toan bo| tat ca| het)?( cac)?"
+        r" (tai lieu|van ban|chinh sach|quy trinh|sop)\b",
+        r"\b(tat ca|toan bo) (cac )?(tai lieu|van ban|chinh sach|quy trinh)"
+        r" (noi|de cap|quy dinh|huong dan) (ve|rang)\b",
+        r"\bsummari[sz]e (all|every|the)( the)? (documents?|policies|policy|sops?|procedures?)\b",
+        r"\b(across|in) (all|every) (the )?(documents|policies|sops)\b",
+    )
+)
+# What a question about the collection is NOT: it asks about figures inside a document.
+_NOT_COLLECTION_MARKERS = (
+    "trong bang",
+    "trong file",
+    "trong tep",
+    "doanh thu",
+    "so lieu",
+    "ty le",
+    "in the table",
+    "revenue",
+    " cot ",
+    " dong ",
+)
+# After "how many documents", these words turn the question into a topic ("... about
+# safety"), which a count of rows cannot answer and the planner should handle.
+_TOPIC_TAIL = re.compile(
+    r"\b(ve|noi ve|lien quan|de cap|chua|about|regarding|related to|mentioning)\b"
+)
+
+
+def detect_corpus_intent(question: str) -> str | None:
+    """ "catalog", "corpus" or None, from the wording alone (no model call).
+
+    Conservative on purpose: None sends the question to the planner, which is the old
+    behaviour, so a miss costs a model call while a false hit would answer the wrong
+    question.
+    """
+    folded = _folded(question)
+    if any(marker in folded for marker in _NOT_COLLECTION_MARKERS):
+        return None
+    for pattern in _CATALOG_PATTERNS:
+        match = pattern.search(folded)
+        if match:
+            return None if _TOPIC_TAIL.search(folded, match.end()) else "catalog"
+    if any(pattern.search(folded) for pattern in _CORPUS_PATTERNS):
+        return "corpus"
+    return None
+
+
+# Unambiguous words for a document type. "quy trinh" and "huong dan" are left out: each
+# fits more than one type, so guessing would silently drop documents from a count.
+_DOC_TYPE_WORDS = (
+    ("SOP", r"\bsops?\b"),
+    ("POLICY", r"\b(chinh sach|policy|policies)\b"),
+    ("FAQ", r"\bfaqs?\b"),
+    ("RCA", r"\brca\b"),
+    ("PLAYBOOK", r"\bplaybooks?\b"),
+    ("DECISION", r"\b(quyet dinh|decisions?)\b"),
+)
+
+
+def match_doc_types(folded_question: str) -> list[str]:
+    return [
+        doc_type
+        for doc_type, pattern in _DOC_TYPE_WORDS
+        if re.search(pattern, folded_question)
+    ]
+
+
+def match_departments(folded_question: str, departments: list[str]) -> list[str]:
+    """Departments named in the question, longest name first so "IT Ops" beats "IT"."""
+    matched: list[str] = []
+    remaining = folded_question
+    for name in sorted(departments, key=len, reverse=True):
+        folded_name = fold_diacritics(name.strip())
+        if len(folded_name) < 2:
+            continue
+        pattern = re.compile(rf"(?<!\w){re.escape(folded_name)}(?!\w)")
+        if pattern.search(remaining):
+            matched.append(name)
+            # Consumed, so "IT" is not also found inside "IT Ops".
+            remaining = pattern.sub(" ", remaining)
+    return matched[:3]
 
 
 def is_simple_question(question: str, *, has_history: bool) -> bool:
@@ -201,7 +319,7 @@ async def allowed_department_names(db: Any, user: User) -> list[str]:
 _SYSTEM = """You plan how to answer a question from a company knowledge base. You do NOT answer it.
 Reply with ONE JSON object and nothing else, with exactly these fields:
 {
- "intent": one of lookup | explain | compare | calculate | visualize | locate | other,
+ "intent": one of lookup | explain | compare | calculate | visualize | locate | catalog | corpus | other. Use "catalog" ONLY for a question about the collection as a whole (how many documents, list or count them, optionally narrowed by type, department or date). Use "corpus" for a question that needs the content of MANY documents at once (summarise all policies, what do the documents say about X overall). A question about one subject or one document is lookup/explain,
  "sub_queries": 1 to %(max_sub)d short, self-contained search queries, in the language of the question. Resolve pronouns and follow-ups using the previous conversation. Use one query per distinct thing asked about (two documents to compare = two queries),
  "doc_types": zero or more of %(types)s that the answer must come from (empty if unsure),
  "departments": zero or more of the department names given below (empty if unsure),

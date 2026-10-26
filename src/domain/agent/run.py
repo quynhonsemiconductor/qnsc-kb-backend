@@ -21,9 +21,13 @@ from src.domain.agent.core import Budget, EventSink, Tracer
 from src.domain.agent.plan import (
     AgentPlan,
     allowed_department_names,
+    _folded,
     build_plan,
+    detect_corpus_intent,
     fallback_plan,
     is_simple_question,
+    match_departments,
+    match_doc_types,
 )
 from src.domain.agent.retrieve import RetrievalOutcome, agentic_retrieve
 from src.domain.agent.tools import annotate_figure, build_chart
@@ -65,6 +69,27 @@ class AgentRun:
             return None
         tracer = Tracer(on_event)
         budget = Budget(settings.AGENT_MAX_LLM_CALLS)
+        if (
+            settings.AGENT_CORPUS_ROUTING_ENABLED
+            and detect_corpus_intent(question) == "catalog"
+        ):
+            # About the collection itself: counted in SQL, so there is nothing for a
+            # planner to decide and no model call is spent on it.
+            await tracer.emit("understand", "skipped", detail="catalog")
+            try:
+                departments = await allowed_department_names(db, user)
+            except Exception as exc:  # noqa: BLE001 - the names only narrow the count
+                logger.warning("Agent could not list departments", error=str(exc))
+                departments = []
+            folded = _folded(question)
+            plan = AgentPlan(
+                intent="catalog",
+                sub_queries=[question.strip()],
+                doc_types=match_doc_types(folded),
+                departments=match_departments(folded, departments),
+                planned=True,
+            )
+            return cls(tracer, budget, plan, fast=False)
         if settings.AGENT_FAST_PATH_ENABLED and is_simple_question(
             question, has_history=has_history
         ):
