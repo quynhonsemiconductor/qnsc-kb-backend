@@ -37,7 +37,7 @@ permissions:
 
 jobs:
   plan:
-    uses: quynhonsemiconductor/ci/.github/workflows/infra-plan.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+    uses: quynhonsemiconductor/ci/.github/workflows/infra-plan.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
     with:
       product: qnsc-kb
       # Mirror the apply-time non-secret TF_VARs, or the plan lies. The Cloudflare
@@ -55,7 +55,6 @@ jobs:
           "cloudflare_account_id": "${{ vars.CLOUDFLARE_ACCOUNT_ID }}"
         }
     secrets:
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       # Read-only qnsc-repo-reader key: the reusable mints a contents:read token for tf-modules.
       # This workflow runs on pull requests, so it never receives a write-capable key.
       QNSC_REPO_READER_PRIVATE_KEY: ${{ secrets.QNSC_REPO_READER_PRIVATE_KEY }}
