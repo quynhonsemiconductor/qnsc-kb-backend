@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -397,7 +398,7 @@ def test_logout_sets_tenant_context_before_revoking_a_refresh_session():
     from src.api.routers.auth import RefreshRequest, logout
     from src.core.security import create_refresh_token
 
-    session = SimpleNamespace(revoked_at=None)
+    session = SimpleNamespace(revoked_at=None, user_id=uuid.uuid4())
 
     class Result:
         def scalar_one_or_none(self):
@@ -407,10 +408,17 @@ def test_logout_sets_tenant_context_before_revoking_a_refresh_session():
         def __init__(self):
             self.calls = []
             self.committed = False
+            self.added = []
 
         async def execute(self, statement, *_args, **_kwargs):
             self.calls.append(str(statement))
             return Result()
+
+        def add(self, item):
+            self.added.append(item)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             self.committed = True
@@ -422,3 +430,5 @@ def test_logout_sets_tenant_context_before_revoking_a_refresh_session():
     assert "set_config('app.company_domain'" in db.calls[0]
     assert session.revoked_at is not None
     assert db.committed
+    # Ending a live session is an account event the user can see afterwards.
+    assert [item.action for item in db.added] == ["logout"]

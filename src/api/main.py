@@ -15,6 +15,7 @@ from sqlalchemy import Table, func, select, text
 from sqlalchemy.engine import CursorResult
 from src.core.config import settings
 from src.api.routers import (
+    account,
     auth,
     articles,
     search,
@@ -829,6 +830,9 @@ async def request_logging_middleware(request, call_next):
 
 # Routers
 app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["auth"])
+app.include_router(
+    account.router, prefix=f"{settings.API_V1_STR}/auth/me", tags=["account"]
+)
 app.include_router(
     articles.router, prefix=f"{settings.API_V1_STR}/articles", tags=["articles"]
 )

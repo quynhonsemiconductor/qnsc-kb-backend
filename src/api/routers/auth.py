@@ -428,18 +428,49 @@ def _validate_role_assignment_authority(
                 )
 
 
-async def _store_refresh_session(db: AsyncSession, user: Any, token: str) -> None:
+def _client_context(request: Request | None) -> tuple[str | None, str | None]:
+    """The caller's user agent and address, trimmed to what the columns hold."""
+    if request is None:
+        return None, None
+    agent = (request.headers.get("user-agent") or "").strip()[:300] or None
+    return agent, client_ip_from_request(request)[:64] or None
+
+
+async def _store_refresh_session(
+    db: AsyncSession,
+    user: Any,
+    token: str,
+    request: Request | None = None,
+    previous: RefreshSession | None = None,
+) -> None:
+    """Record a refresh token, and where this sign-in came from.
+
+    A refresh replaces the row, so `previous` hands its sign-in time and family on: the
+    account page shows one device per sign-in, not one per rotation.
+    """
     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
     expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc).replace(
         tzinfo=None
     )
+    now = datetime.utcnow()
+    agent, address = _client_context(request)
     db.add(
         RefreshSession(
             user_id=user.id,
             token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
             expires_at=expires_at,
+            family_id=(previous.family_id if previous else None) or uuid.uuid4(),
+            user_agent=agent or (previous.user_agent if previous else None),
+            ip_address=address or (previous.ip_address if previous else None),
+            signed_in_at=(previous.signed_in_at if previous else None) or now,
+            last_used_at=now,
         )
     )
+
+
+def _login_detail(request: Request, method: str) -> dict[str, Any]:
+    agent, address = _client_context(request)
+    return {"method": method, "ip": address, "user_agent": agent}
 
 
 def _refresh_hash(token: str) -> str:
@@ -968,7 +999,7 @@ async def accept_invitation(
     auth_service = AuthService(UserRepository(db))
     access = auth_service.create_token(user)
     refresh = auth_service.create_refresh_token(user)
-    await _store_refresh_session(db, user, refresh)
+    await _store_refresh_session(db, user, refresh, request)
     await AuditRepository(db).record(
         user.id,
         "invitation_accept",
@@ -1191,7 +1222,7 @@ async def change_password(
     auth_service = AuthService(UserRepository(db))
     access = auth_service.create_token(user)
     refresh = auth_service.create_refresh_token(user)
-    await _store_refresh_session(db, user, refresh)
+    await _store_refresh_session(db, user, refresh, request)
     await db.commit()
     await AuditRepository(db).record(
         current_user.id, "password_change", "user", str(current_user.id)
@@ -2432,7 +2463,15 @@ async def login(
         user = loaded_user(await user_repo.get_by_id(user.id))
     token = auth_service.create_token(user)
     refresh = auth_service.create_refresh_token(user)
-    await _store_refresh_session(db, user, refresh)
+    await _store_refresh_session(db, user, refresh, request)
+    await AuditRepository(db).record(
+        user.id,
+        "login",
+        "user",
+        str(user.id),
+        detail=_login_detail(request, "password"),
+        commit=False,
+    )
     await db.commit()
     _set_auth_cookies(response, token, refresh)
     return {"access_token": token, "token_type": "bearer", "user": _user_response(user)}
@@ -2568,7 +2607,7 @@ async def refresh_token(
     service = AuthService(UserRepository(db))
     session.revoked_at = datetime.utcnow()
     replacement = service.create_refresh_token(user)
-    await _store_refresh_session(db, user, replacement)
+    await _store_refresh_session(db, user, replacement, request, previous=session)
     await db.commit()
     access = service.create_token(user)
     _set_auth_cookies(response, access, replacement)
@@ -2621,6 +2660,14 @@ async def logout(
             session = None
     if session and session.revoked_at is None:
         session.revoked_at = datetime.utcnow()
+        await AuditRepository(db).record(
+            session.user_id,
+            "logout",
+            "user",
+            str(session.user_id),
+            detail=_login_detail(request, "session"),
+            commit=False,
+        )
         await db.commit()
     _clear_auth_cookies(response)
 
@@ -2673,6 +2720,7 @@ async def entra_login() -> dict[str, str]:
 
 @router.get("/entra/callback")
 async def entra_callback(
+    request: Request,
     code: str,
     state: str,
     db: AsyncSession = Depends(get_db),
@@ -2811,7 +2859,15 @@ async def entra_callback(
     service = AuthService(UserRepository(db))
     access = service.create_token(user)
     refresh = service.create_refresh_token(user)
-    await _store_refresh_session(db, user, refresh)
+    await _store_refresh_session(db, user, refresh, request)
+    await AuditRepository(db).record(
+        user.id,
+        "login",
+        "user",
+        str(user.id),
+        detail=_login_detail(request, "microsoft"),
+        commit=False,
+    )
     await db.commit()
     redirect = RedirectResponse(
         url=f"{settings.FRONTEND_URL.rstrip('/')}/login?entra=success",
