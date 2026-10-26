@@ -238,6 +238,7 @@ def _answer_provenance(data: dict[str, Any]) -> dict[str, Any] | None:
         "unverified_numbers",
         "agent_trace",
         "agent_plan",
+        "coverage",
         "refused",
         "refusal_text",
         "related_sources",
@@ -699,7 +700,7 @@ async def ask_question_stream(
                 _answer_provenance(data),
             )
             yield f"data: {json.dumps({'type': 'sources', 'sources': data.get('citations', [])})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request'), 'clarification_options': data.get('clarification_options'), 'confidence': data.get('confidence'), 'unverified_claims': data.get('unverified_claims'), 'analytics_results': data.get('analytics_results', []), 'evidence_status': data.get('evidence_status'), 'artifacts': data.get('artifacts', []), 'unverified_numbers': data.get('unverified_numbers', []), 'agent_trace': data.get('agent_trace', []), 'agent_plan': data.get('agent_plan'), 'refused': data.get('refused', False), 'refusal_text': data.get('refusal_text', ''), 'related_sources': data.get('related_sources', [])})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'log_id': data.get('log_id'), 'prompt_version': data.get('prompt_version'), 'retrieval_version': data.get('retrieval_version'), 'answer_grounded': data.get('answer_grounded', ''), 'answer_extended': data.get('answer_extended', ''), 'has_extended': data.get('has_extended', False), 'action': data.get('action'), 'action_data': data.get('action_data'), 'article_id': data.get('article_id'), 'article_title': data.get('article_title'), 'article_preview': data.get('article_preview'), 'original_information': data.get('original_information'), 'will_update': data.get('will_update'), 'edit_instruction': data.get('edit_instruction'), 'version': data.get('version'), 'edit_request': data.get('edit_request'), 'clarification_options': data.get('clarification_options'), 'confidence': data.get('confidence'), 'unverified_claims': data.get('unverified_claims'), 'analytics_results': data.get('analytics_results', []), 'evidence_status': data.get('evidence_status'), 'artifacts': data.get('artifacts', []), 'unverified_numbers': data.get('unverified_numbers', []), 'agent_trace': data.get('agent_trace', []), 'agent_plan': data.get('agent_plan'), 'coverage': data.get('coverage'), 'refused': data.get('refused', False), 'refusal_text': data.get('refusal_text', ''), 'related_sources': data.get('related_sources', [])})}\n\n"
 
     return StreamingResponse(
         event_stream(),

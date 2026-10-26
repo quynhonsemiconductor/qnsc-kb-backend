@@ -11,14 +11,20 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from src.core.config import settings
 from src.core.privacy import REDACTED_OPERATIONAL_CONTENT
+from src.core.rate_limit import corpus_rate_limiter
 from src.models.user import User
 from src.models.ai import AiUsageLog, AiCache, AiFeedback
 from src.models.governance import ConflictRecord
 from src.repositories.ai import AIRepository
 from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
-from src.domain.search_service import SearchService
+from src.domain.search_service import SearchService, embed_query
 from src.domain.agent import AgentRun, is_chart_question
+from src.domain.agent.corpus import (
+    CORPUS_PROMPT_ADDENDUM,
+    CorpusContext,
+    gather_corpus_context,
+)
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
 from src.rag.citations import extract_citation_ids, strip_unknown_markers
@@ -1322,6 +1328,25 @@ class AIService:
                 if catalog_payload is not None:
                     return catalog_payload
 
+        # A question that spans many documents is answered from their digests instead of
+        # from the nearest passages (domain/agent/corpus.py). None means "the ordinary way":
+        # off, no digests yet, or nothing citable came out.
+        corpus_context: CorpusContext | None = None
+        if (
+            agent is not None
+            and agent.plan.intent == "corpus"
+            and settings.CORPUS_ENABLED
+            and settings.AGENT_CORPUS_ROUTING_ENABLED
+            and article_id is None
+            and not is_confirmed_edit
+        ):
+            corpus_outcome = await self._corpus_context(
+                user, question, agent, language, authorization_fingerprint
+            )
+            if isinstance(corpus_outcome, dict):
+                return corpus_outcome
+            corpus_context = corpus_outcome
+
         # 3. Retrieve relevant chunks (filtered by permissions)
         # Search returns formatted results list containing title, chunk_text, parent_text, score, section_ref, article_id etc.
         # Search the current question first. Previous turns are useful to the
@@ -1341,7 +1366,11 @@ class AIService:
                 original_length=len(question),
                 rewritten_length=len(retrieval_query),
             )
-        if agent is not None and not agent.fast:
+        if corpus_context is not None:
+            # The sources are already chosen; there is nothing to search.
+            retrieved_results = corpus_context.results
+            self.search_service.vector_search_degraded = False
+        elif agent is not None and not agent.fast:
             # Planned search: one search per sub-question, with a bounded retry when one
             # of them found nothing solid. Same result shape as a single search.
             outcome = await agent.retrieve(self.search_service, user, question)
@@ -1476,7 +1505,11 @@ class AIService:
                     clarification_options=ambiguous_departments,
                 )
 
-        context_results = _select_context(retrieved_results)
+        context_results = (
+            corpus_context.results
+            if corpus_context is not None
+            else _select_context(retrieved_results)
+        )
         if not context_results:
             return _answer_payload(
                 (
@@ -1489,7 +1522,13 @@ class AIService:
                 refused=True,
             )
 
-        explicit_conflicts = _detect_explicit_conflicts(context_results)
+        # Digests are summaries, not passages: a line of one that happens to look like a
+        # "Status: ..." fact must not open a governance conflict record.
+        explicit_conflicts = (
+            _detect_explicit_conflicts(context_results)
+            if corpus_context is None
+            else []
+        )
         if explicit_conflicts:
             for conflict in explicit_conflicts:
                 article_ids = sorted(
@@ -1642,6 +1681,12 @@ class AIService:
             trusted_analysis = "\n".join(
                 value for value in (trusted_analysis, agent.artifact_notes()) if value
             )
+        if corpus_context is not None:
+            trusted_analysis = "\n".join(
+                value
+                for value in (trusted_analysis, corpus_context.coverage.note())
+                if value
+            )
         visual_context = (
             "<untrusted-visual-description>\n"
             f"{fence_untrusted(visual_description)}\n"
@@ -1658,6 +1703,8 @@ class AIService:
         definition_request = is_definition_query(question)
 
         system_prompt = RAG_SYSTEM_PROMPT
+        if corpus_context is not None:
+            system_prompt += CORPUS_PROMPT_ADDENDUM
         if not settings.RAG_ENABLE_EXTENDED_SECTION:
             system_prompt += "\n\nThe extended section is disabled for this request. Emit only <<<GROUNDED>>>."
 
@@ -2091,7 +2138,15 @@ class AIService:
         # 9. Cache answer if cache-worthy (not empty and valid)
         # An answer with a chart or a marked figure is not cached: the cache holds text
         # only, and a replay would silently drop the visual the question was about.
-        if not is_refusal and len(citations) > 0 and not artifacts:
+        # A corpus answer is not cached whole: its sources depend on the digests, and the
+        # expensive part (which documents matter) is cached by corpus.py under a key that
+        # changes when any digest does.
+        if (
+            not is_refusal
+            and len(citations) > 0
+            and not artifacts
+            and corpus_context is None
+        ):
             cached_answer = grounded_answer
             if settings.RAG_CACHE_EXTENDED_SECTION and extended_answer:
                 cached_answer = f"{GROUNDED_SENTINEL}\n{grounded_answer}\n{EXTENDED_SENTINEL}\n{extended_answer}"
@@ -2150,7 +2205,95 @@ class AIService:
             agent_plan=(
                 agent.plan.public() if agent is not None and not agent.fast else None
             ),
+            coverage=(
+                corpus_context.coverage.public() if corpus_context is not None else None
+            ),
         )
+
+    async def _corpus_context(
+        self,
+        user: User,
+        question: str,
+        agent: AgentRun,
+        language: str,
+        authorization_fingerprint: str,
+    ) -> "CorpusContext | dict[str, Any] | None":
+        """The digest sources for a corpus question, a ready-made reply, or None.
+
+        A reply (dict) is returned only when the asker is over the hourly limit for this kind
+        of question: it is the one that costs several model calls, so it is limited on its own.
+        None sends the question down the ordinary path, which is what happens whenever this
+        cannot do better -- never an error.
+        """
+        allowed, retry_after = await corpus_rate_limiter.allow(str(user.id))
+        if not allowed:
+            minutes = max(1, (retry_after + 59) // 60)
+            await agent.tracer.emit("digests", "skipped", detail="rate_limited")
+            return _answer_payload(
+                (
+                    f"Bạn đã hỏi quá nhiều câu hỏi tổng hợp nhiều tài liệu trong một giờ. Vui lòng thử lại sau khoảng {minutes} phút."
+                    if language == "vi"
+                    else f"You have asked too many questions spanning many documents this hour. Please try again in about {minutes} minutes."
+                ),
+                prompt_version=settings.PROMPT_VERSION,
+                retrieval_version="corpus-limited",
+                agent_trace=agent.tracer.steps,
+                agent_plan=agent.plan.public(),
+            )
+
+        async def cache_get(key: str) -> list[dict[str, Any]] | None:
+            row = await self.ai_repo.get_cached(key, authorization_fingerprint, user.id)
+            if row is None:
+                return None
+            try:
+                data = json.loads(row.answer)
+            except (TypeError, ValueError):
+                return None
+            return data if isinstance(data, list) else None
+
+        async def cache_put(
+            key: str, selection: list[dict[str, Any]], article_ids: list[str]
+        ) -> None:
+            row = AiCache(
+                cache_key=hashlib.sha256(
+                    f"{key}|{authorization_fingerprint}".encode("utf-8")
+                ).hexdigest(),
+                owner_user_id=user.id,
+                question_hash=key,
+                authorization_fingerprint=authorization_fingerprint,
+                answer=json.dumps(selection, ensure_ascii=False),
+                citations="[]",
+                article_ids=article_ids,
+                expires_at=datetime.utcnow()
+                + timedelta(hours=settings.CORPUS_CACHE_TTL_HOURS),
+            )
+            try:
+                await self.ai_repo.cache_answer(row)
+            except Exception as exc:
+                # A cache that cannot be written is only a slower next time.
+                logger.warning("Corpus cache write failed", error=str(exc))
+                await self.ai_repo.db.rollback()
+
+        try:
+            return await gather_corpus_context(
+                self.ai_repo.db,
+                user,
+                question,
+                agent.plan,
+                language,
+                agent.tracer,
+                embed_fn=embed_query,
+                complete_fn=complete,
+                cache_get=cache_get,
+                cache_put=cache_put,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Corpus context failed; answering the ordinary way", error=str(exc)
+            )
+            await self.ai_repo.db.rollback()
+            await agent.tracer.emit("synthesize", "skipped", detail="failed")
+            return None
 
     async def _answer_catalog(
         self,

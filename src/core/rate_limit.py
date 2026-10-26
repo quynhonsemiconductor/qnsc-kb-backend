@@ -132,3 +132,8 @@ auth_rate_limiter = RedisRateLimiter(
 source_upload_rate_limiter = RedisRateLimiter(
     "source_upload", limit=10, window_seconds=60
 )
+# Questions that span many documents cost several model calls each, so they are limited
+# on their own, per hour, on top of the per-minute AI limit.
+corpus_rate_limiter = RedisRateLimiter(
+    "corpus", limit=settings.CORPUS_MAX_PER_USER_PER_HOUR, window_seconds=3600
+)
