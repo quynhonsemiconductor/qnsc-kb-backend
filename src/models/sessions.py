@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 import uuid
 from datetime import datetime
-from sqlalchemy import DateTime, ForeignKey, Index, String, text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -20,6 +20,14 @@ class RefreshSession(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # A session is rotated on every refresh, so one sign-in is a chain of rows. These carry
+    # the sign-in across the chain and say where it came from, for the account page. All
+    # nullable: rows issued before they existed have none of it.
+    family_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    signed_in_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     user: Mapped["User"] = relationship("User")
 
 

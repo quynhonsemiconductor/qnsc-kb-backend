@@ -180,7 +180,7 @@ async def test_an_external_tenant_user_gets_401_and_nothing_is_created(signing_k
 
     with patch.object(auth_router.entra_auth, "exchange_code", exchange), patch.object(auth_router, "set_database_context", AsyncMock()) as ctx:
         with pytest.raises(HTTPException) as caught:
-            await auth_router.entra_callback(code="c", state=state, db=db)
+            await auth_router.entra_callback(request=MagicMock(), code="c", state=state, db=db)
 
     assert caught.value.status_code in (401, 503)
     assert db.execute.await_count == 0 and db.add.call_count == 0 and db.commit.await_count == 0 and ctx.await_count == 0
