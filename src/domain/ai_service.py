@@ -49,6 +49,12 @@ from src.domain.evidence_analytics import (
     execute_analytics_plan,
 )
 from src.domain.page_evidence import attach_page_evidence
+from src.domain.catalog import (
+    build_catalog,
+    catalog_artifacts,
+    filter_for_question,
+    format_catalog_answer,
+)
 from src.domain.evidence_extraction import (
     render_evidence_preview,
     table_evidence_preview,
@@ -1304,6 +1310,17 @@ class AIService:
                     clarification_options=clarification_choices,
                     agent_trace=agent.tracer.steps,
                 )
+            if (
+                agent.plan.intent == "catalog"
+                and settings.AGENT_CORPUS_ROUTING_ENABLED
+                and article_id is None
+                and not is_confirmed_edit
+            ):
+                catalog_payload = await self._answer_catalog(
+                    user, question, agent, language, on_token, on_replace
+                )
+                if catalog_payload is not None:
+                    return catalog_payload
 
         # 3. Retrieve relevant chunks (filtered by permissions)
         # Search returns formatted results list containing title, chunk_text, parent_text, score, section_ref, article_id etc.
@@ -2134,6 +2151,83 @@ class AIService:
                 agent.plan.public() if agent is not None and not agent.fast else None
             ),
         )
+
+    async def _answer_catalog(
+        self,
+        user: User,
+        question: str,
+        agent: AgentRun,
+        language: str,
+        on_token: Callable[[str], Awaitable[None]] | None,
+        on_replace: Callable[[str], Awaitable[None]] | None,
+    ) -> dict[str, Any] | None:
+        """Answer a question about the collection by counting it, or None to retrieve instead.
+
+        No model is called: the figures come from SQL under the asker's own permissions and
+        the sentence is produced by code, so the numbers cannot be mis-typed and the answer
+        costs nothing. Not cached: the collection changes whenever a document is published.
+        """
+        import time as _time
+
+        started = _time.perf_counter()
+        await agent.tracer.emit("catalog", "running")
+        try:
+            result = await build_catalog(
+                self.ai_repo.db,
+                user,
+                filter_for_question(
+                    question,
+                    agent.plan.doc_types,
+                    agent.plan.departments,
+                    datetime.utcnow(),
+                ),
+            )
+        except Exception as exc:
+            # A failed statement leaves the transaction unusable for the retrieval that
+            # follows, so it is rolled back before falling through to it.
+            logger.warning(
+                "Catalog query failed; answering by retrieval", error=str(exc)
+            )
+            await self.ai_repo.db.rollback()
+            await agent.tracer.emit("catalog", "skipped", detail="failed")
+            return None
+        await agent.tracer.emit("catalog", "done", total=result.total)
+        text = format_catalog_answer(result, language)
+        log = AiUsageLog(
+            user_id=user.id,
+            question=REDACTED_OPERATIONAL_CONTENT,
+            answer=REDACTED_OPERATIONAL_CONTENT,
+            tokens_used=0,
+            latency_ms=int((_time.perf_counter() - started) * 1000),
+            prompt_version=settings.PROMPT_VERSION,
+            llm_model="catalog",
+            retrieval_version="catalog",
+            reranker_version="none",
+            retrieved_chunk_ids=json.dumps([]),
+        )
+        await self.ai_repo.log_usage(log)
+        payload = _answer_payload(
+            text,
+            "",
+            [],
+            log_id=str(log.id),
+            prompt_version=settings.PROMPT_VERSION,
+            retrieval_version="catalog",
+            confidence="normal",
+            analytics_results=[],
+            refused=False,
+            artifacts=catalog_artifacts(result, language),
+            unverified_numbers=[],
+            agent_trace=agent.tracer.steps,
+            agent_plan=agent.plan.public(),
+        )
+        if on_token:
+            if on_replace:
+                await on_replace(payload["answer"])
+            else:
+                for start in range(0, len(payload["answer"]), 48):
+                    await on_token(payload["answer"][start : start + 48])
+        return payload
 
     async def submit_feedback(
         self, user: User, log_id: uuid.UUID, rating: int, comment: str | None = None
