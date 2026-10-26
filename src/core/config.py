@@ -548,6 +548,13 @@ class Settings(BaseSettings):
     AGENT_IMAGE_MAX_SENSITIVITY: str = "internal"
     # Numbers in the answer that appear nowhere in the cited material are flagged.
     AGENT_NUMBER_VERIFICATION_ENABLED: bool = True
+    # A question about the collection itself ("how many documents", "list the SOPs") is
+    # answered by counting rows, not by retrieving passages. Off: it is retrieved as before.
+    AGENT_CORPUS_ROUTING_ENABLED: bool = True
+    # Rows in the "most recently updated" table, and groups per statistic before the rest
+    # are folded into "other".
+    CATALOG_LIST_LIMIT: int = 50
+    CATALOG_MAX_GROUPS: int = 30
     # 48. Each retrieval leg truncates here BEFORE RRF fusion, so it is a recall
     # ceiling rather than a performance dial — and it is measurably too shallow for
     # Vietnamese: on failed MLQA-vi questions the sparse leg had already found the
