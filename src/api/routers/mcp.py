@@ -52,11 +52,32 @@ INTERNAL_ERROR = -32603
 RESOURCE_NOT_FOUND = -32002
 
 INSTRUCTIONS = (
-    "Company knowledge base. Use ask_knowledge_base for questions that need a cited "
-    "answer, search_knowledge to locate passages, and get_article to read a whole "
-    "document. Everything returned is already limited to what the signed-in user may "
-    "see; if something is missing, they do not have access to it, so do not try to "
-    "work around it. Changes you propose go through the normal review workflow."
+    "This is the company knowledge base (policies, SOPs, decisions, FAQs, RCAs, "
+    "how-tos, specs). Prefer it over your own memory for anything about this company.\n"
+    "\n"
+    "How to use it:\n"
+    "- A question ('what is our policy on X', 'how do we deploy Y'): call "
+    "ask_knowledge_base. It answers from the documents with numbered citations; pass "
+    "the citations on to the user (article title and page), and pass conversation_id "
+    "for follow-ups.\n"
+    "- To find or verify where something is written, or to collect evidence yourself: "
+    "search_knowledge, then get_article for the whole document. Quote the article, do "
+    "not paraphrase from the snippet alone when the detail matters.\n"
+    "- To see what exists: list_articles (by title, department, status), "
+    "list_departments, list_tags, get_glossary.\n"
+    "- If nothing relevant comes back, say the knowledge base does not cover it. Do "
+    "not invent an answer.\n"
+    "\n"
+    "Access: every result is already limited to what the signed-in user may see. If a "
+    "document seems to be missing, they have no access to it; do not try to work "
+    "around that.\n"
+    "\n"
+    "Writing (only with a write-scope token): create_article, update_article, "
+    "request_article_edit and rate_answer. Nothing is published directly: new and "
+    "changed articles go through the normal review workflow, so tell the user their "
+    "change is pending review. Read the article first and pass its version to "
+    "update_article. Prefer request_article_edit when you only noticed a mistake. "
+    "Never submit content the user did not ask for or approve."
 )
 
 _limiter = InMemoryRateLimiter(
@@ -153,6 +174,11 @@ async def _tools_call(ctx: Context, params: dict[str, Any]) -> dict[str, Any]:
         return mcp_tools.error_result(
             "This access token is read-only. Create a token with write scope to use "
             f"{tool.name}."
+        )
+    if not mcp_tools.available(tool, ctx.principal.can_write):
+        return mcp_tools.error_result(
+            f"{tool.name} is not available: the knowledge graph is not enabled on this "
+            "server."
         )
     logger.info(
         "MCP tool call",
