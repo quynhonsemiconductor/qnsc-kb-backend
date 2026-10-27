@@ -91,3 +91,8 @@ def test_a_zero_sized_page_is_not_artwork():
 
 def test_drawing_outside_the_page_is_clipped():
     assert _artwork([_d((700.0, 900.0, 900.0, 1100.0), fill=(0, 0, 0))]) is False
+
+
+def test_a_large_chart_is_still_artwork():
+    drawings = [_d((50.0, 100.0, 545.0, 700.0), fill=(0.2, 0.4, 0.8))]
+    assert _artwork(drawings) is True

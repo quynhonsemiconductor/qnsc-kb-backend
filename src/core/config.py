@@ -440,7 +440,7 @@ class Settings(BaseSettings):
     # (rules, backgrounds and white fills excluded) covers this much of it.
     EVIDENCE_ARTWORK_PAGE_COVERAGE: float = 0.03
     EVIDENCE_ARTWORK_MIN_THICKNESS: float = 2.0
-    EVIDENCE_ARTWORK_BACKGROUND_COVERAGE: float = 0.5
+    EVIDENCE_ARTWORK_BACKGROUND_COVERAGE: float = 0.9
     # How far above and below a figure to read its caption, as a fraction of page height.
     EVIDENCE_FIGURE_CAPTION_MARGIN: float = 0.06
     # Only this many rows are embedded in citations/SSE/history. The complete bounded

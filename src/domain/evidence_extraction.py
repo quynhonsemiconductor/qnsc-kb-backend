@@ -112,7 +112,7 @@ def page_has_vector_artwork(
     What is left after dropping the furniture has to cover `EVIDENCE_ARTWORK_PAGE_COVERAGE`
     of the page. Dropped: paint that cannot be seen (a white or unpainted fill with no
     stroke), anything thinner than `EVIDENCE_ARTWORK_MIN_THICKNESS` points (a rule, an
-    underline) and anything that is most of the page (a background). Pure, like
+    underline) and anything covering nearly the whole page (a tint behind it; a large chart stays). Pure, like
     `page_is_image_scan`, so it is testable without a PDF.
     """
     page_area = max(page_width, 0.0) * max(page_height, 0.0)
