@@ -47,7 +47,7 @@ def test_image_is_one_visual_artifact_without_decoding_or_remote_calls():
             # to the whole page. A standalone uploaded image is unaffected -- the file
             # IS the figure -- but it shares the version, because the version marks the
             # extractor that produced the row, not the shape of one spec.
-            "extraction_version": "evidence-v3",
+            "extraction_version": "evidence-v4",
         }
     ]
 
