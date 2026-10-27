@@ -43,6 +43,7 @@ class Tool:
     build: Callable[[dict[str, Any]], Call]
     shape: Callable[[Any], Any] | None = None
     write: bool = False
+    graph: bool = False
 
     def definition(self) -> dict[str, Any]:
         return {
@@ -158,18 +159,61 @@ def _shape_departments(data: Any) -> Any:
     return data
 
 
-def _shape_answer(data: Any) -> Any:
-    return _pick(
-        data,
-        (
-            "answer",
-            "citations",
-            "conversation_id",
-            "log_id",
-            "answer_grounded",
-            "answer_extended",
-        ),
+HIT_TEXT_CHARS = 1500
+CITATION_EXCERPT_CHARS = 600
+
+
+def _clip(text: Any, limit: int) -> Any:
+    if isinstance(text, str) and len(text) > limit:
+        return text[:limit].rstrip() + " [...]"
+    return text
+
+
+def _shape_search(data: Any) -> Any:
+    """One passage per hit. The REST payload also carries the parent section and every
+    child chunk (the same text again, several times over), which only costs the model
+    context; `get_article` is the way to read more."""
+    if not isinstance(data, list):
+        return data
+    hits = []
+    for hit in data:
+        if not isinstance(hit, dict):
+            hits.append(hit)
+            continue
+        slim = _pick(
+            hit,
+            ("article_id", "title", "dept", "type", "heading", "page_number", "score"),
+        )
+        slim["text"] = _clip(hit.get("chunk_text"), HIT_TEXT_CHARS)
+        slim["source_url"] = hit.get("source_url")
+        evidence = hit.get("evidence")
+        if isinstance(evidence, dict):
+            slim["evidence"] = _pick(evidence, ("kind", "label", "page_number"))
+        hits.append(_drop_none(slim))
+    return hits
+
+
+def _shape_citation(citation: Any) -> Any:
+    if not isinstance(citation, dict):
+        return citation
+    slim = _pick(
+        citation,
+        ("source_id", "article_id", "title", "heading", "page_number", "source_url"),
     )
+    slim["excerpt"] = _clip(citation.get("excerpt"), CITATION_EXCERPT_CHARS)
+    return _drop_none(slim)
+
+
+def _shape_answer(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    slim = _pick(data, ("answer", "conversation_id", "log_id"))
+    slim["citations"] = [_shape_citation(c) for c in data.get("citations") or []]
+    # `answer` already contains both parts; keep them separately only when they differ.
+    for key in ("answer_grounded", "answer_extended"):
+        if data.get(key) and data.get(key) != data.get("answer"):
+            slim[key] = data[key]
+    return slim
 
 
 # -- tools --------------------------------------------------------------------------
@@ -329,9 +373,13 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "search_knowledge",
         "Search the knowledge base",
-        "Hybrid search over the company knowledge base. Returns the most relevant passages "
-        "with their article ids. Use this to find where something is documented, then "
-        "get_article for the full text. Only results the user may see are returned.",
+        "Hybrid (keyword + semantic) search over the company knowledge base. Returns the "
+        "best matching passages, each with its article_id, page and score. Use it to find "
+        "where something is documented or to gather raw evidence; call get_article with "
+        "the article_id to read the whole document. For a ready-made answer with "
+        "citations use ask_knowledge_base instead. Only results the user may see are "
+        "returned. Vietnamese and English both work; query in the language of the "
+        "documents.",
         {
             "query": {"type": "string", "description": "What to look for"},
             "dept": {"type": "string", "description": "Restrict to a department name"},
@@ -345,14 +393,19 @@ TOOLS: tuple[Tool, ...] = (
         },
         ("query",),
         _search,
+        _shape_search,
     ),
     Tool(
         "ask_knowledge_base",
         "Ask the knowledge base",
-        "Ask a question and get a cited answer written by the KB assistant, grounded in "
-        "documents the user may access. Prefer this for 'what is our policy on...' "
-        "questions; use search_knowledge when you want the raw passages. Pass "
-        "conversation_id from an earlier answer to ask a follow-up.",
+        "Ask a question and get an answer written by the KB assistant, grounded in "
+        "documents the user may access, with numbered citations ([C1], [C2]...) that map "
+        "to the 'citations' list (article_id, page, excerpt). Prefer this for 'what is our "
+        "policy on...' or 'how do we...' questions; use search_knowledge when you want "
+        "the raw passages. It reads the whole knowledge base, so questions about "
+        "'all documents' work too. Pass conversation_id from an earlier answer to ask a "
+        "follow-up, and article_id to confine the question to one article. Relay the "
+        "citations to the user; if the answer says nothing relevant was found, say so.",
         {
             "question": {"type": "string"},
             "language": _LANG,
@@ -370,7 +423,10 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "get_article",
         "Read an article",
-        "The full text (Markdown) and metadata of one article.",
+        "The full text (Markdown) and metadata of one article: title, department, "
+        "version, status, tags. Very long articles are truncated and say so; ask "
+        "search_knowledge for the part you need. Pass the 'version' you read to "
+        "update_article.",
         {"article_id": _ID},
         ("article_id",),
         lambda a: Call("GET", f"/articles/{_id(a, 'article_id')}"),
@@ -379,7 +435,9 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "list_articles",
         "List articles",
-        "Browse articles the user can see, with optional filters.",
+        "Browse articles the user can see (newest first), with optional filters. Use it to "
+        "answer 'what documents do we have about...' or to find an article by title; "
+        "returns metadata only, no body.",
         {
             "q": {"type": "string", "description": "Match against titles"},
             "dept": {"type": "string"},
@@ -447,7 +505,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "find_entities",
         "Search the knowledge graph",
-        "Find people, systems, products or other entities extracted from the documents.",
+        "Find people, systems, products or other entities extracted from the documents. "
+        "Only available when the knowledge graph is enabled on this server.",
         {
             "q": {"type": "string"},
             "type": {"type": "string"},
@@ -455,14 +514,17 @@ TOOLS: tuple[Tool, ...] = (
         },
         (),
         _entities,
+        graph=True,
     ),
     Tool(
         "get_entity_neighbors",
         "Explore the knowledge graph",
-        "Entities connected to one entity, and the articles that connect them.",
+        "Entities connected to one entity, and the articles that connect them. Take the "
+        "entity_id from find_entities.",
         {"entity_id": {"type": "string", "format": "uuid"}},
         ("entity_id",),
         lambda a: Call("GET", f"/graph/entities/{_id(a, 'entity_id')}/neighbors"),
+        graph=True,
     ),
     Tool(
         "create_article",
@@ -532,8 +594,15 @@ TOOLS: tuple[Tool, ...] = (
 TOOLS_BY_NAME = {tool.name: tool for tool in TOOLS}
 
 
+def available(tool: Tool, can_write: bool) -> bool:
+    """Whether this server and this token offer the tool at all."""
+    if tool.write and not can_write:
+        return False
+    return settings.KNOWLEDGE_GRAPH_ENABLED or not tool.graph
+
+
 def visible_tools(can_write: bool) -> list[Tool]:
-    return [tool for tool in TOOLS if can_write or not tool.write]
+    return [tool for tool in TOOLS if available(tool, can_write)]
 
 
 # -- result formatting --------------------------------------------------------------
@@ -646,6 +715,21 @@ def _arg(name: str, description: str, required: bool = True) -> dict[str, Any]:
 
 
 PROMPTS: tuple[Prompt, ...] = (
+    Prompt(
+        "explore_knowledge_base",
+        "What is in the knowledge base?",
+        "A first look for someone new: which departments and kinds of documents exist, "
+        "and questions worth asking.",
+        (),
+        lambda a: (
+            "Give me a quick tour of the company knowledge base. Call list_departments, "
+            "then list_articles (a couple of pages if needed) and, if tags exist, "
+            "list_tags. Summarize what areas and document types it covers, which "
+            "departments own what, and how recent it is. Finish with five concrete "
+            "questions I could ask with ask_knowledge_base, based on titles you actually "
+            "saw. Do not invent topics."
+        ),
+    ),
     Prompt(
         "summarize_article",
         "Summarize an article",

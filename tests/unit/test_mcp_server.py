@@ -1,6 +1,7 @@
 """MCP server: protocol, scope, argument safety, and that tools map onto real endpoints."""
 
 import asyncio
+import json
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -367,6 +368,103 @@ def test_ask_returns_only_the_answer_fields(h):
     assert "confirm_edit" not in call.body and "edit_instruction" not in call.body
 
 
+def test_search_hits_carry_one_passage_not_the_parent_and_child_copies(h):
+    long_text = "x" * 5000
+    h.reply = (
+        200,
+        [
+            {
+                "chunk_id": "c1",
+                "article_id": ARTICLE_ID,
+                "title": "Doc",
+                "dept": "IT",
+                "heading": "H",
+                "page_number": 3,
+                "chunk_text": long_text,
+                "parent_text": "PARENT",
+                "child_texts": ["CHILD"] * 10,
+                "owner_email": "a@b.c",
+                "score": 1.2,
+                "source_url": "/api/v1/articles/x/source?page=3",
+                "evidence": {"kind": "page_visual", "label": "L", "id": "e1"},
+            }
+        ],
+    )
+    r = h.result(
+        "tools/call", {"name": "search_knowledge", "arguments": {"query": "vpn"}}
+    )
+    text = r["content"][0]["text"]
+    assert "PARENT" not in text and "CHILD" not in text and "owner_email" not in text
+    (hit,) = json.loads(text)
+    assert hit["article_id"] == ARTICLE_ID and hit["page_number"] == 3
+    assert hit["evidence"] == {"kind": "page_visual", "label": "L"}
+    assert len(hit["text"]) < 1600 and hit["text"].endswith("[...]")
+
+
+def test_ask_citations_are_slim_and_the_answer_is_not_repeated(h):
+    h.reply = (
+        200,
+        {
+            "answer": "A [C1]",
+            "answer_grounded": "A [C1]",
+            "answer_extended": "",
+            "conversation_id": "c",
+            "log_id": "l",
+            "citations": [
+                {
+                    "source_id": "C1",
+                    "article_id": ARTICLE_ID,
+                    "title": "Doc",
+                    "page_number": 2,
+                    "excerpt": "e" * 3000,
+                    "highlight_text": "H",
+                    "highlight_texts": ["H"] * 9,
+                    "child_chunk_ids": ["1", "2"],
+                }
+            ],
+        },
+    )
+    r = h.result(
+        "tools/call",
+        {"name": "ask_knowledge_base", "arguments": {"question": "what is x?"}},
+    )
+    data = json.loads(r["content"][0]["text"])
+    assert "answer_grounded" not in data and "answer_extended" not in data
+    (citation,) = data["citations"]
+    assert citation["source_id"] == "C1" and citation["page_number"] == 2
+    assert "highlight_texts" not in citation and len(citation["excerpt"]) < 700
+    assert data["log_id"] == "l" and data["conversation_id"] == "c"
+
+
+def test_graph_tools_exist_only_when_the_graph_is_enabled(monkeypatch):
+    graph_tools = {"find_entities", "get_entity_neighbors"}
+    monkeypatch.setattr(mcp_tools.settings, "KNOWLEDGE_GRAPH_ENABLED", False)
+    off = Harness(monkeypatch)
+    names = {t["name"] for t in off.result("tools/list")["tools"]}
+    assert not graph_tools & names
+    result = off.result("tools/call", {"name": "find_entities", "arguments": {}})
+    assert (
+        result["isError"] is True and "knowledge graph" in result["content"][0]["text"]
+    )
+    assert off.calls == []
+    monkeypatch.setattr(mcp_tools.settings, "KNOWLEDGE_GRAPH_ENABLED", True)
+    on = Harness(monkeypatch)
+    names = {t["name"] for t in on.result("tools/list")["tools"]}
+    assert graph_tools <= names
+
+
+def test_instructions_tell_a_new_client_how_to_work(h):
+    text = h.result("initialize", {"protocolVersion": "2025-06-18"})["instructions"]
+    for needle in (
+        "ask_knowledge_base",
+        "search_knowledge",
+        "get_article",
+        "citations",
+        "review",
+    ):
+        assert needle in text
+
+
 # -- resources and prompts ----------------------------------------------------------
 
 
@@ -416,6 +514,7 @@ def test_resource_errors(h):
 def test_prompts(h):
     names = {p["name"] for p in h.result("prompts/list")["prompts"]}
     assert {
+        "explore_knowledge_base",
         "summarize_article",
         "answer_with_sources",
         "compare_articles",
@@ -426,6 +525,8 @@ def test_prompts(h):
         {"name": "summarize_article", "arguments": {"article_id": ARTICLE_ID}},
     )
     assert ARTICLE_ID in got["messages"][0]["content"]["text"]
+    tour = h.result("prompts/get", {"name": "explore_knowledge_base"})
+    assert "list_articles" in tour["messages"][0]["content"]["text"]
     for params in (
         {"name": "summarize_article", "arguments": {}},
         {"name": "summarize_article", "arguments": {"article_id": "x"}},

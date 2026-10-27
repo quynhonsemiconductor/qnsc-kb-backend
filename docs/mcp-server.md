@@ -40,6 +40,24 @@ Clients that only speak stdio can use `mcp-remote`:
 }
 ```
 
+## Your first minutes
+
+You do not need to learn the tool names: the server tells the client how to use itself
+(`instructions`, tool descriptions, prompts), so just ask in plain language.
+
+- "What is our policy on remote work?" runs `ask_knowledge_base` and returns an answer
+  with citations (article, page).
+- "Find where the boot sequence is documented and quote it" runs `search_knowledge`,
+  then `get_article`.
+- "What documents do we have about onboarding?" runs `list_articles`.
+- In Claude Code, type `/` and pick a prompt from `qnsc-kb`. Start with
+  `explore_knowledge_base`: it tours what is in the knowledge base and suggests
+  questions.
+- `/mcp` in Claude Code shows the server, its tools and whether it is connected.
+
+If a document you expect is missing, you do not have access to it: results always follow
+your own permissions.
+
 ## What it offers
 
 Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
@@ -49,8 +67,15 @@ Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_artic
 Write tools (write-scope tokens only): `create_article`, `update_article`,
 `request_article_edit`, `rate_answer`. Articles go through the normal review workflow.
 
-Resources: `kb://article/{id}` (Markdown). Prompts: `summarize_article`,
-`answer_with_sources`, `compare_articles`, `find_knowledge_gaps`.
+`find_entities` and `get_entity_neighbors` appear only when `KNOWLEDGE_GRAPH_ENABLED`
+is on; without it the tools are hidden.
+
+Results are trimmed for the model: a search hit is one passage (not the parent section
+and every child chunk), a citation carries a short excerpt. Use `get_article` for the
+whole text.
+
+Resources: `kb://article/{id}` (Markdown). Prompts: `explore_knowledge_base`,
+`summarize_article`, `answer_with_sources`, `compare_articles`, `find_knowledge_gaps`.
 
 Deliberately not offered: deleting or restoring articles, approving drafts, reindexing,
 connectors, user and role administration.
@@ -63,6 +88,14 @@ application in-process, so the endpoint enforces exactly what it enforces for th
 RBAC, ACLs, row-level security, the per-user AI rate limit and audit. There is no second
 implementation of "who may see this". A test checks that every tool targets a route that
 exists. Requests are also limited per token (`MCP_RATE_LIMIT_PER_MINUTE`).
+
+## Troubleshooting
+
+- `401`: the token is wrong, revoked or expired; create a new one under Account.
+- `403`/read-only error on a write tool: the token has `read` scope.
+- `404` on the endpoint: `MCP_ENABLED` is off, or the build predates MCP.
+- A dropped connection (`ECONNRESET`) on a long question: repeat the call. It was seen
+  once on kb-dev and the retry succeeded; the cause is not established.
 
 ## Operating notes
 
