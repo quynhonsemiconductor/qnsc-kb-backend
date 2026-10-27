@@ -15,7 +15,7 @@ from src.core.config import settings
 # v1 carry a page-sized bounding box and are not upgraded in place: `rebuild_article_index`
 # deletes and recreates an article's evidence, so a reindex is what replaces them.
 # v3 stops treating a page-sized scan image as a figure.
-EXTRACTION_VERSION = "evidence-v3"
+EXTRACTION_VERSION = "evidence-v4"
 
 
 def select_page_figures(
@@ -93,6 +93,60 @@ def select_page_figures(
     # PDF happened to list first.
     kept.sort(key=lambda item: (round(item[1][1], 1), round(item[1][0], 1)))
     return kept
+
+
+def page_has_vector_artwork(
+    drawings: Sequence[dict[str, Any]],
+    *,
+    page_width: float,
+    page_height: float,
+) -> bool:
+    """Whether a page's vector drawing is a chart or diagram, not page furniture.
+
+    `page.get_drawings()` is non-empty for almost every page that came out of a word
+    processor: a white rectangle behind the text block, a hairline under the heading, a
+    table's shading. Treating "any drawing" as artwork made 76 of the 127 pages of a
+    plain text book "Visual evidence on page N", each cited as a picture of a page that
+    holds no picture.
+
+    What is left after dropping the furniture has to cover `EVIDENCE_ARTWORK_PAGE_COVERAGE`
+    of the page. Dropped: paint that cannot be seen (a white or unpainted fill with no
+    stroke), anything thinner than `EVIDENCE_ARTWORK_MIN_THICKNESS` points (a rule, an
+    underline) and anything covering nearly the whole page (a tint behind it; a large chart stays). Pure, like
+    `page_is_image_scan`, so it is testable without a PDF.
+    """
+    page_area = max(page_width, 0.0) * max(page_height, 0.0)
+    if page_area <= 0:
+        return False
+    drawn = 0.0
+    for drawing in drawings:
+        rect = drawing.get("rect")
+        if rect is None:
+            continue
+        x0, y0, x1, y1 = (float(value) for value in rect)
+        width = min(max(x0, x1), page_width) - max(min(x0, x1), 0.0)
+        height = min(max(y0, y1), page_height) - max(min(y0, y1), 0.0)
+        if width <= 0 or height <= 0:
+            continue
+        if min(width, height) < settings.EVIDENCE_ARTWORK_MIN_THICKNESS:
+            continue
+        area = width * height
+        if area / page_area >= settings.EVIDENCE_ARTWORK_BACKGROUND_COVERAGE:
+            continue
+        if drawing.get("color") is None and _is_blank_fill(drawing.get("fill")):
+            continue
+        drawn += area
+    return drawn / page_area >= settings.EVIDENCE_ARTWORK_PAGE_COVERAGE
+
+
+def _is_blank_fill(fill: Any) -> bool:
+    """No fill, or white / near white, which paints nothing on a white page."""
+    if fill is None:
+        return True
+    try:
+        return all(float(channel) >= 0.95 for channel in fill)
+    except (TypeError, ValueError):
+        return False
 
 
 def page_is_image_scan(
@@ -363,7 +417,11 @@ def _pdf_evidence(data: bytes) -> list[dict[str, Any]]:
                     )
                     if len(specs) >= settings.EVIDENCE_MAX_ARTIFACTS_PER_DOCUMENT:
                         break
-            elif page.get_drawings():
+            elif page_has_vector_artwork(
+                page.get_drawings(),
+                page_width=float(page.rect.width),
+                page_height=float(page.rect.height),
+            ):
                 # Vector artwork — a chart or diagram drawn rather than embedded — has no
                 # image rect to crop to, so the page remains the only region available.
                 text = " ".join(page.get_text("text").split())

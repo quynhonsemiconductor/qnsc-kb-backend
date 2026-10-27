@@ -436,6 +436,11 @@ class Settings(BaseSettings):
     # sheet itself, so it is not cited as a figure. Scanners leave a small margin, which
     # is why this is below 1.
     EVIDENCE_SCAN_PAGE_COVERAGE: float = 0.85
+    # A page without images is cited as a picture only when its visible vector drawing
+    # (rules, backgrounds and white fills excluded) covers this much of it.
+    EVIDENCE_ARTWORK_PAGE_COVERAGE: float = 0.03
+    EVIDENCE_ARTWORK_MIN_THICKNESS: float = 2.0
+    EVIDENCE_ARTWORK_BACKGROUND_COVERAGE: float = 0.9
     # How far above and below a figure to read its caption, as a fraction of page height.
     EVIDENCE_FIGURE_CAPTION_MARGIN: float = 0.06
     # Only this many rows are embedded in citations/SSE/history. The complete bounded
