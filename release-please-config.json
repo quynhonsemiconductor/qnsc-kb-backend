@@ -5,6 +5,7 @@
     ".": {
       "release-type": "python",
       "package-name": "qnsc-kb-backend",
+      "extra-files": ["src/version.py"],
       "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,

@@ -28,6 +28,7 @@ from src.api.routers import (
     llm,
     notifications,
     graph,
+    system,
 )
 from src.api.deps import (
     SessionLocal,
@@ -850,6 +851,9 @@ app.include_router(
     governance.router, prefix=f"{settings.API_V1_STR}/governance", tags=["governance"]
 )
 app.include_router(meta.router, prefix=f"{settings.API_V1_STR}/meta", tags=["meta"])
+app.include_router(
+    system.router, prefix=f"{settings.API_V1_STR}/system", tags=["system"]
+)
 app.include_router(
     connectors.router, prefix=f"{settings.API_V1_STR}/connectors", tags=["connectors"]
 )

@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     # Local development, the dev Compose stack and the test suite therefore set this
     # explicitly (docker-compose.yml, .env.example, tests/conftest.py).
     ENVIRONMENT: str = "production"
+    # The commit this build was made from, for a host that is not ECS. On ECS it is read back
+    # from the image tag (`sha-<commit>`), so this stays empty there. See core/build_info.py.
+    APP_COMMIT_SHA: str | None = None
     CORS_ORIGINS: str = "http://localhost:5173"
     FRONTEND_URL: str = "http://localhost:5173"
     # Schema lifecycle is owned exclusively by Alembic migrations.
