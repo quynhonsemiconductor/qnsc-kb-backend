@@ -13,11 +13,11 @@ slow gives `commit=None`, and the answer says "unknown" instead of guessing.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import os
 import re
 import time
-import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -83,12 +83,29 @@ def _metadata_url(raw: str | None) -> str | None:
 
 
 def _fetch_container_image(url: str) -> tuple[str | None, str | None]:
-    """`(Image, ImageID)` of this container from the ECS agent."""
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(  # noqa: S310 - host checked in _metadata_url
-        request, timeout=_METADATA_TIMEOUT_SECONDS
-    ) as response:
+    """`(Image, ImageID)` of this container from the ECS agent.
+
+    Uses `http.client` against the host/port parsed from a URL that
+    `_metadata_url` already pinned to the link-local metadata address, so the
+    request can never be redirected to another scheme (no `file://`) or host.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "http" or parsed.hostname not in _METADATA_HOSTS:
+        return None, None
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    connection = http.client.HTTPConnection(
+        parsed.hostname, parsed.port or 80, timeout=_METADATA_TIMEOUT_SECONDS
+    )
+    try:
+        connection.request("GET", path, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return None, None
         payload = json.loads(response.read(1_000_000))
+    finally:
+        connection.close()
     if not isinstance(payload, dict):
         return None, None
     image, image_id = payload.get("Image"), payload.get("ImageID")

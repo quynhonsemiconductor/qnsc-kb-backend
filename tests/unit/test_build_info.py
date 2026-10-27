@@ -164,3 +164,37 @@ def test_the_route_needs_a_signed_in_user_and_is_mounted():
     # as the other wiring tests here do.
     main = (Path(__file__).resolve().parents[2] / "src/api/main.py").read_text("utf-8")
     assert 'system.router, prefix=f"{settings.API_V1_STR}/system"' in main
+
+
+def test_fetch_container_image_reads_the_metadata_endpoint(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    body = json.dumps({"Image": "repo:sha-abc1234", "ImageID": "sha256:" + "a" * 64})
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(build_info, "_METADATA_HOSTS", {"127.0.0.1"})
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/task"
+        image, image_id = build_info._fetch_container_image(url)
+    finally:
+        server.shutdown()
+    assert image == "repo:sha-abc1234"
+    assert image_id == "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    "url", ["file:///etc/passwd", "http://example.com/x", "ftp://169.254.170.2/"]
+)
+def test_fetch_container_image_refuses_other_schemes_and_hosts(url):
+    assert build_info._fetch_container_image(url) == (None, None)
