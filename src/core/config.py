@@ -462,6 +462,12 @@ class Settings(BaseSettings):
     EVIDENCE_VISION_MAX_IMAGES: int = 2
     EVIDENCE_VISION_MAX_TOTAL_BYTES: int = 8000000
     AI_RATE_LIMIT_PER_MINUTE: int = 30
+    # MCP server (POST {API_V1_STR}/mcp), authenticated with personal access tokens.
+    MCP_ENABLED: bool = True
+    MCP_RATE_LIMIT_PER_MINUTE: int = 120
+    MCP_TOKEN_MAX_DAYS: int = 365
+    MCP_TOKENS_PER_USER: int = 20
+    MCP_MAX_RESULT_CHARS: int = 60000
     VECTOR_DISTANCE_THRESHOLD: float = 0.45
     RAG_MIN_RELEVANCE_SCORE: float = 0.12
     RAG_MIN_CONTEXT_SCORE: float = 0.35

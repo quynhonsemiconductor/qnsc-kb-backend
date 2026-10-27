@@ -56,6 +56,7 @@ from src.models.ops import (
     EvalRun,
 )
 from src.models.sessions import RefreshSession, PasswordResetToken
+from src.models.access_token import PersonalAccessToken
 from src.models.connectors import (
     SourceScope,
     SyncCursor,
@@ -128,6 +129,7 @@ __all__ = [
     "EvalRun",
     "RefreshSession",
     "PasswordResetToken",
+    "PersonalAccessToken",
     "SourceScope",
     "SyncCursor",
     "ExternalDocument",

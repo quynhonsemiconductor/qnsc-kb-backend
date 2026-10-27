@@ -29,6 +29,8 @@ from src.api.routers import (
     notifications,
     graph,
     system,
+    mcp,
+    access_tokens,
 )
 from src.api.deps import (
     SessionLocal,
@@ -854,6 +856,13 @@ app.include_router(meta.router, prefix=f"{settings.API_V1_STR}/meta", tags=["met
 app.include_router(
     system.router, prefix=f"{settings.API_V1_STR}/system", tags=["system"]
 )
+app.include_router(
+    access_tokens.router,
+    prefix=f"{settings.API_V1_STR}/auth/me/access-tokens",
+    tags=["account"],
+)
+if settings.MCP_ENABLED:
+    app.include_router(mcp.router, prefix=f"{settings.API_V1_STR}/mcp", tags=["mcp"])
 app.include_router(
     connectors.router, prefix=f"{settings.API_V1_STR}/connectors", tags=["connectors"]
 )
