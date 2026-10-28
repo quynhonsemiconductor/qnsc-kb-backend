@@ -1,0 +1,40 @@
+# =============================================================================
+# Code review — AI review of a pull request against QNSC's rules.
+#
+# Everything that is an organisation decision lives in quynhonsemiconductor/ci: the model, the endpoint
+# and protocol, the severity threshold, the App identity, the timeout, and skipping pull requests a bot
+# opened. Changing any of those is one edit there rather than one per repository.
+#
+# What stays here is what genuinely differs: which repository this is, which rule profiles apply, and the
+# two secrets. Secrets cannot be defaulted — a reusable workflow receives only what the caller hands it,
+# and the alternative, `secrets: inherit`, would give it every secret this repository holds.
+#
+# Profiles: FastAPI + Celery Python with one Dockerfile; alembic migrations are Python, so no sql profile; no TypeScript here.
+# =============================================================================
+
+name: Code review
+
+on:
+  pull_request:
+    # The default list leaves out `ready_for_review`. The reusable workflow skips drafts, and only
+    # reviews a large pull request (> 2,500 reviewable lines) on opened / reopened / ready_for_review
+    # rather than on every push, so without it a draft marked ready waits for its next push, and a
+    # large pull request has no way to ask for a fresh review.
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: code-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@198c470a4f3ab57bfd74a987592287acd2d249dc # v1.25.0
+    with:
+      product: qnsc-kb-backend
+      profiles: python,dockerfile,workflows
+    secrets:
+      llm_token: ${{ secrets.Z_AI_CODING_API_KEY }}
+      app_private_key: ${{ secrets.CODE_REVIEW_APP_KEY }}
