@@ -54,6 +54,16 @@ INTENTS = (
 
 # Matched against text with diacritics folded. A question carrying any of these is not "simple".
 _COMPLEX_MARKERS = (
+    # Wording about a set of documents or a department. These do not decide anything: they only
+    # stop a short question from skipping the planner, which is the part that understands it.
+    "toan bo",
+    "tat ca",
+    "phong ban",
+    "overall",
+    "whole ",
+    "all ",
+    "every ",
+    "department",
     "so sanh",
     "compare",
     "khac nhau",
@@ -319,10 +329,10 @@ async def allowed_department_names(db: Any, user: User) -> list[str]:
 _SYSTEM = """You plan how to answer a question from a company knowledge base. You do NOT answer it.
 Reply with ONE JSON object and nothing else, with exactly these fields:
 {
- "intent": one of lookup | explain | compare | calculate | visualize | locate | catalog | corpus | other. Use "catalog" ONLY for a question about the collection as a whole (how many documents, list or count them, optionally narrowed by type, department or date). Use "corpus" for a question that needs the content of MANY documents at once (summarise all policies, what do the documents say about X overall). A question about one subject or one document is lookup/explain,
+ "intent": one of lookup | explain | compare | calculate | visualize | locate | catalog | corpus | other. Use "catalog" ONLY for a question about the collection as a whole (how many documents, list or count them, optionally narrowed by type, department or date). Use "corpus" for a question that needs the content of MANY documents at once, whatever the verb: summarise, give insight into, analyse, assess or give an overview of all documents or of one department's documents, or what the documents say about X overall. A question about one subject or one document is lookup/explain,
  "sub_queries": 1 to %(max_sub)d short, self-contained search queries, in the language of the question. Resolve pronouns and follow-ups using the previous conversation. Use one query per distinct thing asked about (two documents to compare = two queries),
  "doc_types": zero or more of %(types)s that the answer must come from (empty if unsure),
- "departments": zero or more of the department names given below (empty if unsure),
+ "departments": zero or more of the department names given below; include one whenever the question names it or refers to it ("phòng ban X", "department X", "của phòng X"), empty if unsure,
  "wants_chart": true ONLY if the user asks for a chart/graph/trend or clearly wants numbers shown visually,
  "wants_figure": true ONLY if the user asks about a specific part, stage or region of a picture, diagram or chart,
  "needs_clarification": true ONLY if the question cannot be searched at all without one missing detail,
