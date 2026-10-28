@@ -1454,6 +1454,9 @@ async def delete_department(
                     .where(
                         PendingDraft.company_domain == item.company_domain,
                         PendingDraft.dept == item.name,
+                        # Approved/rejected drafts are history, not work waiting on
+                        # the department; only undecided ones block deleting it.
+                        PendingDraft.status == "pending",
                     )
                 )
             ).scalar_one()
