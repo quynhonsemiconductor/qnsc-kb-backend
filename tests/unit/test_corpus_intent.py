@@ -51,14 +51,6 @@ CORPUS = [
     "Tất cả các tài liệu nói về an toàn đề cập gì",
     "Summarize all the policies",
     "summarise every document",
-    # an assessment of the content as a whole, not only a summary
-    "CHo tôi insight về toàn bộ tài liệu thuộc phòng ban public2 của tôi",
-    "Insight về tất cả tài liệu",
-    "Phân tích toàn bộ các tài liệu của phòng Kỹ thuật",
-    "Đánh giá tất cả chính sách hiện có",
-    "Nhận xét các tài liệu nhân sự",
-    "Give me insights on all documents in public2",
-    "Overview of every policy",
 ]
 
 # Mentions documents, statistics or numbers, but is not about the collection.
@@ -78,11 +70,6 @@ NOT_COLLECTION = [
     "Tài liệu này nói gì về bảo mật",
     "Giải thích tài liệu hướng dẫn cài đặt",
     "What is the leave policy?",
-    # one document, or an "evaluate" without a quantifier
-    "Đánh giá tài liệu này giúp tôi",
-    "Phân tích lỗi trong tài liệu hướng dẫn",
-    "Insight về tài liệu AXI4",
-    "Review this document",
     "",
 ]
 

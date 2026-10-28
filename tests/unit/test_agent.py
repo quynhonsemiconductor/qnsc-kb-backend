@@ -887,15 +887,13 @@ def test_the_agent_can_be_switched_off_per_user_and_then_changes_nothing(monkeyp
     )
 
 
-def _start_with_departments(monkeypatch, question, allowed, planned):
-    _llm(
+def _start_with_departments(
+    monkeypatch, question, allowed, planned, intent="explain", has_history=False
+):
+    plan_calls = _llm(
         monkeypatch,
         "plan",
-        [
-            json.dumps(
-                {"intent": "explain", "sub_queries": ["q"], "departments": planned}
-            )
-        ],
+        [json.dumps({"intent": intent, "sub_queries": ["q"], "departments": planned})],
     )
 
     async def fake_departments(db, user):
@@ -904,23 +902,24 @@ def _start_with_departments(monkeypatch, question, allowed, planned):
     monkeypatch.setattr(
         "src.domain.agent.run.allowed_department_names", fake_departments
     )
-    return run(
+    run_ = run(
         AgentRun.start(
             db=None,
             feature_flags=None,
             user=_user(),
             question=question,
             history_text="",
-            has_history=False,
+            has_history=has_history,
             on_event=None,
         )
     )
+    return run_, plan_calls
 
 
 def test_a_department_named_in_the_question_scopes_the_plan_even_if_the_planner_forgot(
     monkeypatch,
 ):
-    run_ = _start_with_departments(
+    run_, _ = _start_with_departments(
         monkeypatch,
         "So sánh quy trình tuyển dụng của phòng ban public2 với các quy trình khác nhau nhé",
         ["public2", "Nhan su"],
@@ -930,7 +929,7 @@ def test_a_department_named_in_the_question_scopes_the_plan_even_if_the_planner_
 
 
 def test_a_department_the_planner_already_chose_is_not_added_twice(monkeypatch):
-    run_ = _start_with_departments(
+    run_, _ = _start_with_departments(
         monkeypatch,
         "So sánh quy trình tuyển dụng của phòng ban public2 với các quy trình khác nhau nhé",
         ["public2", "Nhan su"],
@@ -940,13 +939,51 @@ def test_a_department_the_planner_already_chose_is_not_added_twice(monkeypatch):
 
 
 def test_a_department_the_asker_may_not_read_is_never_added(monkeypatch):
-    run_ = _start_with_departments(
+    run_, _ = _start_with_departments(
         monkeypatch,
         "So sánh quy trình tuyển dụng của phòng ban secret với các quy trình khác nhau nhé",
         ["public2"],
         [],
     )
     assert run_.plan.departments == []
+
+
+INSIGHT_QUESTION = "CHo tôi insight về toàn bộ tài liệu thuộc phòng ban public2 của tôi"
+
+
+def test_a_short_question_about_a_whole_department_is_not_waved_through_as_simple():
+    # 14 words and no chart/compare wording: this used to skip the planner and be searched
+    # as plain text, so nothing ever decided it was about many documents.
+    assert len(INSIGHT_QUESTION.split()) <= 14
+    assert not is_simple_question(INSIGHT_QUESTION, has_history=False)
+    assert not is_simple_question("Tóm lược tất cả chính sách", has_history=False)
+    assert not is_simple_question(
+        "Give me an overview of all documents", has_history=False
+    )
+    # ordinary short questions still skip planning
+    assert is_simple_question("Quy trình nghỉ phép là gì?", has_history=False)
+
+
+def test_the_planner_not_a_word_list_decides_that_it_is_a_corpus_question(monkeypatch):
+    run_, plan_calls = _start_with_departments(
+        monkeypatch,
+        INSIGHT_QUESTION,
+        ["public2", "Nhan su"],
+        ["public2"],
+        intent="corpus",
+    )
+    assert len(plan_calls) == 1
+    assert run_.plan.intent == "corpus"
+    assert run_.plan.departments == ["public2"]
+
+
+def test_a_short_question_naming_a_department_goes_to_the_planner(monkeypatch):
+    # No scope wording at all, but "public2" is a department the asker may read.
+    run_, plan_calls = _start_with_departments(
+        monkeypatch, "Cho tôi biết về public2", ["public2"], [], intent="explain"
+    )
+    assert len(plan_calls) == 1
+    assert run_.plan.departments == ["public2"]
 
 
 def test_the_agent_can_be_switched_off_globally(monkeypatch):

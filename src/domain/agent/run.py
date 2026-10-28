@@ -69,6 +69,11 @@ class AgentRun:
             return None
         tracer = Tracer(on_event)
         budget = Budget(settings.AGENT_MAX_LLM_CALLS)
+        try:
+            departments = await allowed_department_names(db, user)
+        except Exception as exc:  # noqa: BLE001 - the names only narrow the plan
+            logger.warning("Agent could not list departments", error=str(exc))
+            departments = []
         if settings.AGENT_CORPUS_ROUTING_ENABLED and detect_corpus_intent(question) in (
             "catalog",
             "corpus",
@@ -78,11 +83,6 @@ class AgentRun:
             # a corpus one reads digests (agent/corpus.py).
             detected = detect_corpus_intent(question) or "catalog"
             await tracer.emit("understand", "skipped", detail=detected)
-            try:
-                departments = await allowed_department_names(db, user)
-            except Exception as exc:  # noqa: BLE001 - the names only narrow the count
-                logger.warning("Agent could not list departments", error=str(exc))
-                departments = []
             folded = _folded(question)
             plan = AgentPlan(
                 intent=detected,
@@ -92,19 +92,17 @@ class AgentRun:
                 planned=True,
             )
             return cls(tracer, budget, plan, fast=False)
-        if settings.AGENT_FAST_PATH_ENABLED and is_simple_question(
-            question, has_history=has_history
+        # A question that names a department is scoped by it, however short: it goes to the
+        # planner (and the corpus route) rather than being searched as plain text.
+        names_a_department = bool(match_departments(_folded(question), departments))
+        if (
+            settings.AGENT_FAST_PATH_ENABLED
+            and not names_a_department
+            and is_simple_question(question, has_history=has_history)
         ):
             await tracer.emit("understand", "skipped", detail="fast")
             return cls(tracer, budget, fallback_plan(question), fast=True)
         await tracer.emit("understand", "running")
-        try:
-            departments = await allowed_department_names(db, user)
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 - the department list only narrows the plan
-            logger.warning("Agent could not list departments", error=str(exc))
-            departments = []
         plan = await build_plan(question, history_text, departments, budget)
         # A department the question names outright is a scope the asker chose; the planner is a
         # model and may leave it out, after which the whole knowledge base is searched and the
