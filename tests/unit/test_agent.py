@@ -887,6 +887,68 @@ def test_the_agent_can_be_switched_off_per_user_and_then_changes_nothing(monkeyp
     )
 
 
+def _start_with_departments(monkeypatch, question, allowed, planned):
+    _llm(
+        monkeypatch,
+        "plan",
+        [
+            json.dumps(
+                {"intent": "explain", "sub_queries": ["q"], "departments": planned}
+            )
+        ],
+    )
+
+    async def fake_departments(db, user):
+        return allowed
+
+    monkeypatch.setattr(
+        "src.domain.agent.run.allowed_department_names", fake_departments
+    )
+    return run(
+        AgentRun.start(
+            db=None,
+            feature_flags=None,
+            user=_user(),
+            question=question,
+            history_text="",
+            has_history=False,
+            on_event=None,
+        )
+    )
+
+
+def test_a_department_named_in_the_question_scopes_the_plan_even_if_the_planner_forgot(
+    monkeypatch,
+):
+    run_ = _start_with_departments(
+        monkeypatch,
+        "So sánh quy trình tuyển dụng của phòng ban public2 với các quy trình khác nhau nhé",
+        ["public2", "Nhan su"],
+        [],
+    )
+    assert run_.plan.departments == ["public2"]
+
+
+def test_a_department_the_planner_already_chose_is_not_added_twice(monkeypatch):
+    run_ = _start_with_departments(
+        monkeypatch,
+        "So sánh quy trình tuyển dụng của phòng ban public2 với các quy trình khác nhau nhé",
+        ["public2", "Nhan su"],
+        ["public2"],
+    )
+    assert run_.plan.departments == ["public2"]
+
+
+def test_a_department_the_asker_may_not_read_is_never_added(monkeypatch):
+    run_ = _start_with_departments(
+        monkeypatch,
+        "So sánh quy trình tuyển dụng của phòng ban secret với các quy trình khác nhau nhé",
+        ["public2"],
+        [],
+    )
+    assert run_.plan.departments == []
+
+
 def test_the_agent_can_be_switched_off_globally(monkeypatch):
     monkeypatch.setattr(settings, "AGENT_ENABLED", False)
     assert (

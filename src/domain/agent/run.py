@@ -106,6 +106,13 @@ class AgentRun:
             logger.warning("Agent could not list departments", error=str(exc))
             departments = []
         plan = await build_plan(question, history_text, departments, budget)
+        # A department the question names outright is a scope the asker chose; the planner is a
+        # model and may leave it out, after which the whole knowledge base is searched and the
+        # answer says the department "was not found". Whole-word matches against the names the
+        # asker may read only add to the plan, never widen what they can see.
+        for name in match_departments(_folded(question), departments):
+            if name not in plan.departments and len(plan.departments) < 3:
+                plan.departments.append(name)
         await tracer.emit(
             "understand",
             "done",

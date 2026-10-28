@@ -152,6 +152,14 @@ _CORPUS_PATTERNS = tuple(
         r" (tai lieu|van ban|chinh sach|quy trinh|sop)\b",
         r"\b(tat ca|toan bo) (cac )?(tai lieu|van ban|chinh sach|quy trinh)"
         r" (noi|de cap|quy dinh|huong dan) (ve|rang)\b",
+        # Asking for an assessment of the content as a whole ("insight về toàn bộ tài liệu của
+        # phòng X") is as much a corpus question as asking for a summary. The quantifier is
+        # required: "đánh giá tài liệu này" is about one document and stays with the planner.
+        r"\b(insights?|phan tich|danh gia|nhan xet|nhan dinh|diem chinh|noi dung chinh"
+        r"|chu de chinh|y chinh)( ve| cho| cua)?( toan bo| tat ca| het| cac)+"
+        r" (tai lieu|van ban|chinh sach|quy trinh|sop)\b",
+        r"\b(insights?|overview|analy[sz]e|analysis|review)( of| on| into| across)?"
+        r" (all|every|the whole)( the)? (documents?|policies|policy|sops?|procedures?)\b",
         r"\bsummari[sz]e (all|every|the)( the)? (documents?|policies|policy|sops?|procedures?)\b",
         r"\b(across|in) (all|every) (the )?(documents|policies|sops)\b",
     )
