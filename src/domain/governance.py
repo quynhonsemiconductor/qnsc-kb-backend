@@ -1742,6 +1742,11 @@ class GovernanceService:
                     "draft_id": str(draft.id),
                     "created_by": str(draft.created_by) if draft.created_by else None,
                     "reviewer_id": str(user.id),
+                    # The reviewer is required to explain a rejection; without the text in
+                    # the notification the author learns only "needs changes" and the
+                    # reason stays in a column nothing displays.
+                    "title": draft.title,
+                    "review_note": (draft.review_note or "")[:500],
                 },
             )
         )

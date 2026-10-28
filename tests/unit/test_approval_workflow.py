@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from src.domain.governance import GovernanceService
 from src.models.connectors import ExternalDocument
 from src.models.governance import PendingDraft
+from src.models.ops import NotificationQueue
 from src.models.rbac import Permission, Role, RolePermission
 from src.models.user import Department, User
 
@@ -26,8 +27,9 @@ class FakeGovernanceRepository:
         class Db:
             def __init__(self, source):
                 self.source = source
-            def add(self, _item):
-                pass
+                self.added = []
+            def add(self, item):
+                self.added.append(item)
             async def commit(self):
                 pass
             async def get(self, model, object_id):
@@ -240,6 +242,35 @@ def test_only_assigned_reviewer_can_reject(monkeypatch):
     rejected = asyncio.run(service.reject_draft(assigned, draft.id, "Missing required steps"))
     assert rejected.status == "rejected"
     assert rejected.reviewed_by == assigned.id
+
+
+def test_rejection_notifies_the_author_with_the_reason():
+    author = User(id=uuid.uuid4(), email="author@acme.test", name="Author", company_domain="acme.test", role="Staff")
+    assigned = reviewer("assigned@acme.test")
+    draft = PendingDraft(id=uuid.uuid4(), title="Quy trình mua hàng", company_domain="acme.test", source_ref="upload://p.pdf", source_hash="b" * 64, created_by=author.id, assigned_approver_id=assigned.id, status="pending")
+    repo = FakeGovernanceRepository(draft)
+    service = GovernanceService(repo, FakeArticleRepository())
+
+    asyncio.run(service.reject_draft(assigned, draft.id, "  Thiếu bước phê duyệt của kế toán  "))
+
+    (note,) = [item for item in repo.db.added if isinstance(item, NotificationQueue)]
+    assert note.recipient_user_id == author.id
+    assert note.payload["event"] == "draft_rejected"
+    assert note.payload["title"] == "Quy trình mua hàng"
+    assert note.payload["review_note"] == "Thiếu bước phê duyệt của kế toán"
+
+
+def test_a_very_long_rejection_reason_is_clipped_in_the_notification_only():
+    assigned = reviewer("assigned@acme.test")
+    draft = PendingDraft(id=uuid.uuid4(), title="T", company_domain="acme.test", source_ref="upload://p.pdf", source_hash="c" * 64, created_by=uuid.uuid4(), assigned_approver_id=assigned.id, status="pending")
+    repo = FakeGovernanceRepository(draft)
+    service = GovernanceService(repo, FakeArticleRepository())
+
+    rejected = asyncio.run(service.reject_draft(assigned, draft.id, "x" * 2000))
+
+    (note,) = [item for item in repo.db.added if isinstance(item, NotificationQueue)]
+    assert len(note.payload["review_note"]) == 500
+    assert len(rejected.review_note) == 2000
 
 
 def test_any_authorized_reviewer_can_restructure(monkeypatch):
