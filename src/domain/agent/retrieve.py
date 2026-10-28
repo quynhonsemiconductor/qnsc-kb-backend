@@ -125,9 +125,10 @@ async def agentic_retrieve(
     groups = [_Group(query=query, variants=[query]) for query in queries]
     filters = plan.soft_filters()
     degraded = False
+    collapsed = 0
 
     async def run(group: _Group, query: str, use_filters: bool) -> None:
-        nonlocal degraded
+        nonlocal degraded, collapsed
         found = await search.search(
             user,
             query,
@@ -135,6 +136,7 @@ async def agentic_retrieve(
             limit=limit,
         )
         degraded = degraded or bool(getattr(search, "vector_search_degraded", False))
+        collapsed += int(getattr(search, "duplicates_collapsed", 0) or 0)
         group.results = merge_results([group.results, found], limit)
 
     await tracer.emit("search", "running", queries=[group.query for group in groups])
@@ -185,6 +187,7 @@ async def agentic_retrieve(
         "search",
         "done",
         hits=len(results),
+        duplicates=collapsed,
         sub_questions=len(groups),
         covered=sum(1 for group in groups if group.covered),
         rounds=rounds,

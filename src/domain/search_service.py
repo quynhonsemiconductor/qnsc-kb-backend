@@ -29,6 +29,7 @@ from src.rag.query_router import (
     split_comparison_subjects,
 )
 from src.rag.multi_query import generate_followup_query, generate_subqueries
+from src.rag.dedupe import collapse_duplicates
 from src.models.ops import SearchLog
 from src.repositories.feature_flags import FeatureFlagRepository
 
@@ -170,6 +171,8 @@ class SearchService:
         #: different answers. One service instance serves one request here, so this is
         #: per-request state, not shared.
         self.vector_search_degraded = False
+        #: Copies of an already-found passage removed by the LAST `search` (src/rag/dedupe.py).
+        self.duplicates_collapsed = 0
 
     async def _record_gap(self, user: User, query: str) -> None:
         """Note that a search found nothing, without letting that end the search.
@@ -208,6 +211,7 @@ class SearchService:
         # Reset before any early return, so a caller never reads the previous query's
         # verdict for one that never reached the embedder.
         self.vector_search_degraded = False
+        self.duplicates_collapsed = 0
         if not query.strip():
             return []
         if not any(
@@ -519,6 +523,17 @@ class SearchService:
                     pool_size=len(candidates),
                 )
 
+        # The same passage copied into several documents would take several of the `limit`
+        # slots. Collapsing first lets the slots go to other passages.
+        also_in: dict[str, list[dict[str, str | None]]] = {}
+        before = len(ranked)
+        if settings.RAG_DEDUPE_ENABLED:
+            ranked, also_in = collapse_duplicates(
+                ranked,
+                similarity=settings.RAG_DEDUPE_SIMILARITY,
+                min_chars=settings.RAG_DEDUPE_MIN_CHARS,
+            )
+        self.duplicates_collapsed = before - len(ranked)
         ranked = ranked[:limit]
         # Vector similarity alone is not enough: short or vague inputs can be
         # close to an unrelated document in embedding space. Keep a result only
@@ -613,6 +628,8 @@ class SearchService:
                         else None
                     ),
                     "score": score,
+                    # Other documents that hold the same passage (see src/rag/dedupe.py).
+                    "also_in": also_in.get(str(chunk.id), []),
                 }
             )
 

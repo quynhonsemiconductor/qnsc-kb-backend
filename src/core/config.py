@@ -632,6 +632,16 @@ class Settings(BaseSettings):
     # needs roughly 400 here.
     HNSW_EF_SEARCH: int = 1000
     RAG_RERANK_LIMIT: int = 80
+    # The same passage copied into several documents takes several of the slots above and is
+    # shown to the model several times. With this on, copies from different articles are
+    # collapsed into the best one (src/rag/dedupe.py) BEFORE the cut to RAG_RERANK_LIMIT, so the
+    # freed slots go to other passages; the result lists the other places it appears.
+    RAG_DEDUPE_ENABLED: bool = True
+    # Cosine at or above which two passages count as the same. Deliberately high: embeddings
+    # of merely related text sit well below it. A value above 1 keeps only the exact match.
+    RAG_DEDUPE_SIMILARITY: float = 0.97
+    # Shorter passages (headings, one-line rows) are never merged; they repeat by coincidence.
+    RAG_DEDUPE_MIN_CHARS: int = 60
     RAG_MAX_CONTEXT_PARENTS: int = 40
     RAG_CONTEXT_MAX_CHARS: int = 70000
     RAG_CONTEXT_MAX_TOKENS: int = 17500
@@ -643,7 +653,7 @@ class Settings(BaseSettings):
     # served for six hours as if it came from the new one. Bumped for the
     # e5-large-instruct encoder swap (see EMBEDDING_MODEL) -- a cached answer keyed to
     # v4's e5-small-derived retrieval must not be served once the vector space changes.
-    RETRIEVAL_VERSION: str = "v6-multimodal-evidence"
+    RETRIEVAL_VERSION: str = "v7-dedupe"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False
