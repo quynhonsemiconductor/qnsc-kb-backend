@@ -20,6 +20,7 @@ from src.api.deps import (
     require_permission,
     set_database_context,
 )
+from src.domain.agent.depth import current_depth
 from src.domain.ai_service import AIService, normalize_answer_markdown
 from src.domain.evidence_extraction import table_evidence_preview
 from src.domain.page_evidence import attach_page_evidence
@@ -51,6 +52,8 @@ class AskRequest(BaseModel):
     retry_failed: bool = False
     edit_instruction: str | None = Field(default=None, max_length=4000)
     language: Literal["en", "vi"] = "vi"
+    # How hard to look: "quick" skips follow-up retrieval rounds, "thorough" allows more.
+    depth: Literal["quick", "standard", "thorough"] = "standard"
 
 
 class ConversationCreate(BaseModel):
@@ -524,6 +527,7 @@ async def ask_question(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    current_depth.set(req.depth)
     data = await get_ai_service(db).ask(
         current_user,
         req.question,
@@ -615,6 +619,7 @@ async def ask_question_stream(
     conversation_id = str(conversation.id)
 
     async def event_stream():
+        current_depth.set(req.depth)
         queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
 
         # Streaming responses outlive the endpoint dependency context. Use a

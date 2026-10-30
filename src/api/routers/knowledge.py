@@ -3,7 +3,7 @@
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -697,3 +697,61 @@ async def _announce_decision(item: ConflictRecord) -> None:
                 article_id=str(article_id),
                 error=str(exc),
             )
+
+
+class LessonRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    lesson: str = Field(min_length=1, max_length=20_000)
+    context: str | None = Field(default=None, max_length=20_000)
+    dept: str | None = Field(default=None, min_length=1, max_length=100)
+    language: str = Field(default="vi", min_length=2, max_length=20)
+    tags: list[Annotated[str, Field(min_length=1, max_length=50)]] = Field(
+        default_factory=list, max_length=19
+    )
+
+
+@router.post("/lessons")
+async def submit_lesson(
+    request: LessonRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Save a lesson from an AI session unless the knowledge base already has it.
+
+    Compares it with the articles the author may see (src/domain/lessons.py). A new lesson
+    goes through the ordinary draft-and-review path of POST /articles, so reviewers,
+    department policy and the contradiction check all apply; an update or a duplicate saves
+    nothing and says where to look instead.
+    """
+    from src.api.routers.articles import ArticleCreate, create_article
+    from src.domain.lessons import LESSON_TAG, decide_lesson, lesson_body
+
+    body = lesson_body(request.lesson, request.context)
+    decision = await decide_lesson(db, current_user, request.title, body)
+    if decision.action != "add":
+        hint = (
+            f"Call update_article with article_id {decision.article_id} to add this."
+            if decision.action == "update"
+            else "Nothing was saved: the knowledge base already says this."
+        )
+        return {
+            "decision": decision.action,
+            "article_id": decision.article_id,
+            "title": decision.title,
+            "reason": decision.reason,
+            "next": hint,
+        }
+    tags = [t for t in request.tags if t != LESSON_TAG] + [LESSON_TAG]
+    created = await create_article(
+        ArticleCreate(
+            title=request.title,
+            body_md=body,
+            dept=request.dept,
+            language=request.language,
+            tags=tags,
+            visibility="department",
+        ),
+        current_user,
+        db,
+    )
+    return {"decision": "add", "reason": decision.reason, "result": created}

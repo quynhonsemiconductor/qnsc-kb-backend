@@ -16,7 +16,7 @@ publish only when the document states them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import structlog
@@ -84,6 +84,31 @@ def rank_by_time(
     return sorted(results, key=key)  # sorted() is stable: ties keep retrieval order
 
 
+def with_supersession(
+    validity: dict[str, Validity], decisions: list[tuple[list[str], str]]
+) -> dict[str, Validity]:
+    """End the validity of every article a reviewer decided is superseded.
+
+    When article W was chosen over article L in a conflict, L stopped being the rule on the
+    day W was issued. So L's expiry becomes the day before W's issue date (or earlier if it
+    already expired sooner). Without W's issue date nothing can be said and L is unchanged.
+    Facts are invalidated, not erased: a question about a date before W still finds L in force.
+    """
+    out = dict(validity)
+    for article_ids, kept in decisions:
+        winner = out.get(str(kept))
+        if winner is None or winner.issue is None:
+            continue
+        end = winner.issue - timedelta(days=1)
+        for article_id in map(str, article_ids):
+            if article_id == str(kept):
+                continue
+            current = out.get(article_id, Validity())
+            if current.expiry is None or current.expiry > end:
+                out[article_id] = Validity(current.issue, end)
+    return out
+
+
 async def load_validity(db: AsyncSession, article_ids: set[str]) -> dict[str, Validity]:
     if not article_ids:
         return {}
@@ -96,18 +121,31 @@ async def load_validity(db: AsyncSession, article_ids: set[str]) -> dict[str, Va
 
 
 async def apply_time_focus(
-    db: AsyncSession | None, results: list[dict[str, Any]], as_of: date | None
+    db: AsyncSession | None,
+    results: list[dict[str, Any]],
+    as_of: date | None,
+    company_domain: str | None = None,
 ) -> list[dict[str, Any]]:
     """Reorder `results` for `as_of`; any failure leaves the order as retrieval made it."""
     if db is None or as_of is None or len(results) < 2:
         return results
+    present = {str(r["article_id"]) for r in results if r.get("article_id")}
     try:
-        validity = await load_validity(
-            db, {str(r["article_id"]) for r in results if r.get("article_id")}
-        )
+        decisions: list[tuple[list[str], str]] = []
+        if company_domain:
+            from src.domain.conflict_decisions import load_decisions
+
+            decisions = [
+                (ids, kept)
+                for ids, kept in await load_decisions(db, company_domain)
+                if present & {str(i) for i in ids}
+            ]
+        winners = {kept for _ids, kept in decisions}
+        validity = await load_validity(db, present | winners)
     except Exception as exc:
         logger.warning("Time focus could not read article dates", error=str(exc))
         return results
+    validity = with_supersession(validity, decisions)
     if not any(v.issue or v.expiry for v in validity.values()):
         return results
     return rank_by_time(results, as_of, validity)

@@ -17,7 +17,7 @@ from src.domain.conflict_decisions import (
     superseded_article_ids,
 )
 from src.domain.job_stall import stall_info
-from src.domain.mcp_tools import LESSON_TAG, Call, ToolInputError
+from src.domain.mcp_tools import Call, ToolInputError
 
 
 def _run(coro):
@@ -358,34 +358,38 @@ def test_the_lesson_tool_is_a_write_tool_hidden_from_read_only_tokens():
     assert "record_lesson" in [t.name for t in mcp_tools.visible_tools(can_write=True)]
 
 
-def test_a_lesson_becomes_a_tagged_department_article():
+def test_a_lesson_goes_to_the_server_to_be_checked_against_what_is_stored():
     call = mcp_tools.TOOLS_BY_NAME["record_lesson"].build(
         {
             "title": "Bus ID width",
             "lesson": "S_BUS IDs are 6 bits.",
             "context": "After the xbar rework.",
-            "tags": ["chip", LESSON_TAG],
+            "tags": ["chip"],
         }
     )
 
     assert isinstance(call, Call) and call.method == "POST"
-    assert call.path == "/articles/"
-    body = call.body
-    assert body["title"] == "Bus ID width"
-    assert body["body_md"] == (
-        "## Lesson\n\nS_BUS IDs are 6 bits.\n\n## Context\n\nAfter the xbar rework."
-    )
-    assert body["tags"] == ["chip", LESSON_TAG]
-    assert body["visibility"] == "department"
+    assert call.path == "/knowledge/lessons"
+    assert call.body == {
+        "title": "Bus ID width",
+        "lesson": "S_BUS IDs are 6 bits.",
+        "context": "After the xbar rework.",
+        "language": "vi",
+        "tags": ["chip"],
+    }
 
 
-def test_a_lesson_without_context_has_only_the_lesson_section():
+def test_a_lesson_without_optional_fields_sends_only_what_it_has():
     call = mcp_tools.TOOLS_BY_NAME["record_lesson"].build(
         {"title": "T", "lesson": "Do X."}
     )
 
-    assert call.body["body_md"] == "## Lesson\n\nDo X."
-    assert call.body["tags"] == [LESSON_TAG]
+    assert call.body == {
+        "title": "T",
+        "lesson": "Do X.",
+        "language": "vi",
+        "tags": [],
+    }
 
 
 @pytest.mark.parametrize("missing", ["title", "lesson"])

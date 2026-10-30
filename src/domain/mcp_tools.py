@@ -324,29 +324,24 @@ LESSON_TAG = "session-lesson"
 
 
 def _record_lesson(args: dict[str, Any]) -> Call:
-    """A lesson learned in an AI session, submitted as a normal article awaiting review.
+    """A lesson learned in an AI session.
 
-    The article body is fixed in shape so lessons read alike and can be found by the
-    `session-lesson` tag; everything else is the same path as `create_article`, so the
-    reviewer, the department policy and the contradiction check all apply unchanged.
+    The server compares it with what is stored and either submits it as a normal article
+    awaiting review, or says which existing article to update instead, or that it is already
+    known (src/domain/lessons.py). The body shape, the `session-lesson` tag and the draft
+    review all happen there.
     """
-    lesson = _text(args, "lesson", required=True, max_len=20_000)
-    context = _text(args, "context", max_len=20_000)
-    body = f"## Lesson\n\n{lesson}"
-    if context:
-        body += f"\n\n## Context\n\n{context}"
-    tags = [t for t in _tags(args) if t != LESSON_TAG][:19] + [LESSON_TAG]
     return Call(
         "POST",
-        "/articles/",
+        "/knowledge/lessons",
         body=_drop_none(
             {
                 "title": _text(args, "title", required=True, max_len=255),
-                "body_md": body,
+                "lesson": _text(args, "lesson", required=True, max_len=20_000),
+                "context": _text(args, "context", max_len=20_000),
                 "dept": _text(args, "dept", max_len=100),
                 "language": _text(args, "language", max_len=20) or "vi",
-                "tags": tags,
-                "visibility": "department",
+                "tags": _tags(args),
             }
         ),
     )
@@ -627,11 +622,12 @@ TOOLS: tuple[Tool, ...] = (
         "record_lesson",
         "Record a lesson learned in this session",
         "Save something worth keeping from this session -- a decision and its reason, a fix "
-        "that worked, a rule you were told -- so the next person's AI can find it. Search "
-        "the knowledge base first (search_knowledge) and use update_article instead if the "
-        "lesson belongs in an existing article. Write the lesson so it makes sense without "
-        "this conversation. It is submitted for review like any article and tagged "
-        "'session-lesson'. Requires a token with write scope.",
+        "that worked, a rule you were told -- so the next person's AI can find it. Write the "
+        "lesson so it makes sense without this conversation. The server first checks what is "
+        "already stored: the result says decision 'add' (submitted for review like any "
+        "article, tagged 'session-lesson'), 'update' (an existing article covers the subject; "
+        "call update_article with the article_id returned) or 'skip' (already known, nothing "
+        "was saved). Requires a token with write scope.",
         {
             "title": {"type": "string", "maxLength": 255},
             "lesson": {

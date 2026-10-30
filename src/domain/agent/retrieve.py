@@ -19,6 +19,7 @@ import structlog
 
 from src.core.config import settings
 from src.domain.agent.core import Budget, Tracer, parse_json_object
+from src.domain.agent.depth import retrieval_rounds
 from src.domain.agent.plan import AgentPlan
 from src.domain.temporal import apply_time_focus, parse_as_of
 from src.domain.llm_client import complete
@@ -145,7 +146,7 @@ async def agentic_retrieve(
         await run(group, group.query, use_filters=True)
 
     rounds = 0
-    while rounds < max(0, settings.AGENT_MAX_RETRIEVAL_ROUNDS):
+    while rounds < max(0, retrieval_rounds(settings.AGENT_MAX_RETRIEVAL_ROUNDS)):
         missing = [group for group in groups if not group.covered]
         if not missing:
             break
@@ -178,6 +179,7 @@ async def agentic_retrieve(
             getattr(getattr(search, "chunk_repo", None), "db", None),
             results,
             parse_as_of(plan.as_of),
+            getattr(user, "company_domain", None),
         )
     sufficient = bool(results) and all(group.covered for group in groups)
     coverage = [
