@@ -1532,13 +1532,20 @@ async def delete_department(
     # An article's own department is the "articles" check above. What remains here are
     # links that only SHARE other departments' articles with this one; they are not its
     # content, and with no members (also checked above) nobody loses access by dropping them.
-    shared = (
-        await db.execute(
-            delete(article_departments).where(
-                article_departments.c.department_id == item.id
+    shared = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(article_departments)
+                .where(article_departments.c.department_id == item.id)
             )
+        ).scalar_one()
+    )
+    await db.execute(
+        delete(article_departments).where(
+            article_departments.c.department_id == item.id
         )
-    ).rowcount or 0
+    )
     await db.delete(item)
     await db.commit()
     await AuditRepository(db).record(
