@@ -1493,17 +1493,6 @@ async def delete_department(
                 )
             ).scalar_one()
         ),
-        "gaps": int(
-            (
-                await db.execute(
-                    select(func.count())
-                    .select_from(Gap)
-                    .where(
-                        Gap.company_domain == item.company_domain, Gap.dept == item.name
-                    )
-                )
-            ).scalar_one()
-        ),
         "owners": int(
             (
                 await db.execute(
@@ -1523,12 +1512,39 @@ async def delete_department(
             ).scalar_one()
         ),
     }
-    used_by = [label for label, count in references.items() if count]
+    used_by = [f"{label} ({count})" for label, count in references.items() if count]
     if used_by:
+        detail = f"Department is still in use by {', '.join(used_by)}."
+        if references["articles"]:
+            # Name them: articles in any status count, including ones a normal list
+            # does not show, and "in use by articles" alone cannot be acted on.
+            rows = (
+                await db.execute(
+                    select(Article.title, Article.status)
+                    .where(
+                        Article.company_domain == item.company_domain,
+                        Article.dept == item.name,
+                    )
+                    .order_by(Article.title)
+                    .limit(5)
+                )
+            ).all()
+            detail += " Articles: " + "; ".join(
+                f"{title} [{status}]" for title, status in rows
+            )
+            if references["articles"] > len(rows):
+                detail += "; ..."
+            detail += "."
         raise HTTPException(
             status_code=409,
-            detail=f"Department is still in use by {', '.join(used_by)}. Deactivate it instead of deleting it.",
+            detail=f"{detail} Deactivate it instead of deleting it.",
         )
+    # Unanswered-question records are statistics, not content: keep them, company-wide.
+    await db.execute(
+        update(Gap)
+        .where(Gap.company_domain == item.company_domain, Gap.dept == item.name)
+        .values(dept=None)
+    )
     # An article's own department is the "articles" check above. What remains here are
     # links that only SHARE other departments' articles with this one; they are not its
     # content, and with no members (also checked above) nobody loses access by dropping them.
