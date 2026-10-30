@@ -191,6 +191,8 @@ class DepartmentUpdate(BaseModel):
     description: str | None = Field(default=None, min_length=10, max_length=500)
     active: bool | None = None
     contact_email: EmailStr | None = None
+    #: False = drafts for this department are published without a review.
+    review_required: bool | None = None
 
 
 def _user_response(user: Any) -> dict[str, Any]:
@@ -544,6 +546,7 @@ async def list_departments(
             "company_domain": item.company_domain,
             "active": item.active,
             "contact_email": item.contact_email,
+            **_department_policy_fields(item),
             "owner": next(
                 (
                     {
@@ -1231,6 +1234,20 @@ async def change_password(
     return {"status": "changed"}
 
 
+def _may_waive_review(user: Any) -> bool:
+    """Admin/CEO, the same standing that lets someone approve their own submission."""
+    from src.domain.governance import GovernanceService
+
+    return GovernanceService._may_self_approve(None, user)  # type: ignore[arg-type]
+
+
+def _department_policy_fields(item: Department) -> dict[str, Any]:
+    return {
+        "review_required": item.review_required,
+        "auto_publish_by": item.auto_publish_by,
+    }
+
+
 @router.post("/departments", status_code=status.HTTP_201_CREATED)
 async def create_department(
     payload: DepartmentInput,
@@ -1269,7 +1286,7 @@ async def create_department(
     await AuditRepository(db).record(
         current_user.id, "department_create", "department", str(item.id)
     )
-    return {
+    return _department_policy_fields(item) | {
         "id": item.id,
         "name": item.name,
         "description": item.description,
@@ -1305,9 +1322,11 @@ async def update_department(
         and payload.description is None
         and payload.active is None
         and payload.contact_email is None
+        and payload.review_required is None
     ):
         raise HTTPException(
-            status_code=422, detail="Provide a new name, description, or active status"
+            status_code=422,
+            detail="Provide a new name, description, active status or review policy",
         )
 
     if payload.name is not None:
@@ -1381,12 +1400,34 @@ async def update_department(
         item.active = payload.active
     if payload.contact_email is not None:
         item.contact_email = str(payload.contact_email).lower()
+    policy_changed = False
+    if payload.review_required is not None and (
+        payload.review_required != item.review_required
+    ):
+        if not payload.review_required and not _may_waive_review(current_user):
+            # Publishing without review is self-approval at scale: it takes the same
+            # standing as approving your own draft.
+            raise HTTPException(
+                status_code=403,
+                detail="Only an Admin or CEO can let a department publish without review",
+            )
+        item.review_required = payload.review_required
+        item.auto_publish_by = None if payload.review_required else current_user.id
+        policy_changed = True
     await db.commit()
     await db.refresh(item)
     await AuditRepository(db).record(
-        current_user.id, "department_update", "department", str(item.id)
+        current_user.id,
+        "department_update",
+        "department",
+        str(item.id),
+        detail=(
+            {"review_required": item.review_required, "department": item.name}
+            if policy_changed
+            else None
+        ),
     )
-    return {
+    return _department_policy_fields(item) | {
         "id": item.id,
         "name": item.name,
         "description": item.description,
