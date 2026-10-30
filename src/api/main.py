@@ -30,6 +30,7 @@ from src.api.routers import (
     graph,
     system,
     mcp,
+    mcp_config,
     access_tokens,
 )
 from src.api.deps import (
@@ -863,6 +864,9 @@ app.include_router(
 )
 if settings.MCP_ENABLED:
     app.include_router(mcp.router, prefix=f"{settings.API_V1_STR}/mcp", tags=["mcp"])
+    app.include_router(
+        mcp_config.router, prefix=f"{settings.API_V1_STR}/mcp-config", tags=["mcp"]
+    )
 app.include_router(
     connectors.router, prefix=f"{settings.API_V1_STR}/connectors", tags=["connectors"]
 )

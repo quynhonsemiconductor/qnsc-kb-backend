@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from src.core.config import settings
+from src.domain.mcp_config import APPLY
 
 
 class ToolInputError(ValueError):
@@ -157,6 +158,27 @@ def _shape_departments(data: Any) -> Any:
     if isinstance(data, list):
         return [_pick(item, ("id", "name", "active")) for item in data]
     return data
+
+
+def _shape_config(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    if data.get("up_to_date"):
+        return {
+            "up_to_date": True,
+            "version": data.get("version"),
+            "message": "Your copy is current. Change nothing.",
+        }
+    if not data.get("configured"):
+        return {
+            "configured": False,
+            "message": "No team configuration has been set yet. Nothing to apply.",
+        }
+    return {
+        "version": data.get("version"),
+        "block": data.get("block"),
+        "how_to_apply": APPLY,
+    }
 
 
 HIT_TEXT_CHARS = 1500
@@ -485,6 +507,31 @@ TOOLS: tuple[Tool, ...] = (
         (),
         lambda a: Call("GET", "/auth/departments"),
         _shape_departments,
+    ),
+    Tool(
+        "get_project_config",
+        "Get the team configuration",
+        "The team's standing instructions for AI assistants, kept by the administrators and "
+        "versioned. Call it when the server's instructions name a configuration version "
+        "that your CLAUDE.md block does not have, passing known_version if you have one: "
+        "it answers 'up to date' or returns the new block and how to apply it.",
+        {
+            "known_version": {
+                "type": "integer",
+                "description": "The version in your current block, if any",
+            }
+        },
+        (),
+        lambda a: Call(
+            "GET",
+            "/mcp-config",
+            params=(
+                {"known_version": _int(a, "known_version", -1, -1, 10**9)}
+                if _int(a, "known_version", -1, -1, 10**9) >= 0
+                else None
+            ),
+        ),
+        _shape_config,
     ),
     Tool(
         "list_tags",

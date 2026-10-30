@@ -57,6 +57,7 @@ from src.models.ops import (
 )
 from src.models.sessions import RefreshSession, PasswordResetToken
 from src.models.access_token import PersonalAccessToken
+from src.models.mcp_config import McpConfig, McpConfigVersion
 from src.models.connectors import (
     SourceScope,
     SyncCursor,
@@ -130,6 +131,8 @@ __all__ = [
     "RefreshSession",
     "PasswordResetToken",
     "PersonalAccessToken",
+    "McpConfig",
+    "McpConfigVersion",
     "SourceScope",
     "SyncCursor",
     "ExternalDocument",
