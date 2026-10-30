@@ -27,6 +27,7 @@ from src.core.config import settings
 from src.core.rate_limit import InMemoryRateLimiter
 from src.core.security import create_access_token
 from src.domain import mcp_tools
+from src.domain.mcp_config import instructions_note
 from src.domain.access_tokens import (
     TokenPrincipal,
     authenticate_token,
@@ -140,6 +141,17 @@ def _negotiated_version(requested: Any) -> str:
     return requested if requested in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0]
 
 
+async def _config_note(ctx: Context) -> str:
+    """Name the live team-configuration version, so a client can tell its copy is stale."""
+    try:
+        status, payload = await ctx.call(Call("GET", "/mcp-config"))
+    except Exception:  # noqa: BLE001 - instructions must never fail a connect
+        return ""
+    if status >= 400 or not isinstance(payload, dict) or not payload.get("configured"):
+        return ""
+    return instructions_note(int(payload.get("version") or 0))
+
+
 async def _initialize(ctx: Context, params: dict[str, Any]) -> dict[str, Any]:
     return {
         "protocolVersion": _negotiated_version(params.get("protocolVersion")),
@@ -153,7 +165,7 @@ async def _initialize(ctx: Context, params: dict[str, Any]) -> dict[str, Any]:
             "title": "QNSC Knowledge Base",
             "version": __version__,
         },
-        "instructions": INSTRUCTIONS,
+        "instructions": INSTRUCTIONS + await _config_note(ctx),
     }
 
 
