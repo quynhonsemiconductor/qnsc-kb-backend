@@ -1474,6 +1474,9 @@ async def delete_department(
                     .where(
                         Article.company_domain == item.company_domain,
                         Article.dept == item.name,
+                        # A deleted article is gone everywhere else (404, no undelete),
+                        # so it is not content this department still holds.
+                        Article.status != "deleted",
                     )
                 )
             ).scalar_one()
@@ -1524,6 +1527,7 @@ async def delete_department(
                     .where(
                         Article.company_domain == item.company_domain,
                         Article.dept == item.name,
+                        Article.status != "deleted",
                     )
                     .order_by(Article.title)
                     .limit(5)
