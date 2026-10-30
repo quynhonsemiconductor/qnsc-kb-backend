@@ -1478,15 +1478,6 @@ async def delete_department(
                 )
             ).scalar_one()
         ),
-        "article associations": int(
-            (
-                await db.execute(
-                    select(func.count())
-                    .select_from(article_departments)
-                    .where(article_departments.c.department_id == item.id)
-                )
-            ).scalar_one()
-        ),
         "pending drafts": int(
             (
                 await db.execute(
@@ -1538,10 +1529,24 @@ async def delete_department(
             status_code=409,
             detail=f"Department is still in use by {', '.join(used_by)}. Deactivate it instead of deleting it.",
         )
+    # An article's own department is the "articles" check above. What remains here are
+    # links that only SHARE other departments' articles with this one; they are not its
+    # content, and with no members (also checked above) nobody loses access by dropping them.
+    shared = (
+        await db.execute(
+            delete(article_departments).where(
+                article_departments.c.department_id == item.id
+            )
+        )
+    ).rowcount or 0
     await db.delete(item)
     await db.commit()
     await AuditRepository(db).record(
-        current_user.id, "department_delete", "department", str(department_id)
+        current_user.id,
+        "department_delete",
+        "department",
+        str(department_id),
+        detail={"shared_article_links_removed": shared} if shared else None,
     )
     return {"id": department_id, "deleted": True}
 
