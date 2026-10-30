@@ -60,6 +60,7 @@ async def load_decisions(
             ConflictRecord.status == "resolved",
             ConflictRecord.kept_article_id.is_not(None),
         )
+        .order_by(ConflictRecord.resolved_at.desc())
         .limit(MAX_DECISIONS)
     )
     return [(list(ids or []), str(kept)) for ids, kept in rows.all() if kept]

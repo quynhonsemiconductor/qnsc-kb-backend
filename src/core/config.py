@@ -648,7 +648,7 @@ class Settings(BaseSettings):
     # After a publish, ask the model whether the article contradicts the most similar
     # published ones (src/domain/conflict_llm.py), on top of the labelled-fact pattern check.
     CONFLICT_LLM_DETECTION_ENABLED: bool = True
-    CONFLICT_LLM_TIMEOUT_SECONDS: float = 45.0
+    CONFLICT_LLM_TIMEOUT_SECONDS: float = 25.0
     # A connector job still "queued" after this long has nothing consuming it; the jobs list
     # says so instead of showing an endless wait.
     CONNECTOR_JOB_STALL_MINUTES: int = 15

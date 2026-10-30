@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
@@ -24,6 +25,7 @@ from src.domain.rbac import AuthorizationService
 from src.core.config import settings
 
 router = APIRouter()
+logger = structlog.get_logger()
 
 
 class ContentRequest(BaseModel):
@@ -595,8 +597,9 @@ async def resolve_conflict(
     item.resolved_at = datetime.utcnow()
     item.resolution_note = request.note.strip() or "Decided which article is right"
     item.kept_article_id = keep
+    await _audit_decision(item, current_user, db, "conflict_resolve")
     await db.commit()
-    await _announce_decision(item, current_user, db, "conflict_resolve")
+    await _announce_decision(item)
     return _conflict_state(item)
 
 
@@ -608,13 +611,25 @@ async def reopen_conflict(
 ) -> dict[str, Any]:
     """Undo a resolution: the superseded article is quoted again until it is decided anew."""
     item = await _open_conflict(db, current_user, conflict_id, "resolved")
+    if item.kept_article_id:
+        # Undoing a chosen winner changes what answers may quote again, the same effect as
+        # choosing one, so it takes the same authority.
+        from src.domain.governance import GovernanceService
+
+        if not GovernanceService._may_self_approve(None, current_user):  # type: ignore[arg-type]
+            raise HTTPException(
+                status_code=403,
+                detail="Only an Admin or CEO can reopen a conflict where an article was chosen",
+            )
+    kept_before = item.kept_article_id
     item.status = "open"
     item.resolved_by = None
     item.resolved_at = None
     item.resolution_note = None
     item.kept_article_id = None
+    await _audit_decision(item, current_user, db, "conflict_reopen", kept=kept_before)
     await db.commit()
-    await _announce_decision(item, current_user, db, "conflict_reopen")
+    await _announce_decision(item)
     return _conflict_state(item)
 
 
@@ -644,11 +659,14 @@ def _conflict_state(item: ConflictRecord) -> dict[str, Any]:
     }
 
 
-async def _announce_decision(
-    item: ConflictRecord, current_user: User, db: AsyncSession, action: str
+async def _audit_decision(
+    item: ConflictRecord,
+    current_user: User,
+    db: AsyncSession,
+    action: str,
+    kept: str | None = None,
 ) -> None:
-    """Audit it and drop cached answers built from the articles involved."""
-    from src.domain.events import event_bus
+    """Written in the same transaction as the decision, so one cannot exist without the other."""
     from src.repositories.audit import AuditRepository
 
     await AuditRepository(db).record(
@@ -656,7 +674,26 @@ async def _announce_decision(
         action,
         "conflict",
         str(item.id),
-        detail={"kept_article_id": item.kept_article_id, "fact": item.fact},
+        detail={"kept_article_id": kept or item.kept_article_id, "fact": item.fact},
+        commit=False,
     )
+
+
+async def _announce_decision(item: ConflictRecord) -> None:
+    """Drop cached answers built from the articles involved.
+
+    After the commit, and best-effort: the decision is stored either way, and cached
+    answers also expire on their own, so a failure here is logged rather than turned into
+    an error for a change that already happened.
+    """
+    from src.domain.events import event_bus
+
     for article_id in item.article_ids or []:
-        await event_bus.publish("ConflictResolved", {"article_id": str(article_id)})
+        try:
+            await event_bus.publish("ConflictResolved", {"article_id": str(article_id)})
+        except Exception as exc:
+            logger.warning(
+                "Cache invalidation after a conflict decision failed",
+                article_id=str(article_id),
+                error=str(exc),
+            )

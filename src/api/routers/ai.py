@@ -755,6 +755,9 @@ async def list_feedback_for_review(
     the question, the answer and what the person wrote, so the gap can be fixed in the
     knowledge base or the answer checked. Scoped to the reviewer's own company.
     """
+    # Inner join on the rater on purpose: that user is the only link from a rating to a
+    # company. A rating whose rater was deleted (user_id set NULL) cannot be attributed to
+    # any tenant, so it is left out rather than shown to every company's reviewers.
     stmt = (
         select(AiFeedback, AiUsageLog, User)
         .join(AiUsageLog, AiUsageLog.id == AiFeedback.ai_usage_log_id)
@@ -776,7 +779,7 @@ async def list_feedback_for_review(
         {
             "id": str(feedback.id),
             "created_at": feedback.created_at,
-            "user": author.name if hasattr(author, "name") else None,
+            "user": author.name,
             "question": _excerpt(log.question, 600),
             "answer": _excerpt(log.answer, 1200),
             "comment": feedback.comment,

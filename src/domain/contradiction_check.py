@@ -19,6 +19,7 @@ without blocking gets the same visibility with none of that risk.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -148,6 +149,18 @@ async def detect_contradictions_for_draft(
     return [*conflicts, *llm_found]
 
 
+def _topic_words(topic: str) -> set[str]:
+    return {word for word in re.findall(r"\w+", topic.casefold()) if len(word) > 2}
+
+
+def same_topic(left: str, right: str, threshold: float = 0.34) -> bool:
+    """Whether two topic phrases are mostly the same words (Jaccard overlap)."""
+    a, b = _topic_words(left), _topic_words(right)
+    if not a or not b:
+        return left.strip().casefold() == right.strip().casefold()
+    return len(a & b) / len(a | b) >= threshold
+
+
 async def _record_llm_conflicts(
     db: AsyncSession,
     user: User,
@@ -183,19 +196,21 @@ async def _record_llm_conflicts(
             continue
         fact = item.topic[:255]
         known = (
-            (
-                await db.execute(
-                    select(ConflictRecord.article_ids).where(
-                        ConflictRecord.company_domain == user.company_domain,
-                        ConflictRecord.fact == fact,
-                        ConflictRecord.status.in_(("open", "resolved")),
-                    )
+            await db.execute(
+                select(ConflictRecord.fact, ConflictRecord.article_ids).where(
+                    ConflictRecord.company_domain == user.company_domain,
+                    ConflictRecord.status.in_(("open", "resolved")),
                 )
             )
-            .scalars()
-            .all()
-        )
-        if any(sorted(str(x) for x in (ids or [])) == article_ids for ids in known):
+        ).all()
+        # The model words the topic differently on each run ("Approval time" / "Approval
+        # duration"), so an exact match would reopen a settled conflict on a republish.
+        # The same two articles and a mostly overlapping topic is the same conflict.
+        if any(
+            sorted(str(x) for x in (ids or [])) == article_ids
+            and same_topic(known_fact, fact)
+            for known_fact, ids in known
+        ):
             continue
         evidence = [
             {

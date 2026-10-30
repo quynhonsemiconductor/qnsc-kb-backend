@@ -10,6 +10,9 @@ skipped and why, so an admin can see it instead of inferring it from an empty gr
 from __future__ import annotations
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.models.user import User
 
 logger = structlog.get_logger()
 
@@ -26,7 +29,9 @@ def background_ai_skip_reason() -> str | None:
         return REASON_NO_PROVIDER
 
 
-async def should_skip_background_step(db, user, article_id: str, step: str) -> bool:
+async def should_skip_background_step(
+    db: AsyncSession, user: User, article_id: str, step: str
+) -> bool:
     """True (and an audit row) when `step` cannot run. Never raises."""
     reason = background_ai_skip_reason()
     if reason is None:
@@ -42,7 +47,6 @@ async def should_skip_background_step(db, user, article_id: str, step: str) -> b
             str(article_id),
             detail={"step": step, "reason": reason},
         )
-        await db.commit()
     except Exception as exc:
         logger.warning("Could not record a skipped background step", error=str(exc))
         if hasattr(db, "rollback"):

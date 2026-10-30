@@ -404,9 +404,6 @@ class _ScalarRows:
     def __init__(self, rows):
         self._rows = rows
 
-    def scalars(self):
-        return self
-
     def all(self):
         return self._rows
 
@@ -476,14 +473,40 @@ def test_a_conflict_already_seen_for_the_same_articles_is_not_recorded_again(
     monkeypatch,
 ):
     _patch_detection(monkeypatch, _found())
-    db = _RecordDb(known=[["b-id", "a-id"]])  # open or resolved, order irrelevant
+    # open or resolved, article order irrelevant
+    db = _RecordDb(known=[("Approval time", ["b-id", "a-id"])])
 
     assert _record(db) == [] and db.added == []
 
 
+def test_a_reworded_topic_for_the_same_articles_is_still_the_same_conflict(
+    monkeypatch,
+):
+    _patch_detection(monkeypatch, _found())
+    db = _RecordDb(known=[("Approval duration time", ["a-id", "b-id"])])
+
+    assert _record(db) == [] and db.added == []
+
+
+def test_an_unrelated_topic_for_the_same_articles_is_a_new_conflict(monkeypatch):
+    _patch_detection(monkeypatch, _found())
+    db = _RecordDb(known=[("Parental leave weeks", ["a-id", "b-id"])])
+
+    assert len(_record(db)) == 1
+
+
+def test_topic_overlap_ignores_case_and_short_words():
+    from src.domain.contradiction_check import same_topic
+
+    assert same_topic("Approval TIME", "approval time")
+    assert same_topic("Approval time", "The approval time")
+    assert not same_topic("Approval time", "Parental leave")
+    assert same_topic("", "")
+
+
 def test_the_same_topic_for_other_articles_is_a_new_conflict(monkeypatch):
     _patch_detection(monkeypatch, _found())
-    db = _RecordDb(known=[["x-id", "y-id"]])
+    db = _RecordDb(known=[("Approval time", ["x-id", "y-id"])])
 
     assert len(_record(db)) == 1
 
@@ -592,3 +615,129 @@ def test_resolving_without_a_winner_still_needs_a_note():
         _resolve(_conflict(), _user("Manager"))
 
     assert caught.value.status_code == 422
+
+
+# --- reopening, and the order of audit and events -------------------------------------
+
+
+def _reopen(item, user):
+    from src.api.routers import knowledge
+
+    return _run(
+        knowledge.reopen_conflict(
+            "11111111-1111-1111-1111-111111111111", user, _ResolveDb(item)
+        )
+    )
+
+
+def _decided(kept="a-id"):
+    item = _conflict()
+    item.status = "resolved"
+    item.kept_article_id = kept
+    item.resolution_note = "chosen"
+    return item
+
+
+def _quiet_side_effects(monkeypatch, order=None):
+    from src.domain import events
+
+    async def fake_publish(name, payload):
+        if order is not None:
+            order.append("event")
+
+    monkeypatch.setattr(events.event_bus, "publish", fake_publish)
+
+    class _Audit:
+        def __init__(self, _db):
+            pass
+
+        async def record(self, *a, **k):
+            if order is not None:
+                order.append(("audit", k.get("commit")))
+
+    monkeypatch.setattr("src.repositories.audit.AuditRepository", _Audit)
+
+
+def test_only_an_admin_or_ceo_can_undo_a_chosen_winner(monkeypatch):
+    from fastapi import HTTPException
+
+    _quiet_side_effects(monkeypatch)
+    item = _decided()
+
+    with pytest.raises(HTTPException) as caught:
+        _reopen(item, _user("Manager"))
+
+    assert caught.value.status_code == 403
+    assert item.status == "resolved" and item.kept_article_id == "a-id"
+
+
+def test_an_admin_reopening_clears_the_choice(monkeypatch):
+    _quiet_side_effects(monkeypatch)
+    item = _decided()
+
+    result = _reopen(item, _user("Admin"))
+
+    assert result["status"] == "open" and item.kept_article_id is None
+    assert item.resolved_at is None and item.resolution_note is None
+
+
+def test_anyone_with_access_can_reopen_a_conflict_closed_with_only_a_note(monkeypatch):
+    _quiet_side_effects(monkeypatch)
+    item = _decided(kept=None)
+
+    assert _reopen(item, _user("Manager"))["status"] == "open"
+
+
+def test_the_audit_row_is_written_before_the_commit_and_events_after(monkeypatch):
+    order: list = []
+    _quiet_side_effects(monkeypatch, order)
+
+    class _OrderedDb(_ResolveDb):
+        async def commit(self):
+            order.append("commit")
+
+    from src.api.routers import knowledge
+
+    _run(
+        knowledge.resolve_conflict(
+            "11111111-1111-1111-1111-111111111111",
+            knowledge.ConflictResolutionRequest(keep_article_id="a-id"),
+            _user("Admin"),
+            _OrderedDb(_conflict()),
+        )
+    )
+
+    assert order == [("audit", False), "commit", "event", "event"]
+
+
+def test_a_failing_cache_invalidation_does_not_fail_a_stored_decision(monkeypatch):
+    from src.domain import events
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(events.event_bus, "publish", broken)
+
+    class _Audit:
+        def __init__(self, _db):
+            pass
+
+        async def record(self, *a, **k):
+            return None
+
+    monkeypatch.setattr("src.repositories.audit.AuditRepository", _Audit)
+    item = _conflict()
+
+    result = _resolve(item, _user("Admin"), keep_article_id="a-id")
+
+    assert result["status"] == "resolved"
+
+
+def test_the_governance_repository_exposes_the_session_conflict_decisions_use():
+    # ai_service reads the session off the repository; a rename must fail here, not
+    # silently switch conflict decisions off.
+    from src.repositories.governance import GovernanceRepository
+
+    sentinel = object()
+
+    assert GovernanceRepository(sentinel).db is sentinel
