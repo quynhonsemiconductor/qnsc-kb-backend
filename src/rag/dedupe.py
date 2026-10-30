@@ -105,7 +105,7 @@ def collapse_duplicates(
         match: int | None = None
         key = ""
         vector: np.ndarray | None = None
-        if eligible:
+        if eligible and article is not None:
             key = passage_key(text)
             candidate = by_key.get(key)
             if candidate is not None and kept[candidate][0].article.id != article.id:
