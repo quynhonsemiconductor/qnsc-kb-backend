@@ -15,6 +15,7 @@ from src.core.rate_limit import corpus_rate_limiter
 from src.models.user import User
 from src.models.ai import AiUsageLog, AiCache, AiFeedback
 from src.models.governance import ConflictRecord
+from src.domain.conflict_decisions import apply_conflict_decisions
 from src.repositories.ai import AIRepository
 from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
@@ -1510,6 +1511,17 @@ class AIService:
             if corpus_context is not None
             else _select_context(retrieved_results)
         )
+        decisions_db = getattr(self.gov_repo, "db", None)
+        if (
+            corpus_context is None
+            and settings.CONFLICT_DECISIONS_ENABLED
+            and decisions_db is not None
+        ):
+            # A reviewer already decided which of two disagreeing articles is right; the
+            # other one must not be quoted again (src/domain/conflict_decisions.py).
+            context_results = await apply_conflict_decisions(
+                decisions_db, user.company_domain, context_results
+            )
         if not context_results:
             return _answer_payload(
                 (

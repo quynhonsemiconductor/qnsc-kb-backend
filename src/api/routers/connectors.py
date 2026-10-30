@@ -39,6 +39,7 @@ from src.models.connectors import (
 )
 from src.repositories.user import UserRepository
 from src.domain.connectors import sync_local_folder
+from src.domain.job_stall import stall_info
 from src.core.config import settings
 from src.domain.rbac import AuthorizationService
 from src.domain.acl_auto import (
@@ -211,6 +212,11 @@ def _job_response(
         "created_at": job.created_at,
         "completed_at": job.completed_at,
         "summary": summary if summary is not None else (job.summary_json or {}),
+        **stall_info(
+            job.status,
+            job.created_at,
+            threshold_minutes=settings.CONNECTOR_JOB_STALL_MINUTES,
+        ),
     }
 
 

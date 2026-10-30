@@ -275,6 +275,15 @@ class ConflictRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The article whose statement the reviewer decided is the right one. Answers drop the
+    # other articles in `article_ids` while this is set (src/domain/conflict_decisions.py);
+    # NULL means "resolved, no single winner" (both are right in different contexts), which
+    # changes nothing at answer time.
+    kept_article_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # "pattern" = labelled-fact regex, "llm" = model comparison of two articles.
+    detection_method: Mapped[str] = mapped_column(
+        String(20), default="pattern", server_default="pattern", nullable=False
+    )
 
 
 class AuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):

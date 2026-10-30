@@ -99,8 +99,11 @@ async def detect_contradictions_for_draft(
         return []
 
     conflicts = _detect_explicit_conflicts(results)
+    llm_found = await _record_llm_conflicts(
+        db, user, draft_body_md, exclude_article_id, results[1:]
+    )
     if not conflicts:
-        return []
+        return llm_found
 
     for conflict in conflicts:
         article_ids = sorted(
@@ -142,4 +145,84 @@ async def detect_contradictions_for_draft(
             fact=str(conflict["fact"])[:255],
             article_ids=article_ids,
         )
-    return conflicts
+    return [*conflicts, *llm_found]
+
+
+async def _record_llm_conflicts(
+    db: AsyncSession,
+    user: User,
+    draft_body_md: str,
+    exclude_article_id: str | None,
+    others: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Record what the model finds, skipping a conflict a reviewer has already seen.
+
+    A pair that was resolved is not opened again on the next republish: dedupe covers
+    resolved records as well as open ones, keyed on topic and the same set of articles.
+    Needs a stored article to point at, so a bare draft is never recorded.
+    """
+    from src.domain.conflict_llm import detect_llm_conflicts
+
+    if not exclude_article_id or not others:
+        return []
+    article = await db.get(Article, exclude_article_id)
+    title = article.title if article else ""
+    found = await detect_llm_conflicts(
+        title,
+        draft_body_md,
+        [
+            {"title": other["title"], "body_md": other["context_text"]}
+            for other in others
+        ],
+    )
+    recorded: list[dict[str, Any]] = []
+    for item in found:
+        other = others[item.other_index - 1]
+        article_ids = sorted({str(exclude_article_id), str(other["article_id"])})
+        if len(article_ids) < 2:
+            continue
+        fact = item.topic[:255]
+        known = (
+            (
+                await db.execute(
+                    select(ConflictRecord.article_ids).where(
+                        ConflictRecord.company_domain == user.company_domain,
+                        ConflictRecord.fact == fact,
+                        ConflictRecord.status.in_(("open", "resolved")),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if any(sorted(str(x) for x in (ids or [])) == article_ids for ids in known):
+            continue
+        evidence = [
+            {
+                "article_id": str(exclude_article_id),
+                "title": title,
+                "value": item.new_statement,
+            },
+            {
+                "article_id": str(other["article_id"]),
+                "title": other["title"],
+                "value": item.other_statement,
+            },
+        ]
+        db.add(
+            ConflictRecord(
+                company_domain=user.company_domain,
+                fact=fact,
+                contradiction_type=item.kind,
+                article_ids=article_ids,
+                evidence=evidence,
+                detection_method="llm",
+            )
+        )
+        recorded.append({"fact": fact, "method": "llm", "entries": evidence})
+        logger.info(
+            "LLM contradiction check recorded a conflict",
+            fact=fact,
+            article_ids=article_ids,
+        )
+    return recorded

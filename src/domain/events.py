@@ -68,6 +68,9 @@ class EventBus:
             "ArticleUpdated",
             "PermissionChanged",
             "ArticleDeleted",
+            # A reviewer's pick of the right article changes which passages an answer may
+            # quote, so answers cached from the articles involved are stale.
+            "ConflictResolved",
         }:
             article_id = payload.get("article_id")
             # No article id, no invalidation. The fallback here used to be a bare

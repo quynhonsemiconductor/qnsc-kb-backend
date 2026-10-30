@@ -604,6 +604,7 @@ SAMPLE = {
     "version": 1,
     "title": "T",
     "body_md": "B",
+    "lesson": "L",
     "request_text": "please fix",
     "log_id": ARTICLE_ID,
     "rating": 1,

@@ -113,11 +113,19 @@ class AiFeedback(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Integer, nullable=False
     )  # e.g., 1 for thumbs up, -1 for thumbs down
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set when a reviewer has looked at a thumbs-down and decided what to do about it, so
+    # the review queue (GET /ai/feedback/review) shows only what is still unread.
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     usage_log: Mapped[AiUsageLog] = relationship(
         "AiUsageLog", back_populates="feedback"
     )
-    user: Mapped["User | None"] = relationship("User")
+    # Two columns point at users (the rater and the reviewer); the relationship is the rater.
+    user: Mapped["User | None"] = relationship("User", foreign_keys=[user_id])
 
 
 class PromptVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
