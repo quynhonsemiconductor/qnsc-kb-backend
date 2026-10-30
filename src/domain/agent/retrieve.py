@@ -20,6 +20,7 @@ import structlog
 from src.core.config import settings
 from src.domain.agent.core import Budget, Tracer, parse_json_object
 from src.domain.agent.plan import AgentPlan
+from src.domain.temporal import apply_time_focus, parse_as_of
 from src.domain.llm_client import complete
 from src.models.user import User
 from src.rag.prompt_fencing import fence_untrusted
@@ -172,6 +173,12 @@ async def agentic_retrieve(
                 await run(group, query, use_filters=False)
 
     results = merge_results([group.results for group in groups], limit)
+    if plan.as_of and settings.TEMPORAL_RETRIEVAL_ENABLED:
+        results = await apply_time_focus(
+            getattr(getattr(search, "chunk_repo", None), "db", None),
+            results,
+            parse_as_of(plan.as_of),
+        )
     sufficient = bool(results) and all(group.covered for group in groups)
     coverage = [
         {

@@ -41,6 +41,18 @@ class FeatureFlagRepository:
         await self.db.refresh(flag)
         return flag
 
+    async def is_opted_in(self, key: str, user: User) -> bool:
+        """For a feature that is OFF until someone switches it on.
+
+        `is_enabled` treats a flag nobody created as on, which is right for a feature that
+        ships on. A feature that must stay off by default needs the opposite: no flag, no
+        feature; and an existing flag still follows its role, department and rollout rules.
+        """
+        flag = await self.get(key)
+        if flag is None or not flag.enabled:
+            return False
+        return await self.is_enabled(key, user)
+
     async def is_enabled(self, key: str, user: User) -> bool:
         flag = await self.get(key)
         if flag is None:

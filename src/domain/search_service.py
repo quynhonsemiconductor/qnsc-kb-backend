@@ -361,6 +361,15 @@ class SearchService:
         pool_limit = (
             settings.CROSS_ENCODER_CANDIDATE_POOL if cross_encoder_enabled else limit
         )
+        # The entity-graph leg is off until the "rag.graph_retrieval" flag is created and
+        # switched on (Admin > Feature controls), so it can be tried for some people, then
+        # more, without a deploy. Passed only when on: nothing else about a search changes.
+        graph_kwargs: dict[str, bool] = (
+            {"use_graph": True}
+            if self.feature_flags
+            and await self.feature_flags.is_opted_in("rag.graph_retrieval", user)
+            else {}
+        )
 
         # 2. Query hybrid search -- once per comparison subject / generated sub-query
         # when the query was expanded above, run concurrently and merged and
@@ -380,6 +389,7 @@ class SearchService:
                     user=user,
                     limit=pool_limit,
                     filters=effective_filters,
+                    **graph_kwargs,
                 )
 
             # Concurrent, not sequential: each subject's embed+search is independent of
@@ -405,6 +415,7 @@ class SearchService:
                 user=user,
                 limit=pool_limit,
                 filters=effective_filters,
+                **graph_kwargs,
             )
 
         # Scored here, and again below only if an adaptive follow-up round (also part of
@@ -506,6 +517,7 @@ class SearchService:
                     user=user,
                     limit=pool_limit,
                     filters=effective_filters,
+                    **graph_kwargs,
                 )
                 merged = _merge_candidates(
                     candidates, followup_candidates, seen_chunk_ids
