@@ -69,6 +69,8 @@ from src.models.ops import NotificationQueue
 from src.repositories.governance import GovernanceRepository
 from src.repositories.feature_flags import FeatureFlagRepository
 from src.core.config import settings
+from src.domain.chunk_quality import build_chunk_view
+from src.models.chunk import ArticleChunk, ParentChunk
 from src.repositories.audit import AuditRepository
 from src.domain.similarity import find_similar_documents, classify_similarity
 from src.domain.content_restructure import restructure_document
@@ -2061,6 +2063,42 @@ async def get_related_articles(
         current_user, id
     )
     return await article_repo.list_related(current_user, article, limit)
+
+
+@router.get("/{id}/chunks")
+async def get_article_chunks(
+    id: uuid.UUID,
+    current_user: User = Depends(require_permission("article.edit")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """How this article was cut into passages, with the cuts that look wrong flagged."""
+    article = await ArticleService(
+        ArticleRepository(db), UserRepository(db)
+    ).get_article(current_user, id)
+    parents = (
+        (
+            await db.execute(
+                select(ParentChunk).where(ParentChunk.article_id == article.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    children = (
+        (
+            await db.execute(
+                select(ArticleChunk).where(ArticleChunk.article_id == article.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return build_chunk_view(
+        list(parents),
+        list(children),
+        settings.EMBEDDING_VERSION,
+        settings.CHUNKING_VERSION,
+    )
 
 
 @router.get("/{id}", response_model=ArticleResponse)

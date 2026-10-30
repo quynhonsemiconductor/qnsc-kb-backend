@@ -1559,7 +1559,13 @@ class GovernanceService:
         # every subsequent edit of an already-processed article would spend tokens on a
         # result that mostly does not change, for identity fields (a document number, a
         # signer) that almost never do.
-        if published.structured_metadata is None:
+        from src.domain.background_gate import should_skip_background_step
+
+        if published.structured_metadata is None and not (
+            await should_skip_background_step(
+                db, user, str(published.id), "structured_metadata"
+            )
+        ):
             try:
                 from src.domain.structured_metadata import extract_structured_metadata
 
@@ -1584,6 +1590,10 @@ class GovernanceService:
             from src.domain.entity_extraction import extract_entities_and_relationships
             from src.domain.graph_service import apply_extraction
 
+            if await should_skip_background_step(
+                db, user, str(published.id), "entity_extraction"
+            ):
+                return published
             extraction = await extract_entities_and_relationships(
                 published.title, published.body_md
             )

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 import structlog
@@ -275,6 +276,8 @@ class AgentPlan:
     departments: list[str] = field(default_factory=list)
     wants_chart: bool = False
     wants_figure: bool = False
+    #: The date the question is about ("in March 2025"), when it names one; else None.
+    as_of: str | None = None
     needs_clarification: bool = False
     clarification_question: str = ""
     clarification_options: list[str] = field(default_factory=list)
@@ -299,6 +302,7 @@ class AgentPlan:
             "sub_queries": self.sub_queries,
             "doc_types": self.doc_types,
             "departments": self.departments,
+            "as_of": self.as_of,
             "summary": self.summary,
         }
 
@@ -335,6 +339,7 @@ Reply with ONE JSON object and nothing else, with exactly these fields:
  "departments": zero or more of the department names given below; include one whenever the question names it or refers to it ("phòng ban X", "department X", "của phòng X"), empty if unsure,
  "wants_chart": true ONLY if the user asks for a chart/graph/trend or clearly wants numbers shown visually,
  "wants_figure": true ONLY if the user asks about a specific part, stage or region of a picture, diagram or chart,
+ "as_of": "YYYY-MM-DD" ONLY when the question asks what was true or in force at a specific time ("in March 2025", "as of 1 January 2024", "last year", "when it was introduced"); today is %(today)s, so resolve relative times from it; use the first day of the month or year when only that is given; null otherwise,
  "needs_clarification": true ONLY if the question cannot be searched at all without one missing detail,
  "clarification_question": the one question to ask the user (else ""),
  "clarification_options": up to 4 short choices for it (else []),
@@ -352,6 +357,14 @@ def _clean_list(values: Any, allowed: dict[str, str], limit: int) -> list[str]:
         if len(cleaned) >= limit:
             break
     return cleaned
+
+
+def _clean_as_of(value: Any) -> str | None:
+    """ISO date text only when it is a plausible date; the model's other answers are dropped."""
+    from src.domain.temporal import parse_as_of
+
+    parsed = parse_as_of(value)
+    return parsed.isoformat() if parsed else None
 
 
 def sanitize_plan(
@@ -385,6 +398,7 @@ def sanitize_plan(
         ),
         wants_chart=bool(raw.get("wants_chart")),
         wants_figure=bool(raw.get("wants_figure")),
+        as_of=_clean_as_of(raw.get("as_of")),
         needs_clarification=bool(raw.get("needs_clarification"))
         and bool(clarification),
         clarification_question=clarification,
@@ -406,6 +420,7 @@ async def build_plan(
     system = _SYSTEM % {
         "max_sub": max(1, settings.AGENT_MAX_SUBQUERIES),
         "types": " | ".join(DOCUMENT_TYPES),
+        "today": date.today().isoformat(),
     }
     user_message = (
         f"Departments you may name: {', '.join(departments) if departments else '(none)'}\n"

@@ -13,7 +13,17 @@ import pytest
 from fastapi import FastAPI, Request
 
 from src.api.routers import access_tokens as access_tokens_router
-from src.api.routers import ai, articles, auth, graph, mcp, mcp_config, meta, search
+from src.api.routers import (
+    ai,
+    articles,
+    auth,
+    graph,
+    knowledge,
+    mcp,
+    mcp_config,
+    meta,
+    search,
+)
 from src.core.config import settings
 from src.domain import access_tokens, mcp_tools
 from src.domain.access_tokens import TokenPrincipal
@@ -595,6 +605,7 @@ ROUTERS = {
     "/meta": meta.router,
     "/graph": graph.router,
     "/mcp-config": mcp_config.router,
+    "/knowledge": knowledge.router,
 }
 SAMPLE = {
     "query": "q",
@@ -604,6 +615,7 @@ SAMPLE = {
     "version": 1,
     "title": "T",
     "body_md": "B",
+    "lesson": "L",
     "request_text": "please fix",
     "log_id": ARTICLE_ID,
     "rating": 1,

@@ -320,6 +320,33 @@ def _create_article(args: dict[str, Any]) -> Call:
     )
 
 
+LESSON_TAG = "session-lesson"
+
+
+def _record_lesson(args: dict[str, Any]) -> Call:
+    """A lesson learned in an AI session.
+
+    The server compares it with what is stored and either submits it as a normal article
+    awaiting review, or says which existing article to update instead, or that it is already
+    known (src/domain/lessons.py). The body shape, the `session-lesson` tag and the draft
+    review all happen there.
+    """
+    return Call(
+        "POST",
+        "/knowledge/lessons",
+        body=_drop_none(
+            {
+                "title": _text(args, "title", required=True, max_len=255),
+                "lesson": _text(args, "lesson", required=True, max_len=20_000),
+                "context": _text(args, "context", max_len=20_000),
+                "dept": _text(args, "dept", max_len=100),
+                "language": _text(args, "language", max_len=20) or "vi",
+                "tags": _tags(args),
+            }
+        ),
+    )
+
+
 def _update_article(args: dict[str, Any]) -> Call:
     body = _drop_none(
         {
@@ -589,6 +616,34 @@ TOOLS: tuple[Tool, ...] = (
         },
         ("title", "body_md"),
         _create_article,
+        write=True,
+    ),
+    Tool(
+        "record_lesson",
+        "Record a lesson learned in this session",
+        "Save something worth keeping from this session -- a decision and its reason, a fix "
+        "that worked, a rule you were told -- so the next person's AI can find it. Write the "
+        "lesson so it makes sense without this conversation. The server first checks what is "
+        "already stored: the result says decision 'add' (submitted for review like any "
+        "article, tagged 'session-lesson'), 'update' (an existing article covers the subject; "
+        "call update_article with the article_id returned) or 'skip' (already known, nothing "
+        "was saved). Requires a token with write scope.",
+        {
+            "title": {"type": "string", "maxLength": 255},
+            "lesson": {
+                "type": "string",
+                "description": "What was learned, in a few sentences, standalone",
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional: where it applies and why it holds",
+            },
+            "dept": {"type": "string"},
+            "language": {"type": "string", "description": "vi or en"},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 19},
+        },
+        ("title", "lesson"),
+        _record_lesson,
         write=True,
     ),
     Tool(

@@ -17,6 +17,7 @@ from typing import Any
 import structlog
 
 from src.core.config import settings
+from src.domain.agent.depth import llm_calls
 from src.domain.agent.core import Budget, EventSink, Tracer
 from src.domain.agent.plan import (
     AgentPlan,
@@ -68,7 +69,7 @@ class AgentRun:
         ):
             return None
         tracer = Tracer(on_event)
-        budget = Budget(settings.AGENT_MAX_LLM_CALLS)
+        budget = Budget(llm_calls(settings.AGENT_MAX_LLM_CALLS))
         try:
             departments = await allowed_department_names(db, user)
         except Exception as exc:  # noqa: BLE001 - the names only narrow the plan

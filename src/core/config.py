@@ -642,6 +642,19 @@ class Settings(BaseSettings):
     RAG_DEDUPE_SIMILARITY: float = 0.97
     # Shorter passages (headings, one-line rows) are never merged; they repeat by coincidence.
     RAG_DEDUPE_MIN_CHARS: int = 60
+    # An answer drops the articles a reviewer decided are superseded in a recorded conflict
+    # (src/domain/conflict_decisions.py). Only ever acts on an explicit human decision.
+    # A question about a specific date puts the articles in force then first
+    # (src/domain/temporal.py). Reorders only; nothing is dropped.
+    TEMPORAL_RETRIEVAL_ENABLED: bool = True
+    CONFLICT_DECISIONS_ENABLED: bool = True
+    # After a publish, ask the model whether the article contradicts the most similar
+    # published ones (src/domain/conflict_llm.py), on top of the labelled-fact pattern check.
+    CONFLICT_LLM_DETECTION_ENABLED: bool = True
+    CONFLICT_LLM_TIMEOUT_SECONDS: float = 25.0
+    # A connector job still "queued" after this long has nothing consuming it; the jobs list
+    # says so instead of showing an endless wait.
+    CONNECTOR_JOB_STALL_MINUTES: int = 15
     RAG_MAX_CONTEXT_PARENTS: int = 40
     RAG_CONTEXT_MAX_CHARS: int = 70000
     RAG_CONTEXT_MAX_TOKENS: int = 17500
@@ -653,7 +666,7 @@ class Settings(BaseSettings):
     # served for six hours as if it came from the new one. Bumped for the
     # e5-large-instruct encoder swap (see EMBEDDING_MODEL) -- a cached answer keyed to
     # v4's e5-small-derived retrieval must not be served once the vector space changes.
-    RETRIEVAL_VERSION: str = "v7-dedupe"
+    RETRIEVAL_VERSION: str = "v8-conflict-temporal"
     RERANKER_VERSION: str = "v1.2-definition-aware"
     RAG_ENABLE_EXTENDED_SECTION: bool = True
     RAG_CACHE_EXTENDED_SECTION: bool = False

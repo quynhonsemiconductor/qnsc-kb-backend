@@ -1,9 +1,11 @@
 """Knowledge surfaces backed by the live article and governance models."""
 
 import json
+import uuid
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Annotated, Any, Literal
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
@@ -23,6 +25,7 @@ from src.domain.rbac import AuthorizationService
 from src.core.config import settings
 
 router = APIRouter()
+logger = structlog.get_logger()
 
 
 class ContentRequest(BaseModel):
@@ -36,7 +39,10 @@ class RolePreviewRequest(BaseModel):
 
 
 class ConflictResolutionRequest(BaseModel):
-    note: str = Field(min_length=1, max_length=2000)
+    # Required unless the reviewer names the article that is right: then the choice itself
+    # is the explanation.
+    note: str = Field(default="", max_length=2000)
+    keep_article_id: str | None = Field(default=None, max_length=64)
 
 
 def _browse_filters(
@@ -485,36 +491,79 @@ async def owner_dashboard(
 
 @router.get("/conflicts")
 async def list_conflicts(
+    status_filter: Literal["open", "resolved", "all"] = Query(
+        default="open", alias="status"
+    ),
     current_user: User = Depends(require_permission("governance.read")),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    stmt = select(ConflictRecord).where(
+        ConflictRecord.company_domain == current_user.company_domain
+    )
+    if status_filter != "all":
+        stmt = stmt.where(ConflictRecord.status == status_filter)
     rows = (
-        (
-            await db.execute(
-                select(ConflictRecord)
-                .where(
-                    ConflictRecord.company_domain == current_user.company_domain,
-                    ConflictRecord.status == "open",
-                )
-                .order_by(ConflictRecord.created_at.desc())
-                .limit(200)
-            )
-        )
+        (await db.execute(stmt.order_by(ConflictRecord.created_at.desc()).limit(200)))
         .scalars()
         .all()
     )
+    wanted = {str(a) for item in rows for a in (item.article_ids or [])}
+    articles: dict[str, Article] = {}
+    if wanted:
+        found = (
+            (
+                await db.execute(
+                    select(Article).where(
+                        Article.company_domain == current_user.company_domain,
+                        Article.id.in_([uuid.UUID(a) for a in wanted if _is_uuid(a)]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        articles = {str(a.id): a for a in found}
     return [
         {
             "id": str(item.id),
             "fact": item.fact,
             "contradiction_type": item.contradiction_type,
+            "detection_method": item.detection_method,
             "article_ids": item.article_ids,
+            "articles": [
+                _conflict_article(articles.get(str(a)), str(a))
+                for a in (item.article_ids or [])
+            ],
             "evidence": item.evidence or [],
             "status": item.status,
+            "kept_article_id": item.kept_article_id,
+            "resolution_note": item.resolution_note,
+            "resolved_at": item.resolved_at,
             "created_at": item.created_at,
         }
         for item in rows
     ]
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
+
+
+def _conflict_article(article: Article | None, article_id: str) -> dict[str, Any]:
+    if article is None:
+        return {"id": article_id, "title": None, "dept": None, "issue_date": None}
+    meta = article.structured_metadata or {}
+    return {
+        "id": article_id,
+        "title": article.title,
+        "dept": article.dept,
+        "issue_date": meta.get("issue_date"),
+        "status": article.status,
+    }
 
 
 @router.post("/conflicts/{conflict_id}/resolve")
@@ -524,24 +573,185 @@ async def resolve_conflict(
     current_user: User = Depends(require_permission("governance.read")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    import uuid
+    item = await _open_conflict(db, current_user, conflict_id, "open")
+    keep = request.keep_article_id
+    if keep:
+        if keep not in {str(a) for a in (item.article_ids or [])}:
+            raise HTTPException(
+                status_code=422,
+                detail="keep_article_id must be one of the conflicting articles",
+            )
+        # Choosing a winner changes what every user's answer may quote, so it is not
+        # something any reader of the governance pages may do.
+        from src.domain.governance import GovernanceService
 
+        if not GovernanceService._may_self_approve(None, current_user):  # type: ignore[arg-type]
+            raise HTTPException(
+                status_code=403,
+                detail="Only an Admin or CEO can decide which article is right",
+            )
+    elif not request.note.strip():
+        raise HTTPException(status_code=422, detail="A note is required")
+    item.status = "resolved"
+    item.resolved_by = current_user.id
+    item.resolved_at = datetime.utcnow()
+    item.resolution_note = request.note.strip() or "Decided which article is right"
+    item.kept_article_id = keep
+    await _audit_decision(item, current_user, db, "conflict_resolve")
+    await db.commit()
+    await _announce_decision(item)
+    return _conflict_state(item)
+
+
+@router.post("/conflicts/{conflict_id}/reopen")
+async def reopen_conflict(
+    conflict_id: str,
+    current_user: User = Depends(require_permission("governance.read")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Undo a resolution: the superseded article is quoted again until it is decided anew."""
+    item = await _open_conflict(db, current_user, conflict_id, "resolved")
+    if item.kept_article_id:
+        # Undoing a chosen winner changes what answers may quote again, the same effect as
+        # choosing one, so it takes the same authority.
+        from src.domain.governance import GovernanceService
+
+        if not GovernanceService._may_self_approve(None, current_user):  # type: ignore[arg-type]
+            raise HTTPException(
+                status_code=403,
+                detail="Only an Admin or CEO can reopen a conflict where an article was chosen",
+            )
+    kept_before = item.kept_article_id
+    item.status = "open"
+    item.resolved_by = None
+    item.resolved_at = None
+    item.resolution_note = None
+    item.kept_article_id = None
+    await _audit_decision(item, current_user, db, "conflict_reopen", kept=kept_before)
+    await db.commit()
+    await _announce_decision(item)
+    return _conflict_state(item)
+
+
+async def _open_conflict(
+    db: AsyncSession, current_user: User, conflict_id: str, status_needed: str
+) -> ConflictRecord:
+    if not _is_uuid(conflict_id):
+        raise HTTPException(status_code=404, detail="Conflict not found")
     item = await db.scalar(
         select(ConflictRecord).where(
             ConflictRecord.id == uuid.UUID(conflict_id),
             ConflictRecord.company_domain == current_user.company_domain,
-            ConflictRecord.status == "open",
+            ConflictRecord.status == status_needed,
         )
     )
     if not item:
         raise HTTPException(status_code=404, detail="Conflict not found")
-    item.status = "resolved"
-    item.resolved_by = current_user.id
-    item.resolved_at = datetime.utcnow()
-    item.resolution_note = request.note.strip()
-    await db.commit()
+    return item
+
+
+def _conflict_state(item: ConflictRecord) -> dict[str, Any]:
     return {
         "id": str(item.id),
         "status": item.status,
+        "kept_article_id": item.kept_article_id,
         "resolution_note": item.resolution_note,
     }
+
+
+async def _audit_decision(
+    item: ConflictRecord,
+    current_user: User,
+    db: AsyncSession,
+    action: str,
+    kept: str | None = None,
+) -> None:
+    """Written in the same transaction as the decision, so one cannot exist without the other."""
+    from src.repositories.audit import AuditRepository
+
+    await AuditRepository(db).record(
+        current_user.id,
+        action,
+        "conflict",
+        str(item.id),
+        detail={"kept_article_id": kept or item.kept_article_id, "fact": item.fact},
+        commit=False,
+    )
+
+
+async def _announce_decision(item: ConflictRecord) -> None:
+    """Drop cached answers built from the articles involved.
+
+    After the commit, and best-effort: the decision is stored either way, and cached
+    answers also expire on their own, so a failure here is logged rather than turned into
+    an error for a change that already happened.
+    """
+    from src.domain.events import event_bus
+
+    for article_id in item.article_ids or []:
+        try:
+            await event_bus.publish("ConflictResolved", {"article_id": str(article_id)})
+        except Exception as exc:
+            logger.warning(
+                "Cache invalidation after a conflict decision failed",
+                article_id=str(article_id),
+                error=str(exc),
+            )
+
+
+class LessonRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    lesson: str = Field(min_length=1, max_length=20_000)
+    context: str | None = Field(default=None, max_length=20_000)
+    dept: str | None = Field(default=None, min_length=1, max_length=100)
+    language: str = Field(default="vi", min_length=2, max_length=20)
+    tags: list[Annotated[str, Field(min_length=1, max_length=50)]] = Field(
+        default_factory=list, max_length=19
+    )
+
+
+@router.post("/lessons")
+async def submit_lesson(
+    request: LessonRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Save a lesson from an AI session unless the knowledge base already has it.
+
+    Compares it with the articles the author may see (src/domain/lessons.py). A new lesson
+    goes through the ordinary draft-and-review path of POST /articles, so reviewers,
+    department policy and the contradiction check all apply; an update or a duplicate saves
+    nothing and says where to look instead.
+    """
+    from src.api.routers.articles import ArticleCreate, create_article
+    from src.domain.lessons import LESSON_TAG, decide_lesson, lesson_body
+
+    body = lesson_body(request.lesson, request.context)
+    decision = await decide_lesson(db, current_user, request.title, body)
+    if decision.action != "add":
+        hint = (
+            f"Call update_article with article_id {decision.article_id} to add this."
+            if decision.action == "update"
+            else "Nothing was saved: the knowledge base already says this."
+        )
+        return {
+            "decision": decision.action,
+            "article_id": decision.article_id,
+            "title": decision.title,
+            "reason": decision.reason,
+            "next": hint,
+        }
+    tags = [t for t in request.tags if t != LESSON_TAG] + [LESSON_TAG]
+    created = await create_article(
+        ArticleCreate(
+            title=request.title,
+            body_md=body,
+            dept=request.dept,
+            language=request.language,
+            tags=tags,
+            visibility="department",
+        ),
+        current_user,
+        db,
+    )
+    return {"decision": "add", "reason": decision.reason, "result": created}

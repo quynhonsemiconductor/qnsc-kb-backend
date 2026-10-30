@@ -19,6 +19,7 @@ without blocking gets the same visibility with none of that risk.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -99,8 +100,11 @@ async def detect_contradictions_for_draft(
         return []
 
     conflicts = _detect_explicit_conflicts(results)
+    llm_found = await _record_llm_conflicts(
+        db, user, draft_body_md, exclude_article_id, results[1:]
+    )
     if not conflicts:
-        return []
+        return llm_found
 
     for conflict in conflicts:
         article_ids = sorted(
@@ -142,4 +146,98 @@ async def detect_contradictions_for_draft(
             fact=str(conflict["fact"])[:255],
             article_ids=article_ids,
         )
-    return conflicts
+    return [*conflicts, *llm_found]
+
+
+def _topic_words(topic: str) -> set[str]:
+    return {word for word in re.findall(r"\w+", topic.casefold()) if len(word) > 2}
+
+
+def same_topic(left: str, right: str, threshold: float = 0.34) -> bool:
+    """Whether two topic phrases are mostly the same words (Jaccard overlap)."""
+    a, b = _topic_words(left), _topic_words(right)
+    if not a or not b:
+        return left.strip().casefold() == right.strip().casefold()
+    return len(a & b) / len(a | b) >= threshold
+
+
+async def _record_llm_conflicts(
+    db: AsyncSession,
+    user: User,
+    draft_body_md: str,
+    exclude_article_id: str | None,
+    others: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Record what the model finds, skipping a conflict a reviewer has already seen.
+
+    A pair that was resolved is not opened again on the next republish: dedupe covers
+    resolved records as well as open ones, keyed on topic and the same set of articles.
+    Needs a stored article to point at, so a bare draft is never recorded.
+    """
+    from src.domain.conflict_llm import detect_llm_conflicts
+
+    if not exclude_article_id or not others:
+        return []
+    article = await db.get(Article, exclude_article_id)
+    title = article.title if article else ""
+    found = await detect_llm_conflicts(
+        title,
+        draft_body_md,
+        [
+            {"title": other["title"], "body_md": other["context_text"]}
+            for other in others
+        ],
+    )
+    recorded: list[dict[str, Any]] = []
+    for item in found:
+        other = others[item.other_index - 1]
+        article_ids = sorted({str(exclude_article_id), str(other["article_id"])})
+        if len(article_ids) < 2:
+            continue
+        fact = item.topic[:255]
+        known = (
+            await db.execute(
+                select(ConflictRecord.fact, ConflictRecord.article_ids).where(
+                    ConflictRecord.company_domain == user.company_domain,
+                    ConflictRecord.status.in_(("open", "resolved")),
+                )
+            )
+        ).all()
+        # The model words the topic differently on each run ("Approval time" / "Approval
+        # duration"), so an exact match would reopen a settled conflict on a republish.
+        # The same two articles and a mostly overlapping topic is the same conflict.
+        if any(
+            sorted(str(x) for x in (ids or [])) == article_ids
+            and same_topic(known_fact, fact)
+            for known_fact, ids in known
+        ):
+            continue
+        evidence = [
+            {
+                "article_id": str(exclude_article_id),
+                "title": title,
+                "value": item.new_statement,
+            },
+            {
+                "article_id": str(other["article_id"]),
+                "title": other["title"],
+                "value": item.other_statement,
+            },
+        ]
+        db.add(
+            ConflictRecord(
+                company_domain=user.company_domain,
+                fact=fact,
+                contradiction_type=item.kind,
+                article_ids=article_ids,
+                evidence=evidence,
+                detection_method="llm",
+            )
+        )
+        recorded.append({"fact": fact, "method": "llm", "entries": evidence})
+        logger.info(
+            "LLM contradiction check recorded a conflict",
+            fact=fact,
+            article_ids=article_ids,
+        )
+    return recorded

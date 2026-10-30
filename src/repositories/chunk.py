@@ -244,6 +244,7 @@ class ChunkRepository:
         user: User,
         limit: int = 5,
         filters: dict | None = None,
+        use_graph: bool = False,
     ) -> list[ArticleChunk]:
         """
         Executes a hybrid search:
@@ -526,7 +527,7 @@ class ChunkRepository:
         # goes wrong -- a third leg finding nothing must look identical to a leg that was
         # never asked.
         graph_results: Sequence[ArticleChunk] = []
-        if settings.GRAPH_RETRIEVAL_ENABLED:
+        if settings.GRAPH_RETRIEVAL_ENABLED or use_graph:
             try:
                 graph_results = await self._graph_augmented_candidates(
                     getattr(user, "company_domain", None),

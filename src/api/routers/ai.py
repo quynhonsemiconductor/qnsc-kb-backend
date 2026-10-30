@@ -3,6 +3,8 @@ import json
 import uuid
 from typing import Any, Literal, cast
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -11,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 import structlog
 
-from src.api.deps import SessionLocal, get_current_user, get_db, set_database_context
+from src.api.deps import (
+    SessionLocal,
+    get_current_user,
+    get_db,
+    require_permission,
+    set_database_context,
+)
+from src.domain.agent.depth import current_depth
 from src.domain.ai_service import AIService, normalize_answer_markdown
 from src.domain.evidence_extraction import table_evidence_preview
 from src.domain.page_evidence import attach_page_evidence
@@ -19,6 +28,7 @@ from src.rag.answer_sections import strip_source_metadata
 from src.domain.search_service import SearchService
 from src.domain.rbac import AuthorizationService
 from src.models import User
+from src.models.ai import AiFeedback, AiUsageLog
 from src.models.article import Article
 from src.models.chunk import ArticleChunk, ParentChunk
 from src.repositories.ai import AIRepository
@@ -42,6 +52,8 @@ class AskRequest(BaseModel):
     retry_failed: bool = False
     edit_instruction: str | None = Field(default=None, max_length=4000)
     language: Literal["en", "vi"] = "vi"
+    # How hard to look: "quick" skips follow-up retrieval rounds, "thorough" allows more.
+    depth: Literal["quick", "standard", "thorough"] = "standard"
 
 
 class ConversationCreate(BaseModel):
@@ -515,6 +527,7 @@ async def ask_question(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    current_depth.set(req.depth)
     data = await get_ai_service(db).ask(
         current_user,
         req.question,
@@ -606,6 +619,7 @@ async def ask_question_stream(
     conversation_id = str(conversation.id)
 
     async def event_stream():
+        current_depth.set(req.depth)
         queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
 
         # Streaming responses outlive the endpoint dependency context. Use a
@@ -722,3 +736,87 @@ async def submit_feedback(
         comment=req.comment,
     )
     return {"success": success}
+
+
+class FeedbackReview(BaseModel):
+    note: str = Field(default="", max_length=2_000)
+
+
+def _excerpt(value: str | None, limit: int) -> str:
+    value = (value or "").strip()
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+@router.get("/feedback/review")
+async def list_feedback_for_review(
+    review: Literal["pending", "reviewed", "all"] = "pending",
+    limit: int = 50,
+    current_user: User = Depends(require_permission("governance.read")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Thumbs-down answers a reviewer has not looked at yet.
+
+    Turns a rating that used to be stored and never read into a work queue: each row names
+    the question, the answer and what the person wrote, so the gap can be fixed in the
+    knowledge base or the answer checked. Scoped to the reviewer's own company.
+    """
+    # Inner join on the rater on purpose: that user is the only link from a rating to a
+    # company. A rating whose rater was deleted (user_id set NULL) cannot be attributed to
+    # any tenant, so it is left out rather than shown to every company's reviewers.
+    stmt = (
+        select(AiFeedback, AiUsageLog, User)
+        .join(AiUsageLog, AiUsageLog.id == AiFeedback.ai_usage_log_id)
+        .join(User, User.id == AiFeedback.user_id)
+        .where(
+            AiFeedback.rating == -1, User.company_domain == current_user.company_domain
+        )
+    )
+    if review == "pending":
+        stmt = stmt.where(AiFeedback.reviewed_at.is_(None))
+    elif review == "reviewed":
+        stmt = stmt.where(AiFeedback.reviewed_at.is_not(None))
+    rows = (
+        await db.execute(
+            stmt.order_by(AiFeedback.created_at.desc()).limit(max(1, min(limit, 200)))
+        )
+    ).all()
+    return [
+        {
+            "id": str(feedback.id),
+            "created_at": feedback.created_at,
+            "user": author.name,
+            "question": _excerpt(log.question, 600),
+            "answer": _excerpt(log.answer, 1200),
+            "comment": feedback.comment,
+            "retrieval_version": log.retrieval_version,
+            "reviewed_at": feedback.reviewed_at,
+            "review_note": feedback.review_note,
+        }
+        for feedback, log, author in rows
+    ]
+
+
+@router.post("/feedback/{feedback_id}/review")
+async def mark_feedback_reviewed(
+    feedback_id: uuid.UUID,
+    body: FeedbackReview,
+    current_user: User = Depends(require_permission("governance.read")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    row = (
+        await db.execute(
+            select(AiFeedback)
+            .join(User, User.id == AiFeedback.user_id)
+            .where(
+                AiFeedback.id == feedback_id,
+                User.company_domain == current_user.company_domain,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    row.reviewed_by = current_user.id
+    row.reviewed_at = datetime.utcnow()
+    row.review_note = body.note.strip() or None
+    await db.commit()
+    return {"id": str(row.id), "reviewed_at": row.reviewed_at}
