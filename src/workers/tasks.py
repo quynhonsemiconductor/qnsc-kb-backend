@@ -586,9 +586,47 @@ async def _run_approval_agent_sweep() -> None:
             await approval_agent.run(db, str(domain), dry_run=False)
 
 
+async def _run_department_auto_publish_sweep() -> None:
+    """Publish drafts of departments an Admin has opted out of review.
+
+    See src/domain/department_auto_publish.py: approved as the Admin who turned review off,
+    through the normal approval checks; anything those refuse stays for a person.
+    """
+    from src.domain import department_auto_publish
+    from src.models.user import Department
+
+    async with SessionLocal() as db:
+        await set_database_context(db, None, True)
+        domains = (
+            (
+                await db.execute(
+                    select(Department.company_domain)
+                    .where(
+                        Department.active.is_(True),
+                        Department.review_required.is_(False),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for domain in domains:
+            await department_auto_publish.run(db, str(domain))
+
+
+async def _run_review_sweeps() -> None:
+    # Independent: a failure in one must not skip the other.
+    for sweep in (_run_approval_agent_sweep, _run_department_auto_publish_sweep):
+        try:
+            await sweep()
+        except Exception:  # noqa: BLE001
+            logger.exception("Review sweep failed", sweep=sweep.__name__)
+
+
 @celery_app.task(name="run_approval_agent")
 def run_approval_agent() -> None:
-    sync_run(_run_approval_agent_sweep())
+    sync_run(_run_review_sweeps())
 
 
 @celery_app.task(name="escalate_overdue_drafts")

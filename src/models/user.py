@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     JSON,
 )
+from sqlalchemy import true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -47,6 +48,19 @@ class Department(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: Whether a draft for this department waits for a human decision. False publishes it
+    #: without one (src/domain/department_auto_publish.py). True is the default and the only
+    #: behaviour before this column existed, so nothing changes until an admin opts a
+    #: department out.
+    review_required: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    #: The Admin/CEO who turned review off. Auto-published drafts are approved AS this person,
+    #: through the same checks a manual approval goes through, so the decision has a name
+    #: behind it; if they lose the role or are deactivated, publishing stops and drafts wait.
+    auto_publish_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     managers: Mapped[list["DepartmentManager"]] = relationship(
         "DepartmentManager",
         back_populates="department",
