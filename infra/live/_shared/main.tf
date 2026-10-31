@@ -54,58 +54,24 @@ data "terraform_remote_state" "platform" {
   }
 }
 
-# ── ECR repositories ──────────────────────────────────────────────────────────
-# Three, matching the three targets of the repo-root Dockerfile: api, worker,
-# migrator. `beat` is deliberately absent — Celery beat runs as a second container
-# off the WORKER image with its own command, so it needs no image of its own.
-module "ecr" {
-  # ecr-v2.1.0 (task 0.7, §13). This bump is also a CORRECTNESS fix, not only a policy
-  # change: `release_retention_days` below did not exist as a variable until v2.1.0, so
-  # this call pinned to v2.0.0 was passing an UNKNOWN variable and would have failed
-  # `tofu validate`/plan. The tag exists (release-please cut it), so the bump resolves today.
-  source = "git::https://github.com/quynhonsemiconductor/tf-modules.git//modules/ecr?ref=ecr-v2.2.0"
-
-  # keep_build_count is lower than the module default (10 since ecr-v2.2.0), for a narrower reason
-  # than "the images are big".
-  #
-  # These images ARE big — the api and worker carry ONNX Runtime, paddle and the baked bge-m3
-  # weights — but ECR bills unique LAYERS, and the `deps` and `model-cache` stages are
-  # shared across all three images and unchanged between builds unless poetry.lock or the
-  # model changes. The per-build delta is the application COPY layer, which is small. So
-  # steady-state storage is roughly one ~4-5 GB layer set plus deltas, and multiplying
-  # image size by keep-count overstates it by an order of magnitude.
-  #
-  # What these counts actually insure against is the case where that assumption breaks: a
-  # dependency bump invalidates the shared layers, and every build after it carries its
-  # own multi-GB copy until the old ones expire. 10 and 5 bound that without losing
-  # anything anyone reads — a build older than the last ten is not something we roll back
-  # to, we rebuild. (The one period that assumption DID break was the ONNX migration
-  # itself: three distinct layer generations in two days — torch-era, transition with
-  # both runtimes, onnx-only — and the torch-era tags age out of these counts on their
-  # own within a few more builds.)
-  #
-  # Run the estate preview (infra/scripts/ecr_lifecycle_preview.py — task 0.7, a dry run)
-  # before changing these; it is the only way to see what a policy will delete. Unlike the
-  # module default (`keep_release_count` was 10, a COUNT), the release rule is now a TIME
-  # window: a count is a duration only if the promotion rate is known, and it shortens
-  # silently as promotion gets more frequent. 180 days is generous because ECR storage is
-  # not where the money is.
-  release_retention_days = 180
-  keep_build_count       = 5
-
-  repository_names = ["qnsc-kb-api", "qnsc-kb-worker", "qnsc-kb-migrator"]
-
-  # IMMUTABLE (task 0.8, §11): a rewritable tag underneath a running workload is not
-  # pinned, and :latest already put a develop build into prod (../prod/main.tf:104).
-  # Flipped only after the CI `:latest` push was removed
-  # (ci/.github/workflows/backend-deploy.yml — 0.8 step a); IMMUTABLE rejects a second push
-  # of an existing tag, so flipping first breaks the pipeline. qnsc-kb deploys with
-  # `cache_backend: none`, so no `:buildcache` overwrite depends on mutability either.
-  image_tag_mutability = "IMMUTABLE"
-  kms_key_arn          = data.terraform_remote_state.platform.outputs.kms_key_arn
-  tags                 = { Layer = "shared" }
-}
-
+// ============================================================================
+// AWS EXIT (E1, 2026-10-31): the shared stack is being destroyed — IN TWO CUTS.
+//
+// THIS PR destroys only the ECR repositories (image fallback lives in GHCR).
+// force_delete is NOT set here, so THE OWNER EMPTIES THE REPOS FIRST (runbook
+// step 4) — otherwise the apply dies mid-run on RepositoryNotEmpty.
+//
+// DELIBERATELY KEPT: the GitHub OIDC provider, the deploy/push/infra CI roles
+// and the RDS wake-guard policy. This apply assumes the infra plan/apply
+// roles — destroying them in the same run is self-revocation with no retry.
+// The roles are destroyed LAST, owner-side with admin creds (runbook step 6),
+// after the kb prod state (never applied — verified against the state bucket)
+// and the develop state are confirmed empty.
+//
+// MERGE ORDER: strictly AFTER the develop-stack destroy PR (#292). Draft until
+// the owner's go; merge needs `allow-dns-destroy` (the plan-guard protects the
+// module.iam_oidc roles, so the default guard would refuse this plan).
+// ============================================================================
 # ── GitHub OIDC ───────────────────────────────────────────────────────────────
 # Owns every qnsc-kb AWS role: per-environment deploy, ECR push, infra plan/apply.
 # Keyless — no access keys exist for CI to leak.
