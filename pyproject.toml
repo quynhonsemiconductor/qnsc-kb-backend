@@ -42,7 +42,16 @@ bcrypt = "5.0.0"
 numpy = "^2.0.0"
 # Same reasoning as pyjwt above: ^6.15.0 already admitted the fix, the lock pinned
 # 6.16.1, which carries 16 advisories. 6.19.0 is the highest named fix.
-pypdf = "^6.19.0"
+#
+# RAISED 6.19.0 -> 6.21.4 for seven advisories published against 6.21.2 — GHSA-42gh-23hr-vphw
+# (page-label runtime), GHSA-4vqv-7265-gm2w (strict-mode exception memory), GHSA-62m5-6wh8-28x7
+# (encrypted-PDF runtime/memory) and GHSA-x3rh-gjgm-fmqc (cross-reference streams) fixed in
+# 6.21.3; GHSA-5849-834g-hvw5 (EOF in a standard xref table), GHSA-cggf-277g-3q54 (page tree)
+# and GHSA-mfr5-77xh-9j7h (dictionary cloning) fixed in 6.21.4. The range already admitted
+# 6.21.4 — the lock was simply resolved before they published — so the floor moves with it and
+# a fresh resolution cannot go backwards. Called only for uploaded PDFs (PdfReader, read-only),
+# which is exactly the attack surface all seven describe.
+pypdf = "^6.21.4"
 python-docx = "^1.1.2"
 openpyxl = "^3.1.5"
 python-pptx = "^1.0.2"
