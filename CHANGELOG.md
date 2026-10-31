@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.1.2](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.1...v0.1.2) (2026-10-31)
+
+
+### ✨ Features
+
+* **ai:** agentic answering - plan, per-sub-question search, charts, marked figures, number checks ([#284](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/284)) ([aa2bbe4](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/aa2bbe4ea6f88f379ebffb6ba519f571bd916cea))
+* **ai:** answer questions about the collection itself by counting, not retrieving ([#304](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/304)) ([daf71cb](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/daf71cb54d57856134400784743dfc76fefaba50))
+* **ai:** answer questions that span many documents from their digests ([#306](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/306)) ([ee85088](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/ee850880112ee43c32448d0f7b52e41cb4905a29))
+* **ai:** attach the figures and tables on cited pages to the answer ([#300](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/300)) ([adc71fd](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/adc71fd4b63b5e8b83a9dcb4244fae5c8f812da0))
+* **api:** report the running build at GET /api/v1/system/version ([#309](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/309)) ([1383caf](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/1383caf740ff3bd855df9fadb5cdcf562ba378a3))
+* **articles:** change only the occurrence the reader selected ([#285](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/285)) ([fb52f1b](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/fb52f1b085f8a34828c38386730fbfec63dad401))
+* **auth:** self-service account API — profile name, signed-in devices, activity ([#299](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/299)) ([e69a55c](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/e69a55c53240e599edfb1abfd57f5403d9850986))
+* **ci:** publish images to ghcr on merge (on-prem delivery path) ([#287](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/287)) ([626781e](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/626781e88eb1a42b3bda5b06462cdbbc99936cdd))
+* conflict decisions, model-found conflicts, stalled-job hints, feedback review queue ([#327](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/327)) ([8e72c8a](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/8e72c8a0fa7c24c59e1d843bcd980e7d068fc7fd))
+* **connectors:** resolve provider ACL principals automatically ([#286](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/286)) ([0c8ce54](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/0c8ce549c1fb74d47dd42c0268831d2815395aea))
+* **digest:** keep a short digest of each document, made once per version of its text ([#305](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/305)) ([12397be](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/12397beb53c02bed6aaefc6d548c8753663a88f7))
+* **email:** read the Graph credential from the AZURE_CLIENT_CERTIFICATE_PATH file ([#262](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/262)) ([94c59f4](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/94c59f4bd6af19cfd6c38ce9a70ab0f9ed782570))
+* **email:** refuse unreplaced Graph placeholders at worker start ([#229](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/229)) ([ae1940b](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/ae1940b34303b8ba78392c1390a350d265cf6e57))
+* **governance:** let a department publish drafts without review ([#320](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/320)) ([2fd9343](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/2fd934328fe73ec37b5d05196148db14ddc319f4))
+* **governance:** put the rejection reason in the author's notification ([#312](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/312)) ([59fde43](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/59fde43bdebc2dabf18d7b4666d667b585923e5e))
+* **mcp:** add an MCP server with personal access tokens ([#310](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/310)) ([af317ee](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/af317ee481840a081663caf6fb9c232a60146b64))
+* **mcp:** trim search and answer results, hide graph tools when off, add guidance ([#311](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/311)) ([f05fca8](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/f05fca8cbb28e5814fc878ecc89a32b362203870))
+* **mcp:** versioned team configuration clients can sync into CLAUDE.md ([#325](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/325)) ([9ba68ab](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/9ba68abc8e554f3afdb3aa7ec8163d05d02a9cff))
+* **rag:** collapse the same passage found in several documents ([#317](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/317)) ([91c9f9d](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/91c9f9dee83ab72742293bcaebd07e37da149173))
+
+
+### 🐛 Bug Fixes
+
+* **agent:** let the planner classify short scoped questions ([#314](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/314)) ([9b35078](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/9b35078eb1000c07b2d50517a3838b35bf9b9203))
+* **ai:** stream answers from every OpenAI-compatible provider; flag refusals and name the nearest documents ([#298](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/298)) ([7d550d0](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/7d550d019f3086370147c01e07cb49e640f764af))
+* **ci:** sweep callers to ci v1.24.3; drop the removed AWS_ACCOUNT_ID input ([#307](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/307)) ([34494a8](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/34494a88524cc665691918c66fec1a8a41050146))
+* **departments:** a deleted article no longer blocks deleting its department ([#323](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/323)) ([e958223](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/e95822364f93ab1b74414e482624da96586d7d13))
+* **departments:** name the blocking articles and stop gaps blocking deletion ([#322](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/322)) ([2c4ff7f](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/2c4ff7f2df3da746de5519ffc284513453d9e0c8))
+* **departments:** only undecided drafts block deleting a department ([#315](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/315)) ([88a3ce8](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/88a3ce853e44f26495dc2ec3c893e82b0db99954))
+* **departments:** shared article links no longer block deleting a department ([#321](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/321)) ([5ad8afd](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/5ad8afd071bb6ea97b01f35de2f10841d0e2bd25))
+* **deps:** black 26.10.1 and the opentelemetry family at 1.45.1 for the security scan ([#281](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/281)) ([8d86242](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/8d8624288f40aab048356ff2550ac789180bf824))
+* **deps:** bump filelock and setuptools to clear osv findings ([#290](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/290)) ([481ad35](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/481ad3591828c84c9aa3b641feb21fb8f430d8f0))
+* **deps:** raise pypdf to 6.21.4 past seven advisories ([#328](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/328)) ([07e36d3](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/07e36d38dbdefa98de3dbc36f59d786a48937df1))
+* **deps:** update dnspython to 2.9.0 for GHSA-45c3-73f7-pv4m ([#313](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/313)) ([b752b15](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/b752b1545b7069e6b930914dbcd5402c0a2ceef2))
+* **evidence:** a page-sized scan image is a scan, not a figure ([#301](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/301)) ([c8aa444](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/c8aa444a12c8c53bf1ae5cae90ca2a1863b183e3))
+* **evidence:** a text page with a white backdrop or a rule is not a picture ([#308](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/308)) ([1296c30](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/1296c306cc06d47db14e1a775d92cd944908badf))
+* **llm:** do not send `temperature` to Claude models ([#283](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/283)) ([5f078c3](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/5f078c34a1be4f3a4cc65cfc611b38945b83c1ff))
+
 ## [0.1.1](https://github.com/QNSC-VN/qnsc-kb-backend/compare/v0.1.0...v0.1.1) (2026-08-25)
 
 
