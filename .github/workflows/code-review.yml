@@ -31,11 +31,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@5295d2dc6c0be1c6d9175b626e96705a0893bc0d # v1.28.0
+    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@810f707ebf426b13abedd4375b996d7e3348cb9b # v1.30.0
     with:
       product: qnsc-kb-backend
       profiles: python,dockerfile,workflows
-      rules_ref: v1.28.0
+      rules_ref: v1.30.0
     secrets:
-      llm_token: ${{ secrets.Z_AI_CODING_API_KEY }}
+      llm_token: ${{ vars.CODE_REVIEW_PROVIDER == 'claude' && secrets.ANTHROPIC_CODE_REVIEW_API_KEY || secrets.Z_AI_CODING_API_KEY }}
       app_private_key: ${{ secrets.CODE_REVIEW_APP_KEY }}
