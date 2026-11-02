@@ -4,6 +4,7 @@ import structlog
 import uuid
 import re
 import hashlib
+import unicodedata
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -21,6 +22,7 @@ from src.repositories.chunk import ChunkRepository
 from src.repositories.governance import GovernanceRepository
 from src.domain.search_service import SearchService, embed_query
 from src.domain.agent import AgentRun, is_chart_question
+from src.domain.edit_intent import is_edit_request, may_be_edit_request
 from src.domain.agent.corpus import (
     CORPUS_PROMPT_ADDENDUM,
     CorpusContext,
@@ -236,6 +238,24 @@ _ANALYTICS_OPERATIONS: tuple[tuple[AnalyticsOperation, tuple[str, ...]], ...] = 
 )
 
 
+def _whole_word_pattern(markers: tuple[str, ...]) -> re.Pattern[str]:
+    """Markers as whole words or phrases. `marker in text` matched inside other words:
+    "sum" in "summary", "mean" in "meaning", "count" in "account" and "country"."""
+    return re.compile(
+        r"(?<!\w)(?:" + "|".join(re.escape(marker) for marker in markers) + r")(?!\w)"
+    )
+
+
+_ANALYTICS_PATTERNS = tuple(
+    (name, _whole_word_pattern(markers)) for name, markers in _ANALYTICS_OPERATIONS
+)
+
+
+def _asks_for_analytics(question: str) -> bool:
+    normalized = " ".join(question.lower().split())
+    return any(pattern.search(normalized) for _name, pattern in _ANALYTICS_PATTERNS)
+
+
 def _analytics_results(question: str, context_results: list[dict]) -> list[dict]:
     """Execute only an unambiguous aggregate over a retrieved table.
 
@@ -247,11 +267,7 @@ def _analytics_results(question: str, context_results: list[dict]) -> list[dict]
         return []
     normalized = " ".join(question.lower().split())
     operation = next(
-        (
-            name
-            for name, markers in _ANALYTICS_OPERATIONS
-            if any(marker in normalized for marker in markers)
-        ),
+        (name for name, pattern in _ANALYTICS_PATTERNS if pattern.search(normalized)),
         None,
     )
     if not operation or operation in {"difference", "percentage_change"}:
@@ -287,21 +303,16 @@ def _analytics_results(question: str, context_results: list[dict]) -> list[dict]
     return []
 
 
+_VISUAL_WORDS = re.compile(
+    r"(?<!\w)(?:images?|figures?|charts?|diagrams?|ảnh|hình|biểu đồ|sơ đồ)(?!\w)"
+)
+
+
 def _is_visual_question(question: str) -> bool:
-    normalized = question.lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "image",
-            "figure",
-            "chart",
-            "diagram",
-            "ảnh",
-            "hình",
-            "biểu đồ",
-            "sơ đồ",
-        )
-    )
+    # Whole words: "hình" inside "tình hình" is a word of its own, but "figure" is not
+    # found inside "configure". Only a hint that vision may help; it gates a call the
+    # retrieved evidence must also justify.
+    return bool(_VISUAL_WORDS.search(unicodedata.normalize("NFC", question).lower()))
 
 
 async def _visual_evidence_context(
@@ -388,26 +399,6 @@ def _is_grounding_refusal(grounded_answer: str) -> bool:
     if extract_citation_ids(text):
         return False
     return bool(_REFUSAL_RE.search(text))
-
-
-def _looks_like_edit_request(question: str) -> bool:
-    normalized = " ".join(question.lower().split())
-    return any(
-        marker in normalized
-        for marker in (
-            "cập nhật",
-            "sửa",
-            "chỉnh sửa",
-            "đính chính",
-            "thay đổi",
-            "sửa lại",
-            "update",
-            "edit",
-            "correct",
-            "fix",
-            "modify",
-        )
-    )
 
 
 def _strip_revision_fence(value: str) -> str:
@@ -910,7 +901,13 @@ class AIService:
         is_confirmed_edit = (
             confirm_edit and bool(edit_instruction) and article_id is not None
         )
-        if _looks_like_edit_request(question) or is_confirmed_edit:
+        # A confirmed edit is already decided. Otherwise the wording only nominates a message;
+        # the model decides whether it is an instruction or a question that merely contains
+        # the word (src/domain/edit_intent.py), and only a nominated message pays for a call.
+        if is_confirmed_edit or (
+            may_be_edit_request(question)
+            and await is_edit_request(question, viewing_article=article_id is not None)
+        ):
             target_id = article_id
             matched_target: dict[str, Any] | None = None
             if target_id is None:
@@ -1175,11 +1172,9 @@ class AIService:
         # Follow-up turns retain history and must bypass the cache so earlier
         # conversation context cannot change the answer semantics.
         evidence_enrichment_requested = (
-            _is_visual_question(question) or is_chart_question(question)
-        ) or any(
-            marker in " ".join(question.lower().split())
-            for _operation, markers in _ANALYTICS_OPERATIONS
-            for marker in markers
+            _is_visual_question(question)
+            or is_chart_question(question)
+            or _asks_for_analytics(question)
         )
         cached = (
             await self.ai_repo.get_cached(
