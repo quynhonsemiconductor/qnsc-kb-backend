@@ -285,7 +285,7 @@ def _convert_pdf_with_pymupdf4llm(data: bytes) -> str:
 #: on every upload of these two types it raised MissingDependencyException, logged a warning and
 #: handed the document to the native extractor anyway (51 of 51 in one session's logs). Installing the
 #: extra would not be an improvement either: measured on three real specifications, MarkItDown's
-#: output escaped identifiers (`gpio\\_out`), kept the table of contents and inlined images as data
+#: output escaped identifiers (`gpio\_out`), kept the table of contents and inlined images as data
 #: URIs, which is worse to search than `_extract_docx` / `_extract_xlsx`. Same result as before,
 #: minus the exception.
 _NATIVE_EXTRACTOR_ONLY = {".docx", ".xlsx", ".xlsm"}
