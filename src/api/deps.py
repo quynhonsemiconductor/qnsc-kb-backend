@@ -16,6 +16,9 @@ from src.domain.llm_config import load_runtime_config
 
 engine = create_async_engine(
     settings.DATABASE_URL,
+    # Test a pooled connection before handing it out, so one left dead by a database restart is
+    # replaced instead of failing the first request (or readiness probe) that draws it.
+    pool_pre_ping=True,
     connect_args={
         "timeout": 5,
         "command_timeout": 5,

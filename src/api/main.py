@@ -391,6 +391,49 @@ async def reconcile_published_indexes() -> None:
         )
 
 
+# Set once `_bootstrap_database` has finished. Readiness answers 503 until then.
+database_bootstrapped = False
+_bootstrap_task: "asyncio.Task | None" = None
+BOOTSTRAP_RETRY_MAX_SECONDS = 30
+
+
+async def _bootstrap_database() -> None:
+    """Verify and bootstrap runtime data, retrying with capped backoff until the database answers.
+
+    Migrations run in the deployment entrypoint; this only verifies/bootstraps runtime data. It never
+    gives up: a database that is still starting (crash recovery, a node reboot) is a reason to wait,
+    not to exit. A database that is up but wrong (RLS policies missing) keeps failing here, is
+    logged as an error from the third attempt on, and keeps readiness (and so the deploy gate) at 503.
+    """
+    global database_bootstrapped
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await asyncio.wait_for(init_db(), timeout=60)
+            await verify_rls_policies()
+            await verify_embedding_column_width()
+            await reconcile_published_indexes()
+            database_bootstrapped = True
+            logger.info("Database initialized successfully", attempt=attempt)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            delay = min(BOOTSTRAP_RETRY_MAX_SECONDS, 2**attempt)
+            log = logger.error if attempt >= 3 else logger.warning
+            log(
+                "Database initialization failed; retrying",
+                error=str(exc),
+                attempt=attempt,
+                retry_in_seconds=delay,
+            )
+            # Drop connections that may have been interrupted during recovery
+            # before the next attempt obtains a fresh asyncpg connection.
+            await engine.dispose()
+            await asyncio.sleep(delay)
+
+
 async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
@@ -399,33 +442,13 @@ async def initialize_resources() -> None:
     from src.lib.observability import setup_logging
 
     setup_logging()
-    for attempt in range(1, 4):
-        try:
-            # PostgreSQL can need a few seconds to finish crash recovery after
-            # Docker restarts. Migrations run in the deployment entrypoint;
-            # application startup only verifies/bootstraps runtime data.
-            await asyncio.wait_for(init_db(), timeout=60)
-            logger.info("Database initialized successfully", attempt=attempt)
-            await verify_rls_policies()
-            await verify_embedding_column_width()
-            await reconcile_published_indexes()
-            break
-        except Exception as exc:
-            if attempt == 3:
-                logger.exception(
-                    "Failed to initialize database", error=str(exc), attempts=attempt
-                )
-                raise
-            logger.warning(
-                "Database initialization failed; retrying",
-                error=str(exc),
-                attempt=attempt,
-                retry_in_seconds=attempt * 2,
-            )
-            # Drop connections that may have been interrupted during recovery
-            # before the next attempt obtains a fresh asyncpg connection.
-            await engine.dispose()
-            await asyncio.sleep(attempt * 2)
+    # The database bootstrap runs in the background and retries until PostgreSQL answers, so the
+    # process starts and answers liveness even when it boots before the database (a node reboot
+    # starts every pod at once). Readiness answers 503 until the bootstrap has finished. It used to
+    # run inline with three attempts and then raise, which turned a database that was a minute late
+    # into a CrashLoopBackOff whose restart delay (up to 5 min) outlasted the outage.
+    global _bootstrap_task
+    _bootstrap_task = asyncio.create_task(_bootstrap_database())
 
     # The model loads in the background so the server is up and answering `/health/live`
     # while it does (the ECS container health check and the image HEALTHCHECK use that
@@ -647,6 +670,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if _bootstrap_task and not _bootstrap_task.done():
+            _bootstrap_task.cancel()
+            try:
+                await _bootstrap_task
+            except asyncio.CancelledError:
+                pass
         if _preload_task and not _preload_task.done():
             _preload_task.cancel()
             try:
@@ -973,6 +1002,12 @@ async def _check_dependencies() -> None:
         logger.error("Readiness check failed", error=str(exc))
         raise HTTPException(
             status_code=503, detail={"status": "not_ready", "database": "unavailable"}
+        )
+    if not database_bootstrapped:
+        # The database answers, but the startup bootstrap (seed data, RLS checks) has not finished:
+        # it retries in the background, see `_bootstrap_database`.
+        raise HTTPException(
+            status_code=503, detail={"status": "not_ready", "database": "bootstrapping"}
         )
 
 

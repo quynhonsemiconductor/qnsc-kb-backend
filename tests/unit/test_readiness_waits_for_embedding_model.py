@@ -41,6 +41,7 @@ def backing_services_up(monkeypatch):
     import src.api.deps as deps
 
     monkeypatch.setattr(deps, "engine", MagicMock(connect=MagicMock(return_value=connection)))
+    monkeypatch.setattr(main, "database_bootstrapped", True)
     redis = MagicMock(ping=AsyncMock(), aclose=AsyncMock())
     with patch("redis.asyncio.Redis.from_url", return_value=redis):
         yield
