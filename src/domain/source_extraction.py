@@ -278,6 +278,19 @@ def _convert_pdf_with_pymupdf4llm(data: bytes) -> str:
                 pass
 
 
+#: Formats whose own extractor is the reference reader, so MarkItDown is not asked.
+#:
+#: MarkItDown reads .docx through mammoth and .xlsx through pandas, which are its optional extras
+#: (`markitdown[docx]`, `markitdown[xlsx]`); `pyproject.toml` declares `markitdown` without them, so
+#: on every upload of these two types it raised MissingDependencyException, logged a warning and
+#: handed the document to the native extractor anyway (51 of 51 in one session's logs). Installing the
+#: extra would not be an improvement either: measured on three real specifications, MarkItDown's
+#: output escaped identifiers (`gpio\\_out`), kept the table of contents and inlined images as data
+#: URIs, which is worse to search than `_extract_docx` / `_extract_xlsx`. Same result as before,
+#: minus the exception.
+_NATIVE_EXTRACTOR_ONLY = {".docx", ".xlsx", ".xlsm"}
+
+
 def _convert_with_markitdown(filename: str, data: bytes) -> str:
     if not settings.MARKITDOWN_ENABLED:
         return ""
@@ -286,6 +299,8 @@ def _convert_with_markitdown(filename: str, data: bytes) -> str:
     # installed MarkItDown versions reject .md/.txt/.csv outright; bypassing
     # them avoids turning a valid upload into a 500 during completion.
     if Path(filename).suffix.lower() in {".md", ".txt", ".csv"}:
+        return ""
+    if Path(filename).suffix.lower() in _NATIVE_EXTRACTOR_ONLY:
         return ""
     converter = _markitdown()
     if converter is None:
