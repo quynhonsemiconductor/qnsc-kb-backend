@@ -38,8 +38,34 @@ _use_ssl = settings.REDIS_URL.startswith("rediss://")
 # The hard limit bounds how long any task can hold its message, and the visibility
 # timeout sits above that bound, so redelivery can only ever happen after the worker has
 # been killed — which is exactly when it is wanted.
-_TASK_SOFT_TIME_LIMIT = 3300
-_TASK_HARD_TIME_LIMIT = 3600
+TASK_SOFT_TIME_LIMIT = 3300
+TASK_HARD_TIME_LIMIT = 3600
+#: How long Redis waits for an ack before it hands a message to another consumer.
+VISIBILITY_TIMEOUT = TASK_HARD_TIME_LIMIT + 300
+
+# A periodic task is only worth running while its own next tick has not arrived. beat enqueues on the clock
+# whether or not anything is consuming, and the worker is ONE process that also runs hour-long syncs and OCR:
+# every 30 s tick that lands behind such a task waits in Redis, and with no expiry the worker replays all of
+# them back to back the moment it is free. Measured on the local stack: 100 s without a consumer left 8
+# messages queued, none with an expiry, and the restarted worker ran every one. `expires` makes the broker
+# side discard a tick that is already stale, so a recovered worker does one pass, not a backlog of them.
+#
+# Never below this floor, so a worker that is merely a few seconds behind does not skip a tick it could run.
+_EXPIRY_FLOOR_SECONDS = 30.0
+
+
+def periodic(task: str, every: float, schedule=None) -> dict:
+    """A beat entry that expires when its next tick would have run anyway.
+
+    `every` is the interval in seconds (for a crontab, the gap between runs), and `schedule` overrides the
+    plain interval when the entry fires at a wall-clock time.
+    """
+    return {
+        "task": task,
+        "schedule": float(every) if schedule is None else schedule,
+        "options": {"expires": max(float(every), _EXPIRY_FLOOR_SECONDS)},
+    }
+
 
 celery_app.conf.update(
     broker_use_ssl=_ssl_options if _use_ssl else None,
@@ -50,7 +76,13 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     imports=["src.workers.tasks"],
-    broker_transport_options={"visibility_timeout": _TASK_HARD_TIME_LIMIT + 300},
+    broker_transport_options={"visibility_timeout": VISIBILITY_TIMEOUT},
+    # Nothing reads a task's return value (dispatch is fire-and-forget; progress lives in the database), so
+    # storing one per run only fills Redis: a 30 s beat alone writes thousands of result keys a day.
+    task_ignore_result=True,
+    # Say so explicitly. Left unset, Celery 5.x warns and retries a broker that is not up yet, and the next
+    # major release stops retrying, which turns "Redis started a second after the worker" into a crash loop.
+    broker_connection_retry_on_startup=True,
     # Acknowledge on completion, not on receipt. With early acks a worker killed mid-sync
     # loses the message entirely and the durable queue row stays "running" until the stale
     # sweep notices; with late acks the broker replays it.
@@ -59,8 +91,8 @@ celery_app.conf.update(
     # behind a long-running task, so with the default multiplier of four it can exceed the
     # visibility timeout and be redelivered before it has even started. One at a time.
     worker_prefetch_multiplier=1,
-    task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
-    task_time_limit=_TASK_HARD_TIME_LIMIT,
+    task_soft_time_limit=TASK_SOFT_TIME_LIMIT,
+    task_time_limit=TASK_HARD_TIME_LIMIT,
     # The worker consumes every named queue listed in the image command. Document
     # preparation has its own queue so one retry does not sit behind an arbitrarily long
     # FIFO backlog of embedding/OCR work on ``ingestion``. Concurrency stays one because
@@ -78,78 +110,55 @@ celery_app.conf.update(
         "dispatch_pending_sync_requests": {"queue": "connectors"},
         "renew_webhook_subscriptions": {"queue": "connectors"},
         "recompute_permissions_task": {"queue": "permissions"},
+        "recover_stuck_indexing": {"queue": "ingestion"},
     },
     beat_schedule={
-        "replay-domain-outbox": {
-            "task": "replay_outbox_task",
-            "schedule": 30.0,
-        },
-        "poll-cloud-connectors": {
-            "task": "schedule_cloud_connector_syncs",
-            "schedule": 600.0,
-        },
-        "reconcile-cloud-connectors": {
-            "task": "reconcile_cloud_connectors",
-            "schedule": settings.CONNECTOR_RECONCILE_INTERVAL_MINUTES * 60.0,
-        },
+        "replay-domain-outbox": periodic("replay_outbox_task", 30.0),
+        "poll-cloud-connectors": periodic("schedule_cloud_connector_syncs", 600.0),
+        "reconcile-cloud-connectors": periodic(
+            "reconcile_cloud_connectors",
+            settings.CONNECTOR_RECONCILE_INTERVAL_MINUTES * 60.0,
+        ),
         # The interval is a setting because it is the floor on webhook-to-index latency
         # for anything the request-time dispatch missed. Hard-coding 30 here left
         # CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS declared, documented and dead.
-        "dispatch-pending-sync-requests": {
-            "task": "dispatch_pending_sync_requests",
-            "schedule": float(settings.CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS),
-        },
+        "dispatch-pending-sync-requests": periodic(
+            "dispatch_pending_sync_requests",
+            float(settings.CONNECTOR_SYNC_DISPATCH_INTERVAL_SECONDS),
+        ),
         # Graph drive subscriptions can expire quickly and a lapsed one fails silently.
         # Renew frequently against a horizon so several attempts land before expiry.
-        "renew-webhook-subscriptions": {
-            "task": "renew_webhook_subscriptions",
-            "schedule": 600.0,
-        },
+        "renew-webhook-subscriptions": periodic("renew_webhook_subscriptions", 600.0),
         # A certificate that lapses silently stops all application mail. A wall-clock time, not a 24 h interval:
         # an interval counts from beat's own start (on ephemeral storage), so an environment redeployed more than
         # daily would never reach it. The worker also runs the check each time it starts (tasks.py).
-        "check-mail-certificate": {
-            "task": "check_mail_certificate",
-            "schedule": crontab(hour=1, minute=0),
-        },
-        "prune-operational-metrics": {
-            "task": "prune_operational_metrics",
-            "schedule": 86400.0,
-        },
-        "cleanup-orphaned-source-objects": {
-            "task": "cleanup_orphaned_source_objects",
-            "schedule": 86400.0,
-        },
-        "deliver-notification-queue": {
-            "task": "deliver_notification_queue",
-            "schedule": 30.0,
-        },
-        "verify-review-deadlines": {
-            "task": "verify_review_deadlines",
-            "schedule": 86400.0,
-        },
-        "run-approval-agent": {
-            "task": "run_approval_agent",
-            "schedule": float(settings.APPROVAL_AGENT_RUN_INTERVAL_SECONDS),
-        },
-        "escalate-overdue-drafts": {
-            "task": "escalate_overdue_drafts",
-            "schedule": 21600.0,
-        },
+        "check-mail-certificate": periodic(
+            "check_mail_certificate", 86400.0, schedule=crontab(hour=1, minute=0)
+        ),
+        "prune-operational-metrics": periodic("prune_operational_metrics", 86400.0),
+        "cleanup-orphaned-source-objects": periodic(
+            "cleanup_orphaned_source_objects", 86400.0
+        ),
+        "deliver-notification-queue": periodic("deliver_notification_queue", 30.0),
+        "verify-review-deadlines": periodic("verify_review_deadlines", 86400.0),
+        "run-approval-agent": periodic(
+            "run_approval_agent", float(settings.APPROVAL_AGENT_RUN_INTERVAL_SECONDS)
+        ),
+        "escalate-overdue-drafts": periodic("escalate_overdue_drafts", 21600.0),
         # A reprocess job is a long loop of independent article re-indexes with no
         # heartbeat, so a worker that dies mid-run leaves the row "running" forever and
         # the operator sees a progress bar that never moves again.
-        "recover-stale-index-reprocess-jobs": {
-            "task": "recover_stale_index_reprocess_jobs",
-            "schedule": 900.0,
-        },
+        "recover-stale-index-reprocess-jobs": periodic(
+            "recover_stale_index_reprocess_jobs", 900.0
+        ),
+        # The same failure for a single article: a child killed by the OOM killer raises nothing in Python, so
+        # `index_status` stays "processing" for good and the article drops out of search. See
+        # src/domain/index_recovery.py.
+        "recover-stuck-indexing": periodic("recover_stuck_indexing", 900.0),
         # Nightly, same cadence as the other corpus-wide maintenance sweeps above
         # (prune-operational-metrics, cleanup-orphaned-source-objects): topical matches
         # shift slowly as the corpus grows, so there is no value in running this more
         # often, only cost.
-        "link-related-articles": {
-            "task": "link_related_articles",
-            "schedule": 86400.0,
-        },
+        "link-related-articles": periodic("link_related_articles", 86400.0),
     },
 )

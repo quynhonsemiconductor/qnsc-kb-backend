@@ -114,40 +114,68 @@ def task_failure_handler(task_id=None, exception=None, sender=None, **kwargs):
     )
 
 
+def _fan_out(event_type: str, payload: dict) -> None:
+    """Queue the work a domain event stands for."""
+    article_id = payload.get("article_id")
+    if not article_id:
+        return
+    if event_type in ["ArticlePublished", "ArticleUpdated"]:
+        generate_embeddings_task.delay(article_id)
+    elif event_type == "PermissionChanged":
+        recompute_permissions_task.delay(article_id)
+    elif event_type == "ArticleDeleted":
+        delete_article_chunks_task.delay(article_id)
+
+
+#: An outbox row in one of these states has been handled (or given up on); a second copy of its message
+#: must not fan the work out again.
+_OUTBOX_SETTLED = ("dispatched", "completed", "dead")
+
+
 @celery_app.task(name="handle_domain_event_task")
 def handle_domain_event_task(event_type: str, payload: dict):
     logger.info(
         "Celery event worker received event", event_type=event_type, payload=payload
     )
-
-    if event_type in ["ArticlePublished", "ArticleUpdated"]:
-        article_id = payload.get("article_id")
-        if article_id:
-            generate_embeddings_task.delay(article_id)
-
-    elif event_type == "PermissionChanged":
-        article_id = payload.get("article_id")
-        if article_id:
-            recompute_permissions_task.delay(article_id)
-
-    elif event_type == "ArticleDeleted":
-        article_id = payload.get("article_id")
-        if article_id:
-            delete_article_chunks_task.delay(article_id)
-
     outbox_id = payload.get("_outbox_id")
-    if outbox_id:
+    if not outbox_id:
+        # The outbox row could not be written when the event was published; there is nothing to
+        # claim, so this is the only copy and it just fans out.
+        _fan_out(event_type, payload)
+        return
 
-        async def mark_dispatched():
-            async with SessionLocal() as db:
-                await set_database_context(db, None, True)
-                event = await db.get(OutboxEvent, uuid.UUID(outbox_id))
-                if event:
-                    event.status = "dispatched"
-                    event.last_error = None
-                    await db.commit()
+    async def claim_and_dispatch() -> None:
+        async with SessionLocal() as db:
+            await set_database_context(db, None, True)
+            # Under a row lock, and the fan-out happens inside the same transaction. replay_outbox_task
+            # re-sends a row whose backoff has passed even when the first message is still queued behind a
+            # long task, so the same event can be waiting twice. Whichever copy runs second finds the row
+            # already dispatched and stops; before this each copy queued its own embedding run, and a
+            # re-index of the same article ran once per copy on the one worker.
+            #
+            # If the fan-out raises, the transaction rolls back and the row stays "processing", so the
+            # next replay tries again.
+            event = (
+                await db.execute(
+                    select(OutboxEvent)
+                    .where(OutboxEvent.id == uuid.UUID(outbox_id))
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if event is not None and event.status in _OUTBOX_SETTLED:
+                logger.info(
+                    "Domain event already dispatched; ignoring duplicate message",
+                    event_type=event_type,
+                    outbox_id=outbox_id,
+                )
+                return
+            _fan_out(event_type, payload)
+            if event is not None:
+                event.status = "dispatched"
+                event.last_error = None
+            await db.commit()
 
-        sync_run(mark_dispatched())
+    sync_run(claim_and_dispatch())
 
 
 # Shared with EventBus.recover_outbox_once, which is the inline-mode equivalent of this
@@ -1362,6 +1390,20 @@ def recover_stale_index_reprocess_jobs() -> int:
         return len(requeued)
 
     return sync_run(recover())
+
+
+@celery_app.task(name="recover_stuck_indexing")
+def recover_stuck_indexing_task() -> dict[str, int]:
+    """Re-queue, or report as failed, articles whose indexing was interrupted without a trace.
+
+    See src/domain/index_recovery.py for why this is needed and why the retries are capped.
+    """
+    from src.domain.index_recovery import recover_stuck_indexing
+
+    requeue, failed = sync_run(recover_stuck_indexing())
+    for article_id in requeue:
+        generate_embeddings_task.delay(str(article_id))
+    return {"requeued": len(requeue), "failed": len(failed)}
 
 
 @celery_app.task(name="recompute_permissions_task")
