@@ -4,18 +4,16 @@
 # On every merge to main this builds each service image, PRE-PUSH scans it
 # (CRITICAL fixable vulns + ANY secret), and pushes
 # ghcr.io/quynhonsemiconductor/kb-<service> with the immutable sha-<commit>
-# tag. It runs ALONGSIDE backend-deploy.yml (ECS) and k8s-deploy.yml, which
-# keep pushing to ECR until the AWS cutover; the reusable refuses any ref
-# except refs/heads/main.
+# tag. This is the only image build now (the ECS/ECR deploy was retired with the
+# AWS exit, 2026-11-02); the reusable refuses any ref except refs/heads/main.
 #
-# The reusable's `digests` output (JSON, service → sha256) is what the later
-# gitops bump writes into tags.dev.yaml; that wiring lands with the k8s-deploy
-# move off ECR. Until then the run's step summary records the digests.
+# The reusable's `digests` output (JSON, service → sha256) is what the gitops
+# bump writes into the values files; the run's step summary records the digests.
 #
 # ── ONE IMAGE PER DOCKERFILE STAGE ────────────────────────────────────────────
 # The reusable passes `build-target: <service>`, which the Dockerfile REQUIRES:
 # it has one stage per service (`api`, `worker`, `migrator`), and with no
-# target Docker builds the LAST one — k8s-deploy.yml records the incident where
+# target Docker builds the LAST one — a past incident where
 # every repository silently held three copies of the migrator.
 # =============================================================================
 name: GHCR · Publish

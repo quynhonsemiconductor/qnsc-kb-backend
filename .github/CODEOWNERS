@@ -8,7 +8,6 @@
 
 *                                  @quynhonsemiconductor/kb-leads
 
-/infra/           @quynhonsemiconductor/kb-leads
 /.github/         @quynhonsemiconductor/kb-leads
 /Dockerfile       @quynhonsemiconductor/kb-leads
 /migrations/      @quynhonsemiconductor/kb-leads

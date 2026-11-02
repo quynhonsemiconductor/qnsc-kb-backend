@@ -1,9 +1,0 @@
-# infra/live/prod/terraform.tfvars.example
-# ─────────────────────────────────────────────────────────────────────────────
-# Copy to terraform.tfvars (git-ignored) for a LOCAL plan only. CI passes
-# TF_VAR_cloudflare_api_token and TF_VAR_image_tag; everything else belongs in
-# variables.tf so plan and apply agree.
-# ─────────────────────────────────────────────────────────────────────────────
-
-cloudflare_api_token = "cf-token-with-pages-and-dns-edit"
-image_tag            = "v0.1.0"
