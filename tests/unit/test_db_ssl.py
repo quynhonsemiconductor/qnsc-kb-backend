@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from src.core import db_ssl
 from src.core.db_ssl import asyncpg_ssl, ssl_connect_args
 
 # A real, valid PEM certificate (a throwaway self-signed test CA) — ssl.load_verify_locations
@@ -45,10 +44,6 @@ def test_ca_set_gives_a_verify_full_context(ca_file: str) -> None:
 
 
 def test_no_ca_in_production_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # BAKED_CA_PATH pinned to a path that does not exist: on a host that happens to
-    # have the baked bundle the fallback would silently make this test pass for the
-    # wrong reason (it would test the fallback, not the fail-closed rule).
-    monkeypatch.setattr(db_ssl, "BAKED_CA_PATH", "/nonexistent/bundle.pem")
     monkeypatch.setattr("src.core.config.settings.DATABASE_SSL_CA", None)
     with pytest.raises(RuntimeError, match="DATABASE_SSL_CA"):
         asyncpg_ssl(None, "production")
@@ -74,34 +69,8 @@ def test_connect_args_shape(ca_file: str) -> None:
     assert ssl_connect_args(None, "development") == {}
 
 
-def test_production_falls_back_to_the_baked_bundle(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The image bakes the RDS bundle; production with no explicit DATABASE_SSL_CA
-    # uses it. Deliberately NOT an ENV default: development must never pick it up.
-    baked = tmp_path / "rds-global-bundle.pem"
-    baked.write_text(_CA)
-    monkeypatch.setattr("src.core.config.settings.DATABASE_SSL_CA", None)
-    monkeypatch.setattr(db_ssl, "BAKED_CA_PATH", str(baked))
-    context = asyncpg_ssl(None, "production")
-    assert context is not None and context.verify_mode == ssl.CERT_REQUIRED
-
-
-def test_development_never_picks_up_the_baked_bundle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The exact regression the baked path could cause: a dev compose container sits
-    # on an image that HAS the bundle, but its database has no TLS.
-    monkeypatch.setattr("src.core.config.settings.DATABASE_SSL_CA", None)
-    monkeypatch.setattr(db_ssl, "BAKED_CA_PATH", "/baked/rds-bundle.pem")
-    monkeypatch.setattr(db_ssl.os.path, "exists", lambda p: True)
-    assert asyncpg_ssl(None, "development") is None
-
-
 def test_production_with_no_ca_anywhere_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("src.core.config.settings.DATABASE_SSL_CA", None)
-    monkeypatch.setattr(db_ssl, "BAKED_CA_PATH", "/nonexistent/bundle.pem")
-    monkeypatch.setattr(db_ssl.os.path, "exists", lambda p: False)
     with pytest.raises(RuntimeError, match="DATABASE_SSL_CA"):
         asyncpg_ssl(None, "production")
 
