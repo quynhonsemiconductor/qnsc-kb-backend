@@ -906,9 +906,7 @@ class AIService:
         # the word (src/domain/edit_intent.py), and only a nominated message pays for a call.
         if is_confirmed_edit or (
             may_be_edit_request(question)
-            and await is_edit_request(
-                question, viewing_article=article_id is not None
-            )
+            and await is_edit_request(question, viewing_article=article_id is not None)
         ):
             target_id = article_id
             matched_target: dict[str, Any] | None = None

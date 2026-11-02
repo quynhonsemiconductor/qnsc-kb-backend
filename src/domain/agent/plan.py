@@ -53,6 +53,7 @@ INTENTS = (
     "other",
 )
 
+
 def _whole_words(*patterns: str) -> re.Pattern[str]:
     """One regex that matches any of `patterns` as a whole word or phrase.
 

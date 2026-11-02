@@ -104,4 +104,4 @@ async def is_edit_request(question: str, *, viewing_article: bool = False) -> bo
         return False
     parsed = parse_json_object(text)
     # `is True`, not truthiness: "false" and 0 must not become an edit.
-    return bool(parsed) and parsed.get("edit") is True
+    return parsed is not None and parsed.get("edit") is True
