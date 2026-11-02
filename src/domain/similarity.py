@@ -102,7 +102,18 @@ def _rank(content: str, candidates: list[tuple[str, str, str, str]]) -> list[dic
     # Everything else keeps its token score, which is what `max()` would have chosen
     # anyway for all but pathological inputs.
     order = sorted(range(len(scored)), key=lambda i: scored[i][0], reverse=True)
-    compare = set(order[: settings.SIMILARITY_MAX_SEQUENCE_COMPARISONS])
+    floor = settings.SIMILARITY_SEQUENCE_MIN_TOKEN_SCORE
+    min_tokens = settings.SIMILARITY_FLOOR_MIN_TOKENS
+    content_tokens = len(normalized.split())
+    compare = {
+        i
+        for i in order[: settings.SIMILARITY_MAX_SEQUENCE_COMPARISONS]
+        # Token overlap is only evidence of "unrelated" when there are enough tokens for it to mean
+        # something; a text with few or no spaces keeps its comparison. See the setting.
+        if scored[i][0] >= floor
+        or content_tokens < min_tokens
+        or len(scored[i][1].split()) < min_tokens
+    }
 
     matches: list[dict] = []
     for index, (token_score, candidate, meta) in enumerate(scored):
