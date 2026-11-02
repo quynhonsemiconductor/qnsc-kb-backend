@@ -7,7 +7,9 @@ from typing import Any, Sequence
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy import select, delete, update, and_, or_, text, func, exists, not_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import defer, selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from src.models.chunk import ParentChunk, ArticleChunk, ChunkMetadata
 from src.models.article import Article, ArticleTag, ArticleUserPermission
 from src.models.graph import ArticleEntityMention, GraphEntity, GraphRelationship
@@ -29,14 +31,49 @@ logger = structlog.get_logger()
 #:
 #: `sources` is the trap: permissions reads it as getattr(article, "sources", []), so it
 #: does not appear in a search for `.sources` and looks unused.
+#:
+#: `embedding` is deferred, on every candidate and on every sibling child chunk. A search pulls a pool of
+#: 240 candidates per leg plus each hit's siblings, so hundreds of 1024-float vectors were being loaded and
+#: text-parsed per request (measured: ~480 `_from_text` calls, tens of milliseconds of single-process
+#: API time, megabytes over the wire) to feed ONE consumer, `rag/dedupe.py`, which only looks at the
+#: final ranked list. `attach_embeddings` loads vectors for exactly those. Reading a deferred attribute
+#: from async code raises MissingGreenlet instead of loading: a consumer that needs a vector must ask
+#: for it through `attach_embeddings`.
 RETRIEVAL_LOAD_OPTIONS = (
-    selectinload(ArticleChunk.parent_chunk).selectinload(ParentChunk.child_chunks),
+    defer(ArticleChunk.embedding),
+    selectinload(ArticleChunk.parent_chunk)
+    .selectinload(ParentChunk.child_chunks)
+    .defer(ArticleChunk.embedding),
     selectinload(ArticleChunk.article).selectinload(Article.owner),
     selectinload(ArticleChunk.article).selectinload(Article.departments),
     selectinload(ArticleChunk.article).selectinload(Article.user_permissions),
     selectinload(ArticleChunk.article).selectinload(Article.sources),
     selectinload(ArticleChunk.evidence),
 )
+
+
+async def attach_embeddings(db: AsyncSession, chunks: Sequence[Any]) -> None:
+    """Load `embedding` for chunks that were retrieved without it, in ONE query.
+
+    Authorization is not re-decided here: these are chunks retrieval already returned under the
+    caller's permissions, and only their own vectors are read. Anything that is not a mapped chunk, or
+    already has its vector, is left alone.
+    """
+    wanted = []
+    for chunk in chunks:
+        state = sa_inspect(chunk, raiseerr=False)
+        if state is not None and "embedding" in state.unloaded:
+            wanted.append(chunk)
+    if not wanted:
+        return
+    rows = await db.execute(
+        select(ArticleChunk.id, ArticleChunk.embedding).where(
+            ArticleChunk.id.in_([chunk.id for chunk in wanted])
+        )
+    )
+    vectors = {chunk_id: vector for chunk_id, vector in rows.all()}
+    for chunk in wanted:
+        set_committed_value(chunk, "embedding", vectors.get(chunk.id))
 
 
 class ChunkRepository:
@@ -485,35 +522,53 @@ class ChunkRepository:
                 "simple", func.immutable_unaccent(query)
             )
 
-        keyword_conditions = [search_vector.op("@@")(search_query)]
-        keyword_conditions.extend(
-            func.immutable_unaccent(Article.title).ilike(f"%{term}%")
-            for term in keyword_terms
-        )
-        keyword_stmt = (
+        # TWO queries, not one with an OR. The title match (`ILIKE '%term%'`) used to sit in the same OR as the
+        # full-text match, and a predicate PostgreSQL cannot index makes the whole OR unindexable: every search
+        # sequentially scanned article_chunks, computed to_tsvector() for every row to test it, and then
+        # ranked every row that passed. Measured on 25k chunks: 197 ms for a term that matches nothing at
+        # all, 393 ms for a term matching a fifth of the corpus, growing with the corpus. Split, the
+        # full-text leg uses the GIN index (ix_article_chunks_fts) and the title leg uses the trigram
+        # index (ix_articles_title_unaccent_trgm): 2 ms and 41 ms for the same two queries.
+        #
+        # The result is the same list as before: chunks whose text matched, best rank first, then chunks that
+        # matched only through their article's title (which all ranked 0 and so always came after).
+        pool = max(settings.RAG_CANDIDATE_POOL_SIZE, limit)
+        fts_stmt = (
             select(ArticleChunk)
             .join(Article, Article.id == ArticleChunk.article_id)
-            .where(
-                and_(
-                    *where_clauses,
-                    (
-                        or_(*keyword_conditions)
-                        if keyword_conditions
-                        else search_vector.op("@@")(search_query)
-                    ),
-                )
-            )
-            .order_by(
-                func.ts_rank_cd(
-                    search_vector,
-                    search_query,
-                ).desc()
-            )
-            .limit(max(settings.RAG_CANDIDATE_POOL_SIZE, limit))
+            .where(and_(*where_clauses, search_vector.op("@@")(search_query)))
+            .order_by(func.ts_rank_cd(search_vector, search_query).desc())
+            .limit(pool)
             .options(*RETRIEVAL_LOAD_OPTIONS)
         )
-        key_res = await self.db.execute(keyword_stmt)
-        keyword_results = key_res.scalars().all()
+        keyword_results = list((await self.db.execute(fts_stmt)).scalars().all())
+        if keyword_terms:
+            title_stmt = (
+                select(ArticleChunk)
+                .join(Article, Article.id == ArticleChunk.article_id)
+                .where(
+                    and_(
+                        *where_clauses,
+                        or_(
+                            *(
+                                func.immutable_unaccent(Article.title).ilike(
+                                    f"%{term}%"
+                                )
+                                for term in keyword_terms
+                            )
+                        ),
+                    )
+                )
+                .limit(pool)
+                .options(*RETRIEVAL_LOAD_OPTIONS)
+            )
+            if keyword_results:
+                # Not asked for twice: a chunk the text leg already found keeps its place there.
+                title_stmt = title_stmt.where(
+                    ArticleChunk.id.not_in([chunk.id for chunk in keyword_results])
+                )
+            title_only = (await self.db.execute(title_stmt)).scalars().all()
+            keyword_results = (keyword_results + list(title_only))[:pool]
         logger.info(
             "Search keyword candidates loaded",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),

@@ -21,6 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
+from sqlalchemy.orm import defer
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
@@ -2088,6 +2089,8 @@ async def get_article_chunks(
         (
             await db.execute(
                 select(ArticleChunk).where(ArticleChunk.article_id == article.id)
+                # The chunk view reports versions and text, never the vector.
+                .options(defer(ArticleChunk.embedding))
             )
         )
         .scalars()

@@ -9,7 +9,7 @@ from src.core.privacy import REDACTED_OPERATIONAL_CONTENT
 from src.models.user import User
 from src.models.governance import Gap
 from src.models.ai import AiUsageLog
-from src.repositories.chunk import ChunkRepository
+from src.repositories.chunk import ChunkRepository, attach_embeddings
 from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
@@ -540,6 +540,11 @@ class SearchService:
         also_in: dict[str, list[dict[str, str | None]]] = {}
         before = len(ranked)
         if settings.RAG_DEDUPE_ENABLED:
+            # Candidates are retrieved without their vectors (see RETRIEVAL_LOAD_OPTIONS); the comparison
+            # needs them for the ranked list only, which is a fraction of the pool.
+            await attach_embeddings(
+                self.chunk_repo.db, [chunk for chunk, _score in ranked]
+            )
             ranked, also_in = collapse_duplicates(
                 ranked,
                 similarity=settings.RAG_DEDUPE_SIMILARITY,
