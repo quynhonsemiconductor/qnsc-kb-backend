@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # without it the process refuses to connect (see src/core/db_ssl.py) instead of
     # connecting without TLS. Unset locally: asyncpg connects without TLS, unchanged.
     DATABASE_SSL_CA: str | None = None
+    # The connection pool, PER PROCESS (each uvicorn worker and each Celery process has its own). These are
+    # SQLAlchemy's own defaults, written out so they can be raised: under load the pool is the first thing
+    # to run dry ("QueuePool limit of size 5 overflow 10 reached, connection timed out"), and a request
+    # waits DB_POOL_TIMEOUT_SECONDS for a connection before it fails with a 500. Keep
+    # processes x (DB_POOL_SIZE + DB_MAX_OVERFLOW) under the database's max_connections.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT_SECONDS: float = 30.0
+    # Connections older than this are replaced instead of reused: a load balancer or the server drops idle
+    # ones silently, and the first request to find out used to be the one that failed.
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     APP_DATABASE_ROLE: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
 
