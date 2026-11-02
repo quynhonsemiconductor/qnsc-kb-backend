@@ -283,7 +283,11 @@ def test_the_planners_answer_on_chart_and_figure_is_final_in_both_directions(
     _llm(
         monkeypatch,
         "plan",
-        [json.dumps({"sub_queries": ["q"], "wants_chart": False, "wants_figure": False})],
+        [
+            json.dumps(
+                {"sub_queries": ["q"], "wants_chart": False, "wants_figure": False}
+            )
+        ],
     )
     plan = run(build_plan("Vẽ biểu đồ doanh thu theo quý", "", [], Budget(3)))
     assert plan.planned and not plan.wants_chart and not plan.wants_figure
@@ -690,6 +694,23 @@ def test_a_transposed_or_invented_number_is_reported():
         "1244"
     ]
     assert find_unverified_numbers("Phụ cấp là 1234 mỗi tháng [C1]", context) == []
+
+
+def test_a_number_the_reader_typed_is_not_reported_but_a_derived_one_still_is():
+    context = _ctx("Lương thử việc bằng 85% lương chính thức")
+    answer = (
+        "Lương chính thức 20.000.000 đồng nên lương thử việc là 17.000.000 đồng [C1]"
+    )
+    question = "Nếu lương chính thức là 20 triệu, tức 20.000.000 đồng, thì lương thử việc là bao nhiêu?"
+    assert find_unverified_numbers(answer, context) == ["20.000.000", "17.000.000"]
+    assert find_unverified_numbers(answer, context, question=question) == ["17.000.000"]
+
+
+def test_restating_the_readers_number_wrongly_is_still_reported():
+    context = _ctx("Phụ cấp là 1234 mỗi tháng")
+    assert find_unverified_numbers(
+        "Phụ cấp 1244 [C1]", context, question="Phụ cấp 1234 đúng không?"
+    ) == ["1244"]
 
 
 def test_citation_markers_list_numbers_years_and_small_numbers_are_not_quantities():
