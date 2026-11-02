@@ -429,8 +429,12 @@ async def _bootstrap_database() -> None:
                 retry_in_seconds=delay,
             )
             # Drop connections that may have been interrupted during recovery
-            # before the next attempt obtains a fresh asyncpg connection.
-            await engine.dispose()
+            # before the next attempt obtains a fresh asyncpg connection. Dispose can
+            # itself fail on half-closed sockets; that must not end the retry loop.
+            try:
+                await engine.dispose()
+            except Exception as dispose_exc:
+                logger.warning("Engine dispose failed", error=str(dispose_exc))
             await asyncio.sleep(delay)
 
 
@@ -654,7 +658,8 @@ async def _inline_webhook_maintenance_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Database migrations/readiness must complete before serving traffic.
+    # Migrations run in the deployment entrypoint. The database bootstrap runs in the
+    # background (`_bootstrap_database`); readiness answers 503 until it has finished.
     await initialize_resources()
     recovery_task: asyncio.Task | None = None
     connector_dispatch_task: asyncio.Task | None = None

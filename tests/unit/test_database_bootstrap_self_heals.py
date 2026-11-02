@@ -91,7 +91,12 @@ def test_bootstrap_retries_with_capped_backoff_until_the_database_answers(monkey
         "reconcile_published_indexes",
     ):
         monkeypatch.setattr(main, name, AsyncMock())
-    monkeypatch.setattr(main, "engine", MagicMock(dispose=AsyncMock()))
+    # A dispose that fails on half-closed sockets must not end the retry loop.
+    monkeypatch.setattr(
+        main,
+        "engine",
+        MagicMock(dispose=AsyncMock(side_effect=OSError("socket closed"))),
+    )
     monkeypatch.setattr(main.asyncio, "sleep", sleep)
 
     asyncio.run(main._bootstrap_database())
