@@ -53,81 +53,99 @@ INTENTS = (
     "other",
 )
 
-# Matched against text with diacritics folded. A question carrying any of these is not "simple".
-_COMPLEX_MARKERS = (
+def _whole_words(*patterns: str) -> re.Pattern[str]:
+    """One regex that matches any of `patterns` as a whole word or phrase.
+
+    These lists were tested with `marker in text`, which also matches inside other words. With
+    accents folded, "chinh sach" (policy) contains "hinh" (picture), "kinh doanh" (business)
+    contains "anh ", and "paragraph" contains "graph": the most common word in this domain read
+    as a request for a figure. A word boundary on each side keeps a marker to the word it names,
+    and each pattern spells out the inflections it accepts (a plural such as `charts?`, a family of endings).
+    """
+    return re.compile(r"(?<!\w)(?:" + "|".join(patterns) + r")(?!\w)")
+
+
+# Matched against text with diacritics folded, as whole words or phrases. A question carrying
+# any of these is not "simple": it goes to the planner, which is the part that understands it.
+# The words only decide whether a model call is spent. What the question IS (a chart request, a
+# question about a figure) is decided by the planner's reply, not by these.
+_COMPLEX_MARKERS = _whole_words(
     # Wording about a set of documents or a department. These do not decide anything: they only
     # stop a short question from skipping the planner, which is the part that understands it.
-    "toan bo",
-    "tat ca",
-    "phong ban",
-    "overall",
-    "whole ",
-    "all ",
-    "every ",
-    "department",
-    "so sanh",
-    "compare",
-    "khac nhau",
-    "khac biet",
-    "versus",
-    "bieu do",
-    "chart",
-    "plot",
-    "do thi",
-    "graph",
-    "ve bieu",
-    "ve cho",
-    "visuali",
-    "xu huong",
-    "trend",
-    "thong ke",
-    "statistic",
-    "tinh ",
-    "tong ",
-    "trung binh",
-    "average",
-    "calculate",
-    "total of",
-    "sum of",
-    "hinh",
-    "anh ",
-    "image",
-    "figure",
-    "diagram",
-    "so do",
-    "picture",
-    "giai doan",
-    "stage",
-    "phase",
-    "doan nao",
-    "khoanh",
-    "danh dau",
-    "highlight",
+    r"toan bo",
+    r"tat ca",
+    r"phong ban",
+    r"overall",
+    r"whole",
+    r"all",
+    r"every",
+    r"departments?",
+    r"so sanh",
+    r"compar\w*",
+    r"khac nhau",
+    r"khac biet",
+    r"versus",
+    r"bieu do",
+    r"chart\w*",
+    r"plot\w*",
+    r"do thi",
+    r"graph\w*",
+    r"ve bieu",
+    r"ve cho",
+    r"visuali[sz]\w*",
+    r"xu huong",
+    r"trend\w*",
+    r"thong ke",
+    r"statistic\w*",
+    r"tinh",
+    r"tong",
+    r"trung binh",
+    r"averages?",
+    r"calculat\w*",
+    r"total of",
+    r"sum of",
+    r"hinh",
+    r"anh",
+    r"images?",
+    r"figures?",
+    r"diagrams?",
+    r"so do",
+    r"pictures?",
+    r"giai doan",
+    r"stages?",
+    r"phases?",
+    r"doan nao",
+    r"khoanh",
+    r"danh dau",
+    r"highlight\w*",
 )
-_CHART_MARKERS = (
-    "bieu do",
-    "chart",
-    "plot",
-    "do thi",
-    "graph",
-    "ve bieu",
-    "visuali",
-    "xu huong",
-    "trend",
+# Hints used only when there is no planner reply: the fast path never reaches them (a question
+# with one of these is not simple), and a failed or unaffordable planning call falls back to
+# them. Both are subsets of the list above.
+_CHART_MARKERS = _whole_words(
+    r"bieu do",
+    r"chart\w*",
+    r"plot\w*",
+    r"do thi",
+    r"graph\w*",
+    r"ve bieu",
+    r"visuali[sz]\w*",
+    r"xu huong",
+    r"trend\w*",
 )
-_FIGURE_MARKERS = (
-    "hinh",
-    "anh ",
-    "image",
-    "figure",
-    "diagram",
-    "so do",
-    "picture",
-    "giai doan",
-    "stage",
-    "khoanh",
-    "danh dau",
-    "highlight",
+_FIGURE_MARKERS = _whole_words(
+    r"hinh",
+    r"anh",
+    r"images?",
+    r"figures?",
+    r"diagrams?",
+    r"so do",
+    r"pictures?",
+    r"giai doan",
+    r"stages?",
+    r"khoanh",
+    r"danh dau",
+    r"highlight\w*",
 )
 
 
@@ -255,17 +273,15 @@ def is_simple_question(question: str, *, has_history: bool) -> bool:
     if has_history and words <= 6:
         return False
     folded = _folded(question)
-    return not any(marker in folded for marker in _COMPLEX_MARKERS)
+    return not _COMPLEX_MARKERS.search(folded)
 
 
 def is_chart_question(question: str) -> bool:
-    folded = _folded(question)
-    return any(marker in folded for marker in _CHART_MARKERS)
+    return bool(_CHART_MARKERS.search(_folded(question)))
 
 
 def is_figure_question(question: str) -> bool:
-    folded = _folded(question)
-    return any(marker in folded for marker in _FIGURE_MARKERS)
+    return bool(_FIGURE_MARKERS.search(_folded(question)))
 
 
 @dataclass
@@ -338,7 +354,7 @@ Reply with ONE JSON object and nothing else, with exactly these fields:
  "doc_types": zero or more of %(types)s that the answer must come from (empty if unsure),
  "departments": zero or more of the department names given below; include one whenever the question names it or refers to it ("phòng ban X", "department X", "của phòng X"), empty if unsure,
  "wants_chart": true ONLY if the user asks for a chart/graph/trend or clearly wants numbers shown visually,
- "wants_figure": true ONLY if the user asks about a specific part, stage or region of a picture, diagram or chart,
+ "wants_figure": true ONLY if the user asks about a specific part, stage or region of a picture, diagram or chart. Decide both by what is being asked, not by a keyword: a question about a policy is not a figure question because it contains "hình thức", and "paragraph" is not about a graph,
  "as_of": "YYYY-MM-DD" ONLY when the question asks what was true or in force at a specific time ("in March 2025", "as of 1 January 2024", "last year", "when it was introduced"); today is %(today)s, so resolve relative times from it; use the first day of the month or year when only that is given; null otherwise,
  "needs_clarification": true ONLY if the question cannot be searched at all without one missing detail,
  "clarification_question": the one question to ask the user (else ""),
@@ -451,9 +467,8 @@ async def build_plan(
     if raw is None:
         logger.warning("Agent plan was not valid JSON; searching the question as asked")
         return fallback_plan(question)
-    plan = sanitize_plan(raw, question, departments)
-    # The model decides the intent, but a question that plainly asks for a chart or about a
-    # figure should not lose that because it forgot to say so.
-    plan.wants_chart = plan.wants_chart or is_chart_question(question)
-    plan.wants_figure = plan.wants_figure or is_figure_question(question)
-    return plan
+    # The planner's answer is final, wants_chart and wants_figure included. They used to be
+    # OR-ed with a word list here, so a "no" from the model was overridden by a keyword that
+    # also occurs inside ordinary words ("chinh sach" contains "hinh"). The prompt states both
+    # fields; the word lists remain only as hints for a plan that was never made.
+    return sanitize_plan(raw, question, departments)
