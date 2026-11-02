@@ -22,6 +22,7 @@ from src.api.routers import (
     ai,
     interactions,
     governance,
+    investigate,
     meta,
     connectors,
     knowledge,
@@ -852,6 +853,11 @@ app.include_router(
 )
 app.include_router(
     governance.router, prefix=f"{settings.API_V1_STR}/governance", tags=["governance"]
+)
+app.include_router(
+    investigate.router,
+    prefix=f"{settings.API_V1_STR}/governance/investigate",
+    tags=["investigate"],
 )
 app.include_router(meta.router, prefix=f"{settings.API_V1_STR}/meta", tags=["meta"])
 app.include_router(
