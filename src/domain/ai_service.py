@@ -2102,7 +2102,7 @@ class AIService:
         if agent is not None:
             if citations:
                 unverified_numbers = await agent.verify_numbers(
-                    grounded_answer, context_results, analytics_results
+                    grounded_answer, context_results, analytics_results, question
                 )
             await agent.tracer.emit("answer", "done")
 
