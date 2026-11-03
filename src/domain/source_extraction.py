@@ -647,20 +647,40 @@ def _extract_docx(data: bytes) -> str:
 
 
 def _extract_xlsx(data: bytes) -> str:
+    """Each sheet as a heading, each row as `a | b | c`, a blank line between tables.
+
+    Three things the first version got wrong, measured on a real pin-list and bus-generator workbook:
+
+    * an empty cell was dropped, so a row `Name | | Description` became `Name | Description` and the
+      description read as the second column's value (11 rows between the two files);
+    * a cell with a line break (69 + 6 of them) put the rest of its text on a line of its own, which no
+      longer looks like a table row, so the chunker stopped treating the block as a table;
+    * a blank row, which is how a sheet separates one table from the next, vanished, running tables
+      into each other.
+
+    Empty cells inside a row are kept (trailing ones are not), a cell's own whitespace and line breaks
+    become single spaces, and a blank row becomes a blank line.
+    """
     from openpyxl import load_workbook
 
     workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     parts: list[str] = []
     for sheet in workbook.worksheets:
-        parts.append(f"## {sheet.title}")
+        parts.append(f"\n## {sheet.title}\n")
+        after_blank_row = False
         for row in sheet.iter_rows(values_only=True):
-            values = [
-                str(value).strip()
-                for value in row
-                if value is not None and str(value).strip()
+            cells = [
+                "" if value is None else " ".join(str(value).split()) for value in row
             ]
-            if values:
-                parts.append(" | ".join(values))
+            while cells and not cells[-1]:
+                cells.pop()
+            if not any(cells):
+                after_blank_row = True
+                continue
+            if after_blank_row:
+                parts.append("")
+                after_blank_row = False
+            parts.append(" | ".join(cells))
     return _clean("\n".join(parts))
 
 
