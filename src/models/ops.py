@@ -194,6 +194,8 @@ class ApiRequestMetric(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "path",
             postgresql_where=text("status_code >= 500"),
         ),
+        #: The time window every read of the log starts with (investigate, the health dashboard).
+        Index("ix_api_request_metrics_created_at", "created_at"),
     )
 
     request_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
