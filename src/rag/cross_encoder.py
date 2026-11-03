@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from typing import Any, Sequence, TypeVar
 
 import structlog
@@ -33,7 +34,44 @@ class CrossEncoderUnavailable(RuntimeError):
     """The cross-encoder cannot run — a configuration fault, not a transient one."""
 
 
+def _load_onnx() -> Any:
+    """The int8 ONNX export: onnxruntime and tokenizers, no torch. The image bakes it (Dockerfile `reranker` stage)."""
+    directory = Path(settings.CROSS_ENCODER_ONNX_DIR or "")
+    model_path = directory / settings.CROSS_ENCODER_ONNX_FILE
+    tokenizer_path = directory / "tokenizer.json"
+    for path in (model_path, tokenizer_path):
+        if not path.is_file():
+            raise CrossEncoderUnavailable(
+                f"CROSS_ENCODER_RUNTIME=onnx but {path} is missing. Bake the model "
+                "(KB_BAKE_RERANKER_MODEL=true) or point CROSS_ENCODER_ONNX_DIR at an export."
+            )
+    try:
+        import onnxruntime  # type: ignore[import-untyped]  # no py.typed or stubs; guarded by this try
+        from tokenizers import Tokenizer
+    except ImportError as exc:
+        raise CrossEncoderUnavailable(
+            "CROSS_ENCODER_RUNTIME=onnx needs the 'onnx' dependency group (onnxruntime, tokenizers)."
+        ) from exc
+    from src.rag.onnx_cross_encoder import OnnxCrossEncoder
+
+    logger.info("Loading ONNX cross-encoder", path=str(model_path))
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = max(1, settings.CROSS_ENCODER_THREADS)
+    options.inter_op_num_threads = 1
+    session = onnxruntime.InferenceSession(
+        str(model_path), options, providers=["CPUExecutionProvider"]
+    )
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    tokenizer.enable_truncation(max_length=settings.CROSS_ENCODER_MAX_TOKENS)
+    pad_id = tokenizer.token_to_id("<pad>")
+    tokenizer.enable_padding(pad_id=1 if pad_id is None else pad_id, pad_token="<pad>")
+    logger.info("ONNX cross-encoder ready")
+    return OnnxCrossEncoder(session, tokenizer, settings.CROSS_ENCODER_BATCH_SIZE)
+
+
 def _load() -> Any:
+    if settings.CROSS_ENCODER_RUNTIME == "onnx":
+        return _load_onnx()
     try:
         from sentence_transformers import CrossEncoder
     except ImportError as exc:
@@ -172,15 +210,18 @@ class CircuitBreaker:
 
 breaker = CircuitBreaker()
 
+# About the length of a real chunk (~900 characters): a pair costs roughly in proportion to its tokens, and a one-line
+# sample measured 0.03 s a pair where real chunks cost ~0.2 s, so the startup check said "fine" for a pool that was not.
+_BUDGET_PASSAGE = (
+    "Employees accrue twelve days of annual leave per year, approved by their manager. Leave that is not used by the "
+    "end of the year is carried into the first quarter of the next year, up to five days; the rest lapses and is not "
+    "paid out. A request for more than three consecutive days needs the approval of the head of department, and more "
+    "than five the approval of the director of human resources. Sick leave is recorded separately and does not reduce "
+    "the annual allowance. Requests are filed in the HR portal at least three working days ahead, except for illness. "
+)
 _BUDGET_SAMPLE = [
-    (
-        "what is the leave policy",
-        "Employees accrue twelve days of annual leave per year, approved by their manager.",
-    ),
-    (
-        "who approves expenses",
-        "Expenses above the limit need approval from the department head before payment.",
-    ),
+    ("what is the leave policy", _BUDGET_PASSAGE),
+    ("who approves a long leave request", _BUDGET_PASSAGE),
 ]
 
 
@@ -190,8 +231,8 @@ def check_budget() -> float:
 
     Measured by running it, not assumed: the same model cost ~0.5 s per pair on 2 vCPU and ~0.47 s on
     4, so the right pool depends on the task and a constant in the code would be a guess. The sample
-    passages are short, so this UNDER-estimates real chunks (parent text, titles); a warning here is
-    reliable, silence is not a promise.
+    passage is about the length of a real chunk; a pool that cannot fit warns here, and one that fits can
+    still be slower on a busy task.
     """
     model = _model.get()
     # Under the same lock as score(): torch inference is not meant to run concurrently in one process, and
@@ -204,7 +245,9 @@ def check_budget() -> float:
         started = time.perf_counter()
         model.predict(_BUDGET_SAMPLE)
         per_pair = (time.perf_counter() - started) / len(_BUDGET_SAMPLE)
-    pool = settings.CROSS_ENCODER_CANDIDATE_POOL
+    pool = (
+        settings.CROSS_ENCODER_CANDIDATE_POOL + settings.CROSS_ENCODER_VECTOR_CANDIDATES
+    )
     expected = per_pair * pool
     if expected > settings.CROSS_ENCODER_TIMEOUT_SECONDS:
         logger.warning(
@@ -262,7 +305,77 @@ def score(query: str, passages: list[str]) -> list[float]:
     return [float(value) for value in raw_scores]
 
 
+MAX_PASSAGE_CHARS = 1800
+
+
+def cross_passage(chunk: object) -> str:
+    """What the cross-encoder reads for a chunk: where it is from, then its text, in the order a person would read it."""
+    parent = getattr(chunk, "parent_chunk", None)
+    text = getattr(chunk, "chunk_text", "") or getattr(parent, "text", "") or ""
+    title = getattr(getattr(chunk, "article", None), "title", "") or ""
+    section = getattr(chunk, "heading", None) or (
+        getattr(parent, "section_ref", "") if parent else ""
+    )
+    head = " - ".join(part for part in (title, section) if part)
+    return f"{head}\n{text}"[:MAX_PASSAGE_CHARS]
+
+
 T = TypeVar("T")
+
+
+def select_candidates(
+    ranked: Sequence[tuple[Any, float]],
+    vector_ranks: Any,
+    lexical_n: int,
+    vector_n: int,
+) -> list[int]:
+    """Indexes into `ranked` (already in lexical order) worth the cost of a cross-encoder pair.
+
+    The first `lexical_n`, plus the `vector_n` the embedding ranked highest wherever they sit in the lexical order.
+    Measured on 54 chip-specification questions (a chunk containing the answer ranked 1st / within 5): the lexical
+    order alone 16 / 30; a cross-encoder over its first 30 27 / 42; over its first 10 and the vector top 5 (~14 pairs)
+    27 / 39. The vector half is what lets a chunk with little word overlap, which the lexical order buries, be seen.
+    """
+    chosen = set(range(min(max(lexical_n, 0), len(ranked))))
+    if vector_n > 0 and vector_ranks:
+        by_vector = sorted(
+            (vector_ranks[chunk.id], index)
+            for index, (chunk, _score) in enumerate(ranked)
+            if getattr(chunk, "id", None) in vector_ranks
+        )
+        chosen.update(index for _rank, index in by_vector[:vector_n])
+    return sorted(chosen)
+
+
+def promote(
+    ranked: Sequence[tuple[Any, float]],
+    candidates: Sequence[int],
+    cross_scores: Sequence[float],
+    assist_top_k: int,
+    assist_floor: float,
+    assist_min_probability: float,
+) -> list[tuple[Any, float]]:
+    """The scored candidates first, best cross-encoder score first; everything else after, in its lexical order.
+
+    The VALUE each item carries stays its lexical score, because RAG_MIN_RELEVANCE_SCORE and RAG_MIN_CONTEXT_SCORE
+    were tuned on that scale and a model's own scale would move every threshold. One exception: the cross-encoder's
+    first `assist_top_k` are scored at least `assist_floor` when it is at least `assist_min_probability` sure, so a
+    passage it recognises as the answer is not dropped by a gate that only counts shared words.
+    """
+    if len(candidates) != len(cross_scores):
+        raise ValueError(
+            f"promote got {len(candidates)} candidates but {len(cross_scores)} scores"
+        )
+    scored = sorted(zip(cross_scores, candidates), key=lambda pair: (-pair[0], pair[1]))
+    head: list[tuple[Any, float]] = []
+    for position, (probability, index) in enumerate(scored):
+        chunk, lexical = ranked[index]
+        if position < assist_top_k and probability >= assist_min_probability:
+            lexical = max(lexical, assist_floor)
+        head.append((chunk, lexical))
+    taken = set(candidates)
+    tail = [item for index, item in enumerate(ranked) if index not in taken]
+    return head + tail
 
 
 def reorder_by_cross_encoder(
