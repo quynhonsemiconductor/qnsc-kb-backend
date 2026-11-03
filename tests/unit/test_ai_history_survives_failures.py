@@ -13,6 +13,7 @@ Two ways a turn used to vanish:
 The fix records provenance at write time. These tests hold that line, and — just as
 importantly — hold the fail-closed rule that motivated the masking in the first place.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -63,9 +64,7 @@ def _load(monkeypatch, repository):
 
 def test_an_answer_recorded_as_uncited_survives_a_reload(monkeypatch):
     """This is the "no relevant documents" answer. It was never a cited answer."""
-    response = _load(
-        monkeypatch, _history(action_data={"grounding": "uncited"})
-    )
+    response = _load(monkeypatch, _history(action_data={"grounding": "uncited"}))
 
     assert response[0]["content"].startswith("Toi khong tim thay")
     assert not response[0]["content"].startswith("This historical answer")
@@ -113,7 +112,9 @@ def test_revoked_cited_answer_scrubs_analytics_metadata(monkeypatch):
         _history(
             content="Revenue was 150 [C1].",
             grounded_content="Revenue was 150 [C1].",
-            citations=f'[{ {"source_id": "C1", "chunk_id": str(chunk_id)}!r}]'.replace("'", '"'),
+            citations=f'[{ {"source_id": "C1", "chunk_id": str(chunk_id)}!r}]'.replace(
+                "'", '"'
+            ),
             action_data={
                 "analytics_results": [
                     {
@@ -145,7 +146,10 @@ def test_provenance_leaves_a_cited_answer_alone():
 
 def test_provenance_preserves_an_action_and_adds_to_it():
     stored = ai_router._answer_provenance(
-        {"citations": [], "action_data": {"action": "article_updated", "article_id": "a"}}
+        {
+            "citations": [],
+            "action_data": {"action": "article_updated", "article_id": "a"},
+        }
     )
 
     assert stored == {

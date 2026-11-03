@@ -11,6 +11,7 @@ went unnoticed.
 The provider itself comes from the admin-managed, encrypted workspace configuration —
 see test_llm_provider_source.py. Process-environment keys are deliberately not a source.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -48,7 +49,9 @@ def test_gemini_default_url_is_the_api_root_not_a_chat_path():
     [("gemini", True), ("openai", False), ("groq", False), ("glm", False)],
 )
 def test_native_gemini_is_set_from_the_provider(provider: str, expected: bool):
-    set_runtime_config(RuntimeLLMConfig(provider, "some-model", "https://example.test", "key"))
+    set_runtime_config(
+        RuntimeLLMConfig(provider, "some-model", "https://example.test", "key")
+    )
 
     resolved = resolve_provider()
 

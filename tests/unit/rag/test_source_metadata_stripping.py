@@ -9,6 +9,7 @@ and the model wrote them into the prose, so a three-claim paragraph read:
 The citation payload already carries `last_reviewed` and `owner_email` for the source
 card, so none of that ever needed to be in the answer text.
 """
+
 from __future__ import annotations
 
 from src.rag.answer_sections import strip_source_metadata

@@ -23,6 +23,7 @@ The first test is the general contract, and is the one worth keeping: whatever
 authorization reads off a user, the repository that loads users must eager-load. It
 fails if either side drifts.
 """
+
 from __future__ import annotations
 
 import ast
@@ -46,11 +47,16 @@ USER_PARAMS = {"user", "viewer", "actor", "approver"}
 def _user_relationships() -> set[str]:
     tree = ast.parse((SRC / "models" / "user.py").read_text(encoding="utf-8"))
     names = set()
-    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "User"]:
+    for cls in [
+        n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "User"
+    ]:
         for s in cls.body:
             if isinstance(s, ast.AnnAssign) and isinstance(s.value, ast.Call):
                 f = s.value.func
-                if getattr(f, "id", None) == "relationship" or getattr(f, "attr", None) == "relationship":
+                if (
+                    getattr(f, "id", None) == "relationship"
+                    or getattr(f, "attr", None) == "relationship"
+                ):
                     names.add(s.target.id)
     assert names, "found no relationships on User; the parser has drifted"
     return names
@@ -63,13 +69,22 @@ def _relationships_authorization_reads() -> set[str]:
     for path in AUTHORIZATION_READERS:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for n in ast.walk(tree):
-            if (isinstance(n, ast.Attribute) and n.attr in rels
-                    and isinstance(n.value, ast.Name) and n.value.id in USER_PARAMS):
+            if (
+                isinstance(n, ast.Attribute)
+                and n.attr in rels
+                and isinstance(n.value, ast.Name)
+                and n.value.id in USER_PARAMS
+            ):
                 found.add(n.attr)
-            if (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "getattr"
-                    and len(n.args) >= 2
-                    and isinstance(n.args[0], ast.Name) and n.args[0].id in USER_PARAMS
-                    and isinstance(n.args[1], ast.Constant) and n.args[1].value in rels):
+            if (
+                isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) == "getattr"
+                and len(n.args) >= 2
+                and isinstance(n.args[0], ast.Name)
+                and n.args[0].id in USER_PARAMS
+                and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value in rels
+            ):
                 found.add(n.args[1].value)
     return found
 
@@ -78,13 +93,17 @@ def _eager_loaded_by_get_by_id() -> set[str]:
     """`User.<attr>` named inside the .options(...) chain of UserRepository.get_by_id."""
     tree = ast.parse((SRC / "repositories" / "user.py").read_text(encoding="utf-8"))
     fn = next(
-        n for n in ast.walk(tree)
+        n
+        for n in ast.walk(tree)
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_by_id"
     )
     loaded = set()
     for n in ast.walk(fn):
-        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-                and n.value.id == "User"):
+        if (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "User"
+        ):
             loaded.add(n.attr)
     return loaded
 

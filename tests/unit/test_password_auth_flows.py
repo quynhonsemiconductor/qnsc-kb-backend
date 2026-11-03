@@ -12,6 +12,7 @@ What a fake session cannot prove, and is therefore NOT claimed here: the RLS pol
 let an unauthenticated request insert a reset grant, the UNIQUE constraint on token_hash,
 and the partial index behind the repeat-request lookup. Those need the real pg16 schema.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -166,9 +167,7 @@ def _allow_every_request(monkeypatch):
 
 def _request(*, origin: str | None = None) -> SimpleNamespace:
     headers = {"origin": origin} if origin else {}
-    return SimpleNamespace(
-        headers=headers, client=SimpleNamespace(host="203.0.113.9")
-    )
+    return SimpleNamespace(headers=headers, client=SimpleNamespace(host="203.0.113.9"))
 
 
 def _raw_token() -> str:
@@ -302,9 +301,7 @@ def test_a_known_and_an_unknown_address_get_the_identical_response():
     known_db = _AuthDB(user_by_email=_account())
     unknown_db = _AuthDB(user_by_email=None)
 
-    assert _forgot(known_db, "member@qnsc.vn") == _forgot(
-        unknown_db, "nobody@qnsc.vn"
-    )
+    assert _forgot(known_db, "member@qnsc.vn") == _forgot(unknown_db, "nobody@qnsc.vn")
 
 
 def test_the_forgot_endpoint_answers_202_for_an_address_that_does_not_exist():
@@ -390,7 +387,8 @@ def test_a_reset_token_that_was_never_issued_is_not_found():
 
 def test_a_reset_token_that_was_already_spent_is_gone():
     """410, not 404: a replayed link is a different event from an invented one, and the
-    distinction is what makes a replay visible instead of indistinguishable from noise."""
+    distinction is what makes a replay visible instead of indistinguishable from noise.
+    """
     token = _raw_token()
     user = _account()
     db = _AuthDB(

@@ -10,6 +10,7 @@ company-wide reader saw a document the provider had never shared with them.
 ``asyncio.run`` rather than pytest-asyncio: the marker is not available in every
 environment this suite runs in.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -78,7 +79,11 @@ def test_onedrive_is_a_graph_provider_and_shares_sharepoint_semantics():
     assert cursor_type("onedrive") == cursor_type("sharepoint") == "delta"
     # SharePoint and OneDrive sit behind ONE Entra registration, so an ACL user
     # principal must resolve through the same ExternalIdentity rows.
-    assert identity_provider("onedrive") == identity_provider("sharepoint") == "microsoft_entra"
+    assert (
+        identity_provider("onedrive")
+        == identity_provider("sharepoint")
+        == "microsoft_entra"
+    )
     assert supports_lifecycle_webhooks("onedrive") is True
 
 
@@ -128,7 +133,10 @@ def test_a_mapped_onedrive_group_admits_a_shared_department_member():
     """The positive path: mapped groups reach the reader through Article.departments."""
     shared = _Department()
     article = _Article(sources=[_Source("onedrive")], departments=[shared])
-    assert PermissionService._source_acl_allows(_User(departments=[shared]), article) is True
+    assert (
+        PermissionService._source_acl_allows(_User(departments=[shared]), article)
+        is True
+    )
 
 
 def test_a_onedrive_source_allow_admits_a_mapped_direct_user():
@@ -204,10 +212,18 @@ def test_onedrive_discovery_walks_the_allowlisted_user_drives(monkeypatch):
         urls.append(url)
         if "/drive?" in url:
             user = url.split("/users/")[1].split("/drive")[0]
-            return {"id": f"drive-{user}", "name": "OneDrive", "webUrl": f"https://acme/{user}"}
+            return {
+                "id": f"drive-{user}",
+                "name": "OneDrive",
+                "webUrl": f"https://acme/{user}",
+            }
         # Graph always sends a childCount on the folder facet; an empty dict is falsy
         # and would be treated as a file by the shared folder walk.
-        return {"value": [{"id": "folder-1", "name": "Policies", "folder": {"childCount": 2}}]}
+        return {
+            "value": [
+                {"id": "folder-1", "name": "Policies", "folder": {"childCount": 2}}
+            ]
+        }
 
     adapter._request = fake_request  # type: ignore[method-assign]
     scopes = asyncio.run(adapter.discover_scopes())
@@ -284,13 +300,21 @@ def test_onedrive_reuses_the_graph_delta_walk():
     async def fake_request(method, url, **_kwargs):
         urls.append(url)
         return {
-            "value": [{"id": "file-1", "name": "one.docx", "file": {"mimeType": "application/vnd"}}],
+            "value": [
+                {
+                    "id": "file-1",
+                    "name": "one.docx",
+                    "file": {"mimeType": "application/vnd"},
+                }
+            ],
             "@odata.deltaLink": "https://graph.microsoft.com/v1.0/next-delta",
         }
 
     adapter._request = fake_request  # type: ignore[method-assign]
     changes, cursor = asyncio.run(
-        adapter.incremental_changes({"external_scope_id": "drive-1", "config": {}}, None)
+        adapter.incremental_changes(
+            {"external_scope_id": "drive-1", "config": {}}, None
+        )
     )
 
     assert "/delta" in urls[0]

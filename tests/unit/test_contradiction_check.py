@@ -9,6 +9,7 @@ Three properties matter here, in order of how badly getting them wrong would hur
 3. It must actually find the conflict when one exists, using the same explicit-fact
    detector the reactive (answer-time) path already relies on.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +31,9 @@ class _Article:
 class _FakeDB:
     """Enough of an AsyncSession for this module's two calls: `get` and `scalar`."""
 
-    def __init__(self, articles: dict[str, _Article], existing_open_facts: set[str] | None = None):
+    def __init__(
+        self, articles: dict[str, _Article], existing_open_facts: set[str] | None = None
+    ):
         self._articles = articles
         self._existing_open_facts = existing_open_facts or set()
         self.added: list = []
@@ -65,7 +68,9 @@ def _run(db, matches, draft_body, exclude_id=None, monkeypatch=None):
 
     monkeypatch.setattr(module, "find_similar_documents", fake_find_similar_documents)
     return asyncio.run(
-        detect_contradictions_for_draft(db, _User(), draft_body, exclude_article_id=exclude_id)
+        detect_contradictions_for_draft(
+            db, _User(), draft_body, exclude_article_id=exclude_id
+        )
     )
 
 
@@ -89,7 +94,9 @@ def test_the_article_being_updated_is_excluded_from_its_own_comparison(monkeypat
     article_id = str(uuid.uuid4())
     db = _FakeDB({})
     matches = [{"article_id": article_id, "score": 0.9}]
-    result = _run(db, matches, "Deadline: Friday", exclude_id=article_id, monkeypatch=monkeypatch)
+    result = _run(
+        db, matches, "Deadline: Friday", exclude_id=article_id, monkeypatch=monkeypatch
+    )
     assert result == []
     assert db.added == []
 
@@ -126,7 +133,12 @@ def test_no_shared_labelled_fact_means_no_conflict(monkeypatch):
     db = _FakeDB({str(other.id): other})
     matches = [{"article_id": str(other.id), "score": 0.5}]
 
-    result = _run(db, matches, "This document has no labelled facts at all.", monkeypatch=monkeypatch)
+    result = _run(
+        db,
+        matches,
+        "This document has no labelled facts at all.",
+        monkeypatch=monkeypatch,
+    )
     assert result == []
     assert db.added == []
 

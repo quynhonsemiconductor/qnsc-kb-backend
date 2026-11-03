@@ -21,6 +21,7 @@ plain UUID BEFORE the loop.
 These tests pin that behaviour, because the failure only appears on the draft AFTER a
 refusal — a batch of all-good or all-bad drafts passes either way.
 """
+
 from __future__ import annotations
 
 import ast
@@ -87,7 +88,9 @@ def test_the_actor_id_is_captured_outside_the_loop_not_inside_it():
     def assigns_actor_id(node) -> bool:
         return isinstance(node, ast.AnnAssign | ast.Assign) and any(
             getattr(target, "id", None) == "actor_id"
-            for target in ([node.target] if isinstance(node, ast.AnnAssign) else node.targets)
+            for target in (
+                [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+            )
         )
 
     at_body_level = any(assigns_actor_id(node) for node in func.body)
@@ -99,9 +102,9 @@ def test_the_actor_id_is_captured_outside_the_loop_not_inside_it():
     )
 
     assert at_body_level, "actor_id must be captured in the function body"
-    assert not inside_a_loop, (
-        "capturing actor_id inside the loop re-reads it from an expired current_user"
-    )
+    assert (
+        not inside_a_loop
+    ), "capturing actor_id inside the loop re-reads it from an expired current_user"
 
 
 def test_the_reload_helper_takes_a_primitive_id_not_an_orm_instance():
@@ -178,7 +181,9 @@ def test_blocked_drafts_keep_their_structured_code():
     source = _source()
 
     assert 'detail.get("code")' in source
-    assert "isinstance(detail, dict)" in source, "a string detail must not crash the report"
+    assert (
+        "isinstance(detail, dict)" in source
+    ), "a string detail must not crash the report"
 
 
 def test_both_outcomes_are_reported_separately():

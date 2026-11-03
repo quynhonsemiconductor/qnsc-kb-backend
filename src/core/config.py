@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # without it the process refuses to connect (see src/core/db_ssl.py) instead of
     # connecting without TLS. Unset locally: asyncpg connects without TLS, unchanged.
     DATABASE_SSL_CA: str | None = None
+    # The connection pool, PER PROCESS (each uvicorn worker and each Celery process has its own). These are
+    # SQLAlchemy's own defaults, written out so they can be raised: under load the pool is the first thing
+    # to run dry ("QueuePool limit of size 5 overflow 10 reached, connection timed out"), and a request
+    # waits DB_POOL_TIMEOUT_SECONDS for a connection before it fails with a 500. Keep
+    # processes x (DB_POOL_SIZE + DB_MAX_OVERFLOW) under the database's max_connections.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT_SECONDS: float = 30.0
+    # Connections older than this are replaced instead of reused: a load balancer or the server drops idle
+    # ones silently, and the first request to find out used to be the one that failed.
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     APP_DATABASE_ROLE: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -894,6 +905,16 @@ class Settings(BaseSettings):
     # corpus and the timeout returns once the knowledge base is large enough; 50 is a
     # wide margin over the 5 matches ever returned.
     SIMILARITY_MAX_SEQUENCE_COMPARISONS: int = 50
+    # Of those 50, the ones whose token overlap is almost nil are not worth the O(n*m) pass either.
+    # Measured on 5,034 documents with 30 real probes, 50 comparisons cost 3.4 s per upload and the
+    # 50th-ranked candidate had a token score of 0.002: unrelated text, whose character-level ratio sits
+    # around 0.2-0.24, just under the 0.25 threshold. With a floor of 0.02 the set of documents reported
+    # as similar was identical for all 30 probes and the comparisons fell from 1500 to 863 (-42%);
+    # even 0.05 changed nothing in that sample. Applies only when both texts have at least
+    # SIMILARITY_FLOOR_MIN_TOKENS tokens: a text with no spaces (Chinese, Japanese, Thai, a hex dump) is
+    # one or a few "tokens", its token score says nothing, and it must still be compared. 0 disables.
+    SIMILARITY_SEQUENCE_MIN_TOKEN_SCORE: float = 0.02
+    SIMILARITY_FLOOR_MIN_TOKENS: int = 30
     MAX_SOURCE_UNCOMPRESSED_BYTES: int = 100_000_000
     MAX_SOURCE_ARCHIVE_FILES: int = 2_000
     MALWARE_SCAN_ENABLED: bool = False

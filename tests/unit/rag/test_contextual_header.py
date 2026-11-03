@@ -4,6 +4,7 @@ Mirrors the failure-mode contract auto_tagging.py/entity_extraction.py already h
 every degrade path (no provider, a failed call) returns "" rather than raising, because
 this runs inline in indexing and a broken header must not turn into a broken index.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +18,11 @@ from src.rag.contextual_header import apply_header, generate_section_context
 def llm(monkeypatch):
     from src.domain import llm_client
 
-    state: dict = {"reply": "This document covers the leave policy.", "raises": None, "provider": object()}
+    state: dict = {
+        "reply": "This document covers the leave policy.",
+        "raises": None,
+        "provider": object(),
+    }
 
     async def fake_complete(messages, **kwargs):
         state["messages"] = messages
@@ -26,12 +31,16 @@ def llm(monkeypatch):
         return state["reply"], 10, "fake-model", "fake"
 
     monkeypatch.setattr(llm_client, "complete", fake_complete)
-    monkeypatch.setattr(llm_client, "resolve_provider", lambda *a, **k: state["provider"])
+    monkeypatch.setattr(
+        llm_client, "resolve_provider", lambda *a, **k: state["provider"]
+    )
     return state
 
 
 def test_returns_the_cleaned_header_from_a_well_formed_reply(llm):
-    result = asyncio.run(generate_section_context("Employee Handbook", "Leave Policy", "content"))
+    result = asyncio.run(
+        generate_section_context("Employee Handbook", "Leave Policy", "content")
+    )
     assert result == "This document covers the leave policy."
 
 
@@ -52,7 +61,11 @@ def test_header_is_capped_to_max_length(llm):
 
 
 def test_prompt_includes_title_heading_and_excerpt(llm):
-    asyncio.run(generate_section_context("Employee Handbook", "Leave Policy", "Submit forms early."))
+    asyncio.run(
+        generate_section_context(
+            "Employee Handbook", "Leave Policy", "Submit forms early."
+        )
+    )
     user_message = llm["messages"][1]["content"]
     assert "Employee Handbook" in user_message
     assert "Leave Policy" in user_message

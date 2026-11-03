@@ -21,6 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
+from sqlalchemy.orm import defer
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
@@ -1974,11 +1975,19 @@ async def list_articles(
     q: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    include_body: bool = Query(
+        True,
+        description=(
+            "False leaves `body_md` empty. A list page shows titles and badges, not documents: "
+            "measured on 50 real specifications the body was 90% of a 541 KB response. "
+            "Fetch one article for its body."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     article_repo = ArticleRepository(db)
-    return await article_repo.list_articles(
+    articles = await article_repo.list_articles(
         user=current_user,
         dept=dept,
         topic=topic,
@@ -1988,6 +1997,12 @@ async def list_articles(
         limit=limit,
         offset=offset,
     )
+    if include_body:
+        return articles
+    return [
+        ArticleResponse.model_validate(article).model_copy(update={"body_md": ""})
+        for article in articles
+    ]
 
 
 @router.post("/{id}/follow", status_code=status.HTTP_201_CREATED)
@@ -2088,6 +2103,8 @@ async def get_article_chunks(
         (
             await db.execute(
                 select(ArticleChunk).where(ArticleChunk.article_id == article.id)
+                # The chunk view reports versions and text, never the vector.
+                .options(defer(ArticleChunk.embedding))
             )
         )
         .scalars()

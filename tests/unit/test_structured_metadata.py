@@ -5,6 +5,7 @@ dropped rather than stored as a string that merely looks like a date, and every 
 the four keys must always be present in the result (as a clean string or explicit None)
 so a caller never has to guard against a missing key.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +54,12 @@ def test_a_full_reply_is_returned_as_is(llm):
 def test_every_key_is_present_even_when_the_model_omits_it(llm):
     llm["reply"] = '{"document_number": "SOP-114"}'
     result = _extract(llm)
-    assert set(result.keys()) == {"document_number", "issue_date", "expiry_date", "signed_by"}
+    assert set(result.keys()) == {
+        "document_number",
+        "issue_date",
+        "expiry_date",
+        "signed_by",
+    }
     assert result["issue_date"] is None
 
 

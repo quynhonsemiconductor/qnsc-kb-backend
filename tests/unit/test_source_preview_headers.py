@@ -10,6 +10,7 @@ The preview was blocked by two headers pulling against each other:
 Relaxing either one carelessly is how an untrusted upload gets to read the signed-in
 user's session, so most of what follows pins the part that must NOT be relaxed.
 """
+
 from __future__ import annotations
 
 import inspect

@@ -19,6 +19,7 @@ Removing the attribute fixes both directions. A legacy database keeps its column
 unmapped, it is never referenced again — and an Alembic-built one stops asking for a
 column that was never going to be there.
 """
+
 from __future__ import annotations
 
 import re

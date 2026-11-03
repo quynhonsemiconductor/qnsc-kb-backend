@@ -6,6 +6,7 @@ O(chunks x pages) passes over the whole document — ~104 ms per call across 120
 so roughly 80 seconds of pure re-tokenisation for an 800-chunk file. The tokens are now
 prepared once. These tests pin the BEHAVIOUR that refactor had to preserve.
 """
+
 from __future__ import annotations
 
 from src.domain.indexing import (
@@ -49,7 +50,9 @@ def test_unrelated_text_stays_unattributed():
 
 def test_no_pages_at_all_is_not_an_error():
     assert _match_source_page("bat ky noi dung nao", _prepare_source_pages([])) is None
-    assert _match_source_page("bat ky noi dung nao", _prepare_source_pages(None)) is None
+    assert (
+        _match_source_page("bat ky noi dung nao", _prepare_source_pages(None)) is None
+    )
 
 
 def test_a_long_exact_run_outranks_scattered_token_overlap():
@@ -62,7 +65,9 @@ def test_a_long_exact_run_outranks_scattered_token_overlap():
     ]
     prepared = _prepare_source_pages(pages)
 
-    assert len(" ".join(_normalized_tokens(run)[:24])) >= 24, "the case must exercise the bonus"
+    assert (
+        len(" ".join(_normalized_tokens(run)[:24])) >= 24
+    ), "the case must exercise the bonus"
     assert _match_source_page(run, prepared) == 2
 
 

@@ -5,6 +5,7 @@ its correctness is what this file checks -- the pgvector query around it (`find_
 cannot be exercised without a real Postgres+pgvector connection, but everything it does
 AFTER getting rows back from the database is ordinary Python and belongs here instead.
 """
+
 from __future__ import annotations
 
 from src.domain.article_linking import collapse_to_top_articles
@@ -52,6 +53,7 @@ def test_no_row_within_threshold_returns_no_matches():
 
 def test_ids_are_stringified_for_a_stable_key():
     """Real rows carry UUID objects, not strings; the function must key on str(id)."""
+
     class _FakeUUID:
         def __init__(self, label):
             self._label = label

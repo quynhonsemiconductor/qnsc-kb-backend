@@ -9,6 +9,7 @@ What is deliberately NOT asserted as a failure: a load that raises, or times out
 at 200 with ``degraded: true``. Keyword search works without the model; holding the probe forever
 would turn a degraded feature into an outage and fail every deploy.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,7 +41,9 @@ def backing_services_up(monkeypatch):
     connection.execute = AsyncMock()
     import src.api.deps as deps
 
-    monkeypatch.setattr(deps, "engine", MagicMock(connect=MagicMock(return_value=connection)))
+    monkeypatch.setattr(
+        deps, "engine", MagicMock(connect=MagicMock(return_value=connection))
+    )
     monkeypatch.setattr(main, "database_bootstrapped", True)
     redis = MagicMock(ping=AsyncMock(), aclose=AsyncMock())
     with patch("redis.asyncio.Redis.from_url", return_value=redis):
@@ -80,9 +83,13 @@ def test_200_when_there_is_no_model_to_wait_for(fresh_state, backing_services_up
     assert body["embedding"]["state"] == "disabled"
 
 
-def test_a_failed_load_does_not_hold_readiness_but_is_reported(fresh_state, backing_services_up, monkeypatch):
+def test_a_failed_load_does_not_hold_readiness_but_is_reported(
+    fresh_state, backing_services_up, monkeypatch
+):
     fresh_state.begin()
-    monkeypatch.setattr(main, "warm_up_embeddings", MagicMock(side_effect=RuntimeError("no model.onnx")))
+    monkeypatch.setattr(
+        main, "warm_up_embeddings", MagicMock(side_effect=RuntimeError("no model.onnx"))
+    )
 
     asyncio.run(main._preload_embedding_model())
     body = ready()
@@ -93,7 +100,9 @@ def test_a_failed_load_does_not_hold_readiness_but_is_reported(fresh_state, back
     assert body["degraded"] is True
 
 
-def test_a_load_that_outlasts_the_timeout_stops_holding_readiness(fresh_state, backing_services_up, monkeypatch):
+def test_a_load_that_outlasts_the_timeout_stops_holding_readiness(
+    fresh_state, backing_services_up, monkeypatch
+):
     release = threading.Event()
     monkeypatch.setattr(main.settings, "EMBEDDING_WARMUP_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(main, "warm_up_embeddings", lambda: release.wait(5))
@@ -117,7 +126,9 @@ def test_a_load_that_outlasts_the_timeout_stops_holding_readiness(fresh_state, b
     assert fresh_state.status == warmup.READY
 
 
-def test_the_probe_goes_green_exactly_when_the_load_ends(fresh_state, backing_services_up, monkeypatch):
+def test_the_probe_goes_green_exactly_when_the_load_ends(
+    fresh_state, backing_services_up, monkeypatch
+):
     """The end-to-end shape: 503 during the load, 200 after, through the real task."""
     release = threading.Event()
     monkeypatch.setattr(main.settings, "EMBEDDING_WARMUP_TIMEOUT_SECONDS", 5.0)
@@ -149,7 +160,8 @@ def test_liveness_never_reads_the_warm_up(fresh_state):
 
 def test_the_deploy_probe_does_not_wait_for_the_model(fresh_state, backing_services_up):
     """/health/deps is what the deploy polls (fixed 120 s, shared workflow). A cold model load
-    must not be able to fail a deploy, so it answers 200 while /health/ready answers 503."""
+    must not be able to fail a deploy, so it answers 200 while /health/ready answers 503.
+    """
     fresh_state.begin()
 
     body = asyncio.run(main.health_deps())
@@ -160,7 +172,9 @@ def test_the_deploy_probe_does_not_wait_for_the_model(fresh_state, backing_servi
     assert caught.value.status_code == 503
 
 
-def test_the_deploy_probe_still_fails_when_a_dependency_is_down(fresh_state, monkeypatch):
+def test_the_deploy_probe_still_fails_when_a_dependency_is_down(
+    fresh_state, monkeypatch
+):
     """It is not liveness: ci requires a deploy gate to notice a missing database or cache."""
     import src.api.deps as deps
 

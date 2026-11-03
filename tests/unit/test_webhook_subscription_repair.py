@@ -4,6 +4,7 @@ Neither failure raises anything. The provider simply stops calling: the connecto
 reporting `on_update`, the health endpoint keeps showing a subscription row, and the
 corpus goes stale until a person happens to notice. So both are pinned here.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -269,6 +270,6 @@ def test_a_drive_channel_records_the_id_needed_to_stop_it():
     )
 
     assert result["resource"] == "resource-1"
-    assert asyncio.run(adapter.renew_webhook(result["subscription_id"])) is None, (
-        "a Drive channel cannot be extended; it must be reported as spent"
-    )
+    assert (
+        asyncio.run(adapter.renew_webhook(result["subscription_id"])) is None
+    ), "a Drive channel cannot be extended; it must be reported as spent"

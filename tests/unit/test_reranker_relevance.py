@@ -11,4 +11,9 @@ def test_unrelated_short_query_does_not_match_arbitrary_passage():
 
 
 def test_relevant_terms_receive_positive_relevance():
-    assert score_retrieval_text("clock tree synthesis", "Clock tree synthesis balances clock path delay") >= 0.12
+    assert (
+        score_retrieval_text(
+            "clock tree synthesis", "Clock tree synthesis balances clock path delay"
+        )
+        >= 0.12
+    )

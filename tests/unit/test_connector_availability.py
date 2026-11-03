@@ -9,6 +9,7 @@ source that merely needed a click.
 `available_providers` is the single answer the UI hides on and the creation
 endpoint rejects on, so the two cannot disagree.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,13 +43,20 @@ def _configure_microsoft(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "MICROSOFT_CLIENT_ID", "client-id")
     monkeypatch.setattr(settings, "MICROSOFT_CLIENT_SECRET", "client-secret")
     monkeypatch.setattr(settings, "MICROSOFT_REDIRECT_URI", "https://api.acme.test/cb")
-    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "11111111-2222-4333-8444-555555555555")
+    monkeypatch.setattr(
+        settings, "MICROSOFT_TENANT_ID", "11111111-2222-4333-8444-555555555555"
+    )
 
 
-@pytest.mark.parametrize("authority", ["", "  ", "common", "Common", "organizations", "consumers"])
-def test_delegated_mode_also_needs_a_pinned_tenant(unconfigured, monkeypatch, authority):
+@pytest.mark.parametrize(
+    "authority", ["", "  ", "common", "Common", "organizations", "consumers"]
+)
+def test_delegated_mode_also_needs_a_pinned_tenant(
+    unconfigured, monkeypatch, authority
+):
     """A delegated consent against /common lets an account from ANY tenant (or a personal one) authorize the
-    connector and have its files ingested. The pin is required in BOTH modes, not only application mode."""
+    connector and have its files ingested. The pin is required in BOTH modes, not only application mode.
+    """
     _configure_microsoft(monkeypatch)
     monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", authority)
     monkeypatch.setattr(settings, "MICROSOFT_CONNECTOR_AUTH_MODE", "delegated")
@@ -83,7 +91,9 @@ def test_a_local_folder_needs_no_credentials(unconfigured):
     assert local.missing == ()
 
 
-def test_configuring_microsoft_does_not_make_google_available(unconfigured, monkeypatch):
+def test_configuring_microsoft_does_not_make_google_available(
+    unconfigured, monkeypatch
+):
     """Availability is per provider. One vendor's credentials are not another's."""
     _configure_microsoft(monkeypatch)
     by_system = {item.system: item for item in available_providers()}
@@ -101,7 +111,9 @@ def test_delegated_mode_requires_the_redirect_uri(unconfigured, monkeypatch):
     assert provider_availability("sharepoint").missing == ("MICROSOFT_REDIRECT_URI",)
 
 
-def test_application_mode_needs_a_real_tenant_and_its_own_allowlist(unconfigured, monkeypatch):
+def test_application_mode_needs_a_real_tenant_and_its_own_allowlist(
+    unconfigured, monkeypatch
+):
     """App-only mode has different prerequisites, not merely more of them.
 
     There is no redirect (no human), `common` cannot issue client credentials, and
@@ -116,7 +128,10 @@ def test_application_mode_needs_a_real_tenant_and_its_own_allowlist(unconfigured
     onedrive = provider_availability("onedrive")
 
     assert "MICROSOFT_REDIRECT_URI" not in sharepoint.missing
-    assert sharepoint.missing == ("MICROSOFT_TENANT_ID", "MICROSOFT_SHAREPOINT_SITE_IDS")
+    assert sharepoint.missing == (
+        "MICROSOFT_TENANT_ID",
+        "MICROSOFT_SHAREPOINT_SITE_IDS",
+    )
     # Each Graph provider reads its OWN allowlist: allowlisting sites must not make
     # OneDrive look ready, and vice versa.
     assert onedrive.missing == ("MICROSOFT_TENANT_ID", "MICROSOFT_ONEDRIVE_USER_IDS")
@@ -125,11 +140,15 @@ def test_application_mode_needs_a_real_tenant_and_its_own_allowlist(unconfigured
 def test_one_graph_allowlist_does_not_satisfy_the_other(unconfigured, monkeypatch):
     _configure_microsoft(monkeypatch)
     monkeypatch.setattr(settings, "MICROSOFT_CONNECTOR_AUTH_MODE", "application")
-    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "aaaaaaaa-1111-2222-3333-444444444444")
+    monkeypatch.setattr(
+        settings, "MICROSOFT_TENANT_ID", "aaaaaaaa-1111-2222-3333-444444444444"
+    )
     monkeypatch.setattr(settings, "MICROSOFT_ONEDRIVE_USER_IDS", "alice@acme.test")
 
     assert provider_availability("onedrive").available is True
-    assert provider_availability("sharepoint").missing == ("MICROSOFT_SHAREPOINT_SITE_IDS",)
+    assert provider_availability("sharepoint").missing == (
+        "MICROSOFT_SHAREPOINT_SITE_IDS",
+    )
 
 
 def test_whitespace_is_not_configuration(unconfigured, monkeypatch):

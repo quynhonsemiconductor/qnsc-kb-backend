@@ -30,6 +30,8 @@ def test_definition_passage_beats_reference_passage() -> None:
     ranked = rerank_chunks("Verilog là gì?", [references, definition], limit=2)
 
     assert ranked[0] is definition
-    assert score_retrieval_text("Verilog là gì?", definition.chunk_text) > score_retrieval_text(
+    assert score_retrieval_text(
+        "Verilog là gì?", definition.chunk_text
+    ) > score_retrieval_text(
         "Verilog là gì?", references.chunk_text, section="References"
     )

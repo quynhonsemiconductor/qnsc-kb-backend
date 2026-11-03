@@ -11,6 +11,7 @@ It was also O(n*m) over whole documents (8.25 s for one 20,000-character pair, ~
 doubling, `MAX_SOURCE_TEXT_CHARS` admitting 2,000,000) and ran once per article inline in
 an async function, blocking the worker's event loop for the duration.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,8 +31,22 @@ from src.domain.similarity import (
 )
 
 WORDS = [
-    "verilog", "module", "always", "begin", "end", "wire", "reg", "clock", "reset",
-    "assign", "testbench", "simulation", "synthesis", "fpga", "latch", "sequential",
+    "verilog",
+    "module",
+    "always",
+    "begin",
+    "end",
+    "wire",
+    "reg",
+    "clock",
+    "reset",
+    "assign",
+    "testbench",
+    "simulation",
+    "synthesis",
+    "fpga",
+    "latch",
+    "sequential",
 ]
 
 
@@ -84,7 +99,10 @@ def test_unrelated_documents_stay_below_the_threshold():
     """The fix must not buy recall with false positives."""
     left = normalize(_document(5_000, seed=1))
     right = normalize(" ".join(f"unrelated{n}" for n in range(900)))
-    assert max(sequence_similarity(left, right), token_similarity(left, right)) < MATCH_THRESHOLD
+    assert (
+        max(sequence_similarity(left, right), token_similarity(left, right))
+        < MATCH_THRESHOLD
+    )
 
 
 def test_empty_input_scores_zero_rather_than_raising():
@@ -107,7 +125,9 @@ def test_a_near_duplicate_now_reaches_the_confirmation_band():
 
 def test_matches_are_ranked_and_capped():
     original = _document(2_000)
-    bodies = [_edited(original, fraction) for fraction in (0.02, 0.05, 0.10, 0.20, 0.30)]
+    bodies = [
+        _edited(original, fraction) for fraction in (0.02, 0.05, 0.10, 0.20, 0.30)
+    ]
     bodies += [_document(2_000, seed=99) for _ in range(3)]
 
     matches = _rank(original, _candidates(bodies))
@@ -171,7 +191,9 @@ def test_the_comparison_reads_only_a_bounded_prefix():
     head = normalize(_document(settings.SIMILARITY_COMPARE_CHARS * 2))[
         : settings.SIMILARITY_COMPARE_CHARS
     ]
-    assert sequence_similarity(head + "a" * 5_000, head + "z" * 5_000) == pytest.approx(1.0)
+    assert sequence_similarity(head + "a" * 5_000, head + "z" * 5_000) == pytest.approx(
+        1.0
+    )
 
 
 def test_scoring_does_not_block_the_event_loop():
@@ -198,3 +220,72 @@ def test_scoring_does_not_block_the_event_loop():
         return ticks
 
     assert asyncio.run(scenario()) > 5
+
+
+# ── the token-score floor ─────────────────────────────────────────────────────
+
+
+def _counting(monkeypatch) -> list[int]:
+    calls = [0]
+    real = similarity_module.sequence_similarity
+
+    def counting(left: str, right: str) -> float:
+        calls[0] += 1
+        return real(left, right)
+
+    monkeypatch.setattr(similarity_module, "sequence_similarity", counting)
+    return calls
+
+
+def _unrelated(chars: int) -> str:
+    rng = random.Random(7)
+    words: list[str] = []
+    while sum(len(w) + 1 for w in words) < chars:
+        words.append(f"zq{rng.randrange(400)}")
+    return " ".join(words)
+
+
+def test_a_candidate_with_almost_no_shared_tokens_is_not_compared_character_by_character(
+    monkeypatch,
+):
+    calls = _counting(monkeypatch)
+    original = _document(2_000)
+    assert len(original.split()) >= settings.SIMILARITY_FLOOR_MIN_TOKENS
+    _rank(original, _candidates([_unrelated(2_000) for _ in range(20)]))
+    assert calls[0] == 0
+
+
+def test_a_floor_of_zero_compares_every_top_candidate_as_before(monkeypatch):
+    monkeypatch.setattr(settings, "SIMILARITY_SEQUENCE_MIN_TOKEN_SCORE", 0.0)
+    calls = _counting(monkeypatch)
+    original = _document(2_000)
+    _rank(original, _candidates([_unrelated(2_000) for _ in range(20)]))
+    assert calls[0] == 20
+
+
+def test_a_near_duplicate_is_still_compared_and_still_reported(monkeypatch):
+    calls = _counting(monkeypatch)
+    original = _document(2_000)
+    matches = _rank(
+        original,
+        _candidates([_unrelated(2_000), _edited(original, 0.05), _unrelated(2_000)]),
+    )
+    assert [m["article_id"] for m in matches] == ["id-1"]
+    assert matches[0]["score"] >= 0.9
+    assert calls[0] == 1
+
+
+def test_text_without_spaces_is_still_compared_because_its_token_score_says_nothing(
+    monkeypatch,
+):
+    """One long run of characters is one token: an edited copy has token overlap 0 and must still be found."""
+    calls = _counting(monkeypatch)
+    rng = random.Random(3)
+    alphabet = [chr(code) for code in range(0x4E00, 0x4E00 + 400)]
+    original = "".join(rng.choice(alphabet) for _ in range(1_500))
+    edited = list(original)
+    for index in rng.sample(range(len(edited)), 60):
+        edited[index] = rng.choice(alphabet)
+    matches = _rank(original, _candidates(["".join(edited)]))
+    assert calls[0] == 1
+    assert len(matches) == 1 and matches[0]["score"] >= 0.9

@@ -24,6 +24,7 @@ Two paths used to reach it from inside a tenant, and both are covered here:
 The tests call the real functions. Asserting on source text would pass against code that
 imports the guard and never runs it, which is the failure mode this file exists to catch.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -211,9 +212,11 @@ class _BootstrapDB:
 
     async def execute(self, statement, params=None, *args, **kwargs):
         try:
-            rendered = str(statement.compile(
-                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
-            ))
+            rendered = str(
+                statement.compile(
+                    dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+                )
+            )
         except Exception:
             rendered = str(statement)
         # Identifiers compile lowercase, so routing and literal extraction can share one
@@ -279,7 +282,9 @@ def _run_bootstrap(db):
 
 
 def _assigned(user: User) -> Role:
-    assert len(user.roles) == 1, f"expected exactly one backfilled role, got {user.roles}"
+    assert (
+        len(user.roles) == 1
+    ), f"expected exactly one backfilled role, got {user.roles}"
     return user.roles[0]
 
 
@@ -374,9 +379,11 @@ class _RoleLookupDB:
 
     async def execute(self, statement, params=None, *args, **kwargs):
         sql = " ".join(
-            str(statement.compile(
-                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
-            )).split()
+            str(
+                statement.compile(
+                    dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+                )
+            ).split()
         )
         name = _quoted_value(sql, "roles.name =")
         domain = (
@@ -485,7 +492,9 @@ def test_auth_limiting_fails_closed_when_redis_is_unreachable(monkeypatch):
 
     monkeypatch.setattr(rate_limit.settings, "ENVIRONMENT", "production")
 
-    allowed, retry_after = _allow_with_redis_down(rate_limit.auth_rate_limiter, monkeypatch)
+    allowed, retry_after = _allow_with_redis_down(
+        rate_limit.auth_rate_limiter, monkeypatch
+    )
 
     assert not allowed
     assert retry_after >= 1

@@ -19,6 +19,7 @@ The check is on the mixin rather than on compiled SQL because `Table.insert()` c
 without RETURNING at Core level — the clause is added by the ORM's persistence layer for
 server-generated columns, which a unit test cannot observe without a live connection.
 """
+
 from __future__ import annotations
 
 import pytest

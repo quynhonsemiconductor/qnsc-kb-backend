@@ -293,7 +293,9 @@ def test_mapping_a_non_group_principal_resolves_it_and_unblocks_approval(monkeyp
     assert document.metadata_json["mapped_department_ids"] == [str(department_id)]
     # The unmapped sharing link still blocks: fail-closed is not weakened by mapping a
     # DIFFERENT principal.
-    assert document.metadata_json["unmapped_principal_ids"] == ["link:link:organization"]
+    assert document.metadata_json["unmapped_principal_ids"] == [
+        "link:link:organization"
+    ]
 
 
 def test_provider_acl_intersection_never_broadens_internal_policy():
@@ -506,9 +508,7 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
             self.calls += 1
             if self.calls == 1:
                 return FakeResult(one=article)
-            if self.calls == 2 and document.metadata_json.get(
-                "mapped_department_ids"
-            ):
+            if self.calls == 2 and document.metadata_json.get("mapped_department_ids"):
                 sql = str(_statement)
                 # Audience membership is department membership now: members are
                 # expanded through the user_departments association, never a
@@ -517,9 +517,7 @@ def test_sharepoint_permission_tightening_is_applied_on_resync():
                 assert "users.company_domain" in sql
                 assert "users.active" in sql
                 return FakeResult(rows=[internal_user_id])
-            if self.calls == 3 and document.metadata_json.get(
-                "mapped_department_ids"
-            ):
+            if self.calls == 3 and document.metadata_json.get("mapped_department_ids"):
                 return FakeResult(rows=[department])
             return FakeResult()
 
@@ -854,7 +852,9 @@ def test_google_drive_scope_discovery_follows_drive_and_folder_pages():
     adapter._request = fake_request
     scopes = asyncio.run(adapter.discover_scopes())
     scope_ids = {item["external_scope_id"] for item in scopes}
-    assert {"shared-1", "shared-2", "user", "user:folder-1", "user:folder-2"}.issubset(scope_ids)
+    assert {"shared-1", "shared-2", "user", "user:folder-1", "user:folder-2"}.issubset(
+        scope_ids
+    )
     assert any("pageToken=drive-page-2" in url for url in calls)
     assert any("pageToken=folder-page-2" in url for url in calls)
 
@@ -881,8 +881,18 @@ def test_google_drive_permissions_prefer_email_for_internal_identity_matching():
     async def fake_request(*_args, **_kwargs):
         return {
             "permissions": [
-                {"id": "permission-id", "type": "user", "emailAddress": "owner@acme.test", "role": "reader"},
-                {"id": "domain-id", "type": "domain", "domain": "acme.test", "role": "reader"},
+                {
+                    "id": "permission-id",
+                    "type": "user",
+                    "emailAddress": "owner@acme.test",
+                    "role": "reader",
+                },
+                {
+                    "id": "domain-id",
+                    "type": "domain",
+                    "domain": "acme.test",
+                    "role": "reader",
+                },
             ]
         }
 

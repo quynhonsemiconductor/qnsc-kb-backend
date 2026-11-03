@@ -14,6 +14,7 @@ ORDER IS THE DANGEROUS PART. Callers zip the returned vectors against their chun
 so sorting internally without restoring positions would attach every embedding to the
 wrong chunk — a corpus that looks indexed and retrieves nonsense, with nothing failing.
 """
+
 from __future__ import annotations
 
 import types
@@ -40,7 +41,9 @@ class _Tokenizer:
     def encode_batch(self, texts):
         # One token per 4 characters, capped like the real truncation setting. The token
         # id identifies the TEXT, so a caller can tell which input produced a vector.
-        lengths = [min(max(1, len(t) // 4), settings.EMBEDDING_MAX_TOKENS) for t in texts]
+        lengths = [
+            min(max(1, len(t) // 4), settings.EMBEDDING_MAX_TOKENS) for t in texts
+        ]
         width = max(lengths)
         self.batch_widths.append(width)
         return [

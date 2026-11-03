@@ -7,6 +7,7 @@ is written down in this repository.
 Settings is constructed with `_env_file=None` throughout — a developer's own .env is
 present in a working checkout and would otherwise decide what these assert.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -60,8 +61,11 @@ def _production_settings(**overrides) -> Settings:
 
 # ── The production guard ─────────────────────────────────────────────────────
 
+
 def test_production_refuses_to_start_with_the_repositorys_default_password():
-    settings = _production_settings(BOOTSTRAP_ADMIN_PASSWORD=DEVELOPMENT_DEFAULT_PASSWORD)
+    settings = _production_settings(
+        BOOTSTRAP_ADMIN_PASSWORD=DEVELOPMENT_DEFAULT_PASSWORD
+    )
 
     with pytest.raises(RuntimeError, match="BOOTSTRAP_ADMIN_PASSWORD"):
         settings.validate_production()
@@ -105,6 +109,7 @@ def test_the_default_password_is_usable_outside_production():
 
 # ── Creating the account ─────────────────────────────────────────────────────
 
+
 class _FakeSession:
     """Enough AsyncSession to drive ensure_bootstrap_admin.
 
@@ -135,9 +140,13 @@ class _FakeSession:
 
 def test_an_empty_deployment_gets_a_global_administrator(monkeypatch):
     monkeypatch.setattr(admin_bootstrap.settings, "BOOTSTRAP_ADMIN_ENABLED", True)
-    monkeypatch.setattr(admin_bootstrap.settings, "BOOTSTRAP_ADMIN_EMAIL", "Admin@QNSC.vn")
+    monkeypatch.setattr(
+        admin_bootstrap.settings, "BOOTSTRAP_ADMIN_EMAIL", "Admin@QNSC.vn"
+    )
     monkeypatch.setattr(admin_bootstrap.settings, "BOOTSTRAP_ADMIN_NAME", "Admin")
-    monkeypatch.setattr(admin_bootstrap.settings, "BOOTSTRAP_ADMIN_PASSWORD", "a-real-password")
+    monkeypatch.setattr(
+        admin_bootstrap.settings, "BOOTSTRAP_ADMIN_PASSWORD", "a-real-password"
+    )
     admin_role = Role(name="Admin", company_domain=None, active=True)
     db = _FakeSession(None, admin_role)
 
@@ -157,7 +166,9 @@ def test_an_empty_deployment_gets_a_global_administrator(monkeypatch):
 
 def test_the_password_is_stored_hashed(monkeypatch):
     monkeypatch.setattr(admin_bootstrap.settings, "BOOTSTRAP_ADMIN_ENABLED", True)
-    monkeypatch.setattr(admin_bootstrap.settings, "BOOTSTRAP_ADMIN_PASSWORD", "a-real-password")
+    monkeypatch.setattr(
+        admin_bootstrap.settings, "BOOTSTRAP_ADMIN_PASSWORD", "a-real-password"
+    )
     db = _FakeSession(None, Role(name="Admin", company_domain=None, active=True))
 
     user = asyncio.run(admin_bootstrap.ensure_bootstrap_admin(db))

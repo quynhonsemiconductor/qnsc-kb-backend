@@ -80,7 +80,9 @@ def make_draft(*candidates: DraftCandidate) -> PendingDraft:
     return draft
 
 
-def make_candidate(draft_id: uuid.UUID, position: int, title: str, body: str, start: int, end: int) -> DraftCandidate:
+def make_candidate(
+    draft_id: uuid.UUID, position: int, title: str, body: str, start: int, end: int
+) -> DraftCandidate:
     return DraftCandidate(
         id=uuid.uuid4(),
         draft_id=draft_id,
@@ -103,13 +105,24 @@ def test_batch_review_can_rename_and_discard_candidates():
     service = GovernanceService(repo, object())
     user = make_reviewer()
 
-    asyncio.run(service.review_candidate(user, draft.id, "rename", first.id, title="Renamed title"))
-    asyncio.run(service.review_candidate(user, draft.id, "discard", second.id, note="Out of scope"))
+    asyncio.run(
+        service.review_candidate(
+            user, draft.id, "rename", first.id, title="Renamed title"
+        )
+    )
+    asyncio.run(
+        service.review_candidate(
+            user, draft.id, "discard", second.id, note="Out of scope"
+        )
+    )
 
     assert first.title == "Renamed title"
     assert second.status == "discarded"
     assert second.review_note == "Out of scope"
-    assert [audit.action for audit in repo.audits] == ["candidate_rename", "candidate_discard"]
+    assert [audit.action for audit in repo.audits] == [
+        "candidate_rename",
+        "candidate_discard",
+    ]
 
 
 def test_batch_review_merge_uses_source_order_and_marks_other_discarded():
@@ -120,7 +133,11 @@ def test_batch_review_merge_uses_source_order_and_marks_other_discarded():
     repo = BatchRepository(draft)
     service = GovernanceService(repo, object())
 
-    asyncio.run(service.review_candidate(make_reviewer(), draft.id, "merge", second.id, first.id, title="Combined"))
+    asyncio.run(
+        service.review_candidate(
+            make_reviewer(), draft.id, "merge", second.id, first.id, title="Combined"
+        )
+    )
 
     assert first.body_md == "A\n\nB"
     assert first.title == "Combined"
@@ -136,7 +153,11 @@ def test_batch_review_split_preserves_source_ranges_and_shifts_following_positio
     repo = BatchRepository(draft)
     service = GovernanceService(repo, object())
 
-    asyncio.run(service.review_candidate(make_reviewer(), draft.id, "split", first.id, split_at=3))
+    asyncio.run(
+        service.review_candidate(
+            make_reviewer(), draft.id, "split", first.id, split_at=3
+        )
+    )
 
     by_position = {item.position: item for item in draft.candidates}
     assert by_position[1].body_md == "abc"
@@ -163,7 +184,11 @@ def test_batch_review_rejects_user_without_review_permission():
     )
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.review_candidate(unauthorized, draft.id, "rename", draft.candidates[0].id, title="Nope"))
+        asyncio.run(
+            service.review_candidate(
+                unauthorized, draft.id, "rename", draft.candidates[0].id, title="Nope"
+            )
+        )
 
     assert exc.value.status_code == 403
 

@@ -17,6 +17,7 @@ The width matters separately. `hashtext` is int4, so unrelated article ids colli
 birthday bound around 2^16 ids -- and a collision serialises two unrelated articles against
 each other for a full index run. `hashtextextended` is int8.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -92,4 +93,6 @@ def test_a_failed_body_needs_no_unlock_and_no_recovery_rollback():
         _run(session, fail=True)
 
     assert not [sql for sql in session.statements if "unlock" in sql.lower()]
-    assert session.rollbacks == 0, "the lock needs no rollback of its own to be released"
+    assert (
+        session.rollbacks == 0
+    ), "the lock needs no rollback of its own to be released"

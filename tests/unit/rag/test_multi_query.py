@@ -5,6 +5,7 @@ Same failure-mode contract as contextual_header.py/auto_tagging.py: every degrad
 the caller (search_service.py) already treats as "fall back to the single-query search
 this feature does not change."
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +19,11 @@ from src.rag.multi_query import generate_followup_query, generate_subqueries
 def llm(monkeypatch):
     from src.domain import llm_client
 
-    state: dict = {"reply": "phân cụm dữ liệu\nunsupervised learning", "raises": None, "provider": object()}
+    state: dict = {
+        "reply": "phân cụm dữ liệu\nunsupervised learning",
+        "raises": None,
+        "provider": object(),
+    }
 
     async def fake_complete(messages, **kwargs):
         state["messages"] = messages
@@ -28,7 +33,9 @@ def llm(monkeypatch):
         return state["reply"], 10, "fake-model", "fake"
 
     monkeypatch.setattr(llm_client, "complete", fake_complete)
-    monkeypatch.setattr(llm_client, "resolve_provider", lambda *a, **k: state["provider"])
+    monkeypatch.setattr(
+        llm_client, "resolve_provider", lambda *a, **k: state["provider"]
+    )
     return state
 
 
@@ -57,7 +64,9 @@ def test_blank_question_returns_empty_without_calling(llm):
 
 
 def test_blank_and_duplicate_lines_are_dropped(llm):
-    llm["reply"] = "\n".join(["", "  ", "học không giám sát", "phân cụm dữ liệu", "phân cụm dữ liệu"])
+    llm["reply"] = "\n".join(
+        ["", "  ", "học không giám sát", "phân cụm dữ liệu", "phân cụm dữ liệu"]
+    )
     result = asyncio.run(generate_subqueries("Học không giám sát"))
     # The reply's own restatement of the question is folded/diacritic-matched against
     # the ORIGINAL question and dropped, and the repeated line collapses to one.
@@ -102,7 +111,11 @@ def test_thinking_is_explicitly_disabled(llm):
 def test_returns_the_proposed_query(llm):
     llm["reply"] = "phân cụm k-means"
     result = asyncio.run(
-        generate_followup_query("học không giám sát", ["học không giám sát"], ["Chương 10 - Học có giám sát"])
+        generate_followup_query(
+            "học không giám sát",
+            ["học không giám sát"],
+            ["Chương 10 - Học có giám sát"],
+        )
     )
     assert result == "phân cụm k-means"
 
@@ -119,9 +132,7 @@ def test_a_query_repeating_the_question_is_rejected(llm):
 
 def test_a_query_repeating_an_already_tried_query_is_rejected(llm):
     llm["reply"] = "phân cụm dữ liệu"
-    result = asyncio.run(
-        generate_followup_query("question", ["phân cụm dữ liệu"], [])
-    )
+    result = asyncio.run(generate_followup_query("question", ["phân cụm dữ liệu"], []))
     assert result is None
 
 

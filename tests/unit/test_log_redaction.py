@@ -3,6 +3,7 @@
 A SharePoint/OneDrive pre-authenticated download URL authorises the download in its query string
 (`tempauth=...`, valid ~24 h, scoped to the file). The worker logged these in full from httpx's INFO line.
 """
+
 from __future__ import annotations
 
 import io
@@ -14,6 +15,7 @@ import pytest
 import structlog
 
 from src.lib import log_redaction
+
 
 def _join(*parts: str) -> str:
     """Build a test credential from fragments at runtime.
@@ -60,14 +62,17 @@ def captured(emit):
     return stream.getvalue()
 
 
-@pytest.mark.parametrize("url", [
-    SHAREPOINT,
-    "https://x/y?" + "s" + "ig=" + OPAQUE + "&se=2026",
-    "https://x/y?access_" + "token=" + OPAQUE,
-    "https://x/y?" + "co" + "de=" + CODE + "&state=ok",
-    "https://x/y?X-Amz-" + "Signature=" + DEAD + "&X-Amz-Credential=AKIA%2Fx",
-    "https://x/y?client_" + "secret=" + PASSWORD,
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        SHAREPOINT,
+        "https://x/y?" + "s" + "ig=" + OPAQUE + "&se=2026",
+        "https://x/y?access_" + "token=" + OPAQUE,
+        "https://x/y?" + "co" + "de=" + CODE + "&state=ok",
+        "https://x/y?X-Amz-" + "Signature=" + DEAD + "&X-Amz-Credential=AKIA%2Fx",
+        "https://x/y?client_" + "secret=" + PASSWORD,
+    ],
+)
 def test_credentials_in_a_query_string_are_redacted(url):
     out = log_redaction.redact(f"GET {url} failed")
     assert log_redaction.REDACTED in out
@@ -77,7 +82,11 @@ def test_credentials_in_a_query_string_are_redacted(url):
 
 def test_harmless_parameters_and_the_url_shape_survive():
     out = log_redaction.redact(SHAREPOINT)
-    assert "UniqueId=abc" in out and "ApiVersion=2.0" in out and "contoso.sharepoint.com" in out
+    assert (
+        "UniqueId=abc" in out
+        and "ApiVersion=2.0" in out
+        and "contoso.sharepoint.com" in out
+    )
     assert "temp" + "auth=" + log_redaction.REDACTED in out
 
 
@@ -95,7 +104,9 @@ def test_text_without_credentials_is_untouched():
 def test_the_httpx_info_line_is_gone_and_a_url_logged_by_any_other_logger_is_redacted():
     def emit():
         # exactly what httpx does for every request
-        logging.getLogger("httpx").info('HTTP Request: %s %s "%s"', "GET", SHAREPOINT, "HTTP/1.1 200 OK")
+        logging.getLogger("httpx").info(
+            'HTTP Request: %s %s "%s"', "GET", SHAREPOINT, "HTTP/1.1 200 OK"
+        )
         # and a library that logs at WARNING, which the level change does not remove
         logging.getLogger("some.library").warning("download from %s failed", SHAREPOINT)
         logging.getLogger("some.library").warning("fstring " + SHAREPOINT)
@@ -123,10 +134,20 @@ def test_an_httpx_error_message_that_names_the_url_is_redacted_in_structlog():
     response = httpx.Response(403, request=request)
     with pytest.raises(httpx.HTTPStatusError) as caught:
         response.raise_for_status()
-    assert PAYLOAD in str(caught.value), "precondition: the library really does put the URL in its message"
+    assert PAYLOAD in str(
+        caught.value
+    ), "precondition: the library really does put the URL in its message"
 
-    event = log_redaction.structlog_processor(None, "warning", {"event": "download failed", "error": str(caught.value),
-                                                                "nested": {"urls": [SHAREPOINT]}, "exc": caught.value})
+    event = log_redaction.structlog_processor(
+        None,
+        "warning",
+        {
+            "event": "download failed",
+            "error": str(caught.value),
+            "nested": {"urls": [SHAREPOINT]},
+            "exc": caught.value,
+        },
+    )
     dumped = json.dumps(event, default=str)
     for secret in SECRETS:
         assert secret not in dumped
@@ -135,11 +156,16 @@ def test_an_httpx_error_message_that_names_the_url_is_redacted_in_structlog():
 def test_structlog_output_never_contains_the_token():
     stream = io.StringIO()
     structlog.configure(
-        processors=[log_redaction.structlog_processor, structlog.processors.JSONRenderer()],
+        processors=[
+            log_redaction.structlog_processor,
+            structlog.processors.JSONRenderer(),
+        ],
         logger_factory=structlog.PrintLoggerFactory(file=stream),
     )
     try:
-        structlog.get_logger().warning("Download failed", url=SHAREPOINT, error=f"404 for {SHAREPOINT}")
+        structlog.get_logger().warning(
+            "Download failed", url=SHAREPOINT, error=f"404 for {SHAREPOINT}"
+        )
     finally:
         structlog.reset_defaults()
     out = stream.getvalue()
@@ -153,7 +179,9 @@ def test_setup_logging_wires_the_processor_and_the_levels():
     try:
         processors = structlog.get_config()["processors"]
         assert log_redaction.structlog_processor in processors
-        assert processors.index(log_redaction.structlog_processor) < len(processors) - 1, "before the renderer"
+        assert (
+            processors.index(log_redaction.structlog_processor) < len(processors) - 1
+        ), "before the renderer"
         assert logging.getLogger("httpx").level == logging.WARNING
         assert logging.getLogger("httpcore").level == logging.WARNING
     finally:
@@ -172,21 +200,56 @@ def test_the_worker_installs_it_without_calling_setup_logging():
 
 
 # ── follow-ups from review ───────────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("name", [
-    "code", "key", "sig", "tempauth", "TempAuth", "token", "access_token", "accessToken", "refresh-token",
-    "X-Amz-Signature", "X-Amz-Credential", "X-Amz-Security-Token", "client_secret", "api_key", "apiKey",
-    "X-Api-Key", "subscription-key", "password", "Authorization",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "code",
+        "key",
+        "sig",
+        "tempauth",
+        "TempAuth",
+        "token",
+        "access_token",
+        "accessToken",
+        "refresh-token",
+        "X-Amz-Signature",
+        "X-Amz-Credential",
+        "X-Amz-Security-Token",
+        "client_secret",
+        "api_key",
+        "apiKey",
+        "X-Api-Key",
+        "subscription-key",
+        "password",
+        "Authorization",
+    ],
+)
 def test_credential_parameter_names_are_matched_whole(name):
     out = log_redaction.redact(f"https://x/y?{name}={OPAQUE}&ok=1")
     assert OPAQUE not in out, name
     assert "ok=1" in out
 
 
-@pytest.mark.parametrize("name", ["keyword", "author", "status_code", "monkey", "tokenizer", "secretary", "codec", "passenger", "sigma", "keyboard"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "keyword",
+        "author",
+        "status_code",
+        "monkey",
+        "tokenizer",
+        "secretary",
+        "codec",
+        "passenger",
+        "sigma",
+        "keyboard",
+    ],
+)
 def test_names_that_merely_contain_a_credential_word_are_left_alone(name):
     text = f"https://x/y?{name}=visible"
-    assert log_redaction.redact(text) == text, f"{name} was redacted but is not a credential"
+    assert (
+        log_redaction.redact(text) == text
+    ), f"{name} was redacted but is not a credential"
 
 
 def test_a_non_str_log_argument_is_redacted_after_formatting():
@@ -194,7 +257,9 @@ def test_a_non_str_log_argument_is_redacted_after_formatting():
     url = httpx.URL(SHAREPOINT)
     assert not isinstance(url, str)
 
-    out = captured(lambda: logging.getLogger("some.library").warning("fetching %s", url))
+    out = captured(
+        lambda: logging.getLogger("some.library").warning("fetching %s", url)
+    )
 
     assert "fetching" in out
     for secret in SECRETS:
@@ -264,7 +329,9 @@ def test_the_redactor_sits_after_contextvars_and_exception_formatting():
         redactor = processors.index(log_redaction.structlog_processor)
         assert redactor > processors.index(structlog.contextvars.merge_contextvars)
         assert redactor > processors.index(structlog.processors.format_exc_info)
-        assert redactor == len(processors) - 2, f"must be just before the renderer: {names}"
+        assert (
+            redactor == len(processors) - 2
+        ), f"must be just before the renderer: {names}"
     finally:
         structlog.reset_defaults()
 
@@ -286,12 +353,16 @@ def test_uvicorn_access_lines_are_emitted_and_redacted_with_its_default_logging_
     logging.config.dictConfig(config)
     try:
         path = "/api/v1/download?" + "temp" + "auth=" + TEMPAUTH + "&id=7"
-        logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", path, "1.1", 200)
+        logging.getLogger("uvicorn.access").info(
+            '%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", path, "1.1", 200
+        )
         out = stream.getvalue()
     finally:
         logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
     assert "Logging error" not in out and "Traceback" not in out, out
-    assert "GET" in out and "/api/v1/download" in out and "200" in out, "the access line must still be written"
+    assert (
+        "GET" in out and "/api/v1/download" in out and "200" in out
+    ), "the access line must still be written"
     assert "id=7" in out
     for secret in SECRETS:
         assert secret not in out, out
@@ -318,9 +389,14 @@ def test_args_keep_their_container_type_length_and_non_text_types():
     assert isinstance(positional, tuple) and len(positional) == 4
     assert positional[2] == 200 and isinstance(positional[2], int)
     assert PAYLOAD not in str(positional)
-    assert isinstance(mapping, dict) and mapping["n"] == 3 and PAYLOAD not in str(mapping)
+    assert (
+        isinstance(mapping, dict) and mapping["n"] == 3 and PAYLOAD not in str(mapping)
+    )
 
 
-@pytest.mark.parametrize("name", ["user_credentials", "access_tokens", "client_secrets", "passwords", "signatures"])
+@pytest.mark.parametrize(
+    "name",
+    ["user_credentials", "access_tokens", "client_secrets", "passwords", "signatures"],
+)
 def test_plural_credential_names_are_redacted_too(name):
     assert OPAQUE not in log_redaction.redact(f"https://x/y?{name}={OPAQUE}")

@@ -214,13 +214,6 @@ def test_startup_does_not_wait_for_the_database(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_the_engine_pre_pings_pooled_connections():
-    """A connection left dead by a database restart is replaced, not handed to a request."""
-    import src.api.deps as deps
-
-    assert deps.engine.pool._pre_ping is True
-
-
 def test_tls_failures_are_permanent_even_though_they_are_oserrors():
     import ssl
 

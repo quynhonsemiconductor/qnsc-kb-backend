@@ -8,7 +8,6 @@ from src.api import deps
 from src.api.main import app
 from src.models.user import User
 
-
 PUBLIC_ROUTE_FRAGMENTS = (
     "/openapi.json",
     "/auth/login",

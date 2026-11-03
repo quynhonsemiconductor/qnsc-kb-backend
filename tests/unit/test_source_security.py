@@ -9,7 +9,11 @@ from starlette.datastructures import UploadFile
 
 from src.core.config import settings
 from src.api.routers.articles import _read_upload_limited
-from src.domain.source_extraction import SourceExtractionError, _scan_with_clamd, _validate_source_bytes
+from src.domain.source_extraction import (
+    SourceExtractionError,
+    _scan_with_clamd,
+    _validate_source_bytes,
+)
 
 
 def test_office_signature_is_validated():

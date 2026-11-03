@@ -20,6 +20,7 @@ returned nothing and reported success.
 The fix makes the context transaction-local and re-applies it on every `after_begin`, so
 neither (1) nor (2) can strip it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,12 +49,15 @@ async def sessions():
     The listener under test is registered on the Session CLASS, so any sessionmaker
     exercises it.
     """
-    engine = create_async_engine(os.environ["DATABASE_URL"], pool_size=6, max_overflow=0)
+    engine = create_async_engine(
+        os.environ["DATABASE_URL"], pool_size=6, max_overflow=0
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     try:
         yield factory
     finally:
         await engine.dispose()
+
 
 READ_CONTEXT = text(
     "SELECT current_setting('app.user_id', true), current_setting('app.company_domain', true)"
@@ -69,6 +73,7 @@ async def _strip_pooled_connections(factory, count: int = 6) -> None:
     Reproduces what get_db's RESET block used to leave behind, and what any connection
     that has never served a tenant-scoped request looks like anyway.
     """
+
     async def one() -> None:
         async with factory() as session:
             for name in (
@@ -119,7 +124,10 @@ async def test_context_survives_several_commits(sessions):
         for attempt in range(5):
             await session.commit()
             observed = list((await session.execute(READ_CONTEXT)).first())
-            assert observed == [USER_ID, DOMAIN], f"context lost on commit {attempt + 1}"
+            assert observed == [
+                USER_ID,
+                DOMAIN,
+            ], f"context lost on commit {attempt + 1}"
 
 
 @pytest.mark.asyncio
@@ -138,7 +146,10 @@ async def test_context_does_not_leak_to_a_session_that_never_set_one(sessions):
 
     async with sessions() as session:
         observed = list((await session.execute(READ_CONTEXT)).first())
-        assert observed == ["", ""], f"leaked tenant context into a fresh session: {observed}"
+        assert observed == [
+            "",
+            "",
+        ], f"leaked tenant context into a fresh session: {observed}"
 
 
 @pytest.mark.asyncio
@@ -148,7 +159,7 @@ async def test_a_session_without_context_is_not_given_one(sessions):
     They must keep failing closed under RLS rather than inheriting a context, so the
     listener has to skip them rather than apply some default.
     """
-    
+
     await _strip_pooled_connections(sessions)
 
     async with sessions() as session:

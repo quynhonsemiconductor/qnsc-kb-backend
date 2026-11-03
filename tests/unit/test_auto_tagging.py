@@ -5,6 +5,7 @@ tag) has to degrade to an empty list rather than raise -- this runs inline in th
 background pass that formats a freshly uploaded document, and a broken suggestion must
 never turn into a broken upload.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +19,11 @@ from src.domain.auto_tagging import suggest_tags_for_document
 def llm(monkeypatch):
     from src.domain import llm_client
 
-    state: dict = {"reply": '{"tags": ["database", "backup"]}', "raises": None, "provider": object()}
+    state: dict = {
+        "reply": '{"tags": ["database", "backup"]}',
+        "raises": None,
+        "provider": object(),
+    }
 
     async def fake_complete(messages, **kwargs):
         state["messages"] = messages
@@ -27,7 +32,9 @@ def llm(monkeypatch):
         return state["reply"], 10, "fake-model", "fake"
 
     monkeypatch.setattr(llm_client, "complete", fake_complete)
-    monkeypatch.setattr(llm_client, "resolve_provider", lambda *a, **k: state["provider"])
+    monkeypatch.setattr(
+        llm_client, "resolve_provider", lambda *a, **k: state["provider"]
+    )
     return state
 
 
@@ -49,7 +56,9 @@ def test_provider_failure_returns_empty_not_raises(llm):
     assert _suggest(llm) == []
 
 
-@pytest.mark.parametrize("reply", ["not json", "", "[1,2,3]", '"just a string"', '{"tags": "not-a-list"}'])
+@pytest.mark.parametrize(
+    "reply", ["not json", "", "[1,2,3]", '"just a string"', '{"tags": "not-a-list"}']
+)
 def test_unparseable_reply_returns_empty(llm, reply):
     llm["reply"] = reply
     assert _suggest(llm) == []
@@ -81,7 +90,7 @@ def test_overlong_tag_is_dropped(llm):
 
 
 def test_result_is_capped_at_max_tags(llm):
-    llm["reply"] = '{"tags": [' + ", ".join(f'"tag{i}"' for i in range(20)) + ']}'
+    llm["reply"] = '{"tags": [' + ", ".join(f'"tag{i}"' for i in range(20)) + "]}"
     result = _suggest(llm)
     assert len(result) == 8
     assert result == [f"tag{i}" for i in range(8)]
@@ -103,25 +112,34 @@ def test_missing_tags_key_returns_empty(llm):
 def test_no_catalogue_argument_suggests_freely(llm):
     """Default (no catalogue passed) is unchanged: existing callers keep working."""
     llm["reply"] = '{"tags": ["anything", "goes"]}'
-    assert asyncio.run(suggest_tags_for_document("Doc", "content")) == ["anything", "goes"]
+    assert asyncio.run(suggest_tags_for_document("Doc", "content")) == [
+        "anything",
+        "goes",
+    ]
 
 
 def test_empty_catalogue_suggests_nothing(llm):
     """An empty (not None) catalogue means the tenant has no approved vocabulary yet --
     suggest nothing rather than seed it from unreviewed AI output."""
     llm["reply"] = '{"tags": ["database", "backup"]}'
-    assert asyncio.run(suggest_tags_for_document("Doc", "content", catalogue=set())) == []
+    assert (
+        asyncio.run(suggest_tags_for_document("Doc", "content", catalogue=set())) == []
+    )
 
 
 def test_catalogue_keeps_only_approved_tags(llm):
     llm["reply"] = '{"tags": ["database", "backup", "unapproved-tag"]}'
-    result = asyncio.run(suggest_tags_for_document("Doc", "content", catalogue={"database", "backup"}))
+    result = asyncio.run(
+        suggest_tags_for_document("Doc", "content", catalogue={"database", "backup"})
+    )
     assert result == ["database", "backup"]
 
 
 def test_catalogue_match_is_accent_insensitive(llm):
     llm["reply"] = '{"tags": ["an toàn"]}'
-    result = asyncio.run(suggest_tags_for_document("Doc", "content", catalogue={"an toan"}))
+    result = asyncio.run(
+        suggest_tags_for_document("Doc", "content", catalogue={"an toan"})
+    )
     assert result == ["an toàn"]
 
 

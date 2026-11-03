@@ -61,7 +61,9 @@ def _draft(**overrides):
 def test_stale_queue_and_processing_jobs_become_actionable():
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     queued = _draft(restructure_status="queued", updated_at=now - timedelta(minutes=6))
-    processing = _draft(restructure_status="processing", updated_at=now - timedelta(minutes=66))
+    processing = _draft(
+        restructure_status="processing", updated_at=now - timedelta(minutes=66)
+    )
 
     assert _visible_restructure_state(queued, now)[0] == "stalled"
     assert _visible_restructure_state(processing, now)[0] == "stalled"
@@ -70,7 +72,9 @@ def test_stale_queue_and_processing_jobs_become_actionable():
 def test_recent_queue_and_processing_jobs_remain_in_flight():
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     queued = _draft(restructure_status="queued", updated_at=now - timedelta(minutes=4))
-    processing = _draft(restructure_status="processing", updated_at=now - timedelta(minutes=64))
+    processing = _draft(
+        restructure_status="processing", updated_at=now - timedelta(minutes=64)
+    )
 
     assert _visible_restructure_state(queued, now)[0] == "queued"
     assert _visible_restructure_state(processing, now)[0] == "processing"

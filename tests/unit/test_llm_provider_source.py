@@ -92,7 +92,9 @@ def test_glm_uses_streaming_events_to_collect_content(monkeypatch):
     async def public_endpoint(_url):
         return ResolvedLLMEndpoint("example.test", "93.184.216.34")
 
-    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", public_endpoint)
+    monkeypatch.setattr(
+        llm_client, "validate_public_endpoint_resolution", public_endpoint
+    )
     set_runtime_config(
         RuntimeLLMConfig("glm", "glm-5.2", "https://example.test/chat", "key")
     )
@@ -155,7 +157,9 @@ def test_a_custom_gateway_that_always_streams_is_still_read(monkeypatch):
     async def public_endpoint(_url):
         return ResolvedLLMEndpoint("example.test", "93.184.216.34")
 
-    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", public_endpoint)
+    monkeypatch.setattr(
+        llm_client, "validate_public_endpoint_resolution", public_endpoint
+    )
     set_runtime_config(
         RuntimeLLMConfig(
             "custom", "kr/model", "https://example.test/v1/chat/completions", "key"
@@ -202,7 +206,9 @@ def test_a_custom_gateway_returning_nothing_readable_still_fails(monkeypatch):
     async def public_endpoint(_url):
         return ResolvedLLMEndpoint("example.test", "93.184.216.34")
 
-    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", public_endpoint)
+    monkeypatch.setattr(
+        llm_client, "validate_public_endpoint_resolution", public_endpoint
+    )
     set_runtime_config(
         RuntimeLLMConfig(
             "custom", "kr/model", "https://example.test/v1/chat/completions", "key"

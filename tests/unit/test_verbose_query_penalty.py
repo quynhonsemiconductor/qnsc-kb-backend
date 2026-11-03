@@ -22,6 +22,7 @@ the denominator.
 The guard this scoring exists for is unchanged and asserted below: a query about content
 that genuinely is not there still scores zero and is still refused.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -97,13 +98,18 @@ def test_a_question_about_absent_content_is_still_refused():
     prepared = prepare_query("chính sách nghỉ phép thai sản", pool)
 
     assert prepared.terms, "an unmatchable query must keep its terms, not become empty"
-    assert score_prepared_text(prepared, PASSAGE, TITLE) < settings.RAG_MIN_CONTEXT_SCORE
+    assert (
+        score_prepared_text(prepared, PASSAGE, TITLE) < settings.RAG_MIN_CONTEXT_SCORE
+    )
 
 
 def test_a_partly_answerable_question_is_scored_on_the_part_that_exists():
     """Asking about two things, one of which the corpus covers, should still answer
     about that one rather than refusing over the half that is missing."""
-    assert _score("RTL Generator và chính sách nghỉ phép") >= settings.RAG_MIN_CONTEXT_SCORE
+    assert (
+        _score("RTL Generator và chính sách nghỉ phép")
+        >= settings.RAG_MIN_CONTEXT_SCORE
+    )
 
 
 def test_ranking_is_unchanged_by_verbosity():

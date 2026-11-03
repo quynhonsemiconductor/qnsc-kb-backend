@@ -204,13 +204,18 @@ class AgentRun:
         answer: str,
         context_results: list[dict[str, Any]],
         analytics_results: list[dict[str, Any]],
+        question: str = "",
     ) -> list[str]:
         if not settings.AGENT_NUMBER_VERIFICATION_ENABLED:
             return []
         await self.tracer.emit("verify", "running")
         try:
             unverified = find_unverified_numbers(
-                answer, context_results, analytics_results, self.artifacts
+                answer,
+                context_results,
+                analytics_results,
+                self.artifacts,
+                question=question,
             )
         except (
             Exception

@@ -1,4 +1,4 @@
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from urllib.parse import urlparse
 from fastapi import Cookie, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
@@ -14,18 +14,30 @@ from src.domain.rbac import AuthorizationService, bootstrap_rbac
 from src.domain.admin_bootstrap import ensure_bootstrap_admin
 from src.domain.llm_config import load_runtime_config
 
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    # Test a pooled connection before handing it out, so one left dead by a database restart is
-    # replaced instead of failing the first request (or readiness probe) that draws it.
-    pool_pre_ping=True,
-    connect_args={
-        "timeout": 5,
-        "command_timeout": 5,
-        # verify-full against DATABASE_SSL_CA when set; no TLS locally (db_ssl.py).
-        **ssl_connect_args(),
-    },
-)
+
+def engine_options() -> dict[str, Any]:
+    """How the shared engine connects. One definition, so a test can build an engine exactly like it."""
+    return {
+        # Check a pooled connection before handing it out. Without it, a database restart or failover
+        # leaves the pool full of dead connections and every request that draws one fails: restarting
+        # Postgres under 10 concurrent requests returned 8 x 500 before the first healthy answer. The
+        # check is one round trip (sub-millisecond on the same network) and replaces the dead
+        # connection transparently.
+        "pool_pre_ping": True,
+        "pool_recycle": settings.DB_POOL_RECYCLE_SECONDS,
+        "pool_size": settings.DB_POOL_SIZE,
+        "max_overflow": settings.DB_MAX_OVERFLOW,
+        "pool_timeout": settings.DB_POOL_TIMEOUT_SECONDS,
+        "connect_args": {
+            "timeout": 5,
+            "command_timeout": 5,
+            # verify-full against DATABASE_SSL_CA when set; no TLS locally (db_ssl.py).
+            **ssl_connect_args(),
+        },
+    }
+
+
+engine = create_async_engine(settings.DATABASE_URL, **engine_options())
 SessionLocal = async_sessionmaker(
     autocommit=False,
     autoflush=False,

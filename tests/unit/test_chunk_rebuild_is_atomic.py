@@ -12,6 +12,7 @@ These assert the commit BOUNDARY, not the SQL: that the repository stages its wr
 every standalone caller owns a commit, and that a mid-rebuild embedding failure rolls the
 wipe back instead of publishing a partial index.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -60,7 +61,10 @@ def test_the_chunk_wipe_is_staged_and_not_committed() -> None:
     session = _Session()
     asyncio.run(ChunkRepository(session).delete_by_article_id(uuid.uuid4()))
 
-    assert session.events == ["delete parent_chunks", "delete article_chunks"], session.events
+    assert session.events == [
+        "delete parent_chunks",
+        "delete article_chunks",
+    ], session.events
     assert "commit" not in session.events
 
 
@@ -71,7 +75,9 @@ def test_writing_chunks_flushes_for_ids_rather_than_committing() -> None:
 
     session = _Session()
     repo = ChunkRepository(session)
-    asyncio.run(repo.create_parent_chunk(ParentChunk(article_id=uuid.uuid4(), text="x")))
+    asyncio.run(
+        repo.create_parent_chunk(ParentChunk(article_id=uuid.uuid4(), text="x"))
+    )
 
     assert session.events == ["add", "flush"]
 

@@ -9,6 +9,7 @@ This happened: `Article.sources` was removed as unused because permissions reads
 this test exists to catch, by reading the attribute names out of the permission code
 itself rather than trusting a hand-maintained list.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -38,7 +39,7 @@ def _article_attributes_read_by_permissions() -> set[str]:
     """Every `getattr(article, "...")` and `article.x` in the permission module."""
     source = inspect.getsource(permissions)
     quoted = set(re.findall(r'getattr\(\s*article\s*,\s*["\'](\w+)["\']', source))
-    dotted = set(re.findall(r'\barticle\.(\w+)', source))
+    dotted = set(re.findall(r"\barticle\.(\w+)", source))
     return quoted | dotted
 
 
@@ -71,10 +72,13 @@ def test_the_response_formatter_relationships_are_eager_loaded():
 
 
 def test_the_options_are_shared_not_duplicated_per_statement():
-    """Both statements use one definition; duplicating them is how sources got dropped."""
+    """Every statement uses one definition; duplicating them is how sources got dropped."""
     from src.repositories import chunk as chunk_module
 
     source = inspect.getsource(chunk_module.ChunkRepository.hybrid_search)
 
-    assert source.count("RETRIEVAL_LOAD_OPTIONS") == 2
+    # One per chunk statement (the vector leg, the full-text leg and the title leg), however many there are.
+    statements = source.count("select(ArticleChunk)")
+    assert statements >= 3
+    assert source.count(".options(*RETRIEVAL_LOAD_OPTIONS)") == statements
     assert "selectinload(" not in source, "loader options belong in one shared tuple"

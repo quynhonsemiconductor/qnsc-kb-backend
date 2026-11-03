@@ -8,6 +8,7 @@
    some other exception a caller's `except CrossEncoderUnavailable` would not catch --
    that is the exact contract `domain/search_service.py` falls back on.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -132,5 +133,7 @@ def test_the_lock_is_released_when_scoring_raises(monkeypatch):
     with pytest.raises(CrossEncoderUnavailable):
         cross_encoder.score("q", ["a"])
 
-    assert cross_encoder._scoring.acquire(blocking=False), "a failed call left the reranker locked"
+    assert cross_encoder._scoring.acquire(
+        blocking=False
+    ), "a failed call left the reranker locked"
     cross_encoder._scoring.release()

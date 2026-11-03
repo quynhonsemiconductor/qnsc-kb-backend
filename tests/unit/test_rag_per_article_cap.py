@@ -14,6 +14,7 @@ as absent from a document that contains it.
 The cap now scales to how many articles are actually available. The global parent,
 character and token budgets are untouched and still bound everything.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -55,9 +56,7 @@ def test_the_cap_never_drops_below_the_configured_floor():
 
 @pytest.mark.parametrize("articles", [1, 2, 3, 4, 8])
 def test_the_even_share_never_exceeds_the_global_parent_budget(articles):
-    parents = [
-        _parent(f"a{i}", f"c{i}-{j}") for i in range(articles) for j in range(8)
-    ]
+    parents = [_parent(f"a{i}", f"c{i}-{j}") for i in range(articles) for j in range(8)]
     assert _per_article_cap(parents) <= settings.RAG_MAX_CONTEXT_PARENTS
 
 
@@ -69,7 +68,10 @@ def test_one_article_now_contributes_more_than_three_parents():
 
     Uses enough parents to exceed the configured per-article cap so the assertion
     stays meaningful whatever RAG_MAX_PARENTS_PER_ARTICLE is set to."""
-    parents = [_parent("only", f"c{i}") for i in range(settings.RAG_MAX_PARENTS_PER_ARTICLE + 5)]
+    parents = [
+        _parent("only", f"c{i}")
+        for i in range(settings.RAG_MAX_PARENTS_PER_ARTICLE + 5)
+    ]
     selected = _select_context(parents)
     assert len(selected) > 3
 

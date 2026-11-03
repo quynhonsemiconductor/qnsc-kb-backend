@@ -19,6 +19,7 @@ The repo already folds accents on the lexical leg — migration 20260816_58 wrap
 FTS index and its query in immutable_unaccent — so this brings the reranker into agreement
 with retrieval rather than inventing a convention.
 """
+
 from __future__ import annotations
 
 import pytest

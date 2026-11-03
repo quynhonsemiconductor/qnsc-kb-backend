@@ -40,7 +40,9 @@ def test_postgres_image_is_one_exact_version_in_compose_and_every_workflow():
     in_ci = _ci_images("pgvector/pgvector:")
     assert in_ci, "no CI workflow runs pgvector: the pin check would pass vacuously"
     for image in in_ci:
-        assert _tag(image) == _tag(pinned[0]), f"CI pins {image}, compose pins {pinned[0]}"
+        assert _tag(image) == _tag(
+            pinned[0]
+        ), f"CI pins {image}, compose pins {pinned[0]}"
 
 
 def test_valkey_image_is_one_exact_version_in_compose_and_every_workflow():
@@ -50,4 +52,6 @@ def test_valkey_image_is_one_exact_version_in_compose_and_every_workflow():
     in_ci = _ci_images("valkey/valkey:")
     assert in_ci, "no CI workflow runs valkey: the pin check would pass vacuously"
     for image in in_ci:
-        assert _tag(image) == _tag(pinned[0]), f"CI pins {image}, compose pins {pinned[0]}"
+        assert _tag(image) == _tag(
+            pinned[0]
+        ), f"CI pins {image}, compose pins {pinned[0]}"

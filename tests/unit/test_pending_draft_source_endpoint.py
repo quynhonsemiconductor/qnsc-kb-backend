@@ -10,6 +10,7 @@ get 404 rather than its bytes. Most of what follows pins that, plus the one fail
 that is reached by an ordinary action — rejecting a manual upload deletes its object from
 the bucket while the draft row keeps the key, so the file can be legitimately absent.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -68,7 +69,9 @@ def test_a_deleted_object_is_reported_as_missing_not_as_a_server_fault():
     """
     source = _endpoint_source()
     assert "except FileNotFoundError" in source
-    storage = inspect.getsource(__import__("src.domain.source_storage", fromlist=["x"]).load_source)
+    storage = inspect.getsource(
+        __import__("src.domain.source_storage", fromlist=["x"]).load_source
+    )
     assert "NoSuchKey" in storage
     assert "FileNotFoundError" in storage
 
@@ -87,7 +90,10 @@ def test_the_uploaded_type_is_never_echoed_back():
 def test_the_response_carries_the_shared_source_view_headers():
     source = _endpoint_source()
     assert "SOURCE_VIEW_SECURITY_HEADERS" in source
-    assert "allow-same-origin" not in SOURCE_VIEW_SECURITY_HEADERS["Content-Security-Policy"]
+    assert (
+        "allow-same-origin"
+        not in SOURCE_VIEW_SECURITY_HEADERS["Content-Security-Policy"]
+    )
 
 
 def test_the_filename_is_sanitised_before_it_reaches_a_header():

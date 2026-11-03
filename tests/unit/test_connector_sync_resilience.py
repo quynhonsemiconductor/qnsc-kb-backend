@@ -7,6 +7,7 @@ never read, a deletion that was filtered out before anything could act on it —
 them raised where an operator would see it, and the only symptom was a knowledge base
 that quietly stopped matching the drive behind it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,10 +34,14 @@ from src.models.ops import Connector
 
 
 def _connector(system: str, **kwargs) -> Connector:
-    return Connector(id=uuid.uuid4(), company_domain="acme.test", system=system, **kwargs)
+    return Connector(
+        id=uuid.uuid4(), company_domain="acme.test", system=system, **kwargs
+    )
 
 
-def _change(external_id: str = "file-1", revision: str | None = "v1") -> NormalizedChange:
+def _change(
+    external_id: str = "file-1", revision: str | None = "v1"
+) -> NormalizedChange:
     return NormalizedChange(
         external_id=external_id,
         corpus_id="drive-1",
@@ -87,7 +92,9 @@ def test_a_google_drive_connector_refreshes_its_own_token(monkeypatch):
 
     asyncio.run(connector_auth.ensure_connector_authorized(FakeSession(), connector))
 
-    assert refreshed == ["called"], "a non-SharePoint connector must renew its token too"
+    assert refreshed == [
+        "called"
+    ], "a non-SharePoint connector must renew its token too"
     assert connector.oauth_access_token == "fresh"
     assert connector.oauth_expires_at > datetime.utcnow()
 
@@ -177,7 +184,11 @@ def test_a_repeatedly_failing_revision_stops_being_retried():
         external_id="file-1",
         name="handbook.pdf",
         metadata_json={
-            "ingest_failure": {"revision": "v1", "attempts": _MAX_ITEM_ATTEMPTS, "reason": "corrupt"}
+            "ingest_failure": {
+                "revision": "v1",
+                "attempts": _MAX_ITEM_ATTEMPTS,
+                "reason": "corrupt",
+            }
         },
     )
     assert _is_quarantined(document, _change(revision="v1"))
@@ -208,7 +219,9 @@ def test_a_first_failure_is_retried_before_it_is_given_up_on():
         corpus_id="drive-1",
         external_id="file-1",
         name="handbook.pdf",
-        metadata_json={"ingest_failure": {"revision": "v1", "attempts": 1, "reason": "timeout"}},
+        metadata_json={
+            "ingest_failure": {"revision": "v1", "attempts": 1, "reason": "timeout"}
+        },
     )
     assert not _is_quarantined(document, _change(revision="v1"))
 
@@ -221,7 +234,9 @@ def test_an_indexable_file_is_not_pre_filtered(name):
     assert _unsupported_reason(name, "application/octet-stream") is None
 
 
-@pytest.mark.parametrize("name", ["recording.mp4", "archive.zip", "notebook.one", "README"])
+@pytest.mark.parametrize(
+    "name", ["recording.mp4", "archive.zip", "notebook.one", "README"]
+)
 def test_a_file_that_could_never_be_indexed_is_never_downloaded(name):
     """The cheapest failure is the one the connector declines to attempt."""
 
@@ -229,10 +244,16 @@ def test_a_file_that_could_never_be_indexed_is_never_downloaded(name):
 
 
 def test_a_google_doc_is_exportable_and_a_google_form_is_not():
-    assert _unsupported_reason("Handbook", "application/vnd.google-apps.document") is None
-    assert _unsupported_reason("Sheet", "application/vnd.google-apps.spreadsheet") is None
+    assert (
+        _unsupported_reason("Handbook", "application/vnd.google-apps.document") is None
+    )
+    assert (
+        _unsupported_reason("Sheet", "application/vnd.google-apps.spreadsheet") is None
+    )
     assert _unsupported_reason("Survey", "application/vnd.google-apps.form") is not None
-    assert _unsupported_reason("Sketch", "application/vnd.google-apps.drawing") is not None
+    assert (
+        _unsupported_reason("Sketch", "application/vnd.google-apps.drawing") is not None
+    )
 
 
 # ------------------------------------------------- Google Drive folder scoping
@@ -286,7 +307,10 @@ def test_a_selected_drive_folder_includes_what_is_nested_inside_it():
 
     changes, _ = asyncio.run(
         adapter.incremental_changes(
-            {"external_scope_id": "drive-1", "config": {"drive_id": "drive-1", "folder_id": "target-folder"}},
+            {
+                "external_scope_id": "drive-1",
+                "config": {"drive_id": "drive-1", "folder_id": "target-folder"},
+            },
             "cursor",
         )
     )
@@ -317,7 +341,10 @@ def test_a_file_outside_the_selected_folder_is_still_excluded():
 
     changes, _ = asyncio.run(
         adapter.incremental_changes(
-            {"external_scope_id": "drive-1", "config": {"drive_id": "drive-1", "folder_id": "target-folder"}},
+            {
+                "external_scope_id": "drive-1",
+                "config": {"drive_id": "drive-1", "folder_id": "target-folder"},
+            },
             "cursor",
         )
     )
@@ -333,17 +360,27 @@ def test_a_deletion_under_a_folder_scope_is_reported_not_swallowed():
     """
 
     adapter = _drive_adapter_returning(
-        [{"changes": [{"fileId": "gone", "removed": True}], "newStartPageToken": "token-2"}],
+        [
+            {
+                "changes": [{"fileId": "gone", "removed": True}],
+                "newStartPageToken": "token-2",
+            }
+        ],
         files={},
     )
 
     changes, _ = asyncio.run(
         adapter.incremental_changes(
-            {"external_scope_id": "drive-1", "config": {"drive_id": "drive-1", "folder_id": "target-folder"}},
+            {
+                "external_scope_id": "drive-1",
+                "config": {"drive_id": "drive-1", "folder_id": "target-folder"},
+            },
             "cursor",
         )
     )
-    assert [(change.external_id, change.state) for change in changes] == [("gone", "deleted")]
+    assert [(change.external_id, change.state) for change in changes] == [
+        ("gone", "deleted")
+    ]
 
 
 def test_ancestry_lookups_are_not_repeated_for_every_file_in_a_folder():
@@ -382,12 +419,17 @@ def test_ancestry_lookups_are_not_repeated_for_every_file_in_a_folder():
 
     changes, _ = asyncio.run(
         adapter.incremental_changes(
-            {"external_scope_id": "drive-1", "config": {"drive_id": "drive-1", "folder_id": "target-folder"}},
+            {
+                "external_scope_id": "drive-1",
+                "config": {"drive_id": "drive-1", "folder_id": "target-folder"},
+            },
             "cursor",
         )
     )
     assert len(changes) == 5
-    assert len(lookups) == 1, "the parent chain is resolved once per walk, not once per file"
+    assert (
+        len(lookups) == 1
+    ), "the parent chain is resolved once per walk, not once per file"
 
 
 # ------------------------------------------------------ one walk per connector
@@ -455,7 +497,9 @@ def test_a_connector_already_walking_is_not_sent_a_second_walk():
     claimed = asyncio.run(claim_sync_request(session, request.id))
 
     assert claimed is None
-    assert request.status == "queued", "the request waits its turn rather than being lost"
+    assert (
+        request.status == "queued"
+    ), "the request waits its turn rather than being lost"
     assert request.attempts == 0
 
 

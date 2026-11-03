@@ -22,8 +22,8 @@ through a word, with nothing marking it incomplete.
 `content_restructure` has always passed `thinking=False`. Only this path did not, and
 only glm was affected: the Gemini branch always writes `thinkingConfig`.
 """
-from __future__ import annotations
 
+from __future__ import annotations
 
 
 from src.domain.llm_client import Provider, _payload
@@ -92,9 +92,9 @@ def test_the_answer_path_disables_thinking():
     inside a long streaming function with no seam worth carving one for."""
     from pathlib import Path
 
-    source = (
-        Path(__file__).parents[2] / "src" / "domain" / "ai_service.py"
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[2] / "src" / "domain" / "ai_service.py").read_text(
+        encoding="utf-8"
+    )
     call = source[source.index("max_tokens=settings.RAG_MAX_ANSWER_TOKENS") :][:1200]
     # The ARGUMENT, not the substring: the comment above it also says "thinking=False",
     # and matching that made this test pass with the argument deleted.

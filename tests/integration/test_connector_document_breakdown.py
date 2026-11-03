@@ -16,6 +16,7 @@ it.
 Skips without PostgreSQL, matching test_tenant_context_survives_commit.py; CI applies
 migrations before pytest, so it runs there.
 """
+
 from __future__ import annotations
 
 import os

@@ -12,7 +12,9 @@ errs toward silence, on purpose: a false alarm teaches readers to ignore the war
 transposed digit is still caught because no reading of it matches.
 
 Citation markers (``[C1]``), list numbering, years, and small whole numbers (under 100, not
-percentages or decimals) are not quantities and are not checked.
+percentages or decimals) are not quantities and are not checked. Numbers the reader typed in
+their own question are not checked either: restating "a salary of 20 million" is not the model
+inventing a figure, and flagging it taught readers to dismiss the warning.
 """
 
 from __future__ import annotations
@@ -130,10 +132,16 @@ def find_unverified_numbers(
     context_results: list[dict[str, Any]],
     analytics_results: list[dict[str, Any]] | None = None,
     artifacts: list[dict[str, Any]] | None = None,
+    question: str = "",
 ) -> list[str]:
-    """Quantities stated in the answer that no source contains, in order of appearance."""
+    """Quantities stated in the answer that no source contains, in order of appearance.
+
+    `question` is the reader's own text: a figure they supplied is theirs, not the model's. A figure
+    the model derives from it (a 85% share of the 20 million they gave) still has to be in a source.
+    """
     cleaned = _LIST_MARKER.sub("", _CITATION.sub(" ", answer or ""))
     allowed = source_numbers(context_results, analytics_results or [], artifacts or [])
+    allowed |= numbers_in(question)
     unverified: list[str] = []
     for match in _NUMBER.finditer(cleaned):
         token = match.group(0)

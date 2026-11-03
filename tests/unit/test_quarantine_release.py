@@ -18,6 +18,7 @@ again, and the run read like a problem with the documents.
 These tests pin the release, and pin that it does not quietly widen into "retry
 everything" -- a document that has NOT exhausted its attempts must keep them.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -80,7 +81,9 @@ def test_releasing_a_document_that_never_failed_changes_nothing():
 
 def test_a_document_with_attempts_left_is_still_tried():
     """Release must not be the only thing keeping retries alive."""
-    assert not _is_quarantined(_failed("rev-1", _MAX_ITEM_ATTEMPTS - 1), _Change("rev-1"))
+    assert not _is_quarantined(
+        _failed("rev-1", _MAX_ITEM_ATTEMPTS - 1), _Change("rev-1")
+    )
 
 
 def test_a_new_revision_still_clears_it_by_itself():
@@ -100,6 +103,7 @@ def test_the_release_endpoint_is_registered():
     from src.api.routers.connectors import router
 
     routes = {
-        getattr(route, "path", ""): getattr(route, "methods", set()) for route in router.routes
+        getattr(route, "path", ""): getattr(route, "methods", set())
+        for route in router.routes
     }
     assert "POST" in routes.get("/{connector_id}/retry-failed", set()), sorted(routes)

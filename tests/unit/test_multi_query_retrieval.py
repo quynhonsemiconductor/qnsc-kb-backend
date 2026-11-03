@@ -14,6 +14,7 @@ otherwise load the actual ONNX model) and the lexical scorer (`rerank_chunks_wit
 whose real scores are not worth hand-crafting text to hit exact thresholds) are
 monkeypatched, so every chunk's score is exactly the `fake_score` this file sets on it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +23,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.domain.search_service import SearchService, _dedup_preserve_order, _merge_candidates
+from src.domain.search_service import (
+    SearchService,
+    _dedup_preserve_order,
+    _merge_candidates,
+)
 from src.models.rbac import Permission, Role, RolePermission
 from src.models.user import User
 from src.rag.reranker import normalize_query
@@ -41,7 +46,9 @@ def _admin_user() -> User:
     )
     role = Role(name="Admin", company_domain=COMPANY, active=True)
     role.permissions.append(
-        RolePermission(permission=Permission(key="article.read", name="Read"), scope="company")
+        RolePermission(
+            permission=Permission(key="article.read", name="Read"), scope="company"
+        )
     )
     user.roles.append(role)
     return user
@@ -68,13 +75,19 @@ def _article() -> SimpleNamespace:
     )
 
 
-def _chunk(article: SimpleNamespace, fake_score: float, text: str = "chunk text") -> SimpleNamespace:
+def _chunk(
+    article: SimpleNamespace, fake_score: float, text: str = "chunk text"
+) -> SimpleNamespace:
     chunk = SimpleNamespace(
         id=uuid.uuid4(),
         parent_chunk_id=uuid.uuid4(),
         article=article,
         parent_chunk=SimpleNamespace(
-            text=text, section_ref="S1", heading="Heading", page_number=None, child_chunks=[]
+            text=text,
+            section_ref="S1",
+            heading="Heading",
+            page_number=None,
+            child_chunks=[],
         ),
         chunk_text=text,
         chunk_type="text",
@@ -101,7 +114,8 @@ class _FakeChunkRepo:
 @pytest.fixture
 def patched(monkeypatch):
     """Deterministic stand-ins for the embedder and lexical reranker, so every test
-    controls scores directly via `fake_score` instead of depending on real text scoring."""
+    controls scores directly via `fake_score` instead of depending on real text scoring.
+    """
     from src.domain import search_service as module
 
     async def fake_embed_query(text):
@@ -153,7 +167,9 @@ def test_default_disabled_never_calls_generate_subqueries(patched, monkeypatch):
 # --- enabled: parallel sub-query expansion, merged and de-duplicated ---------------
 
 
-def test_enabled_expands_runs_each_subquery_and_merges_by_chunk_id(patched, monkeypatch):
+def test_enabled_expands_runs_each_subquery_and_merges_by_chunk_id(
+    patched, monkeypatch
+):
     from src.core.config import settings
     from src.domain import search_service as module
 
@@ -219,7 +235,9 @@ def test_comparison_query_does_not_also_pay_for_llm_subqueries(patched, monkeypa
 # --- adaptive follow-up --------------------------------------------------------------
 
 
-def test_followup_fires_on_weak_evidence_and_the_stronger_result_wins(patched, monkeypatch):
+def test_followup_fires_on_weak_evidence_and_the_stronger_result_wins(
+    patched, monkeypatch
+):
     from src.core.config import settings
     from src.domain import search_service as module
 
@@ -290,7 +308,9 @@ def test_followup_disabled_by_max_followups_zero(patched, monkeypatch):
     monkeypatch.setattr(settings, "RAG_MIN_CONTEXT_SCORE", 0.35)
 
     def _boom(*_args, **_kwargs):
-        raise AssertionError("MULTI_QUERY_MAX_FOLLOWUPS=0 must disable the follow-up round")
+        raise AssertionError(
+            "MULTI_QUERY_MAX_FOLLOWUPS=0 must disable the follow-up round"
+        )
 
     monkeypatch.setattr(module, "generate_subqueries", _no_subqueries)
     monkeypatch.setattr(module, "generate_followup_query", _boom)
@@ -334,6 +354,8 @@ def test_merge_candidates_skips_already_seen_ids():
 def test_merge_candidates_mutates_seen_ids_in_place_across_calls():
     seen: set = set()
     first = _merge_candidates([], [SimpleNamespace(id=1)], seen)
-    second = _merge_candidates(first, [SimpleNamespace(id=1), SimpleNamespace(id=2)], seen)
+    second = _merge_candidates(
+        first, [SimpleNamespace(id=1), SimpleNamespace(id=2)], seen
+    )
 
     assert [c.id for c in second] == [1, 2]

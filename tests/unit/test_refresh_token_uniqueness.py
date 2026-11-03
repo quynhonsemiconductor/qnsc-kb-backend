@@ -10,6 +10,7 @@ It is not a narrow race: signing in and refreshing immediately hits it, as does 
 browser tab refreshing at the same moment. Revoked rows keep their hash, so a collision
 outlives the session it replaced.
 """
+
 from __future__ import annotations
 
 import hashlib

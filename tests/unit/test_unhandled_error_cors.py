@@ -17,6 +17,7 @@ inserts at the FRONT, so the last middleware registered is the OUTERMOST. The bo
 must be registered BEFORE ``CORSMiddleware`` to sit inside it. Swapping those two lines
 restores the original bug while every other test still passes — hence this file.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -58,16 +59,20 @@ def client_and_origin():
 def test_the_boundary_sits_inside_cors():
     """Ordering is the whole fix, so assert it directly rather than only via behaviour."""
     names = [
-        m.kwargs.get("dispatch").__name__
-        if m.kwargs.get("dispatch") is not None
-        else m.cls.__name__
+        (
+            m.kwargs.get("dispatch").__name__
+            if m.kwargs.get("dispatch") is not None
+            else m.cls.__name__
+        )
         for m in main.app.user_middleware
     ]
     assert "unhandled_error_boundary" in names, names
     assert "CORSMiddleware" in names, names
     # user_middleware is ordered outermost -> innermost. CORS must wrap the boundary,
     # otherwise it cannot add headers to the response the boundary returns.
-    assert names.index("CORSMiddleware") < names.index("unhandled_error_boundary"), names
+    assert names.index("CORSMiddleware") < names.index(
+        "unhandled_error_boundary"
+    ), names
 
 
 def test_an_unhandled_error_returns_500_with_cors_headers(client_and_origin):

@@ -14,8 +14,13 @@ def test_metadata_restriction_is_display_only_and_does_not_dirty_relationships()
     it = Department(id=uuid.uuid4(), company_domain="local", name="IT", active=True)
     user = User(id=uuid.uuid4(), role="Staff", company_domain="local", departments=[hr])
     article = Article(
-        id=uuid.uuid4(), company_domain="local", dept="HR", departments=[hr, it],
-        sensitivity="internal", status="published", lifecycle_status="active",
+        id=uuid.uuid4(),
+        company_domain="local",
+        dept="HR",
+        departments=[hr, it],
+        sensitivity="internal",
+        status="published",
+        lifecycle_status="active",
     )
     # Mimic a row loaded from the database: the original scalar value is
     # committed before the display-only redaction runs.
@@ -29,12 +34,21 @@ def test_metadata_restriction_is_display_only_and_does_not_dirty_relationships()
 
 
 def test_shared_audience_department_allows_read_outside_primary_department():
-    audit = Department(id=uuid.uuid4(), company_domain="local", name="Audit", active=True)
+    audit = Department(
+        id=uuid.uuid4(), company_domain="local", name="Audit", active=True
+    )
     hr = Department(id=uuid.uuid4(), company_domain="local", name="HR", active=True)
-    user = User(id=uuid.uuid4(), role="Staff", company_domain="local", departments=[hr, audit])
+    user = User(
+        id=uuid.uuid4(), role="Staff", company_domain="local", departments=[hr, audit]
+    )
     article = Article(
-        id=uuid.uuid4(), company_domain="local", dept="IT", departments=[audit],
-        sensitivity="internal", status="published", lifecycle_status="active",
+        id=uuid.uuid4(),
+        company_domain="local",
+        dept="IT",
+        departments=[audit],
+        sensitivity="internal",
+        status="published",
+        lifecycle_status="active",
     )
 
     assert PermissionService.can_view_article(user, article) is True

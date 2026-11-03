@@ -22,6 +22,7 @@ a real, active, tenant-owned department, and these are the invariants that guara
 `asyncio.run` rather than pytest-asyncio, matching test_query_authorization.py — the
 marker is not available in every environment this suite runs in.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -194,7 +195,9 @@ def test_a_department_the_tenant_cannot_see_is_reported_as_missing():
     """Inactive, cross-tenant and non-existent are one message on purpose — the caller
     must not be able to probe another company's department list."""
     with pytest.raises(HTTPException) as raised:
-        asyncio.run(resolve_active_department(_DB(scalar_result=None), "qnsc.vn", "public"))
+        asyncio.run(
+            resolve_active_department(_DB(scalar_result=None), "qnsc.vn", "public")
+        )
 
     assert raised.value.status_code == 422
     assert raised.value.detail == "Department does not exist or is inactive"

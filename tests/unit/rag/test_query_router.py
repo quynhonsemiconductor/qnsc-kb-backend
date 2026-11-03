@@ -3,6 +3,7 @@ retrieval quality on one query, but a false positive fragments an ordinary quest
 into nonsense sub-queries. Every assertion here is really checking which side of that
 trade-off a given input falls on.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -56,7 +57,9 @@ def test_caps_at_max_subjects():
     # Single-letter stand-ins would trip MIN_SUBJECT_LENGTH and defeat the point of this
     # test (falling back to "could not split" for an unrelated reason), so each subject
     # here is a realistic multi-character name.
-    result = split_comparison_subjects("so sánh Alpha và Beta và Gamma và Delta và Epsilon")
+    result = split_comparison_subjects(
+        "so sánh Alpha và Beta và Gamma và Delta và Epsilon"
+    )
     assert len(result) == 3
 
 
@@ -118,7 +121,9 @@ def test_zero_top_score_is_not_ambiguous():
 def test_only_the_top_n_results_are_considered():
     # HR's high score sits outside the default top_n window, so it never enters the
     # near-top comparison against Finance.
-    results = [_result("Finance", 0.9)] + [_result("Other", 0.1)] * 5 + [_result("HR", 0.89)]
+    results = (
+        [_result("Finance", 0.9)] + [_result("Other", 0.1)] * 5 + [_result("HR", 0.89)]
+    )
     assert detect_ambiguous_departments(results, top_n=5) is None
 
 

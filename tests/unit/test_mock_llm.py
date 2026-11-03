@@ -4,14 +4,24 @@ import pytest
 
 from src.core.config import Settings, settings
 from src.domain import llm_client
-from src.domain.llm_config import RuntimeLLMConfig, load_runtime_config, public_config, set_runtime_config
+from src.domain.llm_config import (
+    RuntimeLLMConfig,
+    load_runtime_config,
+    public_config,
+    set_runtime_config,
+)
 
-REFUSAL = "I could not produce a grounded answer from the authorized Knowledge Base sources."
+REFUSAL = (
+    "I could not produce a grounded answer from the authorized Knowledge Base sources."
+)
 SENTINEL = "<<<GROUNDED>>>"
 
 # The shape of the grounded-answer prompt: the sentinel instruction in the system prompt, one authorized passage in the user turn.
 ANSWER_WITH_CONTEXT = [
-    {"role": "system", "content": f"Emit the literal sentinel line `{SENTINEL}` on its own line, then the grounded answer."},
+    {
+        "role": "system",
+        "content": f"Emit the literal sentinel line `{SENTINEL}` on its own line, then the grounded answer.",
+    },
     {
         "role": "user",
         "content": (
@@ -22,7 +32,10 @@ ANSWER_WITH_CONTEXT = [
     },
 ]
 ANSWER_NO_CONTEXT = [
-    {"role": "system", "content": f"Emit the literal sentinel line `{SENTINEL}` on its own line, then the grounded answer."},
+    {
+        "role": "system",
+        "content": f"Emit the literal sentinel line `{SENTINEL}` on its own line, then the grounded answer.",
+    },
     {"role": "user", "content": "Question: what is the moon made of?"},
 ]
 # Any other call, such as a contextual chunk header or a query rewrite.
@@ -79,7 +92,9 @@ async def test_complete_answers_with_the_mock_and_streams_it_when_asked():
     async def on_token(chunk: str) -> None:
         streamed.append(chunk)
 
-    text, _tokens, model, provider = await llm_client.complete(ANSWER_WITH_CONTEXT, on_token=on_token)
+    text, _tokens, model, provider = await llm_client.complete(
+        ANSWER_WITH_CONTEXT, on_token=on_token
+    )
     assert text.endswith("[C1]")
     assert streamed == [text]
     assert (model, provider) == ("mock", "mock")
@@ -99,7 +114,9 @@ async def test_the_mock_cannot_read_images():
 
 
 @pytest.mark.asyncio
-async def test_llm_provider_mock_selects_the_mock_in_development_with_no_saved_provider(monkeypatch):
+async def test_llm_provider_mock_selects_the_mock_in_development_with_no_saved_provider(
+    monkeypatch,
+):
     monkeypatch.setattr(settings, "ENVIRONMENT", "development")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
     await load_runtime_config(_NoRowSession())
@@ -133,10 +150,14 @@ async def test_the_admin_screen_reports_the_mock_as_an_environment_source(monkey
 
 
 def test_production_refuses_the_mock_llm(monkeypatch):
-    monkeypatch.setattr(Settings, "is_development_environment", property(lambda self: False))
+    monkeypatch.setattr(
+        Settings, "is_development_environment", property(lambda self: False)
+    )
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
-    with pytest.raises(RuntimeError, match="LLM_PROVIDER=mock is for local development only"):
+    with pytest.raises(
+        RuntimeError, match="LLM_PROVIDER=mock is for local development only"
+    ):
         settings.validate_production()
 
 

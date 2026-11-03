@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import os
+import posixpath
 import re
 import socket
 import struct
@@ -278,6 +279,19 @@ def _convert_pdf_with_pymupdf4llm(data: bytes) -> str:
                 pass
 
 
+#: Formats whose own extractor is the reference reader, so MarkItDown is not asked.
+#:
+#: MarkItDown reads .docx through mammoth and .xlsx through pandas, which are its optional extras
+#: (`markitdown[docx]`, `markitdown[xlsx]`); `pyproject.toml` declares `markitdown` without them, so
+#: on every upload of these two types it raised MissingDependencyException, logged a warning and
+#: handed the document to the native extractor anyway (51 of 51 in one session's logs). Installing the
+#: extra would not be an improvement either: measured on three real specifications, MarkItDown's
+#: output escaped identifiers (`gpio\_out`), kept the table of contents and inlined images as data
+#: URIs, which is worse to search than `_extract_docx` / `_extract_xlsx`. Same result as before,
+#: minus the exception.
+_NATIVE_EXTRACTOR_ONLY = {".docx", ".xlsx", ".xlsm"}
+
+
 def _convert_with_markitdown(filename: str, data: bytes) -> str:
     if not settings.MARKITDOWN_ENABLED:
         return ""
@@ -286,6 +300,8 @@ def _convert_with_markitdown(filename: str, data: bytes) -> str:
     # installed MarkItDown versions reject .md/.txt/.csv outright; bypassing
     # them avoids turning a valid upload into a 500 during completion.
     if Path(filename).suffix.lower() in {".md", ".txt", ".csv"}:
+        return ""
+    if Path(filename).suffix.lower() in _NATIVE_EXTRACTOR_ONLY:
         return ""
     converter = _markitdown()
     if converter is None:
@@ -525,34 +541,161 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
         raise SourceExtractionError(f"Could not extract text from PDF: {exc}") from exc
 
 
-def _extract_docx(data: bytes) -> str:
+_DOCX_SKIPPED_STYLE = re.compile(
+    r"^(?:toc\b|table of (?:figures|tables|contents))", re.I
+)
+_DOCX_HEADING_STYLE = re.compile(r"^heading\s*([1-9])$", re.I)
+
+
+def _drop_dangling_relationships(data: bytes) -> bytes:
+    """Rewrite a .docx without the relationships whose target part is not in the package.
+
+    Some producers (generators, converters) write `fontTable.xml.rels -> fonts/font1.odttf`, or a
+    customXml item, and then do not ship the part. Word opens such a file; python-docx does not, it
+    raises KeyError("There is no item named 'word/fonts/font1.odttf' in the archive") from
+    Document() and the whole upload fails with "Could not process uploaded source". Measured on two of
+    the 22 files of a real specification set. A relationship to a part that is not there carries nothing
+    to read, so removing it loses nothing.
+    """
+    from lxml import etree  # type: ignore[import-untyped]  # lxml-stubs is not a declared dependency
+
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        names = set(source.namelist())
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                blob = source.read(info.filename)
+                if info.filename.endswith(".rels"):
+                    # word/_rels/fontTable.xml.rels describes the part word/fontTable.xml.
+                    base = posixpath.dirname(posixpath.dirname(info.filename))
+                    root = etree.fromstring(blob, parser)
+                    changed = False
+                    for rel in list(root):
+                        href = rel.get("Target") or ""
+                        if rel.get("TargetMode") == "External" or not href:
+                            continue
+                        resolved = (
+                            href.lstrip("/")
+                            if href.startswith("/")
+                            else posixpath.normpath(posixpath.join(base, href))
+                        )
+                        if resolved not in names:
+                            root.remove(rel)
+                            changed = True
+                    if changed:
+                        blob = etree.tostring(
+                            root,
+                            xml_declaration=True,
+                            encoding="UTF-8",
+                            standalone=True,
+                        )
+                target.writestr(info, blob)
+    return out.getvalue()
+
+
+def _open_docx(data: bytes):
     from docx import Document
 
-    document = Document(io.BytesIO(data))
-    parts = [
-        paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()
-    ]
-    for table in document.tables:
-        for row in table.rows:
-            parts.append(" | ".join(cell.text.strip() for cell in row.cells))
+    try:
+        return Document(io.BytesIO(data))
+    except KeyError:
+        # A relationship points at a part the package does not contain; see above.
+        logger.info("DOCX has relationships to missing parts; reading it without them")
+        return Document(io.BytesIO(_drop_dangling_relationships(data)))
+
+
+def _docx_cell_text(cell: Any) -> str:
+    return " ".join(cell.text.split())
+
+
+def _extract_docx(data: bytes) -> str:
+    """The document's text in the ORDER it is written, headings as Markdown headings.
+
+    Paragraphs and tables used to be read separately, all paragraphs first and every table after
+    them. For a specification that put each register table at the very end of the text, detached from
+    the section it belongs to and from the heading the chunker attaches to a chunk: "PADDIR | 0x00 |
+    RW" sat after the glossary, and no chunk said which block it described. Here a table stays under
+    the heading above it. The table of contents (and of figures/tables) is left out: it only repeats
+    every section title, so a search for a title matched the contents page as often as the section.
+    """
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = _open_docx(data)
+    parts: list[str] = []
+    for child in document.element.body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            paragraph = Paragraph(child, document)
+            text = " ".join(paragraph.text.split())
+            if not text:
+                continue
+            style = (
+                (paragraph.style.name if paragraph.style is not None else "") or ""
+            ).strip()
+            if _DOCX_SKIPPED_STYLE.match(style):
+                continue
+            heading = _DOCX_HEADING_STYLE.match(style)
+            if heading:
+                parts.append(f"\n\n{'#' * int(heading.group(1))} {text}\n")
+            elif style.lower() == "title":
+                parts.append(f"\n\n# {text}\n")
+            else:
+                parts.append(paragraph.text.strip())
+        elif tag == "tbl":
+            rows: list[str] = []
+            for row in Table(child, document).rows:
+                cells: list[str] = []
+                previous = None
+                for cell in row.cells:
+                    # A merged cell is returned once per grid column it spans.
+                    if cell._tc is previous:
+                        continue
+                    previous = cell._tc
+                    cells.append(_docx_cell_text(cell))
+                if any(cells):
+                    rows.append(" | ".join(cells))
+            if rows:
+                parts.append("\n\n" + "\n".join(rows) + "\n")
     return _clean("\n".join(parts))
 
 
 def _extract_xlsx(data: bytes) -> str:
+    """Each sheet as a heading, each row as `a | b | c`, a blank line between tables.
+
+    Three things the first version got wrong, measured on a real pin-list and bus-generator workbook:
+
+    * an empty cell was dropped, so a row `Name | | Description` became `Name | Description` and the
+      description read as the second column's value (11 rows between the two files);
+    * a cell with a line break (69 + 6 of them) put the rest of its text on a line of its own, which no
+      longer looks like a table row, so the chunker stopped treating the block as a table;
+    * a blank row, which is how a sheet separates one table from the next, vanished, running tables
+      into each other.
+
+    Empty cells inside a row are kept (trailing ones are not), a cell's own whitespace and line breaks
+    become single spaces, and a blank row becomes a blank line.
+    """
     from openpyxl import load_workbook
 
     workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     parts: list[str] = []
     for sheet in workbook.worksheets:
-        parts.append(f"## {sheet.title}")
+        parts.append(f"\n## {sheet.title}\n")
+        after_blank_row = False
         for row in sheet.iter_rows(values_only=True):
-            values = [
-                str(value).strip()
-                for value in row
-                if value is not None and str(value).strip()
+            cells = [
+                "" if value is None else " ".join(str(value).split()) for value in row
             ]
-            if values:
-                parts.append(" | ".join(values))
+            while cells and not cells[-1]:
+                cells.pop()
+            if not any(cells):
+                after_blank_row = True
+                continue
+            if after_blank_row:
+                parts.append("")
+                after_blank_row = False
+            parts.append(" | ".join(cells))
     return _clean("\n".join(parts))
 
 

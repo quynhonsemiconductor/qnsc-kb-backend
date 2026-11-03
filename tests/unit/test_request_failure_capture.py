@@ -12,6 +12,7 @@ These tests pin the properties that make the failure diagnosable without AWS:
 * a SUCCESSFUL request stores nothing, so the table does not grow for traffic nobody asks about
 * a storage failure cannot mask the exception it was trying to record
 """
+
 from __future__ import annotations
 
 import ast
@@ -59,7 +60,9 @@ def _record(exc=None, status_code=500, monkeypatch=None):
             "req-123", "POST", "/upload-source", status_code, 91.5, exc
         )
     )
-    rows = [item for item in _FakeSession.instances if isinstance(item, ApiRequestMetric)]
+    rows = [
+        item for item in _FakeSession.instances if isinstance(item, ApiRequestMetric)
+    ]
     return rows[0] if rows else None
 
 
@@ -144,9 +147,9 @@ def test_a_storage_failure_cannot_mask_the_exception_being_recorded(monkeypatch)
 
     assert row.error_type == "RuntimeError"
     source = inspect.getsource(record_request_metric)
-    assert "except Exception as persist_error" in source, (
-        "reusing `exc` here would overwrite the exception under record"
-    )
+    assert (
+        "except Exception as persist_error" in source
+    ), "reusing `exc` here would overwrite the exception under record"
 
 
 def test_the_middleware_passes_the_exception_only_on_the_failure_path():
@@ -169,15 +172,20 @@ def test_the_middleware_passes_the_exception_only_on_the_failure_path():
         == "record_request_metric"
     ]
 
-    assert len(calls) == 2, f"expected a success and a failure call site, got {len(calls)}"
+    assert (
+        len(calls) == 2
+    ), f"expected a success and a failure call site, got {len(calls)}"
 
     arg_counts = sorted(len(call.args) for call in calls)
-    assert arg_counts == [5, 6], f"one call must add the exception argument: {arg_counts}"
+    assert arg_counts == [
+        5,
+        6,
+    ], f"one call must add the exception argument: {arg_counts}"
 
     failure_call = max(calls, key=lambda call: len(call.args))
-    assert getattr(failure_call.args[-1], "id", None) == "exc", (
-        "the failure path's last argument must be the caught exception"
-    )
+    assert (
+        getattr(failure_call.args[-1], "id", None) == "exc"
+    ), "the failure path's last argument must be the caught exception"
 
 
 def test_the_failures_endpoint_requires_global_governance_read():
