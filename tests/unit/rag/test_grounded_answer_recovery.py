@@ -4,7 +4,6 @@ All three ended at the same screen — "Không thể tạo câu trả lời có 
 được cấp quyền trong Cơ sở tri thức" — which reads as "the knowledge base has nothing",
 while the knowledge base had the answer and the model had written it.
 """
-
 from __future__ import annotations
 
 from src.domain.ai_service import _is_grounding_refusal
@@ -37,9 +36,9 @@ def test_an_answer_left_in_the_reasoning_channel_is_still_the_answer():
 
     recovered = _extract_openai_text(response)
 
-    assert recovered.startswith(
-        "<<<GROUNDED>>>"
-    ), "deliberation before the sentinel must never reach the reader"
+    assert recovered.startswith("<<<GROUNDED>>>"), (
+        "deliberation before the sentinel must never reach the reader"
+    )
     assert "[C4]" in recovered
     assert "We need to produce" not in recovered
 
@@ -149,9 +148,7 @@ def test_the_retry_after_header_wins_when_the_provider_sends_one():
 
     from src.domain.llm_client import _retry_after_seconds
 
-    assert (
-        _retry_after_seconds(httpx.Response(429, headers={"retry-after": "12"})) == 12
-    )
+    assert _retry_after_seconds(httpx.Response(429, headers={"retry-after": "12"})) == 12
     assert _retry_after_seconds(httpx.Response(429, text="busy")) is None
 
 

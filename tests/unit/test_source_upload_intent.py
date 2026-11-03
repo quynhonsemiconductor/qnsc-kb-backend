@@ -47,9 +47,7 @@ def test_failed_direct_upload_can_reissue_its_existing_intent(monkeypatch):
         articles.AuthorizationService, "has_permission", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
-        articles,
-        "create_presigned_source_url",
-        lambda *_args, **_kwargs: "https://r2.example/retry",
+        articles, "create_presigned_source_url", lambda *_args, **_kwargs: "https://r2.example/retry"
     )
     monkeypatch.setattr(articles, "AuditRepository", FakeAuditRepository)
 

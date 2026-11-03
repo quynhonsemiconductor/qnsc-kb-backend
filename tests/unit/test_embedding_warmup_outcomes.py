@@ -7,7 +7,6 @@ Follow-ups to test_readiness_waits_for_embedding_model.py:
   while downloading) is a failure, even if its text says "timed out";
 * the task must be referenced somewhere, or the loop can drop it before it records the outcome.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -28,9 +27,7 @@ def fresh_state(monkeypatch):
     return state
 
 
-def test_a_load_that_finishes_after_the_timeout_ends_ready_not_degraded(
-    fresh_state, monkeypatch
-):
+def test_a_load_that_finishes_after_the_timeout_ends_ready_not_degraded(fresh_state, monkeypatch):
     release = threading.Event()
     monkeypatch.setattr(main.settings, "EMBEDDING_WARMUP_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(main, "warm_up_embeddings", lambda: release.wait(5))
@@ -49,16 +46,10 @@ def test_a_load_that_finishes_after_the_timeout_ends_ready_not_degraded(
     finally:
         release.set()
 
-    assert during == (
-        warmup.TIMEOUT,
-        True,
-        False,
-    ), "after the timeout it is degraded and no longer holds readiness"
+    assert during == (warmup.TIMEOUT, True, False), "after the timeout it is degraded and no longer holds readiness"
     assert fresh_state.status == warmup.READY
     assert fresh_state.degraded is False
-    assert (
-        fresh_state.seconds >= 0.3
-    ), "the duration is the real one, including the wait after the timeout"
+    assert fresh_state.seconds >= 0.3, "the duration is the real one, including the wait after the timeout"
 
 
 def test_a_late_failure_is_recorded_as_failed(fresh_state, monkeypatch):
@@ -88,12 +79,9 @@ def test_a_late_failure_is_recorded_as_failed(fresh_state, monkeypatch):
     assert "truncated" in fresh_state.error
 
 
-def test_a_socket_timeout_inside_the_load_is_a_failure_not_a_timeout(
-    fresh_state, monkeypatch
-):
+def test_a_socket_timeout_inside_the_load_is_a_failure_not_a_timeout(fresh_state, monkeypatch):
     """TimeoutError raised BY the load (a download that timed out) must not be mistaken for the
     readiness timeout: nothing was still loading, it simply failed."""
-
     def load():
         raise TimeoutError("The read operation timed out")
 
@@ -121,9 +109,9 @@ def test_initialize_resources_keeps_a_reference_to_the_preload_task():
     import inspect
 
     source = inspect.getsource(main.initialize_resources)
-    assert (
-        "_preload_task = asyncio.create_task(" in source
-    ), "the event loop holds tasks weakly; an unreferenced preload task can be collected before it records its outcome"
+    assert "_preload_task = asyncio.create_task(" in source, (
+        "the event loop holds tasks weakly; an unreferenced preload task can be collected before it records its outcome"
+    )
 
 
 def test_the_readiness_wait_is_shorter_than_the_deploy_poll():

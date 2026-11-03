@@ -19,7 +19,6 @@ Every permission-filtered search was short of candidates, silently: no error, no
 just fewer passages reaching the reranker. These tests pin the four properties that fix
 relies on, because none of them are visible in the query text itself.
 """
-
 from __future__ import annotations
 
 import asyncio

@@ -19,17 +19,13 @@ def test_streaming_answer_does_not_use_request_user_after_response_starts(monkey
         @property
         def id(self):
             if self._closed:
-                raise AssertionError(
-                    "The streaming generator accessed a detached request user"
-                )
+                raise AssertionError("The streaming generator accessed a detached request user")
             return self._id
 
         @property
         def company_domain(self):
             if self._closed:
-                raise AssertionError(
-                    "The streaming generator accessed a detached request user"
-                )
+                raise AssertionError("The streaming generator accessed a detached request user")
             return self._company_domain
 
     class FakeRepository:
@@ -60,9 +56,7 @@ def test_streaming_answer_does_not_use_request_user_after_response_starts(monkey
             pass
 
         async def get_by_id(self, _user_id):
-            return SimpleNamespace(
-                id=uuid.uuid4(), company_domain="acme.test", roles=[], role="Staff"
-            )
+            return SimpleNamespace(id=uuid.uuid4(), company_domain="acme.test", roles=[], role="Staff")
 
     class FakeAIService:
         async def ask(self, _user, _question, **kwargs):
@@ -90,10 +84,7 @@ def test_streaming_answer_does_not_use_request_user_after_response_starts(monkey
             db=object(),
         )
         request_user._closed = True
-        return [
-            chunk.decode() if isinstance(chunk, bytes) else chunk
-            async for chunk in response.body_iterator
-        ]
+        return [chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator]
 
     events = asyncio.run(run_stream())
     payloads = [json.loads(event.removeprefix("data: ").strip()) for event in events]

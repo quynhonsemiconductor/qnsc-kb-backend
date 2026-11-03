@@ -9,7 +9,6 @@ process must be a development environment.
 Most of what follows pins the half that must not move — that the opt-in does nothing
 once ENVIRONMENT is anything else.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -49,9 +48,7 @@ def test_both_conditions_are_required_to_allow_a_local_endpoint():
     ).allows_local_llm_endpoints
 
 
-@pytest.mark.parametrize(
-    "environment", ["production", "prod", "staging", "uat", "demo", ""]
-)
+@pytest.mark.parametrize("environment", ["production", "prod", "staging", "uat", "demo", ""])
 def test_the_opt_in_is_inert_outside_development(environment):
     """A flag travels in env files and task definitions; a copied value must not be able
     to switch the SSRF defence off on a deployed environment."""
@@ -142,9 +139,7 @@ def test_a_public_endpoint_still_works_while_the_opt_in_is_on(local_allowed):
 
 
 def test_resolution_pins_a_loopback_literal_when_permitted(local_allowed):
-    resolved = asyncio.run(
-        validate_public_endpoint_resolution("http://127.0.0.1:11434/v1")
-    )
+    resolved = asyncio.run(validate_public_endpoint_resolution("http://127.0.0.1:11434/v1"))
     assert (resolved.hostname, resolved.address) == ("127.0.0.1", "127.0.0.1")
 
 

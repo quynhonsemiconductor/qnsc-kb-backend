@@ -4,7 +4,6 @@ Embedding a query is the most expensive single step in a search and a pure funct
 (text, embedding version). It is also the step most often repeated — the same question
 from different people, a retry, the AI path searching twice in one turn.
 """
-
 from __future__ import annotations
 
 import asyncio

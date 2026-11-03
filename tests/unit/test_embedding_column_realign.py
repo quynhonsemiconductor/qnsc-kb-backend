@@ -17,7 +17,6 @@ Two things are pinned here: that a realign revision exists at the head of the ch
 the current dimension, and that a mismatch is reported at startup instead of being
 discovered one failed article at a time.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -70,9 +69,9 @@ def test_the_refusal_is_conditional_on_the_opt_in_flag():
         "the realign offers no sanctioned way past the guard; a blocked deploy has to be "
         "rescued with hand-typed DELETEs"
     )
-    assert (
-        "not settings.EMBEDDING_REALIGN_DISCARD_VECTORS" in newest
-    ), "the refusal must be conditional on the flag, so the guard still fires by default"
+    assert "not settings.EMBEDDING_REALIGN_DISCARD_VECTORS" in newest, (
+        "the refusal must be conditional on the flag, so the guard still fires by default"
+    )
 
 
 def test_the_opt_in_defaults_to_off():
@@ -86,9 +85,9 @@ def test_the_guard_message_names_the_flag_rather_than_manual_sql():
     # Bounded to the raise's own argument list -- the closing paren at that indentation --
     # not the first ")" in the text, which falls inside the f-string's "vector({current})".
     message = newest.split("raise RuntimeError", 1)[1].split("\n        )", 1)[0]
-    assert (
-        "EMBEDDING_REALIGN_DISCARD_VECTORS" in message
-    ), "the guard tells the operator what is wrong but not how to proceed"
+    assert "EMBEDDING_REALIGN_DISCARD_VECTORS" in message, (
+        "the guard tells the operator what is wrong but not how to proceed"
+    )
 
 
 def test_the_opt_in_path_clears_parent_chunks_too():

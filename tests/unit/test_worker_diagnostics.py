@@ -250,7 +250,7 @@ def test_the_endpoint_collects_names_only_and_bounds_every_call():
     source = inspect.getsource(governance.get_worker_diagnostics)
 
     assert '"name"' in source
-    assert '.get("args")' not in source and '.get("kwargs")' not in source
+    assert ".get(\"args\")" not in source and ".get(\"kwargs\")" not in source
     assert "control_timeout" in source
     assert "socket_connect_timeout" in source and "socket_timeout" in source
     # Synchronous kombu control calls must not block the event loop for the whole

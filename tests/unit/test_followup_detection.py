@@ -17,7 +17,6 @@ The word cap is raised for the same reason the markers were missing. Vietnamese 
 written in syllables, so "cung cấp cho tôi" counts four words where English counts two,
 and a cap chosen against English sentences was much tighter in Vietnamese than intended.
 """
-
 from __future__ import annotations
 
 import pytest

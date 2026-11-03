@@ -16,7 +16,6 @@ nothing. And an item that rolls back must not leave anything queued at all.
 A broker that is down must not cost the document. The draft keeps the lossless view, says
 so, and stays retryable -- it is not left claiming to be queued forever.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -157,14 +156,10 @@ def test_one_bad_dispatch_does_not_strand_the_others(dispatcher):
         seen.append(draft_id)
         return draft_id != bad
 
-    __import__("sys").modules[
-        "src.workers.tasks"
-    ].dispatch_restructure_pending_draft = flaky
+    __import__("sys").modules["src.workers.tasks"].dispatch_restructure_pending_draft = flaky
     db = _DB()
 
-    asyncio.run(
-        _dispatch_queued_formats(db, [(bad, "qnsc.vn", "u"), (good, "qnsc.vn", "u")])
-    )
+    asyncio.run(_dispatch_queued_formats(db, [(bad, "qnsc.vn", "u"), (good, "qnsc.vn", "u")]))
 
     assert seen == [bad, good]
     assert db.commits == 1

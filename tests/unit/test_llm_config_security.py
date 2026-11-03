@@ -7,10 +7,7 @@ from src.domain.llm_config import DEFAULT_BASE_URLS
 
 def test_llm_endpoint_uses_the_provider_default_when_omitted():
     assert _clean_base_url("openai", None) == DEFAULT_BASE_URLS["openai"]
-    assert (
-        DEFAULT_BASE_URLS["glm"]
-        == "https://api.z.ai/api/coding/paas/v4/chat/completions"
-    )
+    assert DEFAULT_BASE_URLS["glm"] == "https://api.z.ai/api/coding/paas/v4/chat/completions"
 
 
 @pytest.mark.parametrize(
@@ -28,9 +25,7 @@ def test_llm_endpoint_rejects_unsafe_custom_urls(url):
         _clean_base_url("openai", url)
 
 
-def test_llm_endpoint_rejects_unsafe_url_even_when_custom_endpoints_are_enabled(
-    monkeypatch,
-):
+def test_llm_endpoint_rejects_unsafe_url_even_when_custom_endpoints_are_enabled(monkeypatch):
     monkeypatch.setattr("src.api.routers.llm.settings.LLM_ALLOW_CUSTOM_BASE_URL", True)
     with pytest.raises(HTTPException, match="private or reserved"):
         _clean_base_url("openai", "https://127.0.0.1/v1/chat/completions")

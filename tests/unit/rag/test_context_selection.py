@@ -1,9 +1,4 @@
-from src.domain.ai_service import (
-    _conflict_answer,
-    _detect_explicit_conflicts,
-    _select_context,
-    classify_fact_type,
-)
+from src.domain.ai_service import _conflict_answer, _detect_explicit_conflicts, _select_context, classify_fact_type
 from src.rag.citations import extract_citation_ids
 
 
@@ -23,9 +18,7 @@ def test_classify_fact_type_falls_back_to_other_for_an_unknown_label():
     assert classify_fact_type("something new") == "other"
 
 
-def test_context_selection_deduplicates_children_and_assigns_stable_source_ids(
-    monkeypatch,
-):
+def test_context_selection_deduplicates_children_and_assigns_stable_source_ids(monkeypatch):
     monkeypatch.setattr("src.domain.ai_service.settings.RAG_MIN_CONTEXT_SCORE", 0.2)
     results = [
         {
@@ -88,11 +81,7 @@ def test_context_selection_applies_score_and_budget_gates(monkeypatch):
 
 
 def test_citations_normalize_backend_ids_and_legacy_numeric_markers():
-    assert extract_citation_ids("Answer [C2] and [Source ID: C1], plus [3].") == [
-        "C1",
-        "C2",
-        "C3",
-    ]
+    assert extract_citation_ids("Answer [C2] and [Source ID: C1], plus [3].") == ["C1", "C2", "C3"]
 
 
 def test_explicit_conflicts_are_presented_without_adjudication():

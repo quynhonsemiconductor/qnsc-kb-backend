@@ -10,7 +10,6 @@ This test is what stops the allowlist coming back by accident. Two authorities o
 same role decision — an invitation and an environment variable — is precisely the shape
 that silently overrules the admin UI, and it was ENTRA_ADMIN_EMAILS that won last time.
 """
-
 from __future__ import annotations
 
 import inspect

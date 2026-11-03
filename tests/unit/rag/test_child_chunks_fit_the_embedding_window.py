@@ -13,7 +13,6 @@ The ratio below is a deliberately CONSERVATIVE estimate, not a measurement: the 
 to keep a margin against the worst-case language in this corpus, and to fail loudly if
 someone raises the chunk size without also moving to a model with a longer window.
 """
-
 from __future__ import annotations
 
 from src.core.config import settings
@@ -27,11 +26,7 @@ CONSERVATIVE_CHARS_PER_TOKEN = 2.5
 def _child_size_limit() -> int:
     """The character size the chunker actually asks for, read from its own output."""
     text = "\n\n".join(f"Cau {n}. " + "tai lieu noi bo " * 40 for n in range(6))
-    children = [
-        child
-        for parent in create_parent_child_chunks(text)
-        for child in parent["children"]
-    ]
+    children = [child for parent in create_parent_child_chunks(text) for child in parent["children"]]
     assert children, "chunker produced no children"
     return max(len(child) for child in children)
 
@@ -69,9 +64,5 @@ def test_children_still_cover_the_parent():
     for parent in create_parent_child_chunks(text):
         joined = " ".join(parent["children"])
         # Every non-trivial word of the parent must appear somewhere in its children.
-        missing = [
-            w
-            for w in set(parent["parent_text"].split())
-            if len(w) > 3 and w not in joined
-        ]
+        missing = [w for w in set(parent["parent_text"].split()) if len(w) > 3 and w not in joined]
         assert not missing, missing[:5]

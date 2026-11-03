@@ -14,7 +14,6 @@ worth proving.
 ``asyncio.run`` rather than pytest-asyncio: the marker is not available in every
 environment this suite runs in.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -152,9 +151,9 @@ def test_every_account_route_refuses_the_allowlisted_address(enabled):
     source = inspect.getsource(auth)
     # update_user (rename), create_invitation (deferred grant), create_managed_user
     # (immediate grant with a caller-chosen password).
-    assert (
-        source.count("is_reset_operator(") >= 3
-    ), "an account route can write an email without consulting the reset allowlist"
+    assert source.count("is_reset_operator(") >= 3, (
+        "an account route can write an email without consulting the reset allowlist"
+    )
 
 
 def test_the_rename_guard_allows_the_operator_to_keep_its_own_address(monkeypatch):

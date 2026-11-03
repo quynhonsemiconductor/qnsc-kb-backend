@@ -18,7 +18,6 @@ _convert_with_markitdown, which does not guard that call, and out through
 extract_source_markdown, which the upload endpoint does not guard either. An optional
 enhancement layer could return a 500 for the whole upload.
 """
-
 from __future__ import annotations
 
 import builtins

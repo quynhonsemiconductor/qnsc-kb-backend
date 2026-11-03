@@ -19,9 +19,7 @@ def test_every_published_port_binds_loopback_and_reads_its_env_default():
     published = re.findall(r'^\s+- "([^"]+)"$', compose, flags=re.MULTILINE)
     assert published, "docker-compose.yml publishes no ports"
     for mapping in published:
-        assert mapping.startswith(
-            "127.0.0.1:"
-        ), f"{mapping} is reachable beyond loopback"
+        assert mapping.startswith("127.0.0.1:"), f"{mapping} is reachable beyond loopback"
 
     defaults = _env_example_defaults()
     interpolated = re.findall(r"\$\{([A-Z_]*PORT):-(\d+)\}", compose)
@@ -33,9 +31,7 @@ def test_every_published_port_binds_loopback_and_reads_its_env_default():
         "FRONTEND_DEV_PORT",
     }
     for name, value in interpolated:
-        assert (
-            defaults.get(name) == value
-        ), f"{name} default {value} is not what .env.example says"
+        assert defaults.get(name) == value, f"{name} default {value} is not what .env.example says"
 
 
 def test_compose_names_no_fixed_container_and_sets_one_project_name():
@@ -46,19 +42,9 @@ def test_compose_names_no_fixed_container_and_sets_one_project_name():
 
 def test_compose_images_match_production_engines():
     compose = _read("docker-compose.yml")
-    assert re.search(
-        r"(?m)^\s+image: pgvector/pgvector:\d+\.\d+\.\d+-pg18(@sha256:[0-9a-f]{64})?$",
-        compose,
-    )
-    assert re.search(
-        r"(?m)^\s+image: valkey/valkey:8\.1\.\d+-alpine(@sha256:[0-9a-f]{64})?$",
-        compose,
-    )
-    assert not re.search(
-        r"image: \S+:(latest|pg18|pg16|8-alpine|8|7\.2\.\d+-alpine)\s*$",
-        compose,
-        flags=re.MULTILINE,
-    )
+    assert re.search(r"(?m)^\s+image: pgvector/pgvector:\d+\.\d+\.\d+-pg18(@sha256:[0-9a-f]{64})?$", compose)
+    assert re.search(r"(?m)^\s+image: valkey/valkey:8\.1\.\d+-alpine(@sha256:[0-9a-f]{64})?$", compose)
+    assert not re.search(r"image: \S+:(latest|pg18|pg16|8-alpine|8|7\.2\.\d+-alpine)\s*$", compose, flags=re.MULTILINE)
 
 
 def test_ci_and_readme_address_services_not_containers():
@@ -69,10 +55,7 @@ def test_ci_and_readme_address_services_not_containers():
 
 def test_the_source_bucket_name_is_the_same_in_the_env_example_the_init_hook_and_the_compose_file():
     env = dict(re.findall(r"(?m)^([A-Z_]+)=\"?([^\"\n]*)\"?$", _read(".env.example")))
-    init = re.search(
-        r'(?m)^BUCKET="\$\{SOURCE_STORAGE_BUCKET:-([^}]+)\}"',
-        _read("scripts/garage/init.sh"),
-    )
+    init = re.search(r'(?m)^BUCKET="\$\{SOURCE_STORAGE_BUCKET:-([^}]+)\}"', _read("scripts/garage/init.sh"))
     assert init, "BUCKET default not found in scripts/garage/init.sh"
     assert env["SOURCE_STORAGE_BUCKET"] == init.group(1)
     assert f"SOURCE_STORAGE_BUCKET={init.group(1)}" in _read("docker-compose.yml")
@@ -81,9 +64,7 @@ def test_the_source_bucket_name_is_the_same_in_the_env_example_the_init_hook_and
 def test_the_app_containers_reach_garage_by_its_service_name_and_the_browser_by_the_host_port():
     compose = _read("docker-compose.yml")
     assert compose.count("S3_ENDPOINT_URL=http://garage:3900") == 3  # api, worker, beat
-    assert (
-        "S3_PUBLIC_ENDPOINT_URL=http://localhost:${STORAGE_HOST_PORT:-4570}" in compose
-    )
+    assert "S3_PUBLIC_ENDPOINT_URL=http://localhost:${STORAGE_HOST_PORT:-4570}" in compose
     # The app containers wait for the bucket and CORS to be in place, not just for the node to answer.
     assert compose.count("garage-init:\n") >= 1
     assert compose.count("condition: service_completed_successfully") >= 3
@@ -100,7 +81,7 @@ def test_the_bucket_cors_allows_both_loopback_names_of_the_frontend_and_the_init
     assert "CORS check failed" in init
     # Failures are loud: the create and CORS steps never swallow an error.
     for line in init.splitlines():
-        if "put-bucket-cors" in line or '/v1/bucket"' in line or "key/import" in line:
+        if "put-bucket-cors" in line or "/v1/bucket\"" in line or "key/import" in line:
             assert "|| true" not in line, line
 
 
@@ -108,10 +89,7 @@ def test_the_garage_healthcheck_asks_the_node_and_the_init_is_a_one_shot():
     compose = _read("docker-compose.yml")
     garage = compose.split("  garage:\n", 1)[1].split("\n  garage-init:", 1)[0]
     assert '["CMD", "/garage", "status"]' in garage
-    assert (
-        'restart: "no"'
-        in compose.split("  garage-init:\n", 1)[1].split("\n  api:", 1)[0]
-    )
+    assert 'restart: "no"' in compose.split("  garage-init:\n", 1)[1].split("\n  api:", 1)[0]
 
 
 def test_the_garage_secret_is_quoted_so_yaml_keeps_it_a_string():
@@ -128,9 +106,7 @@ def test_no_app_service_runs_migrations_from_an_entrypoint_and_the_schema_is_not
     for name in ("api", "worker", "beat", "migrator"):
         block = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  \S|\Z)", compose)
         assert block, f"{name} is not a service in the dev compose"
-        assert "entrypoint" not in block.group(
-            1
-        ), f"{name} must not run migrations from an entrypoint"
+        assert "entrypoint" not in block.group(1), f"{name} must not run migrations from an entrypoint"
     assert "AUTO_CREATE_SCHEMA=false" in compose
     assert "target: migrator" in compose
     assert 'profiles: ["migrate"]' in compose

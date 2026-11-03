@@ -18,7 +18,6 @@ in production:
 * Connectors survive. They hold the OAuth grant. Deleting them would force an operator to
   reconnect SharePoint by hand after every test reset.
 """
-
 from __future__ import annotations
 
 import asyncio

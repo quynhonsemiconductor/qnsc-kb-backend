@@ -322,7 +322,9 @@ def test_revoked_conversation_answer_cannot_leak_through_grounded_field(monkeypa
     monkeypatch.setattr(ai_router, "_hydrate_citations", no_authorized_citations)
 
     response = asyncio.run(
-        ai_router.get_conversation_messages(uuid.uuid4(), make_ai_user(), object())
+        ai_router.get_conversation_messages(
+            uuid.uuid4(), make_ai_user(), object()
+        )
     )
 
     assert response[0]["content"].startswith("This historical answer is no longer")
@@ -349,16 +351,14 @@ def test_malformed_historical_citation_cannot_leak_metadata_or_answer(monkeypatc
                     content="FORGED PRIVATE ANSWER",
                     grounded_content="FORGED GROUNDED ANSWER",
                     extended_content="FORGED EXTENDED ANSWER",
-                    citations=json.dumps(
-                        [
-                            "not-a-citation",
-                            {
-                                "title": "Private document",
-                                "excerpt": "FORGED SOURCE EXCERPT",
-                                "source_url": "/api/v1/articles/private/source",
-                            },
-                        ]
-                    ),
+                    citations=json.dumps([
+                        "not-a-citation",
+                        {
+                            "title": "Private document",
+                            "excerpt": "FORGED SOURCE EXCERPT",
+                            "source_url": "/api/v1/articles/private/source",
+                        },
+                    ]),
                     usage_log_id=None,
                     created_at=None,
                 )
@@ -367,7 +367,9 @@ def test_malformed_historical_citation_cannot_leak_metadata_or_answer(monkeypatc
     monkeypatch.setattr(ai_router, "AIRepository", FakeRepository)
 
     response = asyncio.run(
-        ai_router.get_conversation_messages(uuid.uuid4(), make_ai_user(), object())
+        ai_router.get_conversation_messages(
+            uuid.uuid4(), make_ai_user(), object()
+        )
     )
 
     assert response[0]["content"].startswith("This historical answer is no longer")
@@ -403,7 +405,9 @@ def test_uncited_historical_assistant_answer_fails_closed(monkeypatch):
     monkeypatch.setattr(ai_router, "AIRepository", FakeRepository)
 
     response = asyncio.run(
-        ai_router.get_conversation_messages(uuid.uuid4(), make_ai_user(), object())
+        ai_router.get_conversation_messages(
+            uuid.uuid4(), make_ai_user(), object()
+        )
     )
 
     assert response[0]["content"].startswith("This historical answer is no longer")
@@ -430,14 +434,10 @@ def test_historical_citation_marker_mismatch_fails_closed(monkeypatch):
                     content="ANSWER WITH [C1]",
                     grounded_content="ANSWER WITH [C1]",
                     extended_content="",
-                    citations=json.dumps(
-                        [
-                            {
-                                "source_id": "C2",
-                                "chunk_id": str(uuid.uuid4()),
-                            }
-                        ]
-                    ),
+                    citations=json.dumps([{
+                        "source_id": "C2",
+                        "chunk_id": str(uuid.uuid4()),
+                    }]),
                     usage_log_id=None,
                     created_at=None,
                 )
@@ -450,7 +450,9 @@ def test_historical_citation_marker_mismatch_fails_closed(monkeypatch):
     monkeypatch.setattr(ai_router, "_hydrate_citations", authorized_citation)
 
     response = asyncio.run(
-        ai_router.get_conversation_messages(uuid.uuid4(), make_ai_user(), object())
+        ai_router.get_conversation_messages(
+            uuid.uuid4(), make_ai_user(), object()
+        )
     )
 
     assert response[0]["content"].startswith("This historical answer is no longer")

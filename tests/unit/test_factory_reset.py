@@ -12,7 +12,6 @@ Three things are being defended, and every one of them fails silently:
 ``asyncio.run`` rather than pytest-asyncio: the marker is not available in every
 environment this suite runs in.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +30,7 @@ from src.domain.factory_reset import (
     purge_order,
 )
 from src.models.base import Base
+
 
 # --- keep-set integrity ------------------------------------------------------
 
@@ -106,9 +106,9 @@ def test_children_are_deleted_before_their_parents():
             target = fk.column.table.name
             if target == table.name or target not in position:
                 continue
-            assert (
-                position[table.name] < position[target]
-            ), f"{table.name} references {target} and must be deleted first"
+            assert position[table.name] < position[target], (
+                f"{table.name} references {target} and must be deleted first"
+            )
 
 
 def test_a_kept_table_referencing_purged_data_is_rejected(monkeypatch):

@@ -13,7 +13,6 @@ artwork repeats on every page. One deck places the same image on all 149 of its 
 `select_page_figures` is pure so that this judgement can be tested without a PDF engine
 (the test venv has no pymupdf), and so the rule is readable on its own.
 """
-
 from __future__ import annotations
 
 import pytest
@@ -93,14 +92,18 @@ def test_an_inverted_rect_is_normalised_rather_than_dropped():
 
 def test_an_image_repeated_across_the_document_is_template_not_evidence():
     """The case that motivated this: one image on all 149 pages of a deck."""
-    kept = select_page_figures([(14, _rect(0.30))], **PAGE, xref_page_counts={14: 20})
+    kept = select_page_figures(
+        [(14, _rect(0.30))], **PAGE, xref_page_counts={14: 20}
+    )
 
     assert kept == []
 
 
 def test_a_figure_appearing_on_a_couple_of_pages_is_still_a_figure():
     """A diagram reused in two sections is not a letterhead."""
-    kept = select_page_figures([(14, _rect(0.30))], **PAGE, xref_page_counts={14: 2})
+    kept = select_page_figures(
+        [(14, _rect(0.30))], **PAGE, xref_page_counts={14: 2}
+    )
 
     assert len(kept) == 1
 
@@ -146,9 +149,7 @@ def test_two_small_placements_can_union_into_something_citable():
     half = _rect(0.012, top=100.0)
     other = _rect(0.012, top=100.0 + (half[3] - half[1]))
 
-    assert (
-        select_page_figures([(7, half)], **PAGE) == []
-    ), "each half is too small alone"
+    assert select_page_figures([(7, half)], **PAGE) == [], "each half is too small alone"
     assert len(select_page_figures([(7, half), (7, other)], **PAGE)) == 1
 
 
@@ -268,8 +269,7 @@ def test_blank_and_whitespace_lines_are_skipped():
     ]
 
     assert (
-        figure_caption_text(lines, figure, page_height=PAGE_HEIGHT)
-        == "Real caption text"
+        figure_caption_text(lines, figure, page_height=PAGE_HEIGHT) == "Real caption text"
     )
 
 

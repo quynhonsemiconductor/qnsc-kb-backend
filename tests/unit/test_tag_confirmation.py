@@ -22,12 +22,7 @@ def make_tag_user(permission_key: str) -> User:
         active=True,
     )
     role = Role(name="Tagger", company_domain="acme.test", active=True)
-    role.permissions.append(
-        RolePermission(
-            permission=Permission(key=permission_key, name=permission_key),
-            scope="company",
-        )
-    )
+    role.permissions.append(RolePermission(permission=Permission(key=permission_key, name=permission_key), scope="company"))
     user.roles.append(role)
     return user
 
@@ -48,22 +43,13 @@ def make_tag_article(user: User) -> Article:
         owner_id=user.id,
         tags=[ArticleTag(tag="existing")],
     )
-
-
 from src.models.user import User
 
 
 def test_ai_tagging_returns_proposals_without_persisting(monkeypatch):
     from src.api.routers import articles
 
-    user = User(
-        id=uuid.uuid4(),
-        email="owner@acme.test",
-        name="Owner",
-        password_hash="hash",
-        company_domain="acme.test",
-        role="Staff",
-    )
+    user = User(id=uuid.uuid4(), email="owner@acme.test", name="Owner", password_hash="hash", company_domain="acme.test", role="Staff")
     article = Article(
         id=uuid.uuid4(),
         title="Access policy",
@@ -90,26 +76,13 @@ def test_ai_tagging_returns_proposals_without_persisting(monkeypatch):
             raise AssertionError("suggestion generation must not persist tags")
 
     async def fake_complete(*_args, **_kwargs):
-        return (
-            json.dumps(
-                {"articles": [{"id": str(article.id), "tags": ["Access Control"]}]}
-            ),
-            0,
-            "test",
-            "test",
-        )
+        return json.dumps({"articles": [{"id": str(article.id), "tags": ["Access Control"]}]}), 0, "test", "test"
 
     monkeypatch.setattr(articles, "ArticleRepository", FakeArticleRepository)
-    monkeypatch.setattr(
-        articles, "resolve_provider", lambda: SimpleNamespace(model="test-model")
-    )
+    monkeypatch.setattr(articles, "resolve_provider", lambda: SimpleNamespace(model="test-model"))
     monkeypatch.setattr(articles, "complete", fake_complete)
 
-    result = asyncio.run(
-        articles.auto_tag_articles(
-            articles.AutoTagRequest(article_ids=[article.id]), user, object()
-        )
-    )
+    result = asyncio.run(articles.auto_tag_articles(articles.AutoTagRequest(article_ids=[article.id]), user, object()))
 
     assert result.updated_count == 0
     assert result.requires_confirmation is True
@@ -117,9 +90,7 @@ def test_ai_tagging_returns_proposals_without_persisting(monkeypatch):
     assert result.results[0]["proposed_tags"] == ["existing", "access control"]
 
 
-def test_tag_confirmation_requires_explicit_sets_and_requeues_published_article(
-    monkeypatch,
-):
+def test_tag_confirmation_requires_explicit_sets_and_requeues_published_article(monkeypatch):
     from src.api.routers import articles
 
     user = make_tag_user("article.edit")
@@ -158,25 +129,15 @@ def test_tag_confirmation_requires_explicit_sets_and_requeues_published_article(
     monkeypatch.setattr(articles, "AuditRepository", FakeAuditRepository)
     monkeypatch.setattr(articles, "event_bus", SimpleNamespace(publish=publish))
 
-    result = asyncio.run(
-        articles.confirm_article_tags(
-            articles.ConfirmTagsRequest(
-                items=[
-                    articles.ConfirmTagItem(
-                        article_id=article.id,
-                        tags=[" Access Control ", "access   control", "bad<script>"],
-                    )
-                ]
-            ),
-            user,
-            FakeDB(),
-        )
-    )
+    result = asyncio.run(articles.confirm_article_tags(
+        articles.ConfirmTagsRequest(items=[
+            articles.ConfirmTagItem(article_id=article.id, tags=[" Access Control ", "access   control", "bad<script>"])
+        ]),
+        user,
+        FakeDB(),
+    ))
 
-    assert result == {
-        "confirmed": [{"article_id": str(article.id), "tags": ["access control"]}],
-        "confirmed_count": 1,
-    }
+    assert result == {"confirmed": [{"article_id": str(article.id), "tags": ["access control"]}], "confirmed_count": 1}
     assert sync_calls == [(article.id, ["access control"], False)]
     assert article.index_status == "pending"
     assert audit_records[0][0][1:] == ("tags_confirm", "article", str(article.id))
@@ -198,30 +159,16 @@ def test_tag_endpoints_reject_authenticated_user_without_edit_permission(monkeyp
             return article if article_id == article.id else None
 
     monkeypatch.setattr(articles, "ArticleRepository", FakeArticleRepository)
-    monkeypatch.setattr(
-        articles, "resolve_provider", lambda: SimpleNamespace(model="test-model")
-    )
+    monkeypatch.setattr(articles, "resolve_provider", lambda: SimpleNamespace(model="test-model"))
 
     with pytest.raises(HTTPException) as auto_exc:
-        asyncio.run(
-            articles.auto_tag_articles(
-                articles.AutoTagRequest(article_ids=[article.id]),
-                unauthorized,
-                object(),
-            )
-        )
+        asyncio.run(articles.auto_tag_articles(articles.AutoTagRequest(article_ids=[article.id]), unauthorized, object()))
     assert auto_exc.value.status_code == 403
 
     with pytest.raises(HTTPException) as confirm_exc:
-        asyncio.run(
-            articles.confirm_article_tags(
-                articles.ConfirmTagsRequest(
-                    items=[
-                        articles.ConfirmTagItem(article_id=article.id, tags=["secret"])
-                    ]
-                ),
-                unauthorized,
-                object(),
-            )
-        )
+        asyncio.run(articles.confirm_article_tags(
+            articles.ConfirmTagsRequest(items=[articles.ConfirmTagItem(article_id=article.id, tags=["secret"])]),
+            unauthorized,
+            object(),
+        ))
     assert confirm_exc.value.status_code == 403

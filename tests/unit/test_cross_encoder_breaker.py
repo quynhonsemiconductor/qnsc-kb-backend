@@ -1,5 +1,4 @@
 """The reranker's circuit breaker and its startup budget check."""
-
 from __future__ import annotations
 
 import asyncio
@@ -70,9 +69,7 @@ def test_a_successful_probe_closes_it_and_a_failed_one_reopens_it():
     clock.now += 101
     assert breaker.allow()
     breaker.record_timeout()
-    assert (
-        not breaker.allow()
-    ), "a timed-out probe re-opens it for another full cooldown"
+    assert not breaker.allow(), "a timed-out probe re-opens it for another full cooldown"
     clock.now += 101
     assert breaker.allow()
     breaker.record_success()
@@ -84,37 +81,18 @@ def _admin():
     from src.models.rbac import Permission, Role, RolePermission
     from src.models.user import User
 
-    user = User(
-        id=uuid.uuid4(),
-        email="a@acme.test",
-        name="A",
-        company_domain="acme.test",
-        role="Admin",
-        active=True,
-    )
+    user = User(id=uuid.uuid4(), email="a@acme.test", name="A", company_domain="acme.test", role="Admin", active=True)
     role = Role(name="Admin", company_domain="acme.test", active=True)
-    role.permissions.append(
-        RolePermission(
-            permission=Permission(key="article.read", name="Read"), scope="company"
-        )
-    )
+    role.permissions.append(RolePermission(permission=Permission(key="article.read", name="Read"), scope="company"))
     user.roles.append(role)
     return user
 
 
 def _chunk(article, score, label):
     return SimpleNamespace(
-        id=uuid.uuid4(),
-        parent_chunk_id=uuid.uuid4(),
-        article=article,
-        chunk_text=label,
-        chunk_type="text",
-        chunking_version=None,
-        page_number=None,
-        fake_score=score,
-        parent_chunk=SimpleNamespace(
-            text=label, section_ref="S", heading="H", page_number=None, child_chunks=[]
-        ),
+        id=uuid.uuid4(), parent_chunk_id=uuid.uuid4(), article=article, chunk_text=label, chunk_type="text",
+        chunking_version=None, page_number=None, fake_score=score,
+        parent_chunk=SimpleNamespace(text=label, section_ref="S", heading="H", page_number=None, child_chunks=[]),
     )
 
 
@@ -128,9 +106,7 @@ def _search(chunks):
     service = SearchService(chunk_repo=Repo(), gov_repo=None, feature_flags=None)
 
     async def go():
-        return await service.search(
-            _admin(), "what is the leave policy? and who approves it?", limit=10
-        )
+        return await service.search(_admin(), "what is the leave policy? and who approves it?", limit=10)
 
     return asyncio.run(go())
 
@@ -141,14 +117,8 @@ def enabled(monkeypatch):
         return [0.1, 0.2, 0.3]
 
     monkeypatch.setattr(module, "embed_query", fake_embed)
-    monkeypatch.setattr(
-        module,
-        "rerank_chunks_with_scores",
-        lambda q, chunks, limit=5: [
-            (c, c.fake_score)
-            for c in sorted(chunks, key=lambda c: -c.fake_score)[:limit]
-        ],
-    )
+    monkeypatch.setattr(module, "rerank_chunks_with_scores",
+                        lambda q, chunks, limit=5: [(c, c.fake_score) for c in sorted(chunks, key=lambda c: -c.fake_score)[:limit]])
     monkeypatch.setattr(settings, "CROSS_ENCODER_RERANKER_ENABLED", True)
     monkeypatch.setattr(settings, "RAG_MIN_RELEVANCE_SCORE", 0.0)
     monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 0.05)
@@ -156,22 +126,9 @@ def enabled(monkeypatch):
 
 def _article():
     return SimpleNamespace(
-        id=uuid.uuid4(),
-        title="T",
-        dept="Eng",
-        domain=None,
-        type="document",
-        sensitivity="internal",
-        status="published",
-        lifecycle_status="active",
-        visibility="company",
-        company_domain="acme.test",
-        owner_id=uuid.uuid4(),
-        sources=[],
-        user_permissions=[],
-        departments=[],
-        owner=None,
-        last_reviewed=None,
+        id=uuid.uuid4(), title="T", dept="Eng", domain=None, type="document", sensitivity="internal",
+        status="published", lifecycle_status="active", visibility="company", company_domain="acme.test",
+        owner_id=uuid.uuid4(), sources=[], user_permissions=[], departments=[], owner=None, last_reviewed=None,
     )
 
 
@@ -193,9 +150,7 @@ def test_after_n_timeouts_searches_stop_calling_the_reranker(enabled, monkeypatc
             release.clear()
         assert len(calls) == 3
         _search(chunks)
-        assert (
-            len(calls) == 3
-        ), "the 4th search must not even try the reranker while the circuit is open"
+        assert len(calls) == 3, "the 4th search must not even try the reranker while the circuit is open"
     finally:
         release.set()
     assert cross_encoder.breaker.is_open
@@ -227,9 +182,7 @@ def test_budget_check_warns_when_the_pool_cannot_fit_the_timeout(monkeypatch):
 
     monkeypatch.setattr(settings, "CROSS_ENCODER_CANDIDATE_POOL", 30)
     monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 3.0)
-    monkeypatch.setattr(
-        cross_encoder._model, "get", lambda: _model(0.2)
-    )  # 0.1 s/pair x 30 = 3.0 s+
+    monkeypatch.setattr(cross_encoder._model, "get", lambda: _model(0.2))  # 0.1 s/pair x 30 = 3.0 s+
 
     with capture_logs() as logs:
         per_pair = cross_encoder.check_budget()
@@ -271,14 +224,10 @@ def test_a_probe_that_ends_in_a_non_timeout_error_reopens_and_the_next_cooldown_
     assert probe is not None and probe.probe
     breaker.finish(probe)  # ended with neither record_success nor record_timeout
 
-    assert (
-        breaker.begin() is None
-    ), "re-opened for another full cooldown, not let straight through"
+    assert breaker.begin() is None, "re-opened for another full cooldown, not let straight through"
     clock.now += 101
     again = breaker.begin()
-    assert (
-        again is not None and again.probe
-    ), "and the next cooldown allows a probe again"
+    assert again is not None and again.probe, "and the next cooldown allows a probe again"
 
 
 def test_finish_is_a_no_op_after_the_probe_recorded_a_result():
@@ -308,20 +257,14 @@ def test_a_lost_probe_expires_on_its_own():
     clock = Clock()
     breaker = CircuitBreaker(clock)
     _open(breaker, clock)
-    assert (
-        breaker.begin() is not None
-    )  # the probe, never finished (a bug elsewhere, a killed task)
+    assert breaker.begin() is not None  # the probe, never finished (a bug elsewhere, a killed task)
     clock.now += 50
     assert breaker.begin() is None
     clock.now += 60
-    assert (
-        breaker.begin() is not None
-    ), "after a full cooldown a stale probe is considered lost"
+    assert breaker.begin() is not None, "after a full cooldown a stale probe is considered lost"
 
 
-def test_through_search_a_probe_that_raises_a_non_timeout_error_does_not_wedge_it(
-    enabled, monkeypatch
-):
+def test_through_search_a_probe_that_raises_a_non_timeout_error_does_not_wedge_it(enabled, monkeypatch):
     now = {"t": 1000.0}
     monkeypatch.setattr(cross_encoder.breaker, "_clock", lambda: now["t"])
     for _ in range(3):
@@ -331,34 +274,22 @@ def test_through_search_a_probe_that_raises_a_non_timeout_error_does_not_wedge_i
     from src.rag.cross_encoder import CrossEncoderUnavailable
 
     def refuses(query, passages):
-        raise CrossEncoderUnavailable(
-            "cross-encoder is still scoring an earlier search"
-        )
+        raise CrossEncoderUnavailable("cross-encoder is still scoring an earlier search")
 
     monkeypatch.setattr(module, "cross_encoder_score", refuses)
     chunks = [_chunk(_article(), 0.9, "a"), _chunk(_article(), 0.5, "b")]
     try:
-        _search(
-            chunks
-        )  # this search is the probe, and it ends with a non-timeout error
-        assert (
-            not cross_encoder.breaker._probing
-        ), "the probe was accounted for (finish), not left to the expiry guard"
+        _search(chunks)  # this search is the probe, and it ends with a non-timeout error
+        assert not cross_encoder.breaker._probing, "the probe was accounted for (finish), not left to the expiry guard"
         assert cross_encoder.breaker.begin() is None, "re-opened, not half-open forever"
         now["t"] += 101
         calls = []
-        monkeypatch.setattr(
-            module,
-            "cross_encoder_score",
-            lambda q, p: calls.append(1) or [0.0] * len(p),
-        )
+        monkeypatch.setattr(module, "cross_encoder_score", lambda q, p: calls.append(1) or [0.0] * len(p))
         _search(chunks)
         assert calls, "the next cooldown lets a probe through again"
         assert not cross_encoder.breaker.is_open, "and its success closes the circuit"
     finally:
-        monkeypatch.setattr(
-            cross_encoder.breaker, "_clock", __import__("time").monotonic
-        )
+        monkeypatch.setattr(cross_encoder.breaker, "_clock", __import__("time").monotonic)
         cross_encoder.breaker.record_success()
 
 
@@ -384,9 +315,7 @@ def test_a_cancelled_probe_does_not_wedge_it(enabled, monkeypatch):
         now["t"] += 101
         assert cross_encoder.breaker.begin() is not None
     finally:
-        monkeypatch.setattr(
-            cross_encoder.breaker, "_clock", __import__("time").monotonic
-        )
+        monkeypatch.setattr(cross_encoder.breaker, "_clock", __import__("time").monotonic)
         cross_encoder.breaker.record_success()
 
 
@@ -395,14 +324,10 @@ def test_check_budget_waits_for_the_scoring_lock(monkeypatch):
     finished = threading.Event()
 
     cross_encoder._scoring.acquire()
-    worker = threading.Thread(
-        target=lambda: (cross_encoder.check_budget(), finished.set())
-    )
+    worker = threading.Thread(target=lambda: (cross_encoder.check_budget(), finished.set()))
     worker.start()
     try:
-        assert not finished.wait(
-            0.3
-        ), "check_budget must not run while a search is scoring"
+        assert not finished.wait(0.3), "check_budget must not run while a search is scoring"
     finally:
         cross_encoder._scoring.release()
     assert finished.wait(5)

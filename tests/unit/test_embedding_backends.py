@@ -12,7 +12,6 @@ Two kinds of test here:
   stored chunks were produced by torch, and a query embedded into a different space
   degrades retrieval silently rather than failing.
 """
-
 from __future__ import annotations
 
 import math
@@ -176,9 +175,7 @@ def test_onnx_matches_torch_closely_enough_to_skip_re_embedding(monkeypatch, tex
     )
 
 
-def test_a_search_query_and_an_indexed_chunk_are_labelled_differently(
-    monkeypatch, width
-):
+def test_a_search_query_and_an_indexed_chunk_are_labelled_differently(monkeypatch, width):
     """Hosted backends embed a question and a passage differently, and mixing them
     degrades retrieval quietly. The seam carries the distinction the two public entry
     points already encode: singular is a query, plural is a batch being indexed."""

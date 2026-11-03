@@ -14,7 +14,6 @@ Two properties matter and are easy to get wrong together: the sections must actu
 at the same time, and they must come back in DOCUMENT order regardless of which finished
 first. Reassembling a document out of order would produce fluent, plausible, wrong text.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -30,9 +29,7 @@ def fake_llm(monkeypatch):
     """Record concurrency and let sections finish out of order."""
     state = {"active": 0, "peak": 0, "seen": []}
 
-    async def _fake(
-        title, section, model, department_descriptions=None, background=True
-    ):
+    async def _fake(title, section, model, department_descriptions=None, background=True):
         state["active"] += 1
         state["peak"] = max(state["peak"], state["active"])
         state["seen"].append(section[:12])
@@ -56,7 +53,9 @@ def test_sections_run_concurrently(fake_llm, monkeypatch):
     monkeypatch.setattr(settings, "RESTRUCTURE_SECTION_CHARS", 2000)
     monkeypatch.setattr(settings, "RESTRUCTURE_MAX_CONCURRENCY", 4)
 
-    asyncio.run(cr._restructure_sections("doc", ["a" * 100] * 4, "m", None))
+    asyncio.run(
+        cr._restructure_sections("doc", ["a" * 100] * 4, "m", None)
+    )
 
     assert fake_llm["peak"] > 1, "sections were formatted one after another"
 

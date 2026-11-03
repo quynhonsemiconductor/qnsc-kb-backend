@@ -4,7 +4,6 @@ Deleting real content is the worse failure. A passage that never gets indexed ca
 found and raises no error, so most of these tests pin the cases where a line only LOOKS
 like furniture and has to survive.
 """
-
 from __future__ import annotations
 
 from src.domain.text_noise import (
@@ -20,7 +19,7 @@ def _paged(*bodies: str) -> list[tuple[int, str]]:
 
 
 def test_a_running_header_is_detected_across_pages_despite_its_page_number():
-    """ "Trang 1/3" and "Trang 2/3" are the same piece of furniture."""
+    """"Trang 1/3" and "Trang 2/3" are the same piece of furniture."""
     pages = _paged(
         "Cong ty ABC - Quy dinh noi bo | Trang 1/3\nDieu 1. Pham vi ap dung",
         "Cong ty ABC - Quy dinh noi bo | Trang 2/3\nDieu 2. Thoi gian lam viec",
@@ -84,16 +83,7 @@ def test_blank_pages_do_not_count_toward_the_page_total():
 
 
 def test_page_labels_are_navigation():
-    for line in (
-        "7",
-        "- 7 -",
-        "[7]",
-        "7/45",
-        "Trang 7",
-        "Trang 7/45",
-        "Page 7 of 45",
-        "p. 7",
-    ):
+    for line in ("7", "- 7 -", "[7]", "7/45", "Trang 7", "Trang 7/45", "Page 7 of 45", "p. 7"):
         assert is_navigation_line(line), line
 
 

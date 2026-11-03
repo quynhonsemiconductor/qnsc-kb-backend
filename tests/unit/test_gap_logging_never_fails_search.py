@@ -19,7 +19,6 @@ The rollback matters as much as the swallow: `log_gap` commits, so a failed writ
 the session in a failed transaction. Catching the error without resetting the session
 just moves the 500 to the next statement in the same request.
 """
-
 from __future__ import annotations
 
 import asyncio

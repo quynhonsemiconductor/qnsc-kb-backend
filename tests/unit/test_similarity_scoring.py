@@ -11,7 +11,6 @@ It was also O(n*m) over whole documents (8.25 s for one 20,000-character pair, ~
 doubling, `MAX_SOURCE_TEXT_CHARS` admitting 2,000,000) and ran once per article inline in
 an async function, blocking the worker's event loop for the duration.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -31,22 +30,8 @@ from src.domain.similarity import (
 )
 
 WORDS = [
-    "verilog",
-    "module",
-    "always",
-    "begin",
-    "end",
-    "wire",
-    "reg",
-    "clock",
-    "reset",
-    "assign",
-    "testbench",
-    "simulation",
-    "synthesis",
-    "fpga",
-    "latch",
-    "sequential",
+    "verilog", "module", "always", "begin", "end", "wire", "reg", "clock", "reset",
+    "assign", "testbench", "simulation", "synthesis", "fpga", "latch", "sequential",
 ]
 
 
@@ -99,10 +84,7 @@ def test_unrelated_documents_stay_below_the_threshold():
     """The fix must not buy recall with false positives."""
     left = normalize(_document(5_000, seed=1))
     right = normalize(" ".join(f"unrelated{n}" for n in range(900)))
-    assert (
-        max(sequence_similarity(left, right), token_similarity(left, right))
-        < MATCH_THRESHOLD
-    )
+    assert max(sequence_similarity(left, right), token_similarity(left, right)) < MATCH_THRESHOLD
 
 
 def test_empty_input_scores_zero_rather_than_raising():
@@ -125,9 +107,7 @@ def test_a_near_duplicate_now_reaches_the_confirmation_band():
 
 def test_matches_are_ranked_and_capped():
     original = _document(2_000)
-    bodies = [
-        _edited(original, fraction) for fraction in (0.02, 0.05, 0.10, 0.20, 0.30)
-    ]
+    bodies = [_edited(original, fraction) for fraction in (0.02, 0.05, 0.10, 0.20, 0.30)]
     bodies += [_document(2_000, seed=99) for _ in range(3)]
 
     matches = _rank(original, _candidates(bodies))
@@ -191,9 +171,7 @@ def test_the_comparison_reads_only_a_bounded_prefix():
     head = normalize(_document(settings.SIMILARITY_COMPARE_CHARS * 2))[
         : settings.SIMILARITY_COMPARE_CHARS
     ]
-    assert sequence_similarity(head + "a" * 5_000, head + "z" * 5_000) == pytest.approx(
-        1.0
-    )
+    assert sequence_similarity(head + "a" * 5_000, head + "z" * 5_000) == pytest.approx(1.0)
 
 
 def test_scoring_does_not_block_the_event_loop():

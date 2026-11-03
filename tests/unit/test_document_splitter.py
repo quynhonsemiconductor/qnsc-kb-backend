@@ -57,9 +57,7 @@ def test_splitter_only_splits_exceptionally_long_review_documents(monkeypatch):
     monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", True)
     text = "# Handbook\n\n" + ("Approved procedure paragraph.\n\n" * 2_000)
 
-    candidates = split_document_candidates(
-        "Handbook", text, prefer_markdown_sections=True
-    )
+    candidates = split_document_candidates("Handbook", text, prefer_markdown_sections=True)
 
     assert len(candidates) == 2
     assert all(len(item["body_md"]) <= 48_000 for item in candidates)
@@ -76,14 +74,9 @@ def test_a_very_long_document_stays_one_candidate_by_default(monkeypatch):
     monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
     text = "# Handbook\n\n" + ("Approved procedure paragraph.\n\n" * 2_000)
 
-    candidates = split_document_candidates(
-        "Handbook", text, prefer_markdown_sections=True
-    )
+    candidates = split_document_candidates("Handbook", text, prefer_markdown_sections=True)
 
     assert len(candidates) == 1
     assert candidates[0]["position"] == 1
     assert candidates[0]["body_md"] == text.strip()
-    assert (candidates[0]["source_start"], candidates[0]["source_end"]) == (
-        0,
-        len(text.strip()),
-    )
+    assert (candidates[0]["source_start"], candidates[0]["source_end"]) == (0, len(text.strip()))

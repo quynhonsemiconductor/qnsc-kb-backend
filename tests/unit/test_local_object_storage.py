@@ -16,12 +16,8 @@ from src.core.config import (
 from src.domain import source_storage
 
 
-@pytest.mark.parametrize(
-    "value", ["http://localhost:4570", "http://127.0.0.1:4570", "http://garage:3900"]
-)
-def test_local_object_endpoints_are_plain_http_on_this_machine_or_the_compose_network(
-    value,
-):
+@pytest.mark.parametrize("value", ["http://localhost:4570", "http://127.0.0.1:4570", "http://garage:3900"])
+def test_local_object_endpoints_are_plain_http_on_this_machine_or_the_compose_network(value):
     assert is_local_object_endpoint(value)
 
 
@@ -67,13 +63,9 @@ def test_the_api_and_worker_client_talks_to_garage_in_development(monkeypatch):
     assert client.meta.region_name == "us-east-1"
 
 
-def test_a_presigned_url_is_built_for_the_browser_origin_not_the_compose_name(
-    monkeypatch,
-):
+def test_a_presigned_url_is_built_for_the_browser_origin_not_the_compose_name(monkeypatch):
     monkeypatch.setattr(settings, "ENVIRONMENT", "development")
-    _configure_local_stack(
-        monkeypatch, internal="http://garage:3900", public="http://localhost:4570"
-    )
+    _configure_local_stack(monkeypatch, internal="http://garage:3900", public="http://localhost:4570")
     url = source_storage.create_presigned_source_url(
         "s3://qnsc-kb-sources-local/qnsc-sources/acme/doc.pdf", operation="put_object"
     )
@@ -83,9 +75,7 @@ def test_a_presigned_url_is_built_for_the_browser_origin_not_the_compose_name(
 
 def test_a_presigned_url_is_signed_with_sigv4_because_garage_refuses_sigv2(monkeypatch):
     monkeypatch.setattr(settings, "ENVIRONMENT", "development")
-    _configure_local_stack(
-        monkeypatch, internal="http://garage:3900", public="http://localhost:4570"
-    )
+    _configure_local_stack(monkeypatch, internal="http://garage:3900", public="http://localhost:4570")
     url = source_storage.create_presigned_source_url(
         "s3://qnsc-kb-sources-local/qnsc-sources/acme/doc.pdf", operation="put_object"
     )
@@ -101,51 +91,34 @@ def test_a_local_endpoint_is_refused_outside_development(monkeypatch):
 
 
 def test_production_refuses_the_browser_endpoint_and_local_embeddings(monkeypatch):
-    monkeypatch.setattr(
-        Settings, "is_development_environment", property(lambda self: False)
-    )
+    monkeypatch.setattr(Settings, "is_development_environment", property(lambda self: False))
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "")
-    monkeypatch.setattr(
-        settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large-instruct"
-    )
+    monkeypatch.setattr(settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large-instruct")
     monkeypatch.setattr(settings, "S3_PUBLIC_ENDPOINT_URL", "http://localhost:4570")
-    with pytest.raises(
-        RuntimeError, match="S3_PUBLIC_ENDPOINT_URL is for local development only"
-    ):
+    with pytest.raises(RuntimeError, match="S3_PUBLIC_ENDPOINT_URL is for local development only"):
         settings.validate_production()
 
 
 def test_production_refuses_mock_embeddings(monkeypatch):
-    monkeypatch.setattr(
-        Settings, "is_development_environment", property(lambda self: False)
-    )
+    monkeypatch.setattr(Settings, "is_development_environment", property(lambda self: False))
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "")
     monkeypatch.setattr(settings, "S3_PUBLIC_ENDPOINT_URL", None)
     monkeypatch.setattr(settings, "EMBEDDING_MODEL", "mock")
-    with pytest.raises(
-        RuntimeError, match="EMBEDDING_MODEL=mock is for local development only"
-    ):
+    with pytest.raises(RuntimeError, match="EMBEDDING_MODEL=mock is for local development only"):
         settings.validate_production()
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [
-        ("R2_ACCESS_KEY_ID", LOCAL_GARAGE_ACCESS_KEY_ID),
-        ("R2_SECRET_ACCESS_KEY", LOCAL_GARAGE_SECRET_ACCESS_KEY),
-    ],
+    [("R2_ACCESS_KEY_ID", LOCAL_GARAGE_ACCESS_KEY_ID), ("R2_SECRET_ACCESS_KEY", LOCAL_GARAGE_SECRET_ACCESS_KEY)],
 )
 def test_production_refuses_the_published_local_garage_key(monkeypatch, field, value):
-    monkeypatch.setattr(
-        Settings, "is_development_environment", property(lambda self: False)
-    )
+    monkeypatch.setattr(Settings, "is_development_environment", property(lambda self: False))
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "")
-    monkeypatch.setattr(
-        settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large-instruct"
-    )
+    monkeypatch.setattr(settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large-instruct")
     monkeypatch.setattr(settings, "S3_PUBLIC_ENDPOINT_URL", None)
     monkeypatch.setattr(settings, field, value)
     with pytest.raises(RuntimeError, match="published local Garage key"):

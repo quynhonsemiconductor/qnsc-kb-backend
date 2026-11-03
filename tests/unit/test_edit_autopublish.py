@@ -22,7 +22,6 @@ about. The fix is to capture plain values BEFORE the approval attempt.
 Measured against real Postgres: happy path 12/12 checks (article body live, version 2,
 `self_approved=True` in the audit), fallback 6/6 with `reason=batch_review_required`.
 """
-
 from __future__ import annotations
 
 import ast
@@ -64,9 +63,7 @@ def test_the_rule_is_the_one_the_codebase_already_trusts_for_self_approval():
     """A wider rule would let a department publisher approve their own work unreviewed."""
     assert hasattr(GovernanceService, "may_publish_own_change")
 
-    source = textwrap.dedent(
-        inspect.getsource(GovernanceService.may_publish_own_change)
-    )
+    source = textwrap.dedent(inspect.getsource(GovernanceService.may_publish_own_change))
     # It must DELEGATE, not restate the role set: two copies of "who may self-approve"
     # would drift, and the drift would silently widen who bypasses review.
     assert "_may_self_approve" in source
@@ -85,9 +82,7 @@ def test_the_edit_path_does_not_invent_its_own_permission_check():
     assert isinstance(call.func, ast.Attribute)
     assert call.func.attr == "may_publish_own_change"
     # Guarded on the actor, not on the article.
-    assert [arg.id for arg in call.args if isinstance(arg, ast.Name)] == [
-        "current_user"
-    ]
+    assert [arg.id for arg in call.args if isinstance(arg, ast.Name)] == ["current_user"]
 
 
 # ------------------------------------------------------- the expiry trap (the real bug)
@@ -103,9 +98,7 @@ def test_the_fallback_never_touches_an_object_the_rollback_expired():
     """
     branch = _approval_branch(_update_article_tree())
     handlers = _except_handlers(branch)
-    assert (
-        handlers
-    ), "the approval attempt must handle the refusal it can legitimately get"
+    assert handlers, "the approval attempt must handle the refusal it can legitimately get"
 
     expired = {"created", "current", "current_user"}
     offenders: list[str] = []
@@ -125,13 +118,7 @@ def test_the_primitives_are_captured_before_the_approval_attempt():
     func = _update_article_tree()
     branch = _approval_branch(func)
 
-    captures = {
-        "draft_id",
-        "draft_title",
-        "draft_status",
-        "edited_article_id",
-        "actor_id",
-    }
+    captures = {"draft_id", "draft_title", "draft_status", "edited_article_id", "actor_id"}
     seen: dict[str, int] = {}
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
@@ -188,9 +175,7 @@ def test_a_refusal_falls_back_to_the_queue_instead_of_failing_the_edit():
     """
     branch = _approval_branch(_update_article_tree())
     handlers = _except_handlers(branch)
-    assert (
-        handlers
-    ), "the approval attempt must handle the refusal it can legitimately get"
+    assert handlers, "the approval attempt must handle the refusal it can legitimately get"
 
     def first_exit(body: list[ast.stmt]) -> ast.stmt | None:
         """The statement that leaves the handler: whichever comes first wins."""
@@ -213,9 +198,9 @@ def test_a_refusal_falls_back_to_the_queue_instead_of_failing_the_edit():
             for keyword in exit_node.value.keywords
             if keyword.arg == "workflow" and isinstance(keyword.value, ast.Constant)
         }
-        assert reported == {
-            "pending_approval"
-        }, f"the fallback must report pending_approval, got {reported or 'nothing'}"
+        assert reported == {"pending_approval"}, (
+            f"the fallback must report pending_approval, got {reported or 'nothing'}"
+        )
 
 
 def test_the_approval_reuses_the_reviewer_path_rather_than_publishing_directly():
@@ -227,9 +212,9 @@ def test_the_approval_reuses_the_reviewer_path_rather_than_publishing_directly()
         for node in ast.walk(branch)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert (
-        "approve_draft" in called
-    ), "the edit must go through the same approve_draft a reviewer calls"
+    assert "approve_draft" in called, (
+        "the edit must go through the same approve_draft a reviewer calls"
+    )
     # No second publish implementation may appear on this path.
     for forbidden in ("create_article", "_publish_article", "add"):
         assert forbidden not in called, (

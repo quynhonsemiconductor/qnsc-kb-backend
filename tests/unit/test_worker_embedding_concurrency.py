@@ -29,7 +29,6 @@ the same reason as `test_embedding_config_matches_image.py`: the invariant lives
 relationship between the image's CMD and the memory arithmetic in the infra files, so
 inspecting a container built from that CMD would only restate one side of it.
 """
-
 from __future__ import annotations
 
 import re
@@ -62,9 +61,7 @@ def _worker_cmd() -> list[str]:
 def test_the_worker_pins_concurrency_to_one() -> None:
     tokens = _worker_cmd()
 
-    assert (
-        "worker" in tokens
-    ), f"the worker CMD no longer runs a Celery worker: {tokens}"
+    assert "worker" in tokens, f"the worker CMD no longer runs a Celery worker: {tokens}"
 
     concurrency = [token for token in tokens if token.startswith("--concurrency")]
     assert concurrency, (
@@ -120,16 +117,18 @@ def test_the_worker_still_consumes_every_expected_queue() -> None:
         "connectors",
         "permissions",
     }, f"the worker's queue list changed: {queues!r}"
-    assert (
-        queues.split(",")[0] == "document-preparation"
-    ), "document preparation should be considered before the ingestion backlog"
+    assert queues.split(",")[0] == "document-preparation", (
+        "document preparation should be considered before the ingestion backlog"
+    )
 
 
 def test_document_preparation_is_routed_out_of_the_ingestion_backlog() -> None:
     from src.workers.celery_app import celery_app
 
     routes = celery_app.conf.task_routes
-    assert routes["restructure_pending_draft_task"] == {"queue": "document-preparation"}
+    assert routes["restructure_pending_draft_task"] == {
+        "queue": "document-preparation"
+    }
 
 
 def test_every_shipped_compose_worker_consumes_document_preparation() -> None:
@@ -137,9 +136,9 @@ def test_every_shipped_compose_worker_consumes_document_preparation() -> None:
     # unavailable in CI and cannot be part of a shipped configuration invariant.
     for filename in ("docker-compose.yml",):
         text = (REPO / filename).read_text(encoding="utf-8")
-        assert (
-            "document-preparation,celery,ingestion,connectors,permissions" in text
-        ), f"{filename} routes preparation work to a queue its worker does not consume"
+        assert "document-preparation,celery,ingestion,connectors,permissions" in text, (
+            f"{filename} routes preparation work to a queue its worker does not consume"
+        )
 
 
 def test_the_cmd_is_still_a_valid_token_list() -> None:
@@ -148,6 +147,6 @@ def test_the_cmd_is_still_a_valid_token_list() -> None:
 
     for token in tokens:
         assert token == token.strip(), f"token carries stray whitespace: {token!r}"
-        assert shlex.split(token) == [token] or token.startswith(
-            "-"
-        ), f"token would be re-split by a shell, which exec form does not run: {token!r}"
+        assert shlex.split(token) == [token] or token.startswith("-"), (
+            f"token would be re-split by a shell, which exec form does not run: {token!r}"
+        )

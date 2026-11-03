@@ -6,7 +6,6 @@ count, so `has_checkable_claim` narrows the set to sentences with something conc
 verify, and `split_cited_sentences` is what tells a caller which passage marker to check
 each one against.
 """
-
 from __future__ import annotations
 
 from src.rag.citations import has_checkable_claim, split_cited_sentences

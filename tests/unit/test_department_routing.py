@@ -137,9 +137,7 @@ def test_a_heading_with_nothing_under_it_is_not_a_candidate():
 Engineering release standards and technical operations.
 """
 
-    candidates = route_document_candidates(
-        "Company handbook", markdown, _two_departments()
-    )
+    candidates = route_document_candidates("Company handbook", markdown, _two_departments())
 
     assert len(candidates) == 1
     # Absorbed rather than dropped: the heading is still in the reviewer's text.
@@ -154,9 +152,7 @@ Engineering release standards and technical operations.
 ## Appendix
 """
 
-    candidates = route_document_candidates(
-        "Company handbook", markdown, _two_departments()
-    )
+    candidates = route_document_candidates("Company handbook", markdown, _two_departments())
 
     assert len(candidates) == 1
     assert candidates[0]["body_md"].rstrip().endswith("## Appendix")
@@ -179,9 +175,7 @@ Engineering release standards and technical operations.
 Employee benefits and workplace policies.
 """
 
-    candidates = route_document_candidates(
-        "Company handbook", markdown, _two_departments()
-    )
+    candidates = route_document_candidates("Company handbook", markdown, _two_departments())
 
     # Front matter merges forward, and the genuine owner change still splits.
     assert len(candidates) == 2
@@ -203,9 +197,7 @@ Engineering release operations.
 Employee benefits policies.
 """
 
-    candidates = route_document_candidates(
-        "Company handbook", markdown, _two_departments()
-    )
+    candidates = route_document_candidates("Company handbook", markdown, _two_departments())
 
     assert len(candidates) == 2
     assert [item["department_ids"] for item in candidates] == [
@@ -216,8 +208,7 @@ Employee benefits policies.
 
 def test_by_default_a_document_is_never_split_across_departments(monkeypatch):
     """Two sections owned by different departments used to become two candidates, which sent
-    the draft to "Review sections". With splitting off it is one candidate, routed as a whole.
-    """
+    the draft to "Review sections". With splitting off it is one candidate, routed as a whole."""
     monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
     departments = _two_departments()
     markdown = """# Company handbook

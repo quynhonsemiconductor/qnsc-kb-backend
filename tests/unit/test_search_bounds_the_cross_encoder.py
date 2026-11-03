@@ -8,7 +8,6 @@ wait for all of it. It now gives up and returns the lexical order it already has
 Driven through the real `SearchService.search`; only the embedder, the lexical scorer and the
 model call are replaced (same approach as test_multi_query_retrieval.py).
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -32,59 +31,26 @@ QUERY = "what is the leave policy? and who approves it?"
 
 
 def _admin() -> User:
-    user = User(
-        id=uuid.uuid4(),
-        email="a@acme.test",
-        name="A",
-        company_domain=COMPANY,
-        role="Admin",
-        active=True,
-    )
+    user = User(id=uuid.uuid4(), email="a@acme.test", name="A", company_domain=COMPANY, role="Admin", active=True)
     role = Role(name="Admin", company_domain=COMPANY, active=True)
-    role.permissions.append(
-        RolePermission(
-            permission=Permission(key="article.read", name="Read"), scope="company"
-        )
-    )
+    role.permissions.append(RolePermission(permission=Permission(key="article.read", name="Read"), scope="company"))
     user.roles.append(role)
     return user
 
 
 def _chunk(article, fake_score: float, label: str) -> SimpleNamespace:
     return SimpleNamespace(
-        id=uuid.uuid4(),
-        parent_chunk_id=uuid.uuid4(),
-        article=article,
-        chunk_text=label,
-        chunk_type="text",
-        chunking_version=None,
-        page_number=None,
-        fake_score=fake_score,
-        label=label,
-        parent_chunk=SimpleNamespace(
-            text=label, section_ref="S1", heading="H", page_number=None, child_chunks=[]
-        ),
+        id=uuid.uuid4(), parent_chunk_id=uuid.uuid4(), article=article, chunk_text=label, chunk_type="text",
+        chunking_version=None, page_number=None, fake_score=fake_score, label=label,
+        parent_chunk=SimpleNamespace(text=label, section_ref="S1", heading="H", page_number=None, child_chunks=[]),
     )
 
 
 def _article():
     return SimpleNamespace(
-        id=uuid.uuid4(),
-        title="T",
-        dept="Eng",
-        domain=None,
-        type="document",
-        sensitivity="internal",
-        status="published",
-        lifecycle_status="active",
-        visibility="company",
-        company_domain=COMPANY,
-        owner_id=uuid.uuid4(),
-        sources=[],
-        user_permissions=[],
-        departments=[],
-        owner=None,
-        last_reviewed=None,
+        id=uuid.uuid4(), title="T", dept="Eng", domain=None, type="document", sensitivity="internal",
+        status="published", lifecycle_status="active", visibility="company", company_domain=COMPANY,
+        owner_id=uuid.uuid4(), sources=[], user_permissions=[], departments=[], owner=None, last_reviewed=None,
     )
 
 
@@ -125,13 +91,9 @@ def _run(chunks):
     return [item["chunk_id"] for item in out], elapsed
 
 
-def test_a_slow_cross_encoder_is_abandoned_and_the_lexical_order_is_kept(
-    cross_encoder_on, monkeypatch
-):
+def test_a_slow_cross_encoder_is_abandoned_and_the_lexical_order_is_kept(cross_encoder_on, monkeypatch):
     article = _article()
-    high, low = _chunk(article, 0.9, "lexically first"), _chunk(
-        article, 0.5, "lexically second"
-    )
+    high, low = _chunk(article, 0.9, "lexically first"), _chunk(article, 0.5, "lexically second")
     release = threading.Event()
 
     def slow_scores(query, passages):
@@ -140,36 +102,23 @@ def test_a_slow_cross_encoder_is_abandoned_and_the_lexical_order_is_kept(
 
     monkeypatch.setattr(module, "cross_encoder_score", slow_scores)
     monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 0.1)
-    release_later = threading.Timer(
-        0.5, release.set
-    )  # frees the thread so the loop can close
+    release_later = threading.Timer(0.5, release.set)  # frees the thread so the loop can close
     release_later.start()
     try:
         ids, elapsed = _run([high, low])
     finally:
         release.set()
 
-    assert ids == [
-        str(high.id),
-        str(low.id),
-    ], "the search must fall back to the lexical order"
-    assert (
-        elapsed < 2.0
-    ), f"the search waited {elapsed:.1f}s for a reranker it had a 0.1s budget for"
+    assert ids == [str(high.id), str(low.id)], "the search must fall back to the lexical order"
+    assert elapsed < 2.0, f"the search waited {elapsed:.1f}s for a reranker it had a 0.1s budget for"
 
 
-def test_a_cross_encoder_inside_the_budget_still_reorders(
-    cross_encoder_on, monkeypatch
-):
+def test_a_cross_encoder_inside_the_budget_still_reorders(cross_encoder_on, monkeypatch):
     """Negative control: the bound must not have switched the feature off."""
     article = _article()
-    high, low = _chunk(article, 0.9, "lexically first"), _chunk(
-        article, 0.5, "lexically second"
-    )
+    high, low = _chunk(article, 0.9, "lexically first"), _chunk(article, 0.5, "lexically second")
 
-    monkeypatch.setattr(
-        module, "cross_encoder_score", lambda query, passages: [0.0, 1.0]
-    )
+    monkeypatch.setattr(module, "cross_encoder_score", lambda query, passages: [0.0, 1.0])
     monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 5.0)
 
     ids, _ = _run([high, low])

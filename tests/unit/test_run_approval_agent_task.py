@@ -7,7 +7,6 @@ in the human queue until somebody remembered to run it again. This only tests th
 wiring: which domains get swept and that each is run for real, not dry-run. The agent's
 own decision logic is covered in test_approval_agent.py.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -52,9 +51,7 @@ def test_sweeps_every_domain_with_an_active_rule(monkeypatch):
         calls.append((company_domain, dry_run))
         return {"evaluated": 0}
 
-    monkeypatch.setattr(
-        tasks, "SessionLocal", lambda: _Session(["acme.test", "qnsc.vn"])
-    )
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: _Session(["acme.test", "qnsc.vn"]))
     monkeypatch.setattr(tasks, "set_database_context", _fake_context)
     monkeypatch.setattr(approval_agent, "run", fake_run)
 

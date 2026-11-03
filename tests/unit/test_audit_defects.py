@@ -20,7 +20,6 @@ All four were measured, not inferred:
    JavaScript read `null` — making the request-failure lookup unusable from the UI, which
    was the entire point of persisting it.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -216,9 +215,9 @@ def test_bookmarks_are_projected_rather_than_returned_raw():
 
     source = inspect.getsource(interactions.list_bookmarks)
 
-    assert (
-        "return [_article_card(" in source
-    ), "bookmarks must return the projected card, not the raw ORM rows"
+    assert "return [_article_card(" in source, (
+        "bookmarks must return the projected card, not the raw ORM rows"
+    )
 
 
 # ------------------------------------------------- 3. the request id must reach the UI

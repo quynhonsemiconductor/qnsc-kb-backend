@@ -10,7 +10,6 @@ PyJWT also differs on audience: it RAISES `InvalidAudienceError` when a token ca
 Entra id_token carries `aud`, so a missed argument here would have failed closed — but
 only at real sign-in, against a live tenant. Hence this test.
 """
-
 from __future__ import annotations
 
 import json
@@ -95,9 +94,7 @@ async def test_a_valid_id_token_verifies_and_maps_the_user(signing_key):
     claims = await entra_auth.verify_id_token(_id_token(signing_key), NONCE)
 
     assert claims["subject"] == "user-object-id"
-    assert (
-        claims["email"] == "someone@qnsc.vn"
-    ), "the address is normalised to lower case"
+    assert claims["email"] == "someone@qnsc.vn", "the address is normalised to lower case"
 
 
 @pytest.mark.asyncio
@@ -117,9 +114,7 @@ async def test_a_replayed_nonce_is_rejected(signing_key):
 
 @pytest.mark.asyncio
 async def test_an_expired_token_is_rejected(signing_key):
-    token = _id_token(
-        signing_key, exp=datetime.now(timezone.utc) - timedelta(minutes=1)
-    )
+    token = _id_token(signing_key, exp=datetime.now(timezone.utc) - timedelta(minutes=1))
 
     with pytest.raises(jwt.ExpiredSignatureError):
         await entra_auth.verify_id_token(token, NONCE)

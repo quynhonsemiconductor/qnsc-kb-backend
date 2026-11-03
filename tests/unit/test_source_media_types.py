@@ -4,23 +4,13 @@ The multipart Content-Type is chosen by whoever uploaded the file, so the respon
 is decided here instead. Anything that could be parsed as markup would execute in the
 application's origin the moment a reviewer opened the source.
 """
-
 from __future__ import annotations
 
-from src.domain.source_storage import (
-    safe_source_media_type,
-    source_should_display_inline,
-)
+from src.domain.source_storage import safe_source_media_type, source_should_display_inline
 
 
 def test_markup_never_gets_a_type_a_browser_will_execute():
-    for filename in (
-        "payload.html",
-        "payload.htm",
-        "payload.svg",
-        "payload.xml",
-        "a.js",
-    ):
+    for filename in ("payload.html", "payload.htm", "payload.svg", "payload.xml", "a.js"):
         assert safe_source_media_type(filename) == "application/octet-stream"
         assert not source_should_display_inline(filename)
 

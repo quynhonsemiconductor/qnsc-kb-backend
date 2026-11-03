@@ -15,7 +15,6 @@ The guard's real purpose is that nothing in the answer may be attributed to a so
 was not consulted. Stripping the dangling marker preserves that exactly, without punishing
 the reader for the model's arithmetic.
 """
-
 from __future__ import annotations
 
 from src.rag.citations import extract_citation_ids, strip_unknown_markers

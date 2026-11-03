@@ -6,7 +6,6 @@ atomically at the end, which turned a streaming provider into a spinner followed
 of text. IncrementalAnswerStream releases each token the moment it cannot be part of a
 sentinel line — so these tests are mostly about what must NEVER escape.
 """
-
 from __future__ import annotations
 
 import pytest
@@ -17,9 +16,7 @@ from src.rag.answer_sections import IncrementalAnswerStream, split_answer_sectio
 def _drain(raw: str, chunk_size: int) -> str:
     """Feed `raw` the way a provider does: arbitrary chunks that split sentinels."""
     stream = IncrementalAnswerStream()
-    pieces = [
-        raw[index : index + chunk_size] for index in range(0, len(raw), chunk_size)
-    ]
+    pieces = [raw[index : index + chunk_size] for index in range(0, len(raw), chunk_size)]
     return "".join(stream.feed(piece) for piece in pieces) + stream.finish()
 
 

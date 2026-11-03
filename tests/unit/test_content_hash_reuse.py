@@ -6,7 +6,6 @@ is already scoped to the current EMBEDDING_VERSION by its caller in indexing.py 
 match under a different encoder is a vector in an unrelated space), so this only has to
 do the lookup and preserve order.
 """
-
 from __future__ import annotations
 
 from src.domain.indexing import _partition_for_reuse

@@ -5,7 +5,6 @@ passage: the vectors are still unit-norm and still retrieve something, just
 worse. So these assertions are the only thing standing between a model swap and
 a quiet regression.
 """
-
 from __future__ import annotations
 
 import pytest
@@ -50,32 +49,18 @@ def test_every_text_in_a_batch_is_prefixed(as_model) -> None:
 
 def test_e5_small_keeps_the_384_wide_column() -> None:
     # Same width as MiniLM, which is why this swap needs no pgvector migration.
-    assert (
-        Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-small").EMBEDDING_DIMENSION
-        == 384
-    )
+    assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-small").EMBEDDING_DIMENSION == 384
 
 
 def test_e5_base_is_768_wide() -> None:
-    assert (
-        Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-base").EMBEDDING_DIMENSION
-        == 768
-    )
+    assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-base").EMBEDDING_DIMENSION == 768
 
 
 def test_e5_large_is_1024_wide() -> None:
     # Regression guard: this used to collapse into the same 768 branch as e5-base, which
     # is wrong -- multilingual-e5-large(-instruct) is XLM-R-large-based, 1024-dim.
-    assert (
-        Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-large").EMBEDDING_DIMENSION
-        == 1024
-    )
-    assert (
-        Settings(
-            EMBEDDING_MODEL="intfloat/multilingual-e5-large-instruct"
-        ).EMBEDDING_DIMENSION
-        == 1024
-    )
+    assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-large").EMBEDDING_DIMENSION == 1024
+    assert Settings(EMBEDDING_MODEL="intfloat/multilingual-e5-large-instruct").EMBEDDING_DIMENSION == 1024
 
 
 # --- instruct-tuned e5: a different prefix convention, not just a bigger base-e5 -------

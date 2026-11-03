@@ -23,9 +23,7 @@ def test_split_grounded_and_extended():
 
 
 def test_missing_grounded_defaults_entire_output_to_grounded():
-    grounded, extended = split_answer_sections(
-        f"Unmarked answer.\n{EXTENDED_SENTINEL}\nMore text."
-    )
+    grounded, extended = split_answer_sections(f"Unmarked answer.\n{EXTENDED_SENTINEL}\nMore text.")
     assert grounded == "Unmarked answer.\nMore text."
     assert extended == ""
 
@@ -44,12 +42,7 @@ def test_extended_citations_are_removed_and_not_extracted():
 
 
 def test_rendering_has_explicit_sections_only_when_enabled():
-    rendered = render_answer_sections(
-        "Grounded [C1].", "General context.", enabled=True
-    )
+    rendered = render_answer_sections("Grounded [C1].", "General context.", enabled=True)
     assert "Answer from the Knowledge Base" in rendered
     assert "Additional context" in rendered
-    assert (
-        render_answer_sections("Grounded [C1].", "General context.", enabled=False)
-        == "Grounded [C1]."
-    )
+    assert render_answer_sections("Grounded [C1].", "General context.", enabled=False) == "Grounded [C1]."

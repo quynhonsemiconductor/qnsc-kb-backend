@@ -10,6 +10,7 @@ from src.domain.evidence_analytics import (
     parse_decimal,
 )
 
+
 TABLE = {
     "columns": ["Quarter", "Revenue"],
     "rows": [["Q1", "1,200.50"], ["Q2", "1.500,50"], ["Q3", "not reported"]],
@@ -22,9 +23,7 @@ def test_parse_decimal_supports_bounded_en_and_vietnamese_formats():
     assert parse_decimal("12,5%") == Decimal("12.5")
 
 
-@pytest.mark.parametrize(
-    "value", ["=SUM(A1:A3)", "NaN", "Infinity", "__import__('os')", "1e9"]
-)
+@pytest.mark.parametrize("value", ["=SUM(A1:A3)", "NaN", "Infinity", "__import__('os')", "1e9"])
 def test_parse_decimal_rejects_formulas_code_and_non_finite_values(value):
     with pytest.raises(ValueError):
         parse_decimal(value)

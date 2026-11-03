@@ -15,7 +15,6 @@ The cases below are mostly about the model behaving badly, because that is the p
 must not reach a user. A routing suggestion is something a reviewer sees and edits; it
 must never be able to fail a document import.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -37,10 +36,7 @@ class _Department:
 
 
 #: Deliberately description-less: the state that made keyword routing useless.
-UNDESCRIBED = [
-    _Department("phys", "Physical Design"),
-    _Department("dv", "Verification"),
-]
+UNDESCRIBED = [_Department("phys", "Physical Design"), _Department("dv", "Verification")]
 
 MARKDOWN = (
     "## Static timing\nSetup and hold across all paths, then signoff.\n\n"
@@ -83,9 +79,7 @@ def _route(departments=UNDESCRIBED, markdown=MARKDOWN, title="Lecture-5-STA"):
 
 def test_the_llm_routes_what_keyword_overlap_cannot(llm):
     """The reported situation: no description anywhere, so no keyword can ever match."""
-    llm["reply"] = (
-        '{"assignments": [{"section": 1, "department": 1}, {"section": 2, "department": 2}]}'
-    )
+    llm["reply"] = '{"assignments": [{"section": 1, "department": 1}, {"section": 2, "department": 2}]}'
 
     routed = _route()
 
@@ -138,17 +132,13 @@ def test_an_unusable_reply_falls_back_instead_of_raising(llm, reply):
 def test_a_department_number_that_does_not_exist_is_dropped(llm):
     """Not clamped into range. A wrong department is worse than no suggestion: a
     reviewer reads a filled-in field as something the system worked out."""
-    llm["reply"] = (
-        '{"assignments": [{"section": 1, "department": 99}, {"section": 2, "department": -1}]}'
-    )
+    llm["reply"] = '{"assignments": [{"section": 1, "department": 99}, {"section": 2, "department": -1}]}'
     assert not any(item["department_ids"] for item in _route())
 
 
 def test_department_zero_means_no_owner(llm):
     """A real answer, not a failure -- it leaves the section to the fallback."""
-    llm["reply"] = (
-        '{"assignments": [{"section": 1, "department": 0}, {"section": 2, "department": 0}]}'
-    )
+    llm["reply"] = '{"assignments": [{"section": 1, "department": 0}, {"section": 2, "department": 0}]}'
     assert not any(item["department_ids"] for item in _route())
 
 
@@ -217,18 +207,14 @@ def test_hidden_reasoning_is_disabled_for_this_call(llm):
 
 def test_adjacent_sections_the_llm_gives_one_owner_are_merged(llm):
     """The merge rule is shared with the keyword path rather than reimplemented."""
-    llm["reply"] = (
-        '{"assignments": [{"section": 1, "department": 1}, {"section": 2, "department": 1}]}'
-    )
+    llm["reply"] = '{"assignments": [{"section": 1, "department": 1}, {"section": 2, "department": 1}]}'
     routed = _route()
     assert len(routed) == 1
     # Asserted explicitly: without it the collapse-to-one-document branch also returns a
     # single item, so this would pass against an implementation that ignored the LLM.
     assert routed[0]["department_ids"] == ["phys"]
     assert routed[0]["position"] == 1
-    assert (
-        "Static timing" in routed[0]["body_md"] and "RTL entry" in routed[0]["body_md"]
-    )
+    assert "Static timing" in routed[0]["body_md"] and "RTL entry" in routed[0]["body_md"]
 
 
 def test_the_prompt_carries_the_descriptions_the_model_needs(llm):
@@ -241,12 +227,9 @@ def test_the_prompt_carries_the_descriptions_the_model_needs(llm):
     assert "phys" not in prompt
 
 
-def test_with_splitting_off_the_whole_document_is_one_routed_candidate(
-    llm, monkeypatch
-):
+def test_with_splitting_off_the_whole_document_is_one_routed_candidate(llm, monkeypatch):
     """The default. The model is still asked once, about the document as a whole, so the
-    reviewer still gets a department suggestion; it just no longer produces several parts.
-    """
+    reviewer still gets a department suggestion; it just no longer produces several parts."""
     monkeypatch.setattr(settings, "DOCUMENT_AUTO_SPLIT_ENABLED", False)
     llm["reply"] = '{"assignments": [{"section": 1, "department": 1}]}'
 

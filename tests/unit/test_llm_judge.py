@@ -6,7 +6,6 @@ proven here is not "the happy path returns a number" -- it is that every way a m
 answer badly (silence, prose instead of a number, an out-of-range passage index) raises
 `JudgeUnavailable` instead of quietly returning a plausible-looking score.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -43,18 +42,11 @@ def _faithfulness(llm, answer="The deadline is Friday.", context="Deadline: Frid
     return asyncio.run(judge_faithfulness(answer, context))
 
 
-def _precision(
-    llm,
-    question="What is the deadline?",
-    passages=("Deadline: Friday.", "Unrelated text."),
-):
+def _precision(llm, question="What is the deadline?", passages=("Deadline: Friday.", "Unrelated text.")):
     return asyncio.run(judge_context_precision(question, list(passages)))
 
 
-@pytest.mark.parametrize(
-    "reply,expected",
-    [("100", 1.0), ("0", 0.0), ("62", 0.62), ("1", 1.0), ("0.42", 0.42)],
-)
+@pytest.mark.parametrize("reply,expected", [("100", 1.0), ("0", 0.0), ("62", 0.62), ("1", 1.0), ("0.42", 0.42)])
 def test_faithfulness_accepts_percentage_or_fraction(llm, reply, expected):
     llm["reply"] = reply
     assert _faithfulness(llm) == pytest.approx(expected)
@@ -69,9 +61,7 @@ def test_faithfulness_tolerates_surrounding_prose():
     original = llm_client_module.complete
     llm_client_module.complete = fake_complete
     try:
-        assert asyncio.run(judge_faithfulness("answer", "context")) == pytest.approx(
-            0.75
-        )
+        assert asyncio.run(judge_faithfulness("answer", "context")) == pytest.approx(0.75)
     finally:
         llm_client_module.complete = original
 
@@ -134,16 +124,10 @@ def test_precision_raises_on_provider_failure(llm):
         _precision(llm)
 
 
-@pytest.mark.parametrize(
-    "reply,expected",
-    [("yes", True), ("Yes.", True), ("no", False), ("No, it does not.", False)],
-)
+@pytest.mark.parametrize("reply,expected", [("yes", True), ("Yes.", True), ("no", False), ("No, it does not.", False)])
 def test_entailment_reads_yes_or_no(llm, reply, expected):
     llm["reply"] = reply
-    assert (
-        asyncio.run(judge_entailment("The deadline is Friday.", "Deadline: Friday."))
-        is expected
-    )
+    assert asyncio.run(judge_entailment("The deadline is Friday.", "Deadline: Friday.")) is expected
 
 
 @pytest.mark.parametrize("reply", ["", "maybe", "it depends on context"])
@@ -170,27 +154,20 @@ def test_flags_a_checkable_sentence_the_judge_rejects(llm):
             {"C1": "This document does not mention any deadline."},
         )
     )
-    assert result == [
-        {"sentence": "The deadline is 5 business days [C1].", "source_id": "C1"}
-    ]
+    assert result == [{"sentence": "The deadline is 5 business days [C1].", "source_id": "C1"}]
 
 
 def test_does_not_flag_a_sentence_the_judge_confirms(llm):
     llm["reply"] = "yes"
     result = asyncio.run(
-        find_unverified_claims(
-            "The deadline is 5 business days [C1].",
-            {"C1": "Deadline: 5 business days."},
-        )
+        find_unverified_claims("The deadline is 5 business days [C1].", {"C1": "Deadline: 5 business days."})
     )
     assert result == []
 
 
 def test_skips_a_sentence_with_no_checkable_claim(llm):
     result = asyncio.run(
-        find_unverified_claims(
-            "This policy covers the finance department [C1].", {"C1": "Some passage."}
-        )
+        find_unverified_claims("This policy covers the finance department [C1].", {"C1": "Some passage."})
     )
     assert result == []
     assert "messages" not in llm, "no judge call should have been made"
@@ -198,18 +175,14 @@ def test_skips_a_sentence_with_no_checkable_claim(llm):
 
 def test_skips_a_sentence_citing_more_than_one_source(llm):
     result = asyncio.run(
-        find_unverified_claims(
-            "The deadline is 5 business days [C1][C2].", {"C1": "a", "C2": "b"}
-        )
+        find_unverified_claims("The deadline is 5 business days [C1][C2].", {"C1": "a", "C2": "b"})
     )
     assert result == []
     assert "messages" not in llm
 
 
 def test_skips_a_sentence_whose_cited_source_was_not_retrieved(llm):
-    result = asyncio.run(
-        find_unverified_claims("The deadline is 5 business days [C9].", {"C1": "a"})
-    )
+    result = asyncio.run(find_unverified_claims("The deadline is 5 business days [C9].", {"C1": "a"}))
     assert result == []
     assert "messages" not in llm
 
@@ -219,20 +192,13 @@ def test_a_judge_failure_is_not_reported_as_unverified(llm):
     running this from the live path unguarded."""
     llm["raises"] = RuntimeError("provider is down")
     result = asyncio.run(
-        find_unverified_claims(
-            "The deadline is 5 business days [C1].",
-            {"C1": "Deadline: 5 business days."},
-        )
+        find_unverified_claims("The deadline is 5 business days [C1].", {"C1": "Deadline: 5 business days."})
     )
     assert result == []
 
 
 def test_stops_at_max_sentences(llm):
     llm["reply"] = "no"
-    answer = " ".join(
-        f"Section {index} lasts {index} days [C1]." for index in range(1, 8)
-    )
-    result = asyncio.run(
-        find_unverified_claims(answer, {"C1": "irrelevant"}, max_sentences=3)
-    )
+    answer = " ".join(f"Section {index} lasts {index} days [C1]." for index in range(1, 8))
+    result = asyncio.run(find_unverified_claims(answer, {"C1": "irrelevant"}, max_sentences=3))
     assert len(result) == 3

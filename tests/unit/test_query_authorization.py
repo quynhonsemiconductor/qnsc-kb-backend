@@ -478,7 +478,9 @@ def test_department_member_queries_are_company_scoped():
     db = _DB()
     repo = UserRepository(db)
 
-    asyncio.run(repo.get_departments_by_ids([uuid.uuid4()], company_domain="acme.test"))
+    asyncio.run(
+        repo.get_departments_by_ids([uuid.uuid4()], company_domain="acme.test")
+    )
     assert "departments.company_domain" in _compiled(db.statement).lower()
 
     asyncio.run(repo.get_by_ids([uuid.uuid4()], company_domain="acme.test"))

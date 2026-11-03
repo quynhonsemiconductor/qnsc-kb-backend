@@ -25,7 +25,6 @@ department bug in #78.
 The reservation must still block a LIVE draft or article. That is its actual job, and
 these tests pin both directions.
 """
-
 from __future__ import annotations
 
 import asyncio

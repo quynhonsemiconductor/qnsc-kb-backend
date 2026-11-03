@@ -26,7 +26,6 @@ across every module, including the paths that are hard to exercise in tests.
 `get_unverified_claims` is jose-only. That distinction is exactly why this is checked
 against the installed module rather than against a hand-written denylist.
 """
-
 from __future__ import annotations
 
 import ast
@@ -39,9 +38,7 @@ SRC = Path(__file__).parents[2] / "src"
 
 
 def _modules_using_jwt() -> list[Path]:
-    return [
-        p for p in SRC.rglob("*.py") if "import jwt" in p.read_text(encoding="utf-8")
-    ]
+    return [p for p in SRC.rglob("*.py") if "import jwt" in p.read_text(encoding="utf-8")]
 
 
 def _jwt_attributes(path: Path) -> set[str]:
@@ -62,9 +59,7 @@ def _jwt_attributes(path: Path) -> set[str]:
 
 def test_the_installed_library_is_pyjwt_not_jose():
     """The premise of every assertion below."""
-    assert hasattr(
-        jwt, "PyJWTError"
-    ), "not PyJWT; the checks below assume the wrong library"
+    assert hasattr(jwt, "PyJWTError"), "not PyJWT; the checks below assume the wrong library"
     assert not hasattr(jwt, "get_unverified_claims"), "python-jose is installed"
 
 
@@ -77,9 +72,7 @@ def test_some_module_actually_uses_jwt():
 def test_every_jwt_call_exists_on_the_installed_library(path):
     """The regression: `jwt.get_unverified_claims` is python-jose, and we ship PyJWT."""
     missing = sorted(attr for attr in _jwt_attributes(path) if not hasattr(jwt, attr))
-    assert (
-        not missing
-    ), f"{path.relative_to(SRC.parent)} calls jwt.{{{', '.join(missing)}}}"
+    assert not missing, f"{path.relative_to(SRC.parent)} calls jwt.{{{', '.join(missing)}}}"
 
 
 def test_the_callback_no_longer_decodes_the_provider_id_token():

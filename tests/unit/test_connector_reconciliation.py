@@ -3,7 +3,6 @@
 Both of these went wrong in a way no other test could see: the reconciliation sweep
 deletes documents, and the lifecycle URL is only ever called by Microsoft.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -36,25 +35,15 @@ def test_sharepoint_delta_without_a_token_replays_the_whole_scope():
         urls.append(url)
         return {
             "value": [
-                {
-                    "id": "file-1",
-                    "name": "one.docx",
-                    "file": {"mimeType": "application/vnd"},
-                },
-                {
-                    "id": "file-2",
-                    "name": "two.docx",
-                    "file": {"mimeType": "application/vnd"},
-                },
+                {"id": "file-1", "name": "one.docx", "file": {"mimeType": "application/vnd"}},
+                {"id": "file-2", "name": "two.docx", "file": {"mimeType": "application/vnd"}},
             ],
             "@odata.deltaLink": "https://graph.microsoft.com/v1.0/next-delta",
         }
 
     adapter._request = fake_request  # type: ignore[method-assign]
     changes, cursor = asyncio.run(
-        adapter.incremental_changes(
-            {"external_scope_id": "drive-1", "config": {}}, None
-        )
+        adapter.incremental_changes({"external_scope_id": "drive-1", "config": {}}, None)
     )
 
     assert "/delta" in urls[0], "a cursor-less call must start a fresh delta walk"

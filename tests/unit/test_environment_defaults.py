@@ -11,7 +11,6 @@ every route, leaving every other mutating endpoint CSRF-able.
 Everything here exercises the real callables rather than matching source text: a check
 that reads the file cannot tell whether the check is reached.
 """
-
 from __future__ import annotations
 
 import asyncio

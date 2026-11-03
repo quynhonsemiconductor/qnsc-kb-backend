@@ -18,7 +18,6 @@ TASK TYPE — hardcoded RETRIEVAL_QUERY for everything, including the chunks bei
 directly contradicting the comment beside it warning that mixing questions and passages
 "degrades retrieval quietly rather than visibly".
 """
-
 from __future__ import annotations
 
 import httpx

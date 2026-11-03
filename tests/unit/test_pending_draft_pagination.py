@@ -12,7 +12,6 @@ Two properties carry the weight here:
 * the total respects authorization -- counting rows the caller may not see would leak
   the existence of another department's drafts.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -97,38 +96,22 @@ class _PagingRepository:
                 if row.assigned_approver_id in {None, assigned_approver_id}
                 or (depts and row.dept in set(depts))
             ]
-        return sorted(
-            rows, key=lambda row: (row.created_at, row.id.bytes), reverse=True
-        )
+        return sorted(rows, key=lambda row: (row.created_at, row.id.bytes), reverse=True)
 
     async def list_drafts(
-        self,
-        status=None,
-        company_domain=None,
-        dept=None,
-        depts=None,
-        assigned_approver_id=None,
-        *,
-        limit=None,
-        offset=0,
-        search=None,
+        self, status=None, company_domain=None, dept=None, depts=None,
+        assigned_approver_id=None, *, limit=None, offset=0, search=None,
     ):
         self.calls.append({"limit": limit, "offset": offset})
         rows = self._matching(
             status, company_domain, dept, depts, assigned_approver_id, search
         )
-        window = rows[max(0, offset) :]
+        window = rows[max(0, offset):]
         return window if limit is None else window[:limit]
 
     async def count_drafts(
-        self,
-        status=None,
-        company_domain=None,
-        dept=None,
-        depts=None,
-        assigned_approver_id=None,
-        *,
-        search=None,
+        self, status=None, company_domain=None, dept=None, depts=None,
+        assigned_approver_id=None, *, search=None,
     ):
         return len(
             self._matching(
@@ -143,12 +126,8 @@ def _service(drafts):
 
 def _publisher() -> User:
     user = User(
-        id=uuid.uuid4(),
-        email="publisher@acme.test",
-        name="Publisher",
-        company_domain="acme.test",
-        role="Reviewer",
-        active=True,
+        id=uuid.uuid4(), email="publisher@acme.test", name="Publisher",
+        company_domain="acme.test", role="Reviewer", active=True,
     )
     permission = Permission(key="article.publish", name="Publish")
     role = Role(name="Publisher", company_domain=None)
@@ -233,9 +212,7 @@ def test_a_total_larger_than_one_page_is_still_reported():
     534 rows behind a 500 cap looked identical to 500 rows in total.
     """
     base = datetime(2026, 10, 13, 12, 0, 0)
-    drafts = [
-        _draft(index, base - timedelta(seconds=index)) for index in range(LIMIT + 34)
-    ]
+    drafts = [_draft(index, base - timedelta(seconds=index)) for index in range(LIMIT + 34)]
     service = _service(drafts)
     user = _publisher()
 
@@ -254,12 +231,8 @@ def test_a_total_larger_than_one_page_is_still_reported():
 
 def _department_reviewer() -> User:
     user = User(
-        id=uuid.uuid4(),
-        email="reviewer@acme.test",
-        name="Reviewer",
-        company_domain="acme.test",
-        role="Reviewer",
-        active=True,
+        id=uuid.uuid4(), email="reviewer@acme.test", name="Reviewer",
+        company_domain="acme.test", role="Reviewer", active=True,
     )
     permission = Permission(key="article.review", name="Review")
     role = Role(name="Reviewer", company_domain="acme.test")
@@ -267,9 +240,7 @@ def _department_reviewer() -> User:
     user.roles.append(role)
     user.dept = "Engineering"
     user.departments = [
-        Department(
-            id=uuid.uuid4(), name="Engineering", company_domain="acme.test", active=True
-        )
+        Department(id=uuid.uuid4(), name="Engineering", company_domain="acme.test", active=True)
     ]
     return user
 
@@ -285,12 +256,7 @@ def test_the_total_counts_only_what_the_caller_may_see():
         _draft(0, base, dept="Engineering"),
         _draft(1, base - timedelta(minutes=1), dept="Engineering"),
         _draft(2, base - timedelta(minutes=2), dept="Finance"),
-        _draft(
-            3,
-            base - timedelta(minutes=3),
-            dept="Engineering",
-            company_domain="other.test",
-        ),
+        _draft(3, base - timedelta(minutes=3), dept="Engineering", company_domain="other.test"),
     ]
     service = _service(drafts)
     reviewer = _department_reviewer()
@@ -313,12 +279,8 @@ def test_a_company_lead_is_counted_within_its_own_tenant():
     # CEO, not Admin: the legacy Admin role is a GLOBAL publisher and so sees every tenant
     # (see the next test); the company-scoped governance lead is the CEO.
     lead = User(
-        id=uuid.uuid4(),
-        email="ceo@acme.test",
-        name="CEO",
-        company_domain="acme.test",
-        role="CEO",
-        active=True,
+        id=uuid.uuid4(), email="ceo@acme.test", name="CEO",
+        company_domain="acme.test", role="CEO", active=True,
     )
 
     assert asyncio.run(service.count_drafts(lead, "pending")) == 1
@@ -334,12 +296,8 @@ def test_a_global_admin_is_counted_across_tenants():
     ]
     service = _service(drafts)
     admin = User(
-        id=uuid.uuid4(),
-        email="admin@acme.test",
-        name="Admin",
-        company_domain="acme.test",
-        role="Admin",
-        active=True,
+        id=uuid.uuid4(), email="admin@acme.test", name="Admin",
+        company_domain="acme.test", role="Admin", active=True,
     )
 
     assert asyncio.run(service.count_drafts(admin, "pending")) == 2
@@ -349,12 +307,8 @@ def test_an_unauthorized_caller_cannot_obtain_a_total():
     """The count must fail closed exactly where the list does, not leak a number."""
     service = _service([_draft(0, datetime(2026, 10, 13, 12, 0, 0))])
     outsider = User(
-        id=uuid.uuid4(),
-        email="staff@acme.test",
-        name="Staff",
-        company_domain="acme.test",
-        role="Staff",
-        active=True,
+        id=uuid.uuid4(), email="staff@acme.test", name="Staff",
+        company_domain="acme.test", role="Staff", active=True,
     )
 
     with pytest.raises(HTTPException) as error:
@@ -393,13 +347,7 @@ def _searchable():
         ("Server access", "sharepoint://drive-1/it-runbook.pdf", "IT"),
     ]
     return [
-        _draft(
-            index,
-            base - timedelta(minutes=index),
-            title=title,
-            source_ref=ref,
-            dept=dept,
-        )
+        _draft(index, base - timedelta(minutes=index), title=title, source_ref=ref, dept=dept)
         for index, (title, ref, dept) in enumerate(rows)
     ]
 
@@ -411,9 +359,7 @@ def _titles(drafts):
 def test_search_ignores_case_and_accents():
     service = _service(_searchable())
 
-    found = asyncio.run(
-        service.list_drafts(_publisher(), "pending", search="QUY TRINH xin nghi")
-    )
+    found = asyncio.run(service.list_drafts(_publisher(), "pending", search="QUY TRINH xin nghi"))
 
     assert _titles(found) == ["Quy trình xin nghỉ phép"]
 
@@ -422,12 +368,8 @@ def test_search_matches_the_source_reference_and_the_department():
     service = _service(_searchable())
     publisher = _publisher()
 
-    by_reference = asyncio.run(
-        service.list_drafts(publisher, "pending", search="it-runbook")
-    )
-    by_department = asyncio.run(
-        service.list_drafts(publisher, "pending", search="tai chinh")
-    )
+    by_reference = asyncio.run(service.list_drafts(publisher, "pending", search="it-runbook"))
+    by_department = asyncio.run(service.list_drafts(publisher, "pending", search="tai chinh"))
 
     assert _titles(by_reference) == ["Server access"]
     assert _titles(by_department) == ["Báo cáo doanh thu 50% quý 3"]
@@ -441,12 +383,7 @@ def test_the_total_describes_the_rows_the_search_matches():
 
     assert asyncio.run(service.count_drafts(publisher, "pending")) == 4
     assert asyncio.run(service.count_drafts(publisher, "pending", search="vpn")) == 1
-    assert (
-        asyncio.run(
-            service.count_drafts(publisher, "pending", search="nothing matches")
-        )
-        == 0
-    )
+    assert asyncio.run(service.count_drafts(publisher, "pending", search="nothing matches")) == 0
 
 
 def test_a_blank_search_is_no_search():
@@ -454,13 +391,8 @@ def test_a_blank_search_is_no_search():
     publisher = _publisher()
 
     for blank in (None, "", "   "):
-        assert (
-            len(asyncio.run(service.list_drafts(publisher, "pending", search=blank)))
-            == 4
-        )
-        assert (
-            asyncio.run(service.count_drafts(publisher, "pending", search=blank)) == 4
-        )
+        assert len(asyncio.run(service.list_drafts(publisher, "pending", search=blank))) == 4
+        assert asyncio.run(service.count_drafts(publisher, "pending", search=blank)) == 4
 
 
 def test_pages_of_search_results_cover_every_match_exactly_once():
@@ -474,9 +406,7 @@ def test_pages_of_search_results_cover_every_match_exactly_once():
     seen = []
     for offset in (0, 3, 6):
         page = asyncio.run(
-            service.list_drafts(
-                publisher, "pending", limit=3, offset=offset, search="report"
-            )
+            service.list_drafts(publisher, "pending", limit=3, offset=offset, search="report")
         )
         seen.extend(item.id for item in page)
 
@@ -511,7 +441,9 @@ def test_the_sql_search_covers_three_columns_and_is_accent_insensitive():
 
     conditions = GovernanceRepository._draft_scope_filters(search="nghi phep")
     sql = str(
-        select(PendingDraft.id).where(*conditions).compile(dialect=postgresql.dialect())
+        select(PendingDraft.id)
+        .where(*conditions)
+        .compile(dialect=postgresql.dialect())
     )
 
     for column in ("title", "source_ref", "dept"):
@@ -581,14 +513,11 @@ def _pg(statement) -> str:
 
 def test_the_real_page_query_has_a_total_order_and_the_requested_window():
     """The fake repository above mirrors the order; this pins what the SQL actually says.
-    Without `id` in the ORDER BY, rows that share a created_at can straddle a page boundary.
-    """
+    Without `id` in the ORDER BY, rows that share a created_at can straddle a page boundary."""
     db = _CapturingDb()
     repository = GovernanceRepository(db)
 
-    asyncio.run(
-        repository.list_drafts("pending", "acme.test", limit=3, offset=6, search="x")
-    )
+    asyncio.run(repository.list_drafts("pending", "acme.test", limit=3, offset=6, search="x"))
 
     sql = _pg(db.statements[0])
     assert "ORDER BY pending_drafts.created_at DESC, pending_drafts.id DESC" in sql
@@ -601,9 +530,7 @@ def test_the_real_page_and_the_real_total_are_built_from_the_same_predicates():
     db = _CapturingDb()
     repository = GovernanceRepository(db)
     scope = dict(
-        status="pending",
-        company_domain="acme.test",
-        depts=["Engineering"],
+        status="pending", company_domain="acme.test", depts=["Engineering"],
         assigned_approver_id=uuid.uuid4(),
     )
 
@@ -611,10 +538,7 @@ def test_the_real_page_and_the_real_total_are_built_from_the_same_predicates():
     asyncio.run(repository.count_drafts(**scope, search="quy trinh"))
 
     page_sql, count_sql = (_pg(statement) for statement in db.statements)
-    assert (
-        page_sql.split(" WHERE ")[1].split(" ORDER BY ")[0]
-        == count_sql.split(" WHERE ")[1]
-    )
+    assert page_sql.split(" WHERE ")[1].split(" ORDER BY ")[0] == count_sql.split(" WHERE ")[1]
     assert "immutable_unaccent" in count_sql, "the search applies to the total too"
 
 
@@ -651,9 +575,7 @@ def test_the_endpoint_sets_the_total_header_and_passes_search_to_the_page_and_th
         def __init__(self, *args):
             pass
 
-        async def list_drafts(
-            self, user, status=None, *, limit=None, offset=0, search=None
-        ):
+        async def list_drafts(self, user, status=None, *, limit=None, offset=0, search=None):
             seen["list"] = (status, limit, offset, search)
             return []
 
@@ -668,13 +590,8 @@ def test_the_endpoint_sets_the_total_header_and_passes_search_to_the_page_and_th
 
     body = asyncio.run(
         router.list_pending_drafts(
-            response=response,
-            status="pending",
-            limit=500,
-            offset=500,
-            search="quy trinh",
-            current_user=_publisher(),
-            db=None,
+            response=response, status="pending", limit=500, offset=500,
+            search="quy trinh", current_user=_publisher(), db=None,
         )
     )
 
