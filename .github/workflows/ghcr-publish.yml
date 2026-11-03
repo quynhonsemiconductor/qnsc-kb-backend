@@ -43,13 +43,17 @@ concurrency:
 jobs:
   publish:
     # Ceiling for the reusable's inner grants: packages: write is the GHCR
-    # push AND the Dockerfile's pull of private @quynhonsemiconductor/*.
+    # push AND the Dockerfile's pull of private @quynhonsemiconductor/*; the
+    # scan path attests the pushed digest, which needs an OIDC token and the
+    # attestation store, so the reusable's job permissions must be granted here.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     # SHA-pinned, NOT @v1 — ci's v1 tag moves on every merge, and a moving ref
     # would let a ci merge change this product's publish pipeline unseen.
-    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
+    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@7e8f6136a017c7b1f57a2e9a288dae3cd008950f # v1.31.1
     with:
       product: kb
       services-json: '["api","worker","migrator"]'
