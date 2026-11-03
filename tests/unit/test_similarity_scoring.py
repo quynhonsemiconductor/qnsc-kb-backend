@@ -198,3 +198,72 @@ def test_scoring_does_not_block_the_event_loop():
         return ticks
 
     assert asyncio.run(scenario()) > 5
+
+
+# ── the token-score floor ─────────────────────────────────────────────────────
+
+
+def _counting(monkeypatch) -> list[int]:
+    calls = [0]
+    real = similarity_module.sequence_similarity
+
+    def counting(left: str, right: str) -> float:
+        calls[0] += 1
+        return real(left, right)
+
+    monkeypatch.setattr(similarity_module, "sequence_similarity", counting)
+    return calls
+
+
+def _unrelated(chars: int) -> str:
+    rng = random.Random(7)
+    words: list[str] = []
+    while sum(len(w) + 1 for w in words) < chars:
+        words.append(f"zq{rng.randrange(400)}")
+    return " ".join(words)
+
+
+def test_a_candidate_with_almost_no_shared_tokens_is_not_compared_character_by_character(
+    monkeypatch,
+):
+    calls = _counting(monkeypatch)
+    original = _document(2_000)
+    assert len(original.split()) >= settings.SIMILARITY_FLOOR_MIN_TOKENS
+    _rank(original, _candidates([_unrelated(2_000) for _ in range(20)]))
+    assert calls[0] == 0
+
+
+def test_a_floor_of_zero_compares_every_top_candidate_as_before(monkeypatch):
+    monkeypatch.setattr(settings, "SIMILARITY_SEQUENCE_MIN_TOKEN_SCORE", 0.0)
+    calls = _counting(monkeypatch)
+    original = _document(2_000)
+    _rank(original, _candidates([_unrelated(2_000) for _ in range(20)]))
+    assert calls[0] == 20
+
+
+def test_a_near_duplicate_is_still_compared_and_still_reported(monkeypatch):
+    calls = _counting(monkeypatch)
+    original = _document(2_000)
+    matches = _rank(
+        original,
+        _candidates([_unrelated(2_000), _edited(original, 0.05), _unrelated(2_000)]),
+    )
+    assert [m["article_id"] for m in matches] == ["id-1"]
+    assert matches[0]["score"] >= 0.9
+    assert calls[0] == 1
+
+
+def test_text_without_spaces_is_still_compared_because_its_token_score_says_nothing(
+    monkeypatch,
+):
+    """One long run of characters is one token: an edited copy has token overlap 0 and must still be found."""
+    calls = _counting(monkeypatch)
+    rng = random.Random(3)
+    alphabet = [chr(code) for code in range(0x4E00, 0x4E00 + 400)]
+    original = "".join(rng.choice(alphabet) for _ in range(1_500))
+    edited = list(original)
+    for index in rng.sample(range(len(edited)), 60):
+        edited[index] = rng.choice(alphabet)
+    matches = _rank(original, _candidates(["".join(edited)]))
+    assert calls[0] == 1
+    assert len(matches) == 1 and matches[0]["score"] >= 0.9
