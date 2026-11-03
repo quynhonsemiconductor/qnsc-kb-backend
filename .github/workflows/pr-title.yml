@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # No checkout: the action reads the title from the event payload.
-      - uses: quynhonsemiconductor/ci/actions/pr-title-conventional-commits@7e8f6136a017c7b1f57a2e9a288dae3cd008950f # v1.31.1
+      - uses: quynhonsemiconductor/ci/actions/pr-title-conventional-commits@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
 
       # The PR labeler used to be a job of its own (one more runner per push). It runs here, in the same
       # runner, as steps. Not on `edited`: a title edit changes no files, so there is nothing to relabel.
@@ -39,4 +39,4 @@ jobs:
       - name: Area and size labels
         if: ${{ github.event.action != 'edited' }}
         continue-on-error: true
-        uses: quynhonsemiconductor/ci/actions/pr-labels@7e8f6136a017c7b1f57a2e9a288dae3cd008950f # v1.31.1
+        uses: quynhonsemiconductor/ci/actions/pr-labels@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1

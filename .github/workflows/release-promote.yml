@@ -1,0 +1,59 @@
+# =============================================================================
+# Release · Promote — a vX.Y.Z tag RETAGS the digests already published for that
+# commit and opens the reviewed gitops prod PR. It builds NOTHING.
+#
+# GATED: kb prod is not launched yet (P3: Entra prod apps, Key Vault secrets,
+# CNPG prod database). values/kb/tags.prod.yaml exists as a sha-0000000
+# placeholder, so the reusable's "no prod values" stop would NOT fire; without
+# this gate a tag would open a real prod PR. Set the repository variable
+# KB_PROD_PROMOTE_ENABLED=true at the P3 cutover. Unset is a clean skip, not red.
+#
+# `web` is not in `services`: qnsc-kb has no web image yet (C's kb-frontend).
+# =============================================================================
+name: Release · Promote
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-promote-kb
+  cancel-in-progress: false
+
+jobs:
+  wait-for-publish:
+    if: ${{ vars.KB_PROD_PROMOTE_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read # wait-for-run reads the run list
+    steps:
+      - uses: quynhonsemiconductor/ci/actions/wait-for-run@400b7e9868e9ba6d172d956a08041ba19b574689  # v1.33.1
+        with:
+          workflow: ghcr-publish.yml
+          sha: ${{ github.sha }}
+          branch: main
+          label: GHCR · Publish
+          max-wait-minutes: '45'
+          failure-message: "The GHCR · Publish run for this release commit did not succeed, so there is no sha-<12> image to retag. Fix the build, then re-run this release job."
+          missing-message: "No GHCR · Publish run exists for this commit. Cut the release from a commit that was published to main."
+
+  promote:
+    needs: wait-for-publish
+    permissions:
+      contents: read
+      packages: write
+      attestations: read
+    uses: quynhonsemiconductor/ci/.github/workflows/release-promote.yml@400b7e9868e9ba6d172d956a08041ba19b574689  # v1.33.1
+    with:
+      product: kb
+      gitops-product: kb
+      release-tag: ${{ github.ref_name }}
+      commit: ${{ github.sha }}
+      services: api worker migrator
+    secrets:
+      QNSC_AUTOMATION_PRIVATE_KEY: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}
