@@ -10,3 +10,32 @@ import os
 # setdefault, not assignment: `ENVIRONMENT=production poetry run pytest` still exercises
 # the production branch, which is what the hardening tests need.
 os.environ.setdefault("ENVIRONMENT", "development")
+
+import sys
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _never_exit_the_test_process():
+    """`_bootstrap_database` ends the process (os._exit) on a non-retryable error, so Kubernetes
+    shows CrashLoopBackOff. Under pytest that would kill the whole run without a report, from a
+    background task any test that enters the app lifespan starts. Raise instead.
+
+    Not via `monkeypatch`: sharing the test's monkeypatch instance would move its undo after
+    other fixtures' teardown, which some of them depend on.
+    """
+    main = sys.modules.get("src.api.main")
+    if main is None:
+        yield
+        return
+
+    def refuse(code: int) -> None:
+        raise RuntimeError(f"_exit_process({code}) called during a test")
+
+    original = main._exit_process
+    main._exit_process = refuse
+    try:
+        yield
+    finally:
+        main._exit_process = original
