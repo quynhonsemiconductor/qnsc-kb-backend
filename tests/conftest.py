@@ -40,3 +40,22 @@ def _never_exit_the_test_process():
         yield
     finally:
         main._exit_process = original
+
+
+@pytest.fixture(autouse=True)
+def _engine_pool_per_event_loop():
+    """Drop the shared engine's pooled connections after every test.
+
+    `src.api.deps.engine` is module-level, and asyncpg binds each connection to the event loop
+    that opened it. Tests drive the app with `asyncio.run` (and each TestClient has its own loop),
+    so a connection pooled by one test was handed to the next one's loop and failed with
+    "RuntimeError: Event loop is closed" (seen in CI: the lifespan bootstrap of
+    test_source_preview_headers drew such a connection). `close=False`: the old loop is gone,
+    so the connections are only dereferenced, never awaited on a dead loop.
+    """
+    yield
+    deps = sys.modules.get("src.api.deps")
+    engine = getattr(deps, "engine", None)
+    sync_engine = getattr(engine, "sync_engine", None)
+    if sync_engine is not None:
+        sync_engine.dispose(close=False)
