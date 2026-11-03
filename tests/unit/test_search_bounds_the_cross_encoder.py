@@ -69,7 +69,7 @@ def cross_encoder_on(monkeypatch):
     async def fake_embed(text):
         return [0.1, 0.2, 0.3]
 
-    def fake_lexical(query, chunks, limit=5, identifiers=None):
+    def fake_lexical(query, chunks, limit=5, identifiers=None, vector_ranks=None):
         ranked = sorted(chunks, key=lambda c: c.fake_score, reverse=True)
         return [(c, c.fake_score) for c in ranked[:limit]]
 

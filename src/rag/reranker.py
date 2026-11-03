@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from typing import Mapping, NamedTuple, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
 
 from src.core.config import settings
 from src.rag.identifier_terms import identifier_terms
@@ -346,6 +346,8 @@ class PreparedQuery(NamedTuple):
     #: Terms that name one specific thing (see identifier_terms.py) and what each is worth against an ordinary
     #: word (1). Empty for a question that names nothing, which then scores exactly as before.
     identifier_weights: Mapping[str, float] = {}
+    #: chunk id -> rank in the vector leg (1 = nearest); empty when the search had no vector leg.
+    vector_ranks: Mapping[Any, int] = {}
 
 
 def prepare_query(
@@ -354,6 +356,7 @@ def prepare_query(
     identifiers: Sequence[str] | None = None,
     frequency: dict[str, int] | None = None,
     pool_size: int = 0,
+    vector_ranks: Mapping[Any, int] | None = None,
 ) -> PreparedQuery:
     """Prepare the query side of a score.
 
@@ -400,6 +403,7 @@ def prepare_query(
         terms=terms,
         is_definition=is_definition_query(query),
         identifier_weights=weights,
+        vector_ranks=vector_ranks or {},
     )
 
 
@@ -469,12 +473,19 @@ def retrieval_score(
     # The child passage is the precise retrieval unit. Parent text is only
     # a fallback because it often contains repeated slides/references.
     text = getattr(chunk, "chunk_text", "") or getattr(parent, "text", "")
-    return score_prepared_text(
-        prepared if prepared is not None else prepare_query(query),
+    prepared = prepared if prepared is not None else prepare_query(query)
+    score = score_prepared_text(
+        prepared,
         text,
         getattr(getattr(chunk, "article", None), "title", ""),
         getattr(parent, "section_ref", "") if parent else "",
     )
+    # What the embedding found counts even when the question shares few words with the passage: the score above
+    # is lexical overlap, and the context gate reads it. See RAG_VECTOR_ASSIST_TOP_N.
+    rank = prepared.vector_ranks.get(getattr(chunk, "id", None))
+    if rank is not None and rank <= settings.RAG_VECTOR_ASSIST_TOP_N:
+        score = max(score, settings.RAG_VECTOR_ASSIST_SCORE)
+    return score
 
 
 def chunk_passage(chunk: object) -> str:
@@ -494,6 +505,7 @@ def prepare_query_for_chunks(
     query: str,
     chunks: Sequence[object],
     identifiers: Sequence[str] | None = None,
+    vector_ranks: Mapping[Any, int] | None = None,
 ) -> PreparedQuery:
     """Prepare a query against the pool it will be scored over."""
     passages = [chunk_passage(chunk) for chunk in chunks]
@@ -504,6 +516,7 @@ def prepare_query_for_chunks(
         named,
         identifier_frequency(passages, named),
         len(passages),
+        vector_ranks,
     )
 
 
@@ -512,9 +525,10 @@ def rerank_chunks_with_scores(
     chunks: Sequence[object],
     limit: int = 5,
     identifiers: Sequence[str] | None = None,
+    vector_ranks: Mapping[Any, int] | None = None,
 ) -> list[tuple[object, float]]:
     """Rerank and hand back the scores, so no caller has to recompute them."""
-    prepared = prepare_query_for_chunks(query, chunks, identifiers)
+    prepared = prepare_query_for_chunks(query, chunks, identifiers, vector_ranks)
     scored: list[tuple[float, int, object]] = []
     for position, chunk in enumerate(chunks):
         scored.append((retrieval_score(query, chunk, prepared), -position, chunk))
