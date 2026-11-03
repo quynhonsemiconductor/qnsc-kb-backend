@@ -414,16 +414,19 @@ def _is_transient_database_error(exc: BaseException) -> bool:
         TimeoutError,  # asyncio.TimeoutError is TimeoutError since 3.11
         sa_exc.OperationalError,
         sa_exc.InterfaceError,
+        sa_exc.TimeoutError,  # pool_timeout: no connection free in the pool in time
         asyncpg.PostgresConnectionError,  # 08xxx: connection lost or refused
         asyncpg.CannotConnectNowError,  # 57P03: "the database system is starting up"
         asyncpg.AdminShutdownError,  # 57P01: terminated by a restart or failover
         asyncpg.TooManyConnectionsError,  # 53300
     )
     chain = _exception_chain(exc)
-    # TLS failures are permanent (wrong CA, bad certificate, a server that refuses TLS), yet they
-    # arrive as OSError subclasses: ssl.SSLError, and asyncpg's plain ConnectionError "rejected SSL
-    # upgrade". Decide them first, or the OSError branch below would retry them forever.
-    if any(_is_tls_failure(e) for e in chain):
+    # TLS failures (wrong CA, bad certificate, a server that refuses TLS) and local file errors (a
+    # missing or unreadable CA, cert or key path) are permanent, yet they arrive as OSError
+    # subclasses: ssl.SSLError, asyncpg's plain ConnectionError "rejected SSL upgrade",
+    # FileNotFoundError, PermissionError. Decide them first, or the OSError branch below would
+    # retry them forever.
+    if any(_is_tls_failure(e) or _is_local_file_error(e) for e in chain):
         return False
     for current in chain:
         if isinstance(current, transient):
@@ -445,6 +448,14 @@ def _exception_chain(exc: BaseException) -> list[BaseException]:
         context = None if current.__suppress_context__ else current.__context__
         current = getattr(current, "orig", None) or current.__cause__ or context
     return chain
+
+
+def _is_local_file_error(exc: BaseException) -> bool:
+    """A missing or unreadable local file (DATABASE_SSL_CA, a client certificate or key): an
+    OSError, but no amount of waiting fixes it."""
+    return isinstance(
+        exc, (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)
+    )
 
 
 def _is_tls_failure(exc: BaseException) -> bool:
@@ -765,21 +776,15 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        bootstrap_error: BaseException | None = None
         if _bootstrap_task and not _bootstrap_task.done():
             _bootstrap_task.cancel()
             try:
                 await _bootstrap_task
             except asyncio.CancelledError:
                 pass
-        elif (
-            _bootstrap_task
-            and not _bootstrap_task.cancelled()
-            and _bootstrap_task.exception() is not None
-        ):
-            # A bootstrap that died with an error must not vanish unobserved at shutdown. In
-            # production a non-retryable error has already exited the process; this is what
-            # surfaces it when `_exit_process` does not end the process (tests).
-            raise _bootstrap_task.exception()  # type: ignore[misc]
+        elif _bootstrap_task and not _bootstrap_task.cancelled():
+            bootstrap_error = _bootstrap_task.exception()
         if _preload_task and not _preload_task.done():
             _preload_task.cancel()
             try:
@@ -793,6 +798,12 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         _inline_tasks.clear()
+        if bootstrap_error is not None:
+            # Raised last, after every other task is cleaned up. A bootstrap that died with an
+            # error must not vanish unobserved at shutdown. In production a non-retryable error
+            # has already exited the process; this surfaces it when `_exit_process` does not
+            # end the process (tests).
+            raise bootstrap_error
 
 
 app = FastAPI(

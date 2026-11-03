@@ -290,3 +290,56 @@ def test_lifespan_teardown_surfaces_a_bootstrap_that_died(monkeypatch):
 
     with pytest.raises(RuntimeError, match="bootstrap blew up"):
         asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError(2, "No such file or directory", "/etc/kb/ca.pem"),
+        PermissionError(13, "Permission denied", "/etc/kb/client.key"),
+        IsADirectoryError(21, "Is a directory", "/etc/kb"),
+        NotADirectoryError(20, "Not a directory", "/etc/kb/ca.pem/x"),
+    ],
+)
+def test_a_bad_certificate_or_key_path_is_permanent(error):
+    """OSErrors, but waiting will not create or unlock the file: exit, do not retry forever."""
+    from sqlalchemy import exc as sa_exc
+
+    assert not main._is_transient_database_error(error)
+    assert not main._is_transient_database_error(
+        sa_exc.DBAPIError("SELECT 1", {}, error)
+    )
+
+
+def test_a_pool_timeout_is_transient():
+    from sqlalchemy import exc as sa_exc
+
+    pool_timeout = sa_exc.TimeoutError("QueuePool limit of size 5 overflow 10 reached")
+    assert main._is_transient_database_error(pool_timeout)
+
+
+def test_teardown_cleans_up_every_task_before_surfacing_a_dead_bootstrap(monkeypatch):
+    """The re-raise comes last: the preload and inline loops are still cancelled first."""
+    import src.lib.observability as observability
+
+    monkeypatch.setattr(type(main.settings), "validate_production", lambda self: None)
+    monkeypatch.setattr(main, "configure_tracing", lambda: None)
+    monkeypatch.setattr(observability, "setup_logging", lambda: None)
+    monkeypatch.setattr(main.settings, "EMBEDDING_MODEL", "mock")
+
+    async def dies() -> None:
+        raise RuntimeError("bootstrap blew up")
+
+    monkeypatch.setattr(main, "_bootstrap_database", dies)
+    loop_task: dict[str, asyncio.Task] = {}
+
+    async def scenario():
+        async with main.lifespan(main.app):
+            loop_task["t"] = asyncio.create_task(asyncio.sleep(3600))
+            main._inline_tasks.append(loop_task["t"])
+            await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="bootstrap blew up"):
+        asyncio.run(scenario())
+    assert loop_task["t"].cancelled()
+    assert main._inline_tasks == []

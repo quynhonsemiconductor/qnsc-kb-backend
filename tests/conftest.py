@@ -51,7 +51,12 @@ def _engine_pool_per_event_loop():
     so a connection pooled by one test was handed to the next one's loop and failed with
     "RuntimeError: Event loop is closed" (seen in CI: the lifespan bootstrap of
     test_source_preview_headers drew such a connection). `close=False`: the old loop is gone,
-    so the connections are only dereferenced, never awaited on a dead loop.
+    so the connections are only dereferenced, never awaited on a dead loop; their sockets close
+    when they are collected.
+
+    Not NullPool: the engine is built once in deps.py from `engine_options()`, and
+    test_engine_options asserts that real pool (size, overflow, timeout). Giving the tests another
+    pool class means changing how deps.py builds the engine, for a test-only leak.
     """
     yield
     deps = sys.modules.get("src.api.deps")
