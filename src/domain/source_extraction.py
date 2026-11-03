@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import os
+import posixpath
 import re
 import socket
 import struct
@@ -525,16 +526,123 @@ def _extract_pdf_pages(data: bytes) -> tuple[list[dict[str, Any]], list[int]]:
         raise SourceExtractionError(f"Could not extract text from PDF: {exc}") from exc
 
 
-def _extract_docx(data: bytes) -> str:
+_DOCX_SKIPPED_STYLE = re.compile(
+    r"^(?:toc\b|table of (?:figures|tables|contents))", re.I
+)
+_DOCX_HEADING_STYLE = re.compile(r"^heading\s*([1-9])$", re.I)
+
+
+def _drop_dangling_relationships(data: bytes) -> bytes:
+    """Rewrite a .docx without the relationships whose target part is not in the package.
+
+    Some producers (generators, converters) write `fontTable.xml.rels -> fonts/font1.odttf`, or a
+    customXml item, and then do not ship the part. Word opens such a file; python-docx does not, it
+    raises KeyError("There is no item named 'word/fonts/font1.odttf' in the archive") from
+    Document() and the whole upload fails with "Could not process uploaded source". Measured on two of
+    the 22 files of a real specification set. A relationship to a part that is not there carries nothing
+    to read, so removing it loses nothing.
+    """
+    from lxml import etree  # type: ignore[import-untyped]  # lxml-stubs is not a declared dependency
+
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        names = set(source.namelist())
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                blob = source.read(info.filename)
+                if info.filename.endswith(".rels"):
+                    # word/_rels/fontTable.xml.rels describes the part word/fontTable.xml.
+                    base = posixpath.dirname(posixpath.dirname(info.filename))
+                    root = etree.fromstring(blob, parser)
+                    changed = False
+                    for rel in list(root):
+                        href = rel.get("Target") or ""
+                        if rel.get("TargetMode") == "External" or not href:
+                            continue
+                        resolved = (
+                            href.lstrip("/")
+                            if href.startswith("/")
+                            else posixpath.normpath(posixpath.join(base, href))
+                        )
+                        if resolved not in names:
+                            root.remove(rel)
+                            changed = True
+                    if changed:
+                        blob = etree.tostring(
+                            root,
+                            xml_declaration=True,
+                            encoding="UTF-8",
+                            standalone=True,
+                        )
+                target.writestr(info, blob)
+    return out.getvalue()
+
+
+def _open_docx(data: bytes):
     from docx import Document
 
-    document = Document(io.BytesIO(data))
-    parts = [
-        paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()
-    ]
-    for table in document.tables:
-        for row in table.rows:
-            parts.append(" | ".join(cell.text.strip() for cell in row.cells))
+    try:
+        return Document(io.BytesIO(data))
+    except KeyError:
+        # A relationship points at a part the package does not contain; see above.
+        logger.info("DOCX has relationships to missing parts; reading it without them")
+        return Document(io.BytesIO(_drop_dangling_relationships(data)))
+
+
+def _docx_cell_text(cell: Any) -> str:
+    return " ".join(cell.text.split())
+
+
+def _extract_docx(data: bytes) -> str:
+    """The document's text in the ORDER it is written, headings as Markdown headings.
+
+    Paragraphs and tables used to be read separately, all paragraphs first and every table after
+    them. For a specification that put each register table at the very end of the text, detached from
+    the section it belongs to and from the heading the chunker attaches to a chunk: "PADDIR | 0x00 |
+    RW" sat after the glossary, and no chunk said which block it described. Here a table stays under
+    the heading above it. The table of contents (and of figures/tables) is left out: it only repeats
+    every section title, so a search for a title matched the contents page as often as the section.
+    """
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = _open_docx(data)
+    parts: list[str] = []
+    for child in document.element.body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            paragraph = Paragraph(child, document)
+            text = " ".join(paragraph.text.split())
+            if not text:
+                continue
+            style = (
+                (paragraph.style.name if paragraph.style is not None else "") or ""
+            ).strip()
+            if _DOCX_SKIPPED_STYLE.match(style):
+                continue
+            heading = _DOCX_HEADING_STYLE.match(style)
+            if heading:
+                parts.append(f"\n\n{'#' * int(heading.group(1))} {text}\n")
+            elif style.lower() == "title":
+                parts.append(f"\n\n# {text}\n")
+            else:
+                parts.append(paragraph.text.strip())
+        elif tag == "tbl":
+            rows: list[str] = []
+            for row in Table(child, document).rows:
+                cells: list[str] = []
+                previous = None
+                for cell in row.cells:
+                    # A merged cell is returned once per grid column it spans.
+                    if cell._tc is previous:
+                        continue
+                    previous = cell._tc
+                    cells.append(_docx_cell_text(cell))
+                if any(cells):
+                    rows.append(" | ".join(cells))
+            if rows:
+                parts.append("\n\n" + "\n".join(rows) + "\n")
     return _clean("\n".join(parts))
 
 
