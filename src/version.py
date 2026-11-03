@@ -9,4 +9,4 @@ between two releases. `src/core/build_info.py` adds the commit, which is what te
 merged PR from the next.
 """
 
-__version__ = "0.1.1"  # x-release-please-version
+__version__ = "0.1.2"  # x-release-please-version
