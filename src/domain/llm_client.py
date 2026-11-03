@@ -131,6 +131,15 @@ async def _guarded_request_target(
     )
 
 
+#: Output budget of the connection test. A reasoning model spends it on thinking before it writes
+#: `content`: DeepSeek's `deepseek-flash` answered the 8-token test with `content: ""`,
+#: `finish_reason: "length"` and a reasoning channel cut off mid-sentence, so "The provider response did not
+#: contain assistant text" blocked saving a working endpoint (saving requires a passing test). It needed
+#: about 10 reasoning tokens to answer "OK"; 256 leaves room for models that think longer. A model that
+#: does not reason stops after one token, so the larger budget costs nothing there.
+PROBE_MAX_TOKENS = 256
+
+
 async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
     """Test one exact candidate without changing the active runtime configuration."""
     if provider.name == "mock":
@@ -148,7 +157,7 @@ async def probe_provider(provider: Provider, timeout: float = 15.0) -> int:
             {"role": "user", "content": "Connection test"},
         ],
         0.0,
-        max_tokens=8,
+        max_tokens=PROBE_MAX_TOKENS,
     )
     started = perf_counter()
     try:
