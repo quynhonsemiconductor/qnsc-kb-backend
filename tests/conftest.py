@@ -15,6 +15,10 @@ import sys
 
 import pytest
 
+# After the environment defaults above: importing it builds `settings`. Imported here so the guard
+# below always applies, whatever order the test modules import things in.
+import src.api.main  # noqa: E402,F401
+
 
 @pytest.fixture(autouse=True)
 def _never_exit_the_test_process():
@@ -25,10 +29,7 @@ def _never_exit_the_test_process():
     Not via `monkeypatch`: sharing the test's monkeypatch instance would move its undo after
     other fixtures' teardown, which some of them depend on.
     """
-    main = sys.modules.get("src.api.main")
-    if main is None:
-        yield
-        return
+    main = sys.modules["src.api.main"]
 
     def refuse(code: int) -> None:
         raise RuntimeError(f"_exit_process({code}) called during a test")

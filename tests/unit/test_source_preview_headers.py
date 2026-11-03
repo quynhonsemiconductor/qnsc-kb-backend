@@ -10,12 +10,10 @@ The preview was blocked by two headers pulling against each other:
 Relaxing either one carelessly is how an untrusted upload gets to read the signed-in
 user's session, so most of what follows pins the part that must NOT be relaxed.
 """
-
 from __future__ import annotations
 
 import inspect
 
-import pytest
 from fastapi.testclient import TestClient
 
 from src.api import main
@@ -63,16 +61,6 @@ def test_the_middleware_defaults_rather_than_overwrites():
 
     assert 'setdefault("X-Frame-Options", "DENY")' in source
     assert 'headers["X-Frame-Options"] = "DENY"' not in source
-
-
-@pytest.fixture(autouse=True)
-def no_database_bootstrap(monkeypatch):
-    """These tests enter the app lifespan for its middleware only; they need no database."""
-
-    async def nothing() -> None:
-        return None
-
-    monkeypatch.setattr(main, "_bootstrap_database", nothing)
 
 
 def test_every_other_response_is_still_denied_framing():

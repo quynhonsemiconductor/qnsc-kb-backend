@@ -419,18 +419,40 @@ def _is_transient_database_error(exc: BaseException) -> bool:
         asyncpg.AdminShutdownError,  # 57P01: terminated by a restart or failover
         asyncpg.TooManyConnectionsError,  # 53300
     )
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    chain = _exception_chain(exc)
+    # TLS failures are permanent (wrong CA, bad certificate, a server that refuses TLS), yet they
+    # arrive as OSError subclasses: ssl.SSLError, and asyncpg's plain ConnectionError "rejected SSL
+    # upgrade". Decide them first, or the OSError branch below would retry them forever.
+    if any(_is_tls_failure(e) for e in chain):
+        return False
+    for current in chain:
         if isinstance(current, transient):
             return True
         if isinstance(current, sa_exc.DBAPIError) and current.connection_invalidated:
             return True
-        current = (
-            getattr(current, "orig", None) or current.__cause__ or current.__context__
-        )
     return False
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """The exception and what caused it: SQLAlchemy's `.orig`, `__cause__`, and `__context__`
+    unless `raise ... from` suppressed it."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        context = None if current.__suppress_context__ else current.__context__
+        current = getattr(current, "orig", None) or current.__cause__ or context
+    return chain
+
+
+def _is_tls_failure(exc: BaseException) -> bool:
+    import ssl
+
+    if isinstance(exc, ssl.SSLError):  # includes SSLCertVerificationError
+        return True
+    return isinstance(exc, ConnectionError) and "SSL" in str(exc)
 
 
 def _exit_process(code: int) -> None:
@@ -505,9 +527,15 @@ async def _bootstrap_database() -> None:
                 logger.warning("Engine dispose failed", error=str(dispose_exc))
             await asyncio.sleep(delay)
             continue
-        database_bootstrapped = True
-        logger.info("Database initialized successfully", attempt=attempt)
-        _start_inline_loops()
+        try:
+            database_bootstrapped = True
+            logger.info("Database initialized successfully", attempt=attempt)
+            _start_inline_loops()
+        except Exception:
+            # Readiness must never stay at "bootstrapping" with nothing left to finish it.
+            database_bootstrapped = False
+            logger.exception("Starting the inline maintenance loops failed; exiting")
+            _exit_process(1)
         return
 
 
@@ -743,6 +771,15 @@ async def lifespan(app: FastAPI):
                 await _bootstrap_task
             except asyncio.CancelledError:
                 pass
+        elif (
+            _bootstrap_task
+            and not _bootstrap_task.cancelled()
+            and _bootstrap_task.exception() is not None
+        ):
+            # A bootstrap that died with an error must not vanish unobserved at shutdown. In
+            # production a non-retryable error has already exited the process; this is what
+            # surfaces it when `_exit_process` does not end the process (tests).
+            raise _bootstrap_task.exception()  # type: ignore[misc]
         if _preload_task and not _preload_task.done():
             _preload_task.cancel()
             try:

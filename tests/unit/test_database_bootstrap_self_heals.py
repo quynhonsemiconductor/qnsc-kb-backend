@@ -219,3 +219,81 @@ def test_the_engine_pre_pings_pooled_connections():
     import src.api.deps as deps
 
     assert deps.engine.pool._pre_ping is True
+
+
+def test_tls_failures_are_permanent_even_though_they_are_oserrors():
+    import ssl
+
+    from sqlalchemy import exc as sa_exc
+
+    bad_ca = ssl.SSLCertVerificationError(
+        "certificate verify failed: unable to get local issuer"
+    )
+    assert not main._is_transient_database_error(bad_ca)
+    assert not main._is_transient_database_error(
+        sa_exc.DBAPIError("SELECT 1", {}, bad_ca)
+    )
+    # asyncpg's own wording when the server will not speak TLS.
+    rejected = ConnectionError("PostgreSQL server at db:5432 rejected SSL upgrade")
+    assert not main._is_transient_database_error(rejected)
+    # A plain connection reset is still transient.
+    assert main._is_transient_database_error(ConnectionResetError("reset by peer"))
+
+
+def test_a_suppressed_context_is_not_followed():
+    """`raise X from None` says the earlier error is not the cause; it must not decide."""
+    try:
+        try:
+            raise ConnectionRefusedError("refused")
+        except ConnectionRefusedError:
+            raise RuntimeError("AUTO_CREATE_SCHEMA is disabled") from None
+    except RuntimeError as err:
+        suppressed = err
+    assert not main._is_transient_database_error(suppressed)
+
+    try:
+        try:
+            raise ConnectionRefusedError("refused")
+        except ConnectionRefusedError:
+            raise RuntimeError("wrapped while handling")
+    except RuntimeError as err:
+        implicit = err
+    assert main._is_transient_database_error(implicit)
+
+
+def test_a_failure_after_success_exits_rather_than_leaving_readiness_stuck(
+    bootstrap, monkeypatch
+):
+    bootstrap["init_db_failing"](0, RuntimeError("unused"))
+
+    def broken_start() -> None:
+        raise RuntimeError("could not schedule the loops")
+
+    monkeypatch.setattr(main, "_start_inline_loops", broken_start)
+
+    asyncio.run(main._bootstrap_database())
+
+    assert bootstrap["exit"] == 1
+    assert main.database_bootstrapped is False
+
+
+def test_lifespan_teardown_surfaces_a_bootstrap_that_died(monkeypatch):
+    """A test (or anything) whose bootstrap failed must see the failure, not a quiet shutdown."""
+    import src.lib.observability as observability
+
+    monkeypatch.setattr(type(main.settings), "validate_production", lambda self: None)
+    monkeypatch.setattr(main, "configure_tracing", lambda: None)
+    monkeypatch.setattr(observability, "setup_logging", lambda: None)
+    monkeypatch.setattr(main.settings, "EMBEDDING_MODEL", "mock")
+
+    async def dies() -> None:
+        raise RuntimeError("bootstrap blew up")
+
+    monkeypatch.setattr(main, "_bootstrap_database", dies)
+
+    async def scenario():
+        async with main.lifespan(main.app):
+            await asyncio.sleep(0)  # let the task run and fail
+
+    with pytest.raises(RuntimeError, match="bootstrap blew up"):
+        asyncio.run(scenario())
