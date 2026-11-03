@@ -118,7 +118,7 @@ def enabled(monkeypatch):
 
     monkeypatch.setattr(module, "embed_query", fake_embed)
     monkeypatch.setattr(module, "rerank_chunks_with_scores",
-                        lambda q, chunks, limit=5: [(c, c.fake_score) for c in sorted(chunks, key=lambda c: -c.fake_score)[:limit]])
+                        lambda q, chunks, limit=5, identifiers=None: [(c, c.fake_score) for c in sorted(chunks, key=lambda c: -c.fake_score)[:limit]])
     monkeypatch.setattr(settings, "CROSS_ENCODER_RERANKER_ENABLED", True)
     monkeypatch.setattr(settings, "RAG_MIN_RELEVANCE_SCORE", 0.0)
     monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 0.05)

@@ -15,6 +15,7 @@ from src.models.article import Article, ArticleTag, ArticleUserPermission
 from src.models.graph import ArticleEntityMention, GraphEntity, GraphRelationship
 from src.models.user import Department, User
 from src.core.config import settings
+from src.rag.identifier_terms import identifier_terms
 from src.repositories.article import ArticleRepository
 
 logger = structlog.get_logger()
@@ -274,6 +275,56 @@ class ChunkRepository:
                 break
         return deduped
 
+    async def _identifier_candidates(
+        self,
+        query: str,
+        where_clauses: list[Any],
+        identifiers: Sequence[str] | None = None,
+    ) -> list[ArticleChunk]:
+        """The best chunks of EACH identifier-shaped word of the question, merged, those named by most first.
+
+        It exists for RECALL: the keyword leg ORs every word of the question and ranks with `ts_rank_cd`, which
+        counts occurrences and ignores rarity, so the chunk holding `PADOUTSET` ranked 128th to 493rd of 600
+        matches and was not among the ~380 candidates the reranker scores (0 of them, for that question; the
+        reranker cannot promote what it is never given).
+
+        One query per identifier, not one OR over all of them, for the same reason: in a single ranked list the
+        200 chunks that repeat `GPIO` outrank the one that says `PADOUTSET` once and fill the whole pool. With a
+        share each, the rare name contributes everything it has and the common one only its best. Same
+        authorization predicate and GIN-indexed expression as the keyword leg. See src/rag/identifier_terms.py.
+        """
+        terms = (
+            list(identifiers) if identifiers is not None else identifier_terms(query)
+        )
+        if not terms:
+            return []
+        pool = settings.RAG_IDENTIFIER_POOL_SIZE
+        share = max(1, -(-pool // len(terms)))
+        search_vector = func.to_tsvector(
+            "simple", func.immutable_unaccent(ArticleChunk.chunk_text)
+        )
+        found: dict[Any, list[Any]] = {}
+        for term in terms:
+            term_query = func.plainto_tsquery("simple", func.immutable_unaccent(term))
+            statement = (
+                select(ArticleChunk)
+                .join(Article, Article.id == ArticleChunk.article_id)
+                .where(and_(*where_clauses, search_vector.op("@@")(term_query)))
+                .order_by(func.ts_rank_cd(search_vector, term_query).desc())
+                .limit(share)
+                .options(*RETRIEVAL_LOAD_OPTIONS)
+            )
+            # Sequential: one AsyncSession cannot run two statements at once.
+            rows = (await self.db.execute(statement)).scalars().all()
+            for rank, chunk in enumerate(rows):
+                entry = found.setdefault(chunk.id, [chunk, 0, rank])
+                entry[1] += 1
+                entry[2] = min(entry[2], rank)
+        # Named by more identifiers first (a register row that names the register and its module), then by
+        # how high it ranked for the identifier that found it.
+        ordered = sorted(found.values(), key=lambda entry: (-entry[1], entry[2]))
+        return [entry[0] for entry in ordered[:pool]]
+
     async def hybrid_search(
         self,
         query: str,
@@ -282,6 +333,7 @@ class ChunkRepository:
         limit: int = 5,
         filters: dict | None = None,
         use_graph: bool = False,
+        identifiers: Sequence[str] | None = None,
     ) -> list[ArticleChunk]:
         """
         Executes a hybrid search:
@@ -575,6 +627,19 @@ class ChunkRepository:
             keyword_result_count=len(keyword_results),
         )
 
+        # 2b. Identifier leg: only when the question names something (see _identifier_candidates).
+        identifier_results: list[ArticleChunk] = []
+        if settings.RAG_IDENTIFIER_LEG_ENABLED:
+            identifier_results = await self._identifier_candidates(
+                query, where_clauses, identifiers
+            )
+            if identifier_results:
+                logger.info(
+                    "Search identifier candidates loaded",
+                    query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                    identifier_result_count=len(identifier_results),
+                )
+
         # 3. Graph-augmented candidates: articles whose entity graph overlaps with
         # entities named in the query. Off by default (GRAPH_RETRIEVAL_ENABLED) pending
         # measurement against a real corpus, and never allowed to break retrieval if the
@@ -614,6 +679,7 @@ class ChunkRepository:
 
         add_rrf_scores(vector_results)
         add_rrf_scores(keyword_results)
+        add_rrf_scores(identifier_results)
         add_rrf_scores(graph_results)
 
         # Sort by score descending

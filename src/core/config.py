@@ -632,6 +632,23 @@ class Settings(BaseSettings):
     # default it gave MLQA-en +2.0 R@10 while MLQA-vi went 56.5 -> 56.0, for about
     # +400ms retrieval p50. Left at 48 until the encoder that justifies it is adopted.
     RAG_CANDIDATE_POOL_SIZE: int = 240
+    # What a question's identifier-shaped word (a register, a signal, a part: `PADOUTSET`, `i_dbg_req`) is worth in
+    # the reranker's score, at most, against 1 for an ordinary word. The reranker scored `matched terms / terms`
+    # with every term equal and re-sorted the whole fused pool by it, so `thanh ghi offset` (3 of 6 terms, in another
+    # module's prose) beat `PADOUTSET GPIO` (2 of 6, the register table), and the chunk holding the register fell
+    # under RAG_MIN_CONTEXT_SCORE. The weight a name actually gets shrinks with how common it is among the
+    # candidates (log(N/df)): `PADOUTSET` in 8 of 400 is worth nearly the maximum, `GPIO` in 150 of 400 not much
+    # more than a word. Measured on 21 chip-specification questions over the 22 real specifications, a chunk
+    # holding the answer reached the prompt for 6 with every term equal and for 18 with this weight and the
+    # leg below. 1 restores the unweighted score. A question with no identifier is unaffected.
+    RAG_IDENTIFIER_TERM_WEIGHT: float = 12.0
+    # A retrieval leg of chunks holding the question's identifier-shaped words, for RECALL: the keyword leg
+    # ORs every word and `ts_rank_cd` ignores rarity, so for "Thanh ghi PADOUTSET của GPIO nằm ở offset nào?"
+    # none of the 8 chunks naming PADOUTSET was among the 380 candidates the reranker scores, and a
+    # reranker cannot promote what it is not given. Skipped for a question with no identifier.
+    RAG_IDENTIFIER_LEG_ENABLED: bool = True
+    # Smaller than RAG_CANDIDATE_POOL_SIZE: a precise signal, not a recall net.
+    RAG_IDENTIFIER_POOL_SIZE: int = 48
     # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
     # the index scan: the permission and published-status predicates consume
     # candidates the index already committed to. pgvector's default is 40, i.e. below

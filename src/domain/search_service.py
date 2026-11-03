@@ -13,6 +13,7 @@ from src.repositories.chunk import ChunkRepository, attach_embeddings
 from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
+from src.rag.identifier_terms import identifier_terms
 from src.rag.reranker import (
     chunk_passage,
     normalize_query,
@@ -263,6 +264,10 @@ class SearchService:
         # the exact subject (for example, CTS) is not drowned out by generic
         # language. Keep the original query for diagnostics and gap logging.
         retrieval_query = normalize_query(query)
+        # Read from the ORIGINAL question: normalize_query lower-cases, and an identifier is told apart by
+        # its capitals (PADOUTSET, DSRAM, PWM), so from `retrieval_query` only the ones with a digit or an
+        # underscore (i2c, cfg_reg_lo) would still be recognised.
+        identifiers = identifier_terms(query)
         logger.info(
             "Search query normalized",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
@@ -390,6 +395,7 @@ class SearchService:
                     limit=pool_limit,
                     filters=effective_filters,
                     **graph_kwargs,
+                    identifiers=identifiers,
                 )
 
             # Concurrent, not sequential: each subject's embed+search is independent of
@@ -416,6 +422,7 @@ class SearchService:
                 limit=pool_limit,
                 filters=effective_filters,
                 **graph_kwargs,
+                identifiers=identifiers,
             )
 
         # Scored here, and again below only if an adaptive follow-up round (also part of
@@ -425,12 +432,14 @@ class SearchService:
         async def _rerank(pool: list) -> list[tuple]:
             if reranking_enabled:
                 result = rerank_chunks_with_scores(
-                    retrieval_query, pool, limit=pool_limit
+                    retrieval_query, pool, limit=pool_limit, identifiers=identifiers
                 )
             else:
                 # Prepared against the same pool the reranker would have used, so
                 # turning the reranker off changes the ordering and not the calibration.
-                prepared = prepare_query_for_chunks(retrieval_query, pool)
+                prepared = prepare_query_for_chunks(
+                    retrieval_query, pool, identifiers=identifiers
+                )
                 result = [
                     (chunk, retrieval_score(retrieval_query, chunk, prepared))
                     for chunk in pool[:pool_limit]
@@ -518,6 +527,7 @@ class SearchService:
                     limit=pool_limit,
                     filters=effective_filters,
                     **graph_kwargs,
+                    identifiers=identifiers,
                 )
                 merged = _merge_candidates(
                     candidates, followup_candidates, seen_chunk_ids

@@ -93,7 +93,9 @@ class _FakeChunkRepo:
         self.calls: list[str] = []
         self.db = None
 
-    async def hybrid_search(self, *, query, query_embedding, user, limit, filters):
+    async def hybrid_search(
+        self, *, query, query_embedding, user, limit, filters, identifiers=None
+    ):
         self.calls.append(query)
         return list(self.results_by_query.get(query, []))
 
@@ -107,7 +109,7 @@ def patched(monkeypatch):
     async def fake_embed_query(text):
         return [0.1, 0.2, 0.3]
 
-    def fake_rerank(query, chunks, limit=5):
+    def fake_rerank(query, chunks, limit=5, identifiers=None):
         ranked = sorted(chunks, key=lambda c: c.fake_score, reverse=True)
         return [(chunk, chunk.fake_score) for chunk in ranked[:limit]]
 
