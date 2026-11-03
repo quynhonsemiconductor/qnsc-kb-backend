@@ -68,3 +68,14 @@ def identifier_terms(query: str, limit: int = MAX_IDENTIFIER_TERMS) -> list[str]
             seen.add(key)
             found.append(key)
     return found[:limit]
+
+
+def usable_identifiers(query: str, normalized_query: str) -> list[str]:
+    """The names of `query` that survive the normalisation retrieval and scoring both work from.
+
+    `normalize_query` drops English stopwords, and several are real chip names in capitals: `CAN`, `ON`, `IN`, `DO`,
+    `AT`. The reranker can only weigh a term it still has, so a name it dropped must not get a retrieval query of
+    its own either ("CAN bus baud rate?" would otherwise pull in the passages that repeat the verb "can").
+    """
+    kept = set(normalized_query.split())
+    return [name for name in identifier_terms(query) if name in kept]

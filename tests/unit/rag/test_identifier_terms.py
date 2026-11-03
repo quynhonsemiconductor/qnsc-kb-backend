@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.rag.identifier_terms import MAX_IDENTIFIER_TERMS, identifier_terms
+from src.rag.identifier_terms import (
+    MAX_IDENTIFIER_TERMS,
+    identifier_terms,
+    usable_identifiers,
+)
+from src.rag.reranker import normalize_query
 
 
 @pytest.mark.parametrize(
@@ -68,3 +73,15 @@ def test_the_list_is_bounded():
         f"REG_{n}" for n in range(30)
     )
     assert len(identifier_terms(question)) == MAX_IDENTIFIER_TERMS
+
+
+def test_a_name_that_is_also_a_stopword_gets_no_retrieval_of_its_own():
+    """`CAN` is a chip name and an English stopword: the scorer drops it, so the leg must not query for it."""
+    question = "CAN bus baud rate?"
+    assert identifier_terms(question) == ["can"]
+    assert usable_identifiers(question, normalize_query(question)) == []
+
+
+def test_the_other_names_of_that_question_are_kept():
+    question = "How does the CAN controller use UART0 and I2C?"
+    assert usable_identifiers(question, normalize_query(question)) == ["uart0", "i2c"]

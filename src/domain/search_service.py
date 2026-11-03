@@ -13,7 +13,7 @@ from src.repositories.chunk import ChunkRepository, attach_embeddings
 from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
-from src.rag.identifier_terms import identifier_terms
+from src.rag.identifier_terms import usable_identifiers
 from src.rag.reranker import (
     chunk_passage,
     normalize_query,
@@ -267,7 +267,7 @@ class SearchService:
         # Read from the ORIGINAL question: normalize_query lower-cases, and an identifier is told apart by
         # its capitals (PADOUTSET, DSRAM, PWM), so from `retrieval_query` only the ones with a digit or an
         # underscore (i2c, cfg_reg_lo) would still be recognised.
-        identifiers = identifier_terms(query)
+        identifiers = usable_identifiers(query, retrieval_query)
         logger.info(
             "Search query normalized",
             query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
