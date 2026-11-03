@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
+    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
     with:
       blocking: true
       combine: true
@@ -38,7 +38,7 @@ jobs:
       contents: read
       security-events: write
       packages: read
-    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@7e8f6136a017c7b1f57a2e9a288dae3cd008950f # v1.31.1
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
     with:
       product: qnsc-kb
       scan_container: true # the only periodic container scan: builds+scans unchanged images too
