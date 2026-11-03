@@ -18,10 +18,42 @@ EXTENDED_HEADING = (
 # after `<<<EXTENDED>>` — uncited general knowledge, by definition — was folded into the
 # grounded section instead of being separated, stripped of markers, and put under its
 # own "not from the Knowledge Base" heading.
+#
+# `<<<END>>>` is not in the prompt: deepseek-flash closes its answer with it unasked, so it is
+# recognised and dropped like the other two (it opens and closes nothing).
 _SENTINEL_LINE_RE = re.compile(
-    r"^\s*<{2,4}\s*(GROUNDED|EXTENDED)\s*>{2,4}\s*$", re.IGNORECASE
+    r"^\s*<{2,4}\s*(GROUNDED|EXTENDED|END)\s*>{2,4}\s*$", re.IGNORECASE
 )
-_SENTINEL_WORDS = ("GROUNDED", "EXTENDED")
+_SENTINEL_WORDS = ("GROUNDED", "EXTENDED", "END")
+
+# The sentinel followed by the text on the SAME line: `<<<GROUNDED>>>Không tìm thấy...`. The prompt
+# asks for a line of its own and deepseek-flash writes it inline, so `_SENTINEL_LINE_RE` found no
+# boundary: the marker reached the reader and everything after `<<<EXTENDED>>>` (general knowledge,
+# uncited by definition) stayed inside "Answer from the Knowledge Base". 38 occurrences in 3 runs of 16
+# questions. Group 2 is what follows the marker on that line.
+_INLINE_SENTINEL_RE = re.compile(
+    r"^([ \t]*<{2,4}\s*(?:GROUNDED|EXTENDED|END)\s*>{2,4})(?!>)[ \t]*(\S.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _break_inline_sentinels(text: str) -> str:
+    """Put the text that follows a line-initial sentinel on its own line, outside code fences."""
+    lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            lines.append(line)
+            continue
+        match = None if in_fence else _INLINE_SENTINEL_RE.match(line)
+        if match:
+            lines.append(match.group(1).strip() + "\n")
+            lines.append(match.group(2))
+        else:
+            lines.append(line)
+    return "".join(lines)
 
 
 def could_begin_a_sentinel(probe: str) -> bool:
@@ -101,7 +133,7 @@ def split_answer_sections(raw: str) -> tuple[str, str]:
     Unmarked output is deliberately treated as grounded. Sentinel-like text in
     fenced code blocks is content, not a section boundary.
     """
-    text = raw or ""
+    text = _break_inline_sentinels(raw or "")
     markers = _sentinel_lines(text)
     grounded_marker = next((item for item in markers if item[0] == "GROUNDED"), None)
     if grounded_marker is None:
@@ -189,6 +221,25 @@ class IncrementalAnswerStream:
         self._line = ""
         self._released = 0
 
+    def _consume_inline_sentinel(self, out: list[str]) -> bool:
+        """`<<<GROUNDED>>>text` on one line: drop the marker and go on with the text as a new line."""
+        if self._released or self._in_fence:
+            return False
+        match = _INLINE_SENTINEL_RE.match(self._line)
+        if not match or self._line.endswith(">"):
+            return False
+        name = re.search(r"GROUNDED|EXTENDED|END", match.group(1), re.IGNORECASE)
+        if name and name.group(0).upper() == "EXTENDED":
+            self._stopped = True
+            self._line = ""
+            return True
+        self._line = match.group(2)
+        self._released = 0
+        if not self._holding():
+            out.append(self._line)
+            self._released = len(self._line)
+        return True
+
     def feed(self, chunk: str) -> str:
         """Consume raw provider text; return only what is safe to show now."""
         if self._stopped or not chunk:
@@ -201,6 +252,10 @@ class IncrementalAnswerStream:
                     break
             else:
                 self._line += character
+                if self._consume_inline_sentinel(out):
+                    if self._stopped:
+                        break
+                    continue
                 if not self._holding():
                     out.append(self._line[self._released :])
                     self._released = len(self._line)
