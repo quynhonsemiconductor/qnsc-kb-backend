@@ -213,6 +213,7 @@ class SearchService:
         # verdict for one that never reached the embedder.
         self.vector_search_degraded = False
         self.duplicates_collapsed = 0
+        self.chunk_repo.vector_ranks = {}
         if not query.strip():
             return []
         if not any(
@@ -432,13 +433,20 @@ class SearchService:
         async def _rerank(pool: list) -> list[tuple]:
             if reranking_enabled:
                 result = rerank_chunks_with_scores(
-                    retrieval_query, pool, limit=pool_limit, identifiers=identifiers
+                    retrieval_query,
+                    pool,
+                    limit=pool_limit,
+                    identifiers=identifiers,
+                    vector_ranks=self.chunk_repo.vector_ranks,
                 )
             else:
                 # Prepared against the same pool the reranker would have used, so
                 # turning the reranker off changes the ordering and not the calibration.
                 prepared = prepare_query_for_chunks(
-                    retrieval_query, pool, identifiers=identifiers
+                    retrieval_query,
+                    pool,
+                    identifiers=identifiers,
+                    vector_ranks=self.chunk_repo.vector_ranks,
                 )
                 result = [
                     (chunk, retrieval_score(retrieval_query, chunk, prepared))

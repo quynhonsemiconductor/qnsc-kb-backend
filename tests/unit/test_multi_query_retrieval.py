@@ -109,7 +109,7 @@ def patched(monkeypatch):
     async def fake_embed_query(text):
         return [0.1, 0.2, 0.3]
 
-    def fake_rerank(query, chunks, limit=5, identifiers=None):
+    def fake_rerank(query, chunks, limit=5, identifiers=None, vector_ranks=None):
         ranked = sorted(chunks, key=lambda c: c.fake_score, reverse=True)
         return [(chunk, chunk.fake_score) for chunk in ranked[:limit]]
 
@@ -339,3 +339,31 @@ def test_merge_candidates_mutates_seen_ids_in_place_across_calls():
     second = _merge_candidates(first, [SimpleNamespace(id=1), SimpleNamespace(id=2)], seen)
 
     assert [c.id for c in second] == [1, 2]
+
+
+def test_the_search_clears_the_previous_ranks_and_hands_the_current_ones_to_the_reranker(
+    patched, monkeypatch
+):
+    from src.domain import search_service as module
+
+    seen = {}
+
+    def capture(query, chunks, limit=5, identifiers=None, vector_ranks=None):
+        seen["ranks"] = dict(vector_ranks or {})
+        return [(chunk, chunk.fake_score) for chunk in chunks][:limit]
+
+    monkeypatch.setattr(module, "rerank_chunks_with_scores", capture)
+    article = _article()
+    query = "unsupervised learning methods"
+    chunk = _chunk(article, 0.9)
+    repo = _FakeChunkRepo({normalize_query(query): [chunk]})
+    repo.vector_ranks = {"left-over-from-the-last-search": 1}
+
+    async def hybrid_search(**kwargs):
+        repo.vector_ranks[chunk.id] = 3
+        return [chunk]
+
+    monkeypatch.setattr(repo, "hybrid_search", hybrid_search)
+    _search(repo, query)
+
+    assert seen["ranks"] == {chunk.id: 3}

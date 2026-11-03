@@ -649,6 +649,14 @@ class Settings(BaseSettings):
     RAG_IDENTIFIER_LEG_ENABLED: bool = True
     # Smaller than RAG_CANDIDATE_POOL_SIZE: a precise signal, not a recall net.
     RAG_IDENTIFIER_POOL_SIZE: int = 48
+    # A chunk in the first RAG_VECTOR_ASSIST_TOP_N of the VECTOR leg is scored at least RAG_VECTOR_ASSIST_SCORE.
+    # The reranker's score is lexical overlap with the question, and the context gate (RAG_MIN_CONTEXT_SCORE)
+    # reads it, so a question phrased in other words than the document is dropped even when the embedding found
+    # the right chunk: "how is the watchdog counter clocked and how long is one tick?" against "WDOG_COUNT
+    # increments every cycle of i_clk_wdt (50 ns)" scored 0.167 with the chunk at vector rank 2. Keep the score at
+    # or above RAG_MIN_CONTEXT_SCORE or it does nothing. 0 turns it off.
+    RAG_VECTOR_ASSIST_TOP_N: int = 5
+    RAG_VECTOR_ASSIST_SCORE: float = 0.4
     # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
     # the index scan: the permission and published-status predicates consume
     # candidates the index already committed to. pgvector's default is 40, i.e. below
