@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@810f707ebf426b13abedd4375b996d7e3348cb9b # v1.30.0
+    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@7e8f6136a017c7b1f57a2e9a288dae3cd008950f # v1.31.1
     with:
       product: qnsc-kb-backend
       profiles: python,dockerfile,workflows
