@@ -394,16 +394,79 @@ async def reconcile_published_indexes() -> None:
 # Set once `_bootstrap_database` has finished. Readiness answers 503 until then.
 database_bootstrapped = False
 _bootstrap_task: "asyncio.Task | None" = None
+# The inline-mode maintenance loops, started only once the bootstrap has succeeded.
+_inline_tasks: "list[asyncio.Task]" = []
 BOOTSTRAP_RETRY_MAX_SECONDS = 30
 
 
-async def _bootstrap_database() -> None:
-    """Verify and bootstrap runtime data, retrying with capped backoff until the database answers.
+def _is_transient_database_error(exc: BaseException) -> bool:
+    """True for "the database is not reachable (yet)", the only failures worth waiting out.
 
-    Migrations run in the deployment entrypoint; this only verifies/bootstraps runtime data. It never
-    gives up: a database that is still starting (crash recovery, a node reboot) is a reason to wait,
-    not to exit. A database that is up but wrong (RLS policies missing) keeps failing here, is
-    logged as an error from the third attempt on, and keeps readiness (and so the deploy gate) at 503.
+    Walks the cause chain, because SQLAlchemy wraps the driver's error. Anything else (a
+    misconfiguration such as AUTO_CREATE_SCHEMA, a missing RLS policy, a code bug) will fail the
+    same way on every attempt, so it is not retried.
+    """
+    import asyncpg  # type: ignore[import-untyped]
+    from sqlalchemy import exc as sa_exc
+
+    transient = (
+        OSError,  # ECONNREFUSED, DNS, network unreachable
+        TimeoutError,  # asyncio.TimeoutError is TimeoutError since 3.11
+        sa_exc.OperationalError,
+        sa_exc.InterfaceError,
+        asyncpg.PostgresConnectionError,  # 08xxx: connection lost or refused
+        asyncpg.CannotConnectNowError,  # 57P03: "the database system is starting up"
+        asyncpg.AdminShutdownError,  # 57P01: terminated by a restart or failover
+        asyncpg.TooManyConnectionsError,  # 53300
+    )
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, transient):
+            return True
+        if isinstance(current, sa_exc.DBAPIError) and current.connection_invalidated:
+            return True
+        current = (
+            getattr(current, "orig", None) or current.__cause__ or current.__context__
+        )
+    return False
+
+
+def _exit_process(code: int) -> None:
+    """End the process so Kubernetes restarts it and shows CrashLoopBackOff. Patched in tests."""
+    import os
+    import sys
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
+def _start_inline_loops() -> None:
+    """Inline-mode maintenance loops. They read and write the database, so they start only once
+    the bootstrap has succeeded: never during index reconciliation, never after a failed RLS check.
+    """
+    if settings.JOB_MODE.lower() == "celery":
+        return
+    _inline_tasks.extend(
+        [
+            asyncio.create_task(_inline_outbox_recovery_loop()),
+            asyncio.create_task(_inline_connector_sync_dispatch_loop()),
+            asyncio.create_task(_inline_webhook_maintenance_loop()),
+        ]
+    )
+
+
+async def _bootstrap_database() -> None:
+    """Verify and bootstrap runtime data, waiting out a database that is not reachable yet.
+
+    Migrations run in the deployment entrypoint; this only verifies/bootstraps runtime data.
+    Connectivity failures (refused, timeout, "starting up", 53300) are retried with capped backoff
+    and never give up: a database that is still starting (crash recovery, a node reboot) is a reason
+    to wait, not to exit. Any other failure is deterministic (AUTO_CREATE_SCHEMA set, RLS policies
+    missing): it is logged and the process exits non-zero, so the pod shows CrashLoopBackOff instead
+    of retrying silently. On success the inline maintenance loops start.
     """
     global database_bootstrapped
     attempt = 0
@@ -414,16 +477,21 @@ async def _bootstrap_database() -> None:
             await verify_rls_policies()
             await verify_embedding_column_width()
             await reconcile_published_indexes()
-            database_bootstrapped = True
-            logger.info("Database initialized successfully", attempt=attempt)
-            return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if not _is_transient_database_error(exc):
+                logger.exception(
+                    "Database initialization failed with a non-retryable error; exiting",
+                    error=str(exc),
+                    attempt=attempt,
+                )
+                _exit_process(1)
+                return
             delay = min(BOOTSTRAP_RETRY_MAX_SECONDS, 2**attempt)
             log = logger.error if attempt >= 3 else logger.warning
             log(
-                "Database initialization failed; retrying",
+                "Database not reachable during initialization; retrying",
                 error=str(exc),
                 attempt=attempt,
                 retry_in_seconds=delay,
@@ -436,6 +504,11 @@ async def _bootstrap_database() -> None:
             except Exception as dispose_exc:
                 logger.warning("Engine dispose failed", error=str(dispose_exc))
             await asyncio.sleep(delay)
+            continue
+        database_bootstrapped = True
+        logger.info("Database initialized successfully", attempt=attempt)
+        _start_inline_loops()
+        return
 
 
 async def initialize_resources() -> None:
@@ -661,17 +734,6 @@ async def lifespan(app: FastAPI):
     # Migrations run in the deployment entrypoint. The database bootstrap runs in the
     # background (`_bootstrap_database`); readiness answers 503 until it has finished.
     await initialize_resources()
-    recovery_task: asyncio.Task | None = None
-    connector_dispatch_task: asyncio.Task | None = None
-    webhook_maintenance_task: asyncio.Task | None = None
-    if settings.JOB_MODE.lower() != "celery":
-        recovery_task = asyncio.create_task(_inline_outbox_recovery_loop())
-        connector_dispatch_task = asyncio.create_task(
-            _inline_connector_sync_dispatch_loop()
-        )
-        webhook_maintenance_task = asyncio.create_task(
-            _inline_webhook_maintenance_loop()
-        )
     try:
         yield
     finally:
@@ -687,24 +749,13 @@ async def lifespan(app: FastAPI):
                 await _preload_task
             except asyncio.CancelledError:
                 pass
-        if recovery_task:
-            recovery_task.cancel()
+        for task in _inline_tasks:
+            task.cancel()
             try:
-                await recovery_task
+                await task
             except asyncio.CancelledError:
                 pass
-        if connector_dispatch_task:
-            connector_dispatch_task.cancel()
-            try:
-                await connector_dispatch_task
-            except asyncio.CancelledError:
-                pass
-        if webhook_maintenance_task:
-            webhook_maintenance_task.cancel()
-            try:
-                await webhook_maintenance_task
-            except asyncio.CancelledError:
-                pass
+        _inline_tasks.clear()
 
 
 app = FastAPI(

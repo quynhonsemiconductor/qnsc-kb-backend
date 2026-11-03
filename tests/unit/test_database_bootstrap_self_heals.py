@@ -70,21 +70,26 @@ def test_liveness_answers_while_the_database_is_down(database):
     assert asyncio.run(main.health_live()) == {"status": "alive"}
 
 
-def test_bootstrap_retries_with_capped_backoff_until_the_database_answers(monkeypatch):
+@pytest.fixture
+def bootstrap(monkeypatch):
+    """`_bootstrap_database` with its steps, sleep, dispose, loop start and process exit stubbed."""
     monkeypatch.setattr(main, "database_bootstrapped", False)
-    calls = {"n": 0}
-
-    async def init_db():
-        calls["n"] += 1
-        if calls["n"] <= 6:
-            raise ConnectionRefusedError("the database system is starting up")
-
-    sleeps: list[float] = []
+    state = {
+        "sleeps": [],
+        "loops_started_after_attempt": None,
+        "exit": None,
+        "attempts": 0,
+    }
 
     async def sleep(seconds: float) -> None:
-        sleeps.append(seconds)
+        state["sleeps"].append(seconds)
 
-    monkeypatch.setattr(main, "init_db", init_db)
+    def start_loops() -> None:
+        state["loops_started_after_attempt"] = state["attempts"]
+
+    def exit_process(code: int) -> None:
+        state["exit"] = code
+
     for name in (
         "verify_rls_policies",
         "verify_embedding_column_width",
@@ -98,12 +103,90 @@ def test_bootstrap_retries_with_capped_backoff_until_the_database_answers(monkey
         MagicMock(dispose=AsyncMock(side_effect=OSError("socket closed"))),
     )
     monkeypatch.setattr(main.asyncio, "sleep", sleep)
+    monkeypatch.setattr(main, "_start_inline_loops", start_loops)
+    monkeypatch.setattr(main, "_exit_process", exit_process)
+
+    def init_db_failing(times: int, error: Exception):
+        async def init_db():
+            state["attempts"] += 1
+            if state["attempts"] <= times:
+                raise error
+
+        monkeypatch.setattr(main, "init_db", init_db)
+
+    state["init_db_failing"] = init_db_failing
+    return state
+
+
+def test_bootstrap_retries_with_capped_backoff_until_the_database_answers(bootstrap):
+    bootstrap["init_db_failing"](6, ConnectionRefusedError("connect ECONNREFUSED"))
 
     asyncio.run(main._bootstrap_database())
 
     assert main.database_bootstrapped is True
-    assert calls["n"] == 7
-    assert sleeps == [2, 4, 8, 16, 30, 30]  # doubling, capped, never giving up
+    assert bootstrap["attempts"] == 7
+    assert bootstrap["sleeps"] == [
+        2,
+        4,
+        8,
+        16,
+        30,
+        30,
+    ]  # doubling, capped, never giving up
+    assert bootstrap["exit"] is None
+
+
+def test_inline_loops_start_only_after_the_bootstrap_succeeds(bootstrap, monkeypatch):
+    """They read and write the database: not while it is unreachable, not during reconciliation."""
+    bootstrap["init_db_failing"](3, ConnectionRefusedError("connect ECONNREFUSED"))
+    reconciled = {"loops_started_before": None}
+
+    async def reconcile():
+        reconciled["loops_started_before"] = (
+            bootstrap["loops_started_after_attempt"] is not None
+        )
+
+    monkeypatch.setattr(main, "reconcile_published_indexes", reconcile)
+
+    asyncio.run(main._bootstrap_database())
+
+    assert reconciled["loops_started_before"] is False
+    assert bootstrap["loops_started_after_attempt"] == 4  # the first successful attempt
+
+
+def test_a_deterministic_error_is_not_retried_it_exits_for_crashloopbackoff(bootstrap):
+    """AUTO_CREATE_SCHEMA set, a missing RLS policy: retrying would fail the same way forever."""
+    bootstrap["init_db_failing"](
+        1, RuntimeError("AUTO_CREATE_SCHEMA is disabled; run Alembic")
+    )
+
+    asyncio.run(main._bootstrap_database())
+
+    assert bootstrap["exit"] == 1
+    assert bootstrap["sleeps"] == []
+    assert bootstrap["loops_started_after_attempt"] is None
+    assert main.database_bootstrapped is False
+
+
+def test_connectivity_errors_are_transient_through_sqlalchemy_wrapping():
+    import asyncpg
+    from sqlalchemy import exc as sa_exc
+
+    starting_up = asyncpg.CannotConnectNowError("the database system is starting up")
+    wrapped = sa_exc.DBAPIError("SELECT 1", {}, starting_up)
+    assert main._is_transient_database_error(wrapped)
+    assert main._is_transient_database_error(
+        asyncpg.TooManyConnectionsError("too many clients")
+    )
+    assert main._is_transient_database_error(TimeoutError())
+    assert main._is_transient_database_error(ConnectionRefusedError())
+
+    assert not main._is_transient_database_error(
+        RuntimeError("AUTO_CREATE_SCHEMA is disabled")
+    )
+    assert not main._is_transient_database_error(
+        sa_exc.ProgrammingError("SELECT 1", {}, Exception("relation does not exist"))
+    )
 
 
 def test_startup_does_not_wait_for_the_database(monkeypatch):
