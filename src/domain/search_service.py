@@ -179,6 +179,11 @@ async def get_text_embeddings(texts: list[str]) -> list[list[float]] | None:
 
 
 class SearchService:
+    #: False for a search nobody is waiting on a screen for (the duplicate check of a lesson): it does not need
+    #: the cross-encoder's order, and its few seconds (plus its turn in the queue) are spent on a request that has
+    #: other model calls to make.
+    use_cross_encoder: bool = True
+
     def __init__(
         self,
         chunk_repo: ChunkRepository,
@@ -386,6 +391,7 @@ class SearchService:
         # to need the extra ranking precision, not on every ordinary factual lookup.
         cross_encoder_enabled = (
             reranking_enabled
+            and self.use_cross_encoder
             and settings.CROSS_ENCODER_RERANKER_ENABLED
             and (
                 not settings.CROSS_ENCODER_ONLY_DEEP_QUERIES

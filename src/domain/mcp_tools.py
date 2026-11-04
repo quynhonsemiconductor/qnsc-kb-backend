@@ -406,6 +406,12 @@ def _conversation(args: dict[str, Any]) -> Call:
     return Call("GET", f"/ai/conversations/{_id(args, 'conversation_id')}/messages")
 
 
+def _my_drafts(args: dict[str, Any]) -> Call:
+    return Call(
+        "GET", "/knowledge/my-drafts", params={"limit": _int(args, "limit", 20, 1, 50)}
+    )
+
+
 LESSON_TAG = "session-lesson"
 
 
@@ -606,6 +612,17 @@ TOOLS: tuple[Tool, ...] = (
         shape_args=_shape_conversation,
     ),
     Tool(
+        "list_my_drafts",
+        "List what you submitted that is still waiting for review",
+        "Lessons and articles this user submitted that are not published yet: waiting for a "
+        "reviewer, or rejected with the reviewer's note. Check it before record_lesson, or when "
+        "asked 'did we record that?': a saved lesson is not found by search_knowledge until a "
+        "reviewer approves it. Only the user's own submissions are listed.",
+        {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+        (),
+        _my_drafts,
+    ),
+    Tool(
         "list_articles",
         "List articles",
         "Browse articles the user can see (newest first), with optional filters. Use it to "
@@ -750,8 +767,9 @@ TOOLS: tuple[Tool, ...] = (
         "lesson so it makes sense without this conversation. The server first checks what is "
         "already stored: the result says decision 'add' (submitted for review like any "
         "article, tagged 'session-lesson'), 'update' (an existing article covers the subject; "
-        "call update_article with the article_id returned) or 'skip' (already known, nothing "
-        "was saved). Requires a token with write scope.",
+        "call update_article with the article_id returned) or 'skip' (already known, or "
+        "you already submitted it and it awaits review (list_my_drafts); nothing was saved). "
+        "Requires a token with write scope.",
         {
             "title": {"type": "string", "maxLength": 255},
             "lesson": {

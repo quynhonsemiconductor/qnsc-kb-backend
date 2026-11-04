@@ -1827,7 +1827,10 @@ async def create_article(
     restructure_result = await restructure_document(
         article_in.title,
         article_in.body_md,
-        enabled=restructuring_enabled,
+        # A session lesson is a few sentences in a fixed shape (src/domain/lessons.py): restructuring it
+        # added a model call of about five seconds to saving it and nothing a reviewer reads.
+        enabled=restructuring_enabled
+        and not any(tag.strip() == "session-lesson" for tag in article_in.tags),
         background=False,
     )
     draft_body = restructure_result.body_md or article_in.body_md

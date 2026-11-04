@@ -699,6 +699,50 @@ async def _announce_decision(item: ConflictRecord) -> None:
             )
 
 
+@router.get("/my-drafts")
+async def my_drafts(
+    limit: int = Query(20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """What the caller has submitted that has not been published: waiting for a reviewer, or rejected.
+
+    Only the caller's own submissions, never a colleague's. Without this a lesson an assistant saved yesterday is
+    invisible to it today (it is not an article until a reviewer approves it), so it either says nothing was ever
+    recorded or records the same thing again.
+    """
+    rows = (
+        (
+            await db.execute(
+                select(PendingDraft)
+                .where(
+                    PendingDraft.created_by == current_user.id,
+                    PendingDraft.company_domain == current_user.company_domain,
+                    PendingDraft.status.in_(("draft", "pending", "rejected")),
+                )
+                .order_by(PendingDraft.created_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(row.id),
+            "title": row.title,
+            "status": "waiting_for_review" if row.status != "rejected" else "rejected",
+            "dept": row.dept,
+            "has_approver": row.assigned_approver_id is not None,
+            "review_note": row.review_note if row.status == "rejected" else None,
+            "tags": row.tags or [],
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "excerpt": (row.summary or row.restructured_body_md or "")[:400],
+        }
+        for row in rows
+    ]
+
+
 class LessonRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     lesson: str = Field(min_length=1, max_length=20_000)
@@ -729,16 +773,22 @@ async def submit_lesson(
     body = lesson_body(request.lesson, request.context)
     decision = await decide_lesson(db, current_user, request.title, body)
     if decision.action != "add":
-        hint = (
-            f"Call update_article with article_id {decision.article_id} to add this."
-            if decision.action == "update"
-            else "Nothing was saved: the knowledge base already says this."
-        )
+        if decision.pending:
+            hint = (
+                "Nothing was saved: you already submitted this and it is waiting for review "
+                "(list_my_drafts). If it needs correcting, tell the reviewer, or save the "
+                "correction once it is published."
+            )
+        elif decision.action == "update":
+            hint = f"Call update_article with article_id {decision.article_id} to add this."
+        else:
+            hint = "Nothing was saved: the knowledge base already says this."
         return {
             "decision": decision.action,
             "article_id": decision.article_id,
             "title": decision.title,
             "reason": decision.reason,
+            "pending": decision.pending,
             "next": hint,
         }
     tags = [t for t in request.tags if t != LESSON_TAG] + [LESSON_TAG]
