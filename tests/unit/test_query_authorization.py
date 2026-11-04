@@ -55,7 +55,9 @@ def test_historical_citation_hydration_rebuilds_metadata_from_authorized_rows():
         heading=None,
         page_number=None,
         parent_chunk=parent,
-        article=SimpleNamespace(id=article_id, title="Authorized Article"),
+        article=SimpleNamespace(
+            id=article_id, title="Authorized Article", type="LESSON"
+        ),
     )
     db = _DB([chunk])
 
@@ -76,6 +78,9 @@ def test_historical_citation_hydration_rebuilds_metadata_from_authorized_rows():
     )
 
     assert hydrated[0]["title"] == "Authorized Article"
+    assert (
+        hydrated[0]["article_type"] == "LESSON"
+    ), "a stored answer still says it relied on a lesson"
     assert hydrated[0]["excerpt"] == "authorized parent passage"
     assert hydrated[0]["source_url"] == f"/api/v1/articles/{article_id}/source?page=4"
     assert hydrated[0]["source_ref"] == "Authorized Article - Authorized heading"
@@ -478,9 +483,7 @@ def test_department_member_queries_are_company_scoped():
     db = _DB()
     repo = UserRepository(db)
 
-    asyncio.run(
-        repo.get_departments_by_ids([uuid.uuid4()], company_domain="acme.test")
-    )
+    asyncio.run(repo.get_departments_by_ids([uuid.uuid4()], company_domain="acme.test"))
     assert "departments.company_domain" in _compiled(db.statement).lower()
 
     asyncio.run(repo.get_by_ids([uuid.uuid4()], company_domain="acme.test"))

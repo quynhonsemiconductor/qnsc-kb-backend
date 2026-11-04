@@ -2065,6 +2065,8 @@ class AIService:
                         "parent_chunk_id": context_row.get("parent_chunk_id"),
                         "article_id": context_row["article_id"],
                         "title": context_row["title"],
+                        # LESSON marks what an assistant saved without review, so the screen can say so.
+                        "article_type": context_row.get("type"),
                         "section_ref": context_row["section_ref"],
                         "heading": context_row.get("heading"),
                         "source_ref": f"{context_row['title']} - {context_row.get('heading') or context_row['section_ref'] or 'General'}",
