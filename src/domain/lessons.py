@@ -26,8 +26,11 @@ from typing import Any
 
 import structlog
 
-from src.domain.similarity import find_similar_documents
+from sqlalchemy import select
+
+from src.domain.similarity import find_similar_documents, rank_texts
 from src.models.article import Article
+from src.models.governance import PendingDraft
 
 logger = structlog.get_logger()
 
@@ -41,6 +44,9 @@ PASSAGES_PER_ARTICLE = 3
 RETRIEVAL_TIMEOUT_SECONDS = 8.0
 #: Without a model, a match at least this similar counts as the same lesson.
 FALLBACK_UPDATE_SCORE = 0.6
+#: The author's own submissions still waiting for review that a new lesson is compared with (newest first).
+OWN_DRAFT_STATUSES = ("draft", "pending")
+OWN_DRAFT_LIMIT = 30
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.DOTALL)
 
 _SYSTEM_PROMPT = """You keep a team's knowledge base free of duplicates. A NEW LESSON was
@@ -66,6 +72,8 @@ class _Candidate:
     body: str = ""
     #: Found by text similarity (so `score` is on that scale), not by retrieval.
     lexical: bool = False
+    #: Not an article: the author's own submission, still waiting for review.
+    pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +82,8 @@ class LessonDecision:
     article_id: str | None = None
     title: str | None = None
     reason: str = ""
+    #: `article_id` is the author's own earlier submission, still waiting for review (it cannot be updated).
+    pending: bool = False
 
 
 def lesson_body(lesson: str, context: str | None) -> str:
@@ -133,7 +143,9 @@ async def _ask_model(
             ],
             timeout=settings.CONFLICT_LLM_TIMEOUT_SECONDS,
             thinking=False,
-            max_tokens=300,
+            # A reasoning model spends part of this on thinking: 300 came back empty about one call in three and
+            # the retry doubled the time a lesson took to save.
+            max_tokens=800,
         )
     except Exception as exc:
         logger.warning("Lesson decision call failed", error=str(exc))
@@ -155,6 +167,8 @@ async def _retrieved_candidates(db: Any, user: Any, query: str) -> list[_Candida
     from src.repositories.governance import GovernanceRepository
 
     class _LessonSearch(SearchService):
+        use_cross_encoder = False
+
         async def _record_gap(self, user: Any, query: str) -> None:
             return None
 
@@ -190,10 +204,66 @@ async def _retrieved_candidates(db: Any, user: Any, query: str) -> list[_Candida
     return list(by_article.values())[:MAX_CANDIDATES]
 
 
+async def _own_pending_candidates(db: Any, user: Any, content: str) -> list[_Candidate]:
+    """The author's own submissions still waiting for review that say something like `content`.
+
+    Neither retrieval nor the article text comparison can see these (a draft is not an article until a reviewer
+    approves it), so an assistant that saved a lesson one day and saved it again, reworded, the next day made a second
+    draft for the reviewer. Only the AUTHOR's drafts are compared: a draft is not visible to colleagues before it is
+    approved, and naming one to somebody else would leak it.
+    """
+    try:
+        rows = (
+            (
+                await db.execute(
+                    select(PendingDraft)
+                    .where(
+                        PendingDraft.created_by == user.id,
+                        PendingDraft.status.in_(OWN_DRAFT_STATUSES),
+                    )
+                    .order_by(PendingDraft.created_at.desc())
+                    .limit(OWN_DRAFT_LIMIT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        texts = {
+            str(row.id): (row.summary or row.restructured_body_md or "") for row in rows
+        }
+        matches = await rank_texts(
+            content,
+            [
+                (str(row.id), row.title, "pending", texts[str(row.id)])
+                for row in rows
+                if texts[str(row.id)]
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - a lesson is saved either way
+        logger.warning("Own pending draft check failed", error=str(exc))
+        return []
+    return [
+        _Candidate(
+            article_id=str(match["article_id"]),
+            title=match.get("title") or "",
+            score=float(match.get("score") or 0),
+            body=texts[str(match["article_id"])][:EXCERPT_CHARS],
+            lexical=True,
+            pending=True,
+        )
+        for match in matches
+    ]
+
+
 async def decide_lesson(db: Any, user: Any, title: str, body: str) -> LessonDecision:
     """Never raises: any failure is an add, which is what happened before this existed."""
     content = f"{title}\n{body}"
     candidates = await _retrieved_candidates(db, user, content)
+    # Drafts the author already has waiting come before articles found only by text overlap.
+    for pending in await _own_pending_candidates(db, user, content):
+        if len(candidates) >= MAX_CANDIDATES:
+            break
+        candidates.append(pending)
     try:
         matches = await find_similar_documents(db, user, content)
     except Exception as exc:
@@ -230,15 +300,22 @@ async def decide_lesson(db: Any, user: Any, title: str, body: str) -> LessonDeci
         # retrieval score says "related", not "the same".
         top = next((c for c in candidates if c.lexical), None)
         if top is not None and top.score >= FALLBACK_UPDATE_SCORE:
-            return LessonDecision(
-                "update",
-                top.article_id,
-                top.title,
-                "A very similar article already exists.",
-            )
+            return _decision("update", top, "A very similar article already exists.")
         return LessonDecision("add")
     action, target, reason = verdict
     if action == "add" or target is None:
         return LessonDecision("add", reason=reason)
-    chosen = candidates[target - 1]
+    return _decision(action, candidates[target - 1], reason)
+
+
+def _decision(action: str, chosen: _Candidate, reason: str) -> LessonDecision:
+    """An update or a skip against `chosen`. A pending draft cannot be updated, so it is always a skip."""
+    if chosen.pending:
+        return LessonDecision(
+            "skip",
+            chosen.article_id,
+            chosen.title,
+            reason or "You already submitted this and it is waiting for review.",
+            pending=True,
+        )
     return LessonDecision(action, chosen.article_id, chosen.title, reason)

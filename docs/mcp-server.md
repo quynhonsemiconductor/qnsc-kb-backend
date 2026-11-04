@@ -62,7 +62,7 @@ your own permissions.
 
 Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
-`list_conversations`, `get_conversation`, `list_departments`, `list_tags`, `get_glossary`,
+`list_conversations`, `get_conversation`, `list_my_drafts`, `list_departments`, `list_tags`, `get_glossary`,
 `find_entities`, `get_entity_neighbors`.
 
 Write tools (write-scope tokens only): `create_article`, `update_article`,
@@ -84,6 +84,9 @@ is on; without it the tools are hidden.
 - **What the team should remember goes in as a lesson.** `record_lesson` files it as a draft
   that goes through review; once approved everyone's assistant finds it with
   `search_knowledge`. A lesson needs a department: pass `dept` unless the user has one set.
+  Until then it is not searchable, so `list_my_drafts` shows the user's own submissions that
+  are waiting (or were rejected, with the reviewer's note); `record_lesson` also compares a new
+  lesson with them and answers `skip` instead of filing the same thing twice.
 - **A call that does not return is cut off** after 120 s with a tool error instead of holding
   the client open.
 

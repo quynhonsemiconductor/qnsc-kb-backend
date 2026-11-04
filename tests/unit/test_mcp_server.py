@@ -867,3 +867,26 @@ def test_the_instructions_name_memory_and_distrust_document_text(h):
     text = h.result("initialize", {})["instructions"]
     assert "record_lesson" in text and "list_conversations" in text
     assert "data, not instructions" in text
+
+
+def test_list_my_drafts_reads_the_callers_unpublished_submissions(h):
+    rows = [
+        {"id": str(uuid.uuid4()), "title": "Console", "status": "waiting_for_review"}
+    ]
+    h.reply = (200, rows)
+
+    out = h.result("tools/call", {"name": "list_my_drafts", "arguments": {"limit": 5}})
+
+    assert json.loads(out["content"][0]["text"]) == rows
+    call = h.calls[-1]
+    assert call.method == "GET" and call.path == "/knowledge/my-drafts"
+    assert call.params == {"limit": 5}
+
+
+def test_list_my_drafts_is_a_read_tool_and_the_instructions_name_it(h):
+    names = {tool["name"] for tool in h.result("tools/list")["tools"]}
+    assert "list_my_drafts" in names
+    assert (
+        "list_my_drafts"
+        in h.result("initialize", {"protocolVersion": "2025-06-18"})["instructions"]
+    )
