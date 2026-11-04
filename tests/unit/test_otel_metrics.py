@@ -53,6 +53,36 @@ def test_signal_endpoint_does_not_double_a_full_signal_url(monkeypatch):
     assert otel.signal_endpoint("metrics") == "http://alloy:4318/v1/metrics"
 
 
+def test_signal_endpoint_resolves_every_signal_from_one_full_url(monkeypatch):
+    """A caller may configure any one full signal URL; the rest still resolve."""
+    monkeypatch.setattr(
+        settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://alloy:4318/v1/traces"
+    )
+    assert otel.signal_endpoint("metrics") == "http://alloy:4318/v1/metrics"
+    assert otel.signal_endpoint("traces") == "http://alloy:4318/v1/traces"
+    assert otel.signal_endpoint("logs") == "http://alloy:4318/v1/logs"
+
+
+def test_histogram_uses_the_otel_js_default_boundaries():
+    assert otel_metrics.HTTP_DURATION_BOUNDARIES_MS == (
+        0,
+        5,
+        10,
+        25,
+        50,
+        75,
+        100,
+        250,
+        500,
+        750,
+        1000,
+        2500,
+        5000,
+        7500,
+        10000,
+    )
+
+
 def test_deployment_environment_prefers_deployment_env(monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_ENV", "dev")
     monkeypatch.setenv(
@@ -181,7 +211,18 @@ def test_route_template_is_kept_verbatim():
 
 @pytest.mark.parametrize(
     ("code", "expected"),
-    [(200, "2xx"), (302, "3xx"), (404, "4xx"), (500, "5xx")],
+    [
+        (100, "other"),
+        (199, "other"),
+        (200, "2xx"),
+        (299, "2xx"),
+        (302, "3xx"),
+        (404, "4xx"),
+        (500, "5xx"),
+        (599, "5xx"),
+        (600, "other"),
+        (700, "other"),
+    ],
 )
-def test_status_class_buckets_match_rova(code, expected):
+def test_status_class_buckets_and_the_other_fallthrough(code, expected):
     assert otel_metrics.status_class(code) == expected

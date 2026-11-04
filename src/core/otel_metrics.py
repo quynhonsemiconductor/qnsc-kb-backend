@@ -24,8 +24,10 @@ which is also what makes the same 5xx alert rule shape apply to kb:
     http.server.requests  -> http_server_requests_total
     http.server.errors    -> http_server_errors_total      (status >= 400)
 
-The histogram uses the same bucket boundaries as opshub, in ms, so a p99 is a
-number rather than a clamp at 10 s on AI routes that legitimately run long.
+The histogram uses the OpenTelemetry JS default boundaries (the set rova's SDK
+emits with), in ms, so a p99 lines up with the Node products' dashboards. Long AI
+routes read their quantile route-filtered; extra 30/45/60 s rungs would cost
+buckets on every route to describe one.
 
 GATING: nothing is exported unless OTEL_EXPORTER_OTLP_ENDPOINT is set and
 OTEL_ENABLED is not explicitly false. Without that, both configure_metrics() and
@@ -60,9 +62,12 @@ HTTP_SERVER_DURATION_METRIC = "http.server.duration"
 HTTP_SERVER_REQUESTS_METRIC = "http.server.requests"
 HTTP_SERVER_ERRORS_METRIC = "http.server.errors"
 
-#: Histogram boundaries in milliseconds, opshub's set: the OTel JS defaults plus
-#: the rungs that cover the real timeout budgets. Above 60 s the request is not a
-#: served request any more, so the overflow bucket describes nothing.
+#: Histogram boundaries in milliseconds — the OpenTelemetry JS defaults, verbatim
+#: (rova/opshub's SDK uses the same set unless a product overrides it). Chosen for
+#: comparability with the Node products' p50/p95/p99, and because it is the
+#: cheapest set that still separates the rungs a normal request lives in. No
+#: 45s/60s rungs: kb's long AI calls are better read from the route-filtered
+#: quantile than from extra buckets on every route.
 HTTP_DURATION_BOUNDARIES_MS = (
     0,
     5,
@@ -79,10 +84,6 @@ HTTP_DURATION_BOUNDARIES_MS = (
     5000,
     7500,
     10000,
-    15000,
-    30000,
-    45000,
-    60000,
 )
 
 #: One export per minute (rova/opshub use the same interval): the Grafana Cloud
@@ -159,14 +160,23 @@ def configure_metrics(metric_reader: MetricReader | None = None) -> bool:
 
 
 def status_class(status_code: int) -> str:
-    """Bucket a status code the way rova's HttpMetrics does."""
-    if status_code >= 500:
-        return "5xx"
-    if status_code >= 400:
-        return "4xx"
-    if status_code >= 300:
+    """Bucket a status code. The four classes rova uses, plus ``other``.
+
+    rova's ``HttpMetrics`` folds anything below 200 into ``2xx`` and anything at
+    or above 600 into ``5xx``; neither is a status a compliant server sends, and
+    calling an informational (1xx) response a success or a 7xx a server error
+    would misreport it in the 5xx alert. A distinct bounded value keeps the class
+    total without lying — and 1xx/600+ stay well inside the cardinality guard.
+    """
+    if 200 <= status_code < 300:
+        return "2xx"
+    if 300 <= status_code < 400:
         return "3xx"
-    return "2xx"
+    if 400 <= status_code < 500:
+        return "4xx"
+    if 500 <= status_code < 600:
+        return "5xx"
+    return "other"
 
 
 def method_label(method: str) -> str:
@@ -201,6 +211,21 @@ def record_http_request(
             _errors.add(1, labels)
     except Exception:  # Telemetry must never break a request.
         logger.debug("Could not record the HTTP metric", exc_info=True)
+
+
+def shutdown_metrics() -> None:
+    """Flush the last interval and stop the exporter reader.
+
+    Called from the lifespan's finally block. Without it the final 60-second
+    window of metrics is lost on every deploy/scale-in.
+    """
+    provider = _provider
+    if provider is None:
+        return
+    try:
+        provider.force_flush()
+    finally:
+        provider.shutdown()
 
 
 def reset_metrics_for_testing() -> None:

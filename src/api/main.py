@@ -47,8 +47,12 @@ from src.models import User
 from src.models.chunk import ArticleChunk
 from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
-from src.core.otel_metrics import configure_metrics, record_http_request
-from src.core.tracing import configure_tracing, get_tracer, trace
+from src.core.otel_metrics import (
+    configure_metrics,
+    record_http_request,
+    shutdown_metrics,
+)
+from src.core.tracing import configure_tracing, get_tracer, shutdown_tracing, trace
 from src.core.warmup import FAILED, READY, TIMEOUT, embedding_warmup
 from src.rag import cross_encoder
 from src.lib import log_redaction
@@ -318,6 +322,13 @@ async def record_request_metric(
     # this family has the route/method/status_class shape rova and opshub emit and
     # the Adaptive Metrics `http_server_` rule keeps. Outside the `try` below on
     # purpose — a DB outage must not also silence the request metrics.
+    # STREAMING (`POST /api/v1/ai/ask/stream`): the middleware sees `call_next`
+    # return the StreamingResponse AS SOON AS THE HEADERS EXIST, so the duration
+    # recorded here is time-to-first-byte, not the token stream's lifetime. That is
+    # deliberate: wrapping the body iterator to time the full stream would record
+    # minutes-long durations on that one route and dominate its p95 — the same
+    # reason rova's interceptor excludes SSE from RED. Read stream progress from
+    # access logs or the route's own events instead; no body wrapping (YAGNI).
     record_http_request(path, method, status_code, duration_ms)
     error_type: str | None = None
     error_detail: str | None = None
@@ -559,10 +570,17 @@ async def _bootstrap_database() -> None:
 async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
-    configure_tracing()
-    # Same endpoint, separate OTLP signal. Both are no-ops without an endpoint, so
-    # a local run and the unit suite configure neither.
-    configure_metrics()
+    # Telemetry is best-effort: a bad endpoint, a broken certificate or an SDK
+    # that cannot start must cost the metrics, never the process. Without this
+    # wrapper an exporter misconfiguration turned into a CrashLoopBackOff on a
+    # pod whose actual job (serving the API) was fine.
+    try:
+        configure_tracing()
+        # Same endpoint, separate OTLP signal. Both are no-ops without an endpoint,
+        # so a local run and the unit suite configure neither.
+        configure_metrics()
+    except Exception:
+        logger.exception("OpenTelemetry setup failed; serving without telemetry")
     # Structured JSON logs to stdout (the contract with the log aggregation pipeline).
     from src.lib.observability import setup_logging
 
@@ -807,6 +825,18 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         _inline_tasks.clear()
+        # Telemetry LAST, after the workloads stopped: a forced flush before the
+        # last spans and the last 60-second metric window exist loses them on every
+        # deploy. Best-effort — a failing exporter must not turn a clean shutdown
+        # into a failed one.
+        for shutdown_signal, name in (
+            (shutdown_metrics, "metrics"),
+            (shutdown_tracing, "traces"),
+        ):
+            try:
+                shutdown_signal()
+            except Exception:
+                logger.exception("OpenTelemetry shutdown failed", signal=name)
         if bootstrap_error is not None:
             # Raised last, after every other task is cleaned up. A bootstrap that died with an
             # error must not vanish unobserved at shutdown. In production a non-retryable error

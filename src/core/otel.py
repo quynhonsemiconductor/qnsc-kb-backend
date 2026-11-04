@@ -15,6 +15,7 @@ loses the environment split entirely.
 from __future__ import annotations
 
 import os
+import re
 
 from src.core.config import settings
 
@@ -50,10 +51,11 @@ def signal_endpoint(signal: str) -> str | None:
     if base is None:
         return None
     trimmed = base.rstrip("/")
-    # Tolerate a caller that already supplied the full signal URL (a local run
-    # following the OTLP spec's *_ENDPOINT form) instead of doubling the path.
-    if trimmed.endswith(f"/v1/{signal}"):
-        return trimmed
+    # Tolerate a caller that supplied a signal URL already — the full form of any
+    # signal, not just the one being built. A local run may set the trace URL and
+    # expect metrics to resolve from it; appending blindly would give
+    # `/v1/traces/v1/metrics`, which the receiver answers with 404.
+    trimmed = re.sub(r"/v1/(?:traces|metrics|logs)$", "", trimmed)
     return f"{trimmed}/v1/{signal}"
 
 
