@@ -104,7 +104,8 @@ def diff_versions(
     metadata = _metadata_changes(before, after)
     result: dict[str, Any] = {"metadata_changes": metadata}
 
-    if max(len(old_lines), len(new_lines)) > (max_lines or MAX_COMPARED_LINES):
+    ceiling = MAX_COMPARED_LINES if max_lines is None else max_lines
+    if max(len(old_lines), len(new_lines)) > ceiling:
         result.update(
             body={"lines_before": len(old_lines), "lines_after": len(new_lines)},
             hunks=[],

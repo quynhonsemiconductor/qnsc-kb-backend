@@ -373,7 +373,7 @@ def test_diff_versions_takes_a_lower_ceiling_for_the_caller_that_needs_one():
 
 @pytest.fixture
 def recent_repo(monkeypatch):
-    holder = SimpleNamespace(asked=[], found=[])
+    holder = SimpleNamespace(asked=[], found=[], more=False)
 
     class FakeRepo:
         def __init__(self, db):
@@ -385,7 +385,7 @@ def recent_repo(monkeypatch):
                     user=user, since=since, dept=dept, scope=scope, limit=limit
                 )
             )
-            return holder.found
+            return holder.found, holder.more
 
     monkeypatch.setattr(articles, "ArticleRepository", FakeRepo)
     return holder
@@ -408,9 +408,9 @@ def _recent(**kwargs):
 
 
 def test_the_feed_endpoint_looks_back_the_days_asked_in_naive_utc(recent_repo):
-    from datetime import UTC, timedelta
+    from datetime import timedelta, timezone
 
-    before = datetime.now(UTC).replace(tzinfo=None)
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
     out = _recent(days=3)
 
     [asked] = recent_repo.asked
@@ -421,7 +421,9 @@ def test_the_feed_endpoint_looks_back_the_days_asked_in_naive_utc(recent_repo):
         < timedelta(days=3, seconds=5)
     )
     assert out["count"] == 0 and out["changes"] == [] and out["truncated"] is False
-    assert out["since"].endswith("+00:00")
+    assert (
+        out["since"] == asked.since.isoformat()
+    ), "echoed as naive UTC, like changed_at"
 
 
 def test_the_feed_endpoint_prefers_since_and_reads_an_offset_time(recent_repo):
@@ -445,10 +447,10 @@ def test_the_feed_endpoint_treats_a_bare_date_as_utc(recent_repo):
 
 
 def test_the_feed_endpoint_refuses_a_start_in_the_future(recent_repo):
-    from datetime import UTC, timedelta
+    from datetime import timedelta, timezone
 
     with pytest.raises(HTTPException) as caught:
-        _recent(since=datetime.now(UTC) + timedelta(days=1))
+        _recent(since=datetime.now(timezone.utc) + timedelta(days=1))
 
     assert caught.value.status_code == 422 and not recent_repo.asked
 
@@ -460,18 +462,68 @@ def test_the_feed_endpoint_passes_the_filters_and_the_callers_own_rights(recent_
 
     asked = recent_repo.asked[0]
     assert asked.user is user and asked.dept == "Firmware"
-    assert asked.scope == "lessons" and asked.limit == 6
+    assert asked.scope == "lessons" and asked.limit == 5
     _recent(scope="all")
     assert recent_repo.asked[1].scope is None
 
 
-def test_the_feed_endpoint_says_whether_more_exist_beyond_the_page(recent_repo):
+def test_the_feed_endpoint_reports_what_the_repository_says_about_more(recent_repo):
     recent_repo.found = [_change("A", "x"), _change("B", "y")]
 
     full = _recent(limit=2)
-    cut = _recent(limit=1)
+    recent_repo.more = True
+    cut = _recent(limit=2)
 
     assert [c["title"] for c in full["changes"]] == ["A", "B"]
     assert full["truncated"] is False, "exactly a full page is not a cut one"
-    assert recent_repo.asked[0].limit == 3, "one more than shown is asked for"
-    assert [c["title"] for c in cut["changes"]] == ["A"] and cut["truncated"] is True
+    assert cut["truncated"] is True and cut["count"] == 2
+
+
+def test_a_zero_ceiling_is_a_ceiling_not_unset():
+    old, new = _snapshot("a"), _snapshot("b")
+
+    assert diff_versions(old, new, max_lines=0)["hunks"] == []
+    assert diff_versions(old, new, max_lines=None)["hunks"]
+
+
+def test_the_repository_reads_one_row_more_than_the_page_to_know_about_more():
+    import asyncio
+
+    from src.repositories.article import ArticleRepository
+
+    from tests.unit.test_query_authorization import _reader
+
+    class Rows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+        def scalars(self):
+            return Rows([])
+
+    class Db:
+        def __init__(self, rows):
+            self.rows = rows
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return Rows(self.rows if len(self.statements) == 1 else [])
+
+    three = [
+        SimpleNamespace(
+            article_id=i, latest=1, versions=1, changed_at=datetime(2026, 11, 2)
+        )
+        for i in range(3)
+    ]
+    db = Db(three)
+
+    changes, more = asyncio.run(
+        ArticleRepository(db).recent_changes(_reader(), datetime(2026, 11, 1), limit=2)
+    )
+
+    assert more is True
+    assert "LIMIT" in str(db.statements[0].compile()).upper()
+    assert db.statements[0]._limit_clause.value == 3, "limit + 1"

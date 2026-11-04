@@ -5,7 +5,7 @@ import re
 import uuid
 import unicodedata
 from pathlib import Path
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Sequence, cast
 from fastapi import (
     APIRouter,
@@ -1986,28 +1986,30 @@ async def recent_changes(
     already existed is "updated" and says what changed since the period began (see `/{id}/changes` for the detail).
     Only published articles the caller may read are listed, by the same rule as the article list.
     """
-    now = datetime.now(UTC)
-    start = since if since is not None else now - timedelta(days=days)
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=UTC)
+    # Version timestamps are stored, and answered, as naive UTC; `since` is read and echoed the same way.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if since is None:
+        start = now - timedelta(days=days)
+    elif since.tzinfo is None:
+        start = since
+    else:
+        start = since.astimezone(timezone.utc).replace(tzinfo=None)
     if start > now:
         raise HTTPException(status_code=422, detail="'since' is in the future")
-    # Version timestamps are stored as naive UTC.
-    changes = await ArticleRepository(db).recent_changes(
+    changes, more = await ArticleRepository(db).recent_changes(
         current_user,
-        start.astimezone(UTC).replace(tzinfo=None),
+        start,
         dept=dept,
         scope=None if scope == "all" else scope,
-        limit=limit + 1,
+        limit=limit,
     )
     # Comparing texts is CPU work: keep it off the event loop, one thread for the whole page.
-    entries = await asyncio.to_thread(describe_recent, changes[:limit])
+    entries = await asyncio.to_thread(describe_recent, changes)
     return {
-        "since": start.astimezone(UTC).isoformat(),
+        "since": start.isoformat(),
         "count": len(entries),
         "changes": entries,
-        # One more was asked for than shown, so this is known rather than guessed from a full page.
-        "truncated": len(changes) > limit,
+        "truncated": more,
     }
 
 

@@ -347,8 +347,11 @@ class ArticleRepository:
         dept: str | None = None,
         scope: str | None = None,
         limit: int = 20,
-    ) -> list[RecentChange]:
+    ) -> tuple[list[RecentChange], bool]:
         """Published articles the caller may read that gained a version since `since`, newest change first.
+
+        Returns the page and whether more matched than it holds. One row more than `limit` is read to know, so that
+        is decided by what matched and not by how many rows survived being loaded.
 
         The same visibility predicate as every other read, applied to the version rows themselves: a version of an
         article the caller cannot read is never counted, and nothing is filtered in Python. `scope` is
@@ -383,11 +386,13 @@ class ArticleRepository:
                 .where(and_(*filters))
                 .group_by(ArticleVersion.article_id)
                 .order_by(changed_at.desc())
-                .limit(limit)
+                .limit(limit + 1)
             )
         ).all()
+        more = len(rows) > limit
+        rows = rows[:limit]
         if not rows:
-            return []
+            return [], more
         ids = [row.article_id for row in rows]
         articles = {
             article.id: article
@@ -455,7 +460,7 @@ class ArticleRepository:
                     changed_at=row.changed_at,
                 )
             )
-        return changes
+        return changes, more
 
     async def index_status_counts(self, user: User) -> dict[str, int]:
         """Published articles the caller may read, counted by search-index state.
