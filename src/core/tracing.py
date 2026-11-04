@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.core.config import settings
+from src.core.otel import resource_attributes, signal_endpoint
 
 try:
     from opentelemetry import trace
@@ -13,12 +13,13 @@ except ImportError:  # Keep local/unit environments lightweight.
 
 
 def configure_tracing() -> None:
-    if trace is None or not settings.OTEL_EXPORTER_OTLP_ENDPOINT:
+    endpoint = signal_endpoint("traces")
+    if trace is None or endpoint is None:
         return
-    provider = TracerProvider(
-        resource=Resource.create({"service.name": settings.PROJECT_NAME})
-    )
-    exporter = OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT)
+    provider = TracerProvider(resource=Resource.create(resource_attributes()))
+    # The full /v1/traces path is built in signal_endpoint(): the exporter does not
+    # append it to an explicit endpoint, so the base URL alone posted to the root.
+    exporter = OTLPSpanExporter(endpoint=endpoint)
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
 

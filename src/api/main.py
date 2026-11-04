@@ -47,6 +47,7 @@ from src.models import User
 from src.models.chunk import ArticleChunk
 from src.models.ops import ApiRequestMetric
 from src.core.metrics import record_request, prometheus_text
+from src.core.otel_metrics import configure_metrics, record_http_request
 from src.core.tracing import configure_tracing, get_tracer, trace
 from src.core.warmup import FAILED, READY, TIMEOUT, embedding_warmup
 from src.rag import cross_encoder
@@ -313,6 +314,11 @@ async def record_request_metric(
     exc: BaseException | None = None,
 ) -> None:
     record_request(method, path, status_code, duration_ms)
+    # The same observation in OTLP: `route` is already the resolved template, so
+    # this family has the route/method/status_class shape rova and opshub emit and
+    # the Adaptive Metrics `http_server_` rule keeps. Outside the `try` below on
+    # purpose — a DB outage must not also silence the request metrics.
+    record_http_request(path, method, status_code, duration_ms)
     error_type: str | None = None
     error_detail: str | None = None
     if exc is not None:
@@ -554,6 +560,9 @@ async def initialize_resources() -> None:
     logger.info("Starting up and initializing database...")
     settings.validate_production()
     configure_tracing()
+    # Same endpoint, separate OTLP signal. Both are no-ops without an endpoint, so
+    # a local run and the unit suite configure neither.
+    configure_metrics()
     # Structured JSON logs to stdout (the contract with the log aggregation pipeline).
     from src.lib.observability import setup_logging
 
