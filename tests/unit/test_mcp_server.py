@@ -1061,3 +1061,49 @@ def test_list_recent_changes_refuses_an_unknown_scope_before_calling(h):
     )
     assert out["isError"] is True and "scope" in str(out)
     assert len(h.calls) == before
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_required_text_is_refused_not_searched(h, blank):
+    before = len(h.calls)
+
+    out = h.result(
+        "tools/call", {"name": "search_knowledge", "arguments": {"query": blank}}
+    )
+
+    assert out["isError"] is True and "'query' is required" in str(out)
+    assert len(h.calls) == before
+
+
+def test_a_blank_optional_text_is_left_out_of_the_call(h):
+    h.reply = (200, [])
+
+    h.result(
+        "tools/call",
+        {"name": "list_articles", "arguments": {"q": "  ", "dept": "Firmware"}},
+    )
+
+    assert h.calls[-1].params == {"dept": "Firmware", "limit": 20, "offset": 0}
+
+
+@pytest.mark.parametrize("since", ["2026-11-01", "2026-11-01T09:00:00", " 2026-11-01 "])
+def test_list_recent_changes_takes_an_iso_date_or_time(h, since):
+    h.reply = (200, {})
+
+    h.result(
+        "tools/call", {"name": "list_recent_changes", "arguments": {"since": since}}
+    )
+
+    assert h.calls[-1].params["since"] == since.strip()
+
+
+@pytest.mark.parametrize("since", ["yesterday", "11/01/2026", "last week"])
+def test_list_recent_changes_explains_a_date_it_cannot_read(h, since):
+    before = len(h.calls)
+
+    out = h.result(
+        "tools/call", {"name": "list_recent_changes", "arguments": {"since": since}}
+    )
+
+    assert out["isError"] is True and "ISO date or time" in str(out)
+    assert len(h.calls) == before

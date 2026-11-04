@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -76,7 +77,9 @@ def _text(
     args: dict[str, Any], key: str, *, required: bool = False, max_len: int = 4000
 ) -> str | None:
     value = args.get(key)
-    if value is None or value == "":
+    # Blank is empty: a query of spaces used to go through and come back as "nothing found", which an assistant
+    # reads as an answer rather than as a mistake of its own.
+    if value is None or (isinstance(value, str) and not value.strip()):
         if required:
             raise ToolInputError(f"'{key}' is required")
         return None
@@ -566,6 +569,19 @@ def _changes(args: dict[str, Any]) -> Call:
     )
 
 
+def _iso_start(args: dict[str, Any], key: str) -> str | None:
+    value = _text(args, key, max_len=40)
+    if value is None:
+        return None
+    try:
+        datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ToolInputError(
+            f"'{key}' must be an ISO date or time, e.g. 2026-11-01 or 2026-11-01T09:00:00"
+        ) from None
+    return value.strip()
+
+
 def _recent_changes(args: dict[str, Any]) -> Call:
     return Call(
         "GET",
@@ -573,7 +589,7 @@ def _recent_changes(args: dict[str, Any]) -> Call:
         params=_drop_none(
             {
                 "days": _int(args, "days", 7, 1, 365),
-                "since": _text(args, "since", max_len=40),
+                "since": _iso_start(args, "since"),
                 "dept": _text(args, "dept", max_len=100),
                 "scope": _choice(args, "scope", ("all", "documents", "lessons")),
                 "limit": _int(args, "limit", 20, 1, 50),
