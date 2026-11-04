@@ -583,6 +583,16 @@ class Settings(BaseSettings):
     # adaptive loop must still have a worst-case cost. 0 disables the follow-up round
     # without disabling the sub-query expansion above.
     MULTI_QUERY_MAX_FOLLOWUPS: int = 1
+    # Off by default, same posture as the other retrieval additions here. When on, a question written
+    # in Vietnamese is also searched in QUERY_TRANSLATION_TARGET_LANGUAGE (rag/query_translation.py):
+    # one short model call per new question (remembered, fail-open, QUERY_TRANSLATION_TIMEOUT_SECONDS),
+    # then both are retrieved and every passage keeps its better score. For a knowledge base written
+    # mostly in the target language: Vietnamese questions otherwise match the Vietnamese-language
+    # documents whatever the topic. MAX_TOKENS leaves room for a reasoning model's thinking.
+    QUERY_TRANSLATION_ENABLED: bool = False
+    QUERY_TRANSLATION_TARGET_LANGUAGE: str = "English"
+    QUERY_TRANSLATION_TIMEOUT_SECONDS: float = 4.0
+    QUERY_TRANSLATION_MAX_TOKENS: int = 800
     # ── Agentic answering (src/domain/agent) ───────────────────────────────────────────────
     # The assistant plans before it searches (what is being asked, which documents, which
     # tools), searches once per sub-question, checks it found enough, then may draw a chart
