@@ -139,6 +139,44 @@ def find_aliases(
     return [name for _uses, name in ranked[:limit]]
 
 
+#: Results of the ordinary search that keep their place, and how many the extended search may put right after them.
+KEEP_ORDINARY = 2
+INSERT_EXTENDED = 3
+
+
+def merge_alias_results(
+    ordinary: list[dict],
+    extended: list[dict],
+    keep: int = KEEP_ORDINARY,
+    insert: int = INSERT_EXTENDED,
+) -> list[dict]:
+    """The ordinary search's first `keep` results, then up to `insert` the extended search found and it did not,
+    then the rest of the ordinary results, then the rest of the extended ones. Each passage once.
+
+    A name added to a question that was about something else can only move the answer down by `insert` places.
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+
+    def add(item: dict) -> None:
+        key = str(item.get("chunk_id"))
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+
+    ordinary_ids = {str(item.get("chunk_id")) for item in ordinary}
+    for item in ordinary[:keep]:
+        add(item)
+    new = [item for item in extended if str(item.get("chunk_id")) not in ordinary_ids]
+    for item in new[:insert]:
+        add(item)
+    for item in ordinary[keep:]:
+        add(item)
+    for item in extended:
+        add(item)
+    return merged
+
+
 class VocabularyCache:
     """One vocabulary per company, loaded in the background and refreshed after `ttl_seconds`.
 

@@ -298,3 +298,78 @@ def test_no_vocabulary_yet_or_no_company_means_no_names(monkeypatch):
     with_company = SimpleNamespace(company_domain="acme.test")
     assert SearchService._alias_names(with_company, "clock divider", "") == []
     assert SearchService._alias_names(SimpleNamespace(), "clock divider", "") == []
+
+
+# -- the extended search only adds, it does not replace -----------------------------------------------
+
+
+def _hit(name):
+    return {"chunk_id": name, "title": name}
+
+
+def test_the_first_ordinary_results_keep_their_place_and_new_finds_follow_them():
+    ordinary = [_hit(x) for x in "ABCDE"]
+    extended = [_hit(x) for x in "XYAZBC"]
+
+    merged = abbreviations.merge_alias_results(ordinary, extended)
+
+    assert [h["chunk_id"] for h in merged] == list("ABXYZCDE")
+
+
+def test_a_wrong_name_costs_the_answer_at_most_the_places_inserted():
+    ordinary = [_hit("answer")] + [_hit(f"o{i}") for i in range(5)]
+    extended = [_hit(f"n{i}") for i in range(10)] + [_hit("answer")]
+
+    merged = [
+        h["chunk_id"] for h in abbreviations.merge_alias_results(ordinary, extended)
+    ]
+
+    assert merged.index("answer") == 0
+    ordinary = [_hit("o0"), _hit("o1"), _hit("answer")]
+    merged = [
+        h["chunk_id"] for h in abbreviations.merge_alias_results(ordinary, extended)
+    ]
+    assert merged.index("answer") <= 2 + abbreviations.INSERT_EXTENDED
+
+
+def test_when_the_extended_search_finds_nothing_new_the_order_is_the_ordinary_one():
+    ordinary = [_hit(x) for x in "ABCD"]
+
+    merged = abbreviations.merge_alias_results(ordinary, [_hit("C"), _hit("A")])
+
+    assert [h["chunk_id"] for h in merged] == list("ABCD")
+
+
+def test_one_side_empty_is_the_other_side():
+    assert abbreviations.merge_alias_results([], [_hit("A")]) == [_hit("A")]
+    assert abbreviations.merge_alias_results([_hit("A")], []) == [_hit("A")]
+
+
+def _search_with(monkeypatch, found, passes):
+    async def fake_pass(self, user, query, filters, limit, apply_aliases):
+        passes.append(apply_aliases)
+        if not apply_aliases:
+            self._found_aliases = found
+            return [_hit("A"), _hit("B"), _hit("C")]
+        return [_hit("N"), _hit("A")]
+
+    monkeypatch.setattr(SearchService, "_search_pass", fake_pass)
+    service = SearchService.__new__(SearchService)
+    return _run(service.search(SimpleNamespace(), "q", None, 3))
+
+
+def test_a_question_with_no_name_is_searched_once(monkeypatch):
+    passes = []
+
+    results = _search_with(monkeypatch, [], passes)
+
+    assert passes == [False] and [h["chunk_id"] for h in results] == ["A", "B", "C"]
+
+
+def test_a_question_with_a_name_is_searched_twice_and_merged(monkeypatch):
+    passes = []
+
+    results = _search_with(monkeypatch, ["CLKDIV"], passes)
+
+    assert passes == [False, True]
+    assert [h["chunk_id"] for h in results] == ["A", "B", "N"], "cut to the limit"

@@ -16,6 +16,7 @@ from src.domain.rbac import AuthorizationService
 from src.rag.abbreviations import (
     find_aliases,
     load_company_vocabulary,
+    merge_alias_results,
     vocabulary_cache,
 )
 from src.rag.identifier_terms import MAX_IDENTIFIER_TERMS, usable_identifiers
@@ -253,6 +254,28 @@ class SearchService:
     async def search(
         self, user: User, query: str, filters: dict | None = None, limit: int = 5
     ) -> list[dict[str, Any]]:
+        """The ranked passages for a question.
+
+        With QUERY_ABBREVIATION_EXPANSION_ENABLED, a question that spells an abbreviated name out is searched a
+        second time carrying the name (src/rag/abbreviations.py), and only the first results of the ordinary search
+        keep their place: what the extended search found that the ordinary one did not comes right after them. A name
+        proposed for a question about something else then costs a few places, not the answer.
+        """
+        self._found_aliases: list[str] = []
+        results = await self._search_pass(user, query, filters, limit, False)
+        if not self._found_aliases:
+            return results
+        extended = await self._search_pass(user, query, filters, limit, True)
+        return merge_alias_results(results, extended)[:limit]
+
+    async def _search_pass(
+        self,
+        user: User,
+        query: str,
+        filters: dict | None,
+        limit: int,
+        apply_aliases: bool,
+    ) -> list[dict[str, Any]]:
         # Reset before any early return, so a caller never reads the previous query's
         # verdict for one that never reached the embedder.
         self.vector_search_degraded = False
@@ -377,6 +400,10 @@ class SearchService:
         alias_names = (
             [] if comparison_subjects else self._alias_names(user, query, translated)
         )
+        if not apply_aliases:
+            # The ordinary pass only notes what the extended one would add.
+            self._found_aliases = alias_names
+            alias_names = []
         if alias_names:
             extra = " ".join(alias_names)
             retrieval_query = f"{retrieval_query} {extra}"
