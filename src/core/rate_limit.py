@@ -125,6 +125,9 @@ class RedisRateLimiter:
                 await client.aclose()
 
 
+# Keyed by the authenticated user's id at the call sites (src/api/routers/ai.py), never by
+# the source address: staff share one office egress address behind Cloudflare. The bucket
+# lives in Valkey, so it is one limit across API pods and survives a restart or deploy.
 ai_rate_limiter = RedisRateLimiter("ai", limit=settings.AI_RATE_LIMIT_PER_MINUTE)
 auth_rate_limiter = RedisRateLimiter(
     "auth", limit=10, window_seconds=60, fail_closed=True
