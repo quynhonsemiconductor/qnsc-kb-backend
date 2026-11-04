@@ -458,3 +458,41 @@ def test_historical_citation_marker_mismatch_fails_closed(monkeypatch):
     assert response[0]["content"].startswith("This historical answer is no longer")
     assert response[0]["answer_grounded"] == ""
     assert response[0]["citations"] == []
+
+
+def _ask_and_collect_cache(monkeypatch, history):
+    """Run one answered question through `ask` and return what was written to the cache."""
+    question = "And what about the second one?"
+    messages = history + [SimpleNamespace(role="user", content=question)]
+    repo = ConversationAwareAIRepository(messages)
+    monkeypatch.setattr(
+        "src.domain.ai_service.resolve_provider",
+        lambda: SimpleNamespace(name="test", model="test-model"),
+    )
+
+    async def fake_complete(*_args, **_kwargs):
+        answer = "<<<GROUNDED>>>\nThe retention period is thirty days [C1]."
+        return answer, 1, "m", "p"
+
+    monkeypatch.setattr("src.domain.ai_service.complete", fake_complete)
+    service = AIService(repo, FakeSearchService([_retrieved_result()]), object())
+    result = asyncio.run(
+        service.ask(make_ai_user(), question, conversation_id=uuid.uuid4())
+    )
+    assert result["citations"], "the answer must be grounded for the cache to be in play"
+    return repo.cached
+
+
+def test_a_standalone_answer_is_cached(monkeypatch):
+    assert len(_ask_and_collect_cache(monkeypatch, [])) == 1
+
+
+def test_an_answer_written_with_earlier_turns_is_not_cached(monkeypatch):
+    """The cache is keyed by the question's words. A follow-up such as "and the second
+    one?" answered from this conversation must not be stored under those words, or an
+    unrelated conversation asking the same words would be handed this one's answer."""
+    history = [
+        SimpleNamespace(role="user", content="What is the first retention rule?"),
+        SimpleNamespace(role="assistant", content="Thirty days for logs."),
+    ]
+    assert _ask_and_collect_cache(monkeypatch, history) == []

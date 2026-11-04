@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # without it the process refuses to connect (see src/core/db_ssl.py) instead of
     # connecting without TLS. Unset locally: asyncpg connects without TLS, unchanged.
     DATABASE_SSL_CA: str | None = None
+    # The connection pool, PER PROCESS (each uvicorn worker and each Celery process has its own). These are
+    # SQLAlchemy's own defaults, written out so they can be raised: under load the pool is the first thing
+    # to run dry ("QueuePool limit of size 5 overflow 10 reached, connection timed out"), and a request
+    # waits DB_POOL_TIMEOUT_SECONDS for a connection before it fails with a 500. Keep
+    # processes x (DB_POOL_SIZE + DB_MAX_OVERFLOW) under the database's max_connections.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT_SECONDS: float = 30.0
+    # Connections older than this are replaced instead of reused: a load balancer or the server drops idle
+    # ones silently, and the first request to find out used to be the one that failed.
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     APP_DATABASE_ROLE: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -497,23 +508,40 @@ class Settings(BaseSettings):
     # not by what a developer happens to have installed locally.
     CROSS_ENCODER_RERANKER_ENABLED: bool = False
     CROSS_ENCODER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    # `onnx` runs the int8 export on ONNX Runtime (no torch, ~4.8 pairs/s on 2 threads, scores correlate 0.995 with
+    # the torch ones); `torch` runs CROSS_ENCODER_MODEL through sentence-transformers (~0.5 s a pair on 2 vCPU) and
+    # needs the `ml` group. The onnx export is baked by KB_BAKE_RERANKER_MODEL=true.
+    CROSS_ENCODER_RUNTIME: str = "onnx"
+    CROSS_ENCODER_ONNX_DIR: str = "/opt/reranker-onnx"
+    CROSS_ENCODER_ONNX_FILE: str = "model_int8.onnx"
+    CROSS_ENCODER_MAX_TOKENS: int = 512
+    CROSS_ENCODER_BATCH_SIZE: int = 8
+    # False: run on every question. True: only where `needs_deep_retrieval` says the question is complex (the
+    # earlier behaviour, chosen when a pair cost 0.5 s). Register lookups are not complex and gain the most:
+    # a chunk holding the answer ranked 1st for 16 of 54 chip-spec questions without it and 27 with it.
+    CROSS_ENCODER_ONLY_DEEP_QUERIES: bool = False
+    # The cross-encoder's first CROSS_ENCODER_ASSIST_TOP_K are scored at least RAG_VECTOR_ASSIST_SCORE when it is
+    # at least this sure, so the lexical context gate cannot drop the passage the model recognised as the answer.
+    CROSS_ENCODER_ASSIST_TOP_K: int = 3
+    CROSS_ENCODER_ASSIST_MIN_PROBABILITY: float = 0.05
     # Off by default for the same reason: a change to what the reader sees on the live
     # answer path, with no production traffic behind it yet to confirm the ambiguity
     # heuristic (rag/query_router.py::detect_ambiguous_departments) actually fires on
     # real questions rather than on ordinary ones with two loosely-relevant departments.
     CLARIFICATION_ON_AMBIGUOUS_DEPARTMENTS_ENABLED: bool = False
-    # How many hybrid_search candidates are re-scored. A cross-encoder pays for every
-    # (query, passage) pair it scores, unlike a bi-encoder embedding computed once per
-    # passage at index time — so this is a cost/latency dial, not a recall ceiling like
-    # RAG_CANDIDATE_POOL_SIZE below.
-    CROSS_ENCODER_CANDIDATE_POOL: int = 30
+    # How many of the lexical order's first candidates are re-scored, plus CROSS_ENCODER_VECTOR_CANDIDATES the vector
+    # search ranked highest. A cross-encoder pays for every (query, passage) pair it scores, unlike a bi-encoder
+    # embedding computed once at index time, so this is a cost/latency dial: 10 + 5 is ~14 pairs, ~3 s on 2 threads,
+    # and gets most of what 30 does (a chunk with the answer within the first 5: 39 of 54 against 42, lexical alone 30).
+    CROSS_ENCODER_CANDIDATE_POOL: int = 10
+    CROSS_ENCODER_VECTOR_CANDIDATES: int = 5
     # A search must not wait on the reranker longer than this: on timeout the request returns
     # the lexical order it already has. MEASURED (scripts/bench_inference.py, docs/performance-develop.md):
     # bge-reranker-v2-m3 costs ~0.5 s per (query, passage) pair on 2 vCPU, so the default pool of 30
     # is ~15 s there. The bound is what keeps "optional enhancement" from meaning "optionally
     # makes search look stuck". The scoring thread cannot be cancelled; while it finishes,
     # further searches skip the cross-encoder instead of queueing behind it.
-    CROSS_ENCODER_TIMEOUT_SECONDS: float = 3.0
+    CROSS_ENCODER_TIMEOUT_SECONDS: float = 5.0
     # After this many CONSECUTIVE timeouts the reranker is skipped for the cooldown below instead of
     # being tried (and waited on, up to the timeout) by every search. A timed-out call also keeps a
     # thread busy until it finishes, so on a CPU that is too small the feature would otherwise cost
@@ -621,6 +649,31 @@ class Settings(BaseSettings):
     # default it gave MLQA-en +2.0 R@10 while MLQA-vi went 56.5 -> 56.0, for about
     # +400ms retrieval p50. Left at 48 until the encoder that justifies it is adopted.
     RAG_CANDIDATE_POOL_SIZE: int = 240
+    # What a question's identifier-shaped word (a register, a signal, a part: `PADOUTSET`, `i_dbg_req`) is worth in
+    # the reranker's score, at most, against 1 for an ordinary word. The reranker scored `matched terms / terms`
+    # with every term equal and re-sorted the whole fused pool by it, so `thanh ghi offset` (3 of 6 terms, in another
+    # module's prose) beat `PADOUTSET GPIO` (2 of 6, the register table), and the chunk holding the register fell
+    # under RAG_MIN_CONTEXT_SCORE. The weight a name actually gets shrinks with how common it is among the
+    # candidates (log(N/df)): `PADOUTSET` in 8 of 400 is worth nearly the maximum, `GPIO` in 150 of 400 not much
+    # more than a word. Measured on 21 chip-specification questions over the 22 real specifications, a chunk
+    # holding the answer reached the prompt for 6 with every term equal and for 18 with this weight and the
+    # leg below. 1 restores the unweighted score. A question with no identifier is unaffected.
+    RAG_IDENTIFIER_TERM_WEIGHT: float = 12.0
+    # A retrieval leg of chunks holding the question's identifier-shaped words, for RECALL: the keyword leg
+    # ORs every word and `ts_rank_cd` ignores rarity, so for "Thanh ghi PADOUTSET của GPIO nằm ở offset nào?"
+    # none of the 8 chunks naming PADOUTSET was among the 380 candidates the reranker scores, and a
+    # reranker cannot promote what it is not given. Skipped for a question with no identifier.
+    RAG_IDENTIFIER_LEG_ENABLED: bool = True
+    # Smaller than RAG_CANDIDATE_POOL_SIZE: a precise signal, not a recall net.
+    RAG_IDENTIFIER_POOL_SIZE: int = 48
+    # A chunk in the first RAG_VECTOR_ASSIST_TOP_N of the VECTOR leg is scored at least RAG_VECTOR_ASSIST_SCORE.
+    # The reranker's score is lexical overlap with the question, and the context gate (RAG_MIN_CONTEXT_SCORE)
+    # reads it, so a question phrased in other words than the document is dropped even when the embedding found
+    # the right chunk: "how is the watchdog counter clocked and how long is one tick?" against "WDOG_COUNT
+    # increments every cycle of i_clk_wdt (50 ns)" scored 0.167 with the chunk at vector rank 2. Keep the score at
+    # or above RAG_MIN_CONTEXT_SCORE or it does nothing. 0 turns it off.
+    RAG_VECTOR_ASSIST_TOP_N: int = 5
+    RAG_VECTOR_ASSIST_SCORE: float = 0.4
     # Must stay >= RAG_CANDIDATE_POOL_SIZE, and higher, because pgvector filters AFTER
     # the index scan: the permission and published-status predicates consume
     # candidates the index already committed to. pgvector's default is 40, i.e. below
@@ -894,6 +947,16 @@ class Settings(BaseSettings):
     # corpus and the timeout returns once the knowledge base is large enough; 50 is a
     # wide margin over the 5 matches ever returned.
     SIMILARITY_MAX_SEQUENCE_COMPARISONS: int = 50
+    # Of those 50, the ones whose token overlap is almost nil are not worth the O(n*m) pass either.
+    # Measured on 5,034 documents with 30 real probes, 50 comparisons cost 3.4 s per upload and the
+    # 50th-ranked candidate had a token score of 0.002: unrelated text, whose character-level ratio sits
+    # around 0.2-0.24, just under the 0.25 threshold. With a floor of 0.02 the set of documents reported
+    # as similar was identical for all 30 probes and the comparisons fell from 1500 to 863 (-42%);
+    # even 0.05 changed nothing in that sample. Applies only when both texts have at least
+    # SIMILARITY_FLOOR_MIN_TOKENS tokens: a text with no spaces (Chinese, Japanese, Thai, a hex dump) is
+    # one or a few "tokens", its token score says nothing, and it must still be compared. 0 disables.
+    SIMILARITY_SEQUENCE_MIN_TOKEN_SCORE: float = 0.02
+    SIMILARITY_FLOOR_MIN_TOKENS: int = 30
     MAX_SOURCE_UNCOMPRESSED_BYTES: int = 100_000_000
     MAX_SOURCE_ARCHIVE_FILES: int = 2_000
     MALWARE_SCAN_ENABLED: bool = False

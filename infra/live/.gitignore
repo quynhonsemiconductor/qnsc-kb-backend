@@ -1,6 +1,0 @@
-.terraform/
-.terraform.lock.hcl.bak
-terraform.tfvars
-*.tfplan
-tfplan
-plan.txt

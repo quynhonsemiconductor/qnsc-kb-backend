@@ -1394,6 +1394,12 @@ async def get_request_failures(
     request_id: str | None = Query(None, min_length=1, max_length=100),
     min_status: int = Query(500, ge=400, le=599),
     since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
+    # Exact matches, for drilling into one group from the Investigate view. `path` above is a
+    # substring search, and a route template can contain `_`, which ILIKE reads as a wildcard.
+    route: str | None = Query(None, min_length=1, max_length=255),
+    method: str | None = Query(None, pattern="^[A-Za-z]{3,12}$"),
+    error_type: str | None = Query(None, min_length=1, max_length=100),
     current_user: User = Depends(require_permission("governance.read", scope="global")),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
@@ -1416,6 +1422,14 @@ async def get_request_failures(
         conditions.append(ApiRequestMetric.request_id == request_id)
     if since:
         conditions.append(ApiRequestMetric.created_at >= since)
+    if until:
+        conditions.append(ApiRequestMetric.created_at < until)
+    if route:
+        conditions.append(ApiRequestMetric.path == route)
+    if method:
+        conditions.append(ApiRequestMetric.method == method.upper())
+    if error_type:
+        conditions.append(ApiRequestMetric.error_type == error_type)
 
     rows = await db.execute(
         select(ApiRequestMetric)

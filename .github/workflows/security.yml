@@ -4,8 +4,8 @@
 # Trivy (filesystem + built image), Semgrep, gitleaks, and OSV over the dependency
 # lockfile. Language-agnostic: OSV reads poetry.lock directly.
 #
-# Runs weekly as well as on push, because a CVE published after a merge is invisible
-# to a push-triggered scan — the code did not change, the world did.
+# Runs on PR and push. The net for a CVE published after a merge (the code did not
+# change, the world did) is Scheduled · Security Scan — ONE schedule per repo.
 # =============================================================================
 name: Security · Scan
 
@@ -24,14 +24,12 @@ on:
     #
     # `main` is this repo's only long-lived branch, so the filter skipped nothing anyone
     # wanted skipped. No upside, one silent failure mode.
-  schedule:
-    - cron: "0 4 * * 1" # Monday 04:00 UTC
 
 concurrency:
   # A PUSH TO MAIN IS NEVER CANCELLED, and that takes a group of its own per commit. The group used to be
   # `security-${{ github.ref }}` with cancel-in-progress, so two commits landing on main close together shared
   # `security-refs/heads/main` and the second CANCELLED the first's scan: that commit was left with no scan on record,
-  # and the weekly scheduled run (also `refs/heads/main`) could cancel, or be cancelled by, a push.
+  # and a scheduled run (also `refs/heads/main`) could cancel, or be cancelled by, a push.
   #
   # `cancel-in-progress: false` alone would NOT have fixed it: GitHub keeps ONE pending run per group and cancels
   # every other pending one. Only a distinct group per commit keeps them all.
@@ -57,7 +55,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
+    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
     with:
       blocking: true
       combine: true # actionlint + zizmor as ONE job; the required check is now `actions-security / Workflow security (actionlint, zizmor)`
@@ -72,16 +70,15 @@ jobs:
       contents: read
       security-events: write # SARIF upload
       packages: read
-    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
     with:
       product: qnsc-kb
       # Gitleaks + osv-scanner + Semgrep as ONE job; the required check is now
       # `security / Security scans (Gitleaks, osv-scanner, Semgrep)`.
       combine: true
       # Trivy runs in `Backend CI`'s Docker build job, on the image that job already builds, instead of building it again here.
-      # EXCEPT on the weekly schedule: Backend CI never runs on a schedule, so without this a new CVE in an unchanged image would
-      # go unseen until the next code change. The scheduled run builds and scans the image itself, as before.
-      scan_container: ${{ github.event_name == 'schedule' }}
+      # The daily Scheduled · Security Scan builds and scans the image too; that is the periodic container-CVE net now.
+      scan_container: false
       # OSV findings block. The dependency surface here is unusually wide — torch,
       # paddlepaddle, paddleocr, pymupdf and their transitive graph — which is an
       # argument for the gate rather than against it.

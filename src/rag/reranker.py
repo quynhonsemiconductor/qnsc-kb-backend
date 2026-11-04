@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
-from typing import NamedTuple, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
+
+from src.core.config import settings
+from src.rag.identifier_terms import identifier_terms
 
 
 # Vietnamese is routinely typed without diacritics — "CTS la gi" for "CTS là gì" — and
@@ -290,6 +294,43 @@ def corpus_terms(passages: Sequence[str]) -> frozenset[str]:
     return frozenset(found)
 
 
+def identifier_frequency(
+    passages: Sequence[str], identifiers: Sequence[str]
+) -> dict[str, int]:
+    """In how many of `passages` each identifier occurs as a whole token."""
+    wanted = set(identifiers)
+    counts = dict.fromkeys(wanted, 0)
+    if not wanted:
+        return counts
+    for passage in passages:
+        for token in wanted.intersection(TOKEN_RE.findall(fold_diacritics(passage))):
+            counts[token] += 1
+    return counts
+
+
+def identifier_weights(
+    identifiers: Sequence[str],
+    frequency: dict[str, int],
+    pool_size: int,
+    maximum: float,
+) -> dict[str, float]:
+    """What each named thing is worth: `maximum` for one that is rare among the candidates, 1 for one in all of them.
+
+    `log(N / df) / log(N)`: `PADOUTSET` in 8 of 400 candidates keeps 0.65 of the extra weight, `GPIO` in 150 of 400
+    keeps 0.16. A fixed weight scored every chunk that mentioned the module's name the same as the chunk that
+    held the register, and with hundreds of them tied the answer fell outside the top 80.
+    """
+    if pool_size < 2:
+        return {name: maximum for name in identifiers}
+    weights: dict[str, float] = {}
+    for name in identifiers:
+        found = max(1, min(frequency.get(name, 0), pool_size))
+        weights[name] = 1.0 + (maximum - 1.0) * (
+            math.log(pool_size / found) / math.log(pool_size)
+        )
+    return weights
+
+
 class PreparedQuery(NamedTuple):
     """The query-side half of a score, computed once instead of once per candidate.
 
@@ -302,9 +343,21 @@ class PreparedQuery(NamedTuple):
     normalized: str
     terms: frozenset[str]
     is_definition: bool
+    #: Terms that name one specific thing (see identifier_terms.py) and what each is worth against an ordinary
+    #: word (1). Empty for a question that names nothing, which then scores exactly as before.
+    identifier_weights: Mapping[str, float] = {}
+    #: chunk id -> rank in the vector leg (1 = nearest); empty when the search had no vector leg.
+    vector_ranks: Mapping[Any, int] = {}
 
 
-def prepare_query(query: str, findable: frozenset[str] | None = None) -> PreparedQuery:
+def prepare_query(
+    query: str,
+    findable: frozenset[str] | None = None,
+    identifiers: Sequence[str] | None = None,
+    frequency: dict[str, int] | None = None,
+    pool_size: int = 0,
+    vector_ranks: Mapping[Any, int] | None = None,
+) -> PreparedQuery:
     """Prepare the query side of a score.
 
     `findable` is every token present somewhere in the candidate pool. Query terms that
@@ -334,10 +387,23 @@ def prepare_query(query: str, findable: frozenset[str] | None = None) -> Prepare
         scored_terms = terms & findable
         if scored_terms:
             terms = scored_terms
+    maximum = settings.RAG_IDENTIFIER_TERM_WEIGHT
+    # `identifiers` is passed by a caller that holds the ORIGINAL question, because `query` here is usually
+    # already normalised (lower-cased) and an identifier is recognised by its capitals.
+    named = identifier_terms(query) if identifiers is None else identifiers
+    identified = [name for name in named if name in terms] if maximum != 1.0 else []
+    # Without pool statistics (a caller that scores one passage) every name is worth the maximum.
+    weights = (
+        identifier_weights(identified, frequency, pool_size, maximum)
+        if frequency is not None
+        else {name: maximum for name in identified}
+    )
     return PreparedQuery(
         normalized=normalized,
         terms=terms,
         is_definition=is_definition_query(query),
+        identifier_weights=weights,
+        vector_ranks=vector_ranks or {},
     )
 
 
@@ -357,8 +423,18 @@ def score_prepared_text(
     # the whole passage; because `normalized_text` is tokens joined by single spaces and
     # every token character is itself in the token class, those lookarounds could only
     # ever match a complete token — so this is the same predicate without the scan.
-    matched = len(terms & set(text_tokens))
-    score = matched / max(len(terms), 1)
+    found = terms & set(text_tokens)
+    if prepared.identifier_weights:
+        # Every term counted the same, so a passage holding `thanh`, `ghi` and `offset` (3 of 6) beat the
+        # register table holding `PADOUTSET` and `GPIO` (2 of 6): measured on 17 chip-spec questions, the
+        # passage with the named register lost to a different module's prose in 9 of them. A named thing
+        # is worth more than the words around it. With no identifier this is len(found) / len(terms).
+        weights = prepared.identifier_weights
+        score = (
+            len(found) + sum(weights[name] - 1.0 for name in found if name in weights)
+        ) / max(len(terms) + sum(weight - 1.0 for weight in weights.values()), 1.0)
+    else:
+        score = len(found) / max(len(terms), 1)
     if len(prepared.normalized) > 2 and prepared.normalized in normalized_text:
         score += 0.35
 
@@ -397,12 +473,19 @@ def retrieval_score(
     # The child passage is the precise retrieval unit. Parent text is only
     # a fallback because it often contains repeated slides/references.
     text = getattr(chunk, "chunk_text", "") or getattr(parent, "text", "")
-    return score_prepared_text(
-        prepared if prepared is not None else prepare_query(query),
+    prepared = prepared if prepared is not None else prepare_query(query)
+    score = score_prepared_text(
+        prepared,
         text,
         getattr(getattr(chunk, "article", None), "title", ""),
         getattr(parent, "section_ref", "") if parent else "",
     )
+    # What the embedding found counts even when the question shares few words with the passage: the score above
+    # is lexical overlap, and the context gate reads it. See RAG_VECTOR_ASSIST_TOP_N.
+    rank = prepared.vector_ranks.get(getattr(chunk, "id", None))
+    if rank is not None and rank <= settings.RAG_VECTOR_ASSIST_TOP_N:
+        score = max(score, settings.RAG_VECTOR_ASSIST_SCORE)
+    return score
 
 
 def chunk_passage(chunk: object) -> str:
@@ -418,18 +501,34 @@ def chunk_passage(chunk: object) -> str:
     )
 
 
-def prepare_query_for_chunks(query: str, chunks: Sequence[object]) -> PreparedQuery:
+def prepare_query_for_chunks(
+    query: str,
+    chunks: Sequence[object],
+    identifiers: Sequence[str] | None = None,
+    vector_ranks: Mapping[Any, int] | None = None,
+) -> PreparedQuery:
     """Prepare a query against the pool it will be scored over."""
+    passages = [chunk_passage(chunk) for chunk in chunks]
+    named = identifier_terms(query) if identifiers is None else list(identifiers)
     return prepare_query(
-        query, corpus_terms([chunk_passage(chunk) for chunk in chunks])
+        query,
+        corpus_terms(passages),
+        named,
+        identifier_frequency(passages, named),
+        len(passages),
+        vector_ranks,
     )
 
 
 def rerank_chunks_with_scores(
-    query: str, chunks: Sequence[object], limit: int = 5
+    query: str,
+    chunks: Sequence[object],
+    limit: int = 5,
+    identifiers: Sequence[str] | None = None,
+    vector_ranks: Mapping[Any, int] | None = None,
 ) -> list[tuple[object, float]]:
     """Rerank and hand back the scores, so no caller has to recompute them."""
-    prepared = prepare_query_for_chunks(query, chunks)
+    prepared = prepare_query_for_chunks(query, chunks, identifiers, vector_ranks)
     scored: list[tuple[float, int, object]] = []
     for position, chunk in enumerate(chunks):
         scored.append((retrieval_score(query, chunk, prepared), -position, chunk))

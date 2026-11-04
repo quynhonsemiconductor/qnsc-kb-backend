@@ -509,3 +509,53 @@ def test_matching_test_token_allows_save(monkeypatch):
     assert result == {"provider": "custom"}
     assert db.commits == 1
     assert db.row.encrypted_api_key == "encrypted:secret-key"
+
+
+def test_probe_leaves_a_reasoning_model_room_to_think_before_it_answers(monkeypatch):
+    """`deepseek-flash` spends tokens on reasoning first: with 8 it returned empty `content` and
+    `finish_reason: length`, which the probe reported as a broken endpoint. The budget is what is sent.
+    """
+    sent: dict = {}
+
+    async def validate(_url):
+        return ResolvedLLMEndpoint("models.example.com", "93.184.216.34")
+
+    class Response:
+        is_redirect = False
+        is_error = False
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield b'{"choices":[{"message":{"content":"OK"}}]}'
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **kwargs):
+            sent.update(kwargs["json"])
+            return Response()
+
+    monkeypatch.setattr(llm_client, "validate_public_endpoint_resolution", validate)
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", Client)
+    provider = Provider(
+        "custom",
+        "deepseek-flash",
+        "https://models.example.com/v1/chat/completions",
+        "secret-key",
+        custom_endpoint=True,
+    )
+    assert asyncio.run(llm_client.probe_provider(provider)) >= 1
+    assert sent["max_tokens"] == llm_client.PROBE_MAX_TOKENS >= 256

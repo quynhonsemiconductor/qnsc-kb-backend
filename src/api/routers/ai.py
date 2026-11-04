@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 import structlog
 
 from src.api.deps import (
@@ -124,9 +124,11 @@ async def _hydrate_citations(
         select(ArticleChunk)
         .join(Article, Article.id == ArticleChunk.article_id)
         .options(
-            selectinload(ArticleChunk.parent_chunk).selectinload(
-                ParentChunk.child_chunks
-            ),
+            # Neither the chunk nor its siblings are shown with a vector; see RETRIEVAL_LOAD_OPTIONS.
+            defer(ArticleChunk.embedding),
+            selectinload(ArticleChunk.parent_chunk)
+            .selectinload(ParentChunk.child_chunks)
+            .defer(ArticleChunk.embedding),
             selectinload(ArticleChunk.article),
             selectinload(ArticleChunk.article).selectinload(Article.owner),
             selectinload(ArticleChunk.evidence),

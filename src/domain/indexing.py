@@ -21,6 +21,7 @@ from src.repositories.chunk import ChunkRepository
 from src.rag.chunker import create_parent_child_chunks
 from src.rag.contextual_header import apply_header, generate_section_context
 from src.lib.locking import article_lock
+from src.domain.index_recovery import INTERRUPTED_PREFIX
 
 logger = structlog.get_logger()
 
@@ -138,8 +139,16 @@ async def set_index_status(
         article_repo = ArticleRepository(db)
         article = await article_repo.get_by_id(article_id)
         if article:
+            # Moving to "processing" keeps the note that an earlier run was interrupted. It is the only
+            # record of how many times recovery has already queued this article, and clearing it here
+            # would let one that kills the worker every time be retried for ever. Any other text left by
+            # a previous run is cleared, as before; a successful run clears this one too.
+            keep_marker = status == "processing" and (
+                article.index_error or ""
+            ).startswith(INTERRUPTED_PREFIX)
             article.index_status = status
-            article.index_error = error
+            if not keep_marker:
+                article.index_error = error
             await article_repo.update(article)
 
 

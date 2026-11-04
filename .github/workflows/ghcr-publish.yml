@@ -4,18 +4,16 @@
 # On every merge to main this builds each service image, PRE-PUSH scans it
 # (CRITICAL fixable vulns + ANY secret), and pushes
 # ghcr.io/quynhonsemiconductor/kb-<service> with the immutable sha-<commit>
-# tag. It runs ALONGSIDE backend-deploy.yml (ECS) and k8s-deploy.yml, which
-# keep pushing to ECR until the AWS cutover; the reusable refuses any ref
-# except refs/heads/main.
+# tag. This is the only image build now (the ECS/ECR deploy was retired with the
+# AWS exit, 2026-11-02); the reusable refuses any ref except refs/heads/main.
 #
-# The reusable's `digests` output (JSON, service → sha256) is what the later
-# gitops bump writes into tags.dev.yaml; that wiring lands with the k8s-deploy
-# move off ECR. Until then the run's step summary records the digests.
+# The reusable's `digests` output (JSON, service → sha256) is what the gitops
+# bump writes into the values files; the run's step summary records the digests.
 #
 # ── ONE IMAGE PER DOCKERFILE STAGE ────────────────────────────────────────────
 # The reusable passes `build-target: <service>`, which the Dockerfile REQUIRES:
 # it has one stage per service (`api`, `worker`, `migrator`), and with no
-# target Docker builds the LAST one — k8s-deploy.yml records the incident where
+# target Docker builds the LAST one — a past incident where
 # every repository silently held three copies of the migrator.
 # =============================================================================
 name: GHCR · Publish
@@ -37,25 +35,36 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # One GHCR publish per product at a time (the reusable declares the same
-  # group); a push racing a workflow_dispatch serialises instead of racing.
-  group: ghcr-publish-backend-kb
+  # One GHCR publish per product PER COMMIT. A product-wide group lets a newer
+  # main push replace the queued run for the previous commit (GitHub keeps one
+  # pending run per group, even with cancel-in-progress false).
+  group: ghcr-publish-backend-kb-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
   publish:
     # Ceiling for the reusable's inner grants: packages: write is the GHCR
-    # push AND the Dockerfile's pull of private @quynhonsemiconductor/*.
+    # push AND the Dockerfile's pull of private @quynhonsemiconductor/*; the
+    # scan path attests the pushed digest, which needs an OIDC token and the
+    # attestation store, so the reusable's job permissions must be granted here.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     # SHA-pinned, NOT @v1 — ci's v1 tag moves on every merge, and a moving ref
     # would let a ci merge change this product's publish pipeline unseen.
-    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@2a85ef7bb3c793edbc9b424ba2abeaed8080aab6 # v1.24.3
+    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
     with:
       product: kb
+      # ONE publish call, so the reusable's OWN dev bump is used (unlike the
+      # two-call products, where a single branch would collide).
+      bump-dev: 'true'
+      gitops-product: kb
       services-json: '["api","worker","migrator"]'
       # The on-prem k3s host is amd64; native amd64 runner (a QEMU build of
       # this pnpm + Nest compile fails — see the reusable's build_runner note).
       platforms: linux/amd64
       build_runner: ubuntu-24.04
+    secrets:
+      QNSC_AUTOMATION_PRIVATE_KEY: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}

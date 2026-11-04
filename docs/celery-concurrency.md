@@ -77,3 +77,33 @@ Acceptance for whoever applies it: `MemoryUtilization` of the worker service und
 x86 Fargate memory (the numbers above are arm64 under Docker; the ONNX weights are the same size, the runtime's
 arena behaviour may differ a little), OCR, the real queue depths, and how many of the 141 s are Graph latency
 versus extraction.
+
+## What one consumer costs beyond throughput (applied)
+
+One process runs every queue, so anything that waits behind a long task also waits for the beat ticks and
+the control-plane tasks that feed it. Three consequences were reproduced on the local stack and fixed:
+
+| Symptom | Cause | Change |
+|---|---|---|
+| After 100 s with no consumer, 8 beat messages were queued, none with an expiry, and the restarted worker ran every one. An hour-long sync would leave ~360. | beat enqueues on the clock whether or not anything consumes | Every schedule entry goes through `periodic()` in `celery_app.py` and expires with its own tick. The restarted worker now logs `Discarding revoked task` for the stale ones and runs one fresh pass. |
+| The same outbox event queued its embedding run once per copy. | `replay_outbox_task` re-sends a row once its backoff passes even while the first message still waits behind a long task | `handle_domain_event_task` claims the row (`FOR UPDATE`) and fans out inside that transaction; a second copy sees `dispatched` and stops. A failed fan-out rolls back, so the row is still claimable. |
+| An article killed mid-index stayed `processing` forever and dropped out of search. | The OOM killer ends a prefork child without raising anything in Python, and `acks_late` does not requeue a lost worker. Only the API start-up sweep ever repaired it. | `recover_stuck_indexing` (every 15 min, `src/domain/index_recovery.py`). Stuck longer than `INDEX_STUCK_MINUTES` (visibility timeout + 10 min) means requeue, at most twice; then `failed`, which the dashboard lists and `/governance/index/reprocess` retries. The count survives in `index_error`, so no migration. |
+
+Also set: `task_ignore_result` (nothing reads results; a 30 s beat alone wrote thousands of result keys a day) and
+`broker_connection_retry_on_startup` (explicit, because the next Celery major stops retrying a broker that is not up
+yet).
+
+Deliberately not `task_reject_on_worker_lost`: it requeues without limit, so an article that kills the worker every
+time would take it down in a loop. The sweeper bounds that.
+
+## Still open (infrastructure, not changed here)
+
+- **The split above is still the real fix** for a sync blocking embeddings and for control-plane tasks waiting
+  behind it. Expiry only stops the backlog from replaying; a tick that arrives during a long task is still skipped.
+- **ECS `stopTimeout` is capped at 120 s but a task may run 3600 s.** A deploy during a long run kills it, and
+  Redis hands the message back only after `VISIBILITY_TIMEOUT` (3900 s). The sweeper covers articles; a connector
+  sync is covered by its own durable queue row.
+- **Short control-plane tasks share the 3600 s hard limit.** A hung database call in `replay_outbox_task` would hold
+  the single worker for an hour. A per-task `time_limit` on the short ones is worth adding once their real
+  durations are measured.
+

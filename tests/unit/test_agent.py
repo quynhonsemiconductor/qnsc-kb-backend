@@ -257,7 +257,7 @@ def test_planning_with_no_budget_does_not_call_the_model(monkeypatch):
     assert calls == []
 
 
-def test_a_good_plan_is_used_and_a_chart_request_is_never_lost(monkeypatch):
+def test_a_good_plan_is_used(monkeypatch):
     _llm(
         monkeypatch,
         "plan",
@@ -266,14 +266,54 @@ def test_a_good_plan_is_used_and_a_chart_request_is_never_lost(monkeypatch):
                 {
                     "intent": "lookup",
                     "sub_queries": ["doanh thu quý"],
-                    "wants_chart": False,
                     "summary": "Tìm doanh thu",
                 }
             )
         ],
     )
+    plan = run(build_plan("Doanh thu theo quý?", "", [], Budget(3)))
+    assert plan.planned and plan.sub_queries == ["doanh thu quý"]
+
+
+def test_the_planners_answer_on_chart_and_figure_is_final_in_both_directions(
+    monkeypatch,
+):
+    # The planner used to be OR-ed with a word list, so its "no" was overridden by a keyword.
+    # Chart wording the model judges not to be a chart request stays "no" ...
+    _llm(
+        monkeypatch,
+        "plan",
+        [
+            json.dumps(
+                {"sub_queries": ["q"], "wants_chart": False, "wants_figure": False}
+            )
+        ],
+    )
     plan = run(build_plan("Vẽ biểu đồ doanh thu theo quý", "", [], Budget(3)))
-    assert plan.planned and plan.sub_queries == ["doanh thu quý"] and plan.wants_chart
+    assert plan.planned and not plan.wants_chart and not plan.wants_figure
+    # ... and a request the wording does not betray is honoured.
+    _llm(
+        monkeypatch,
+        "plan",
+        [json.dumps({"sub_queries": ["q"], "wants_chart": True, "wants_figure": True})],
+    )
+    plan = run(build_plan("Doanh thu các quý gần đây ra sao?", "", [], Budget(3)))
+    assert plan.wants_chart and plan.wants_figure
+
+
+def test_the_word_list_is_only_a_hint_when_there_is_no_plan(monkeypatch):
+    _llm(monkeypatch, "plan", [RuntimeError("provider down")])
+    plan = run(build_plan("Vẽ biểu đồ doanh thu theo quý", "", [], Budget(3)))
+    assert not plan.planned and plan.wants_chart and not plan.wants_figure
+    _llm(monkeypatch, "plan", [RuntimeError("provider down")])
+    plan = run(build_plan("Chính sách nghỉ phép là gì?", "", [], Budget(3)))
+    assert not plan.wants_chart and not plan.wants_figure
+
+
+def test_the_planner_prompt_says_a_keyword_is_not_enough(monkeypatch):
+    calls = _llm(monkeypatch, "plan", ["{}"])
+    run(build_plan("q", "", [], Budget(3)))
+    assert "not by a keyword" in calls[0][0]["content"]
 
 
 def test_the_planner_prompt_fences_the_question(monkeypatch):
@@ -654,6 +694,23 @@ def test_a_transposed_or_invented_number_is_reported():
         "1244"
     ]
     assert find_unverified_numbers("Phụ cấp là 1234 mỗi tháng [C1]", context) == []
+
+
+def test_a_number_the_reader_typed_is_not_reported_but_a_derived_one_still_is():
+    context = _ctx("Lương thử việc bằng 85% lương chính thức")
+    answer = (
+        "Lương chính thức 20.000.000 đồng nên lương thử việc là 17.000.000 đồng [C1]"
+    )
+    question = "Nếu lương chính thức là 20 triệu, tức 20.000.000 đồng, thì lương thử việc là bao nhiêu?"
+    assert find_unverified_numbers(answer, context) == ["20.000.000", "17.000.000"]
+    assert find_unverified_numbers(answer, context, question=question) == ["17.000.000"]
+
+
+def test_restating_the_readers_number_wrongly_is_still_reported():
+    context = _ctx("Phụ cấp là 1234 mỗi tháng")
+    assert find_unverified_numbers(
+        "Phụ cấp 1244 [C1]", context, question="Phụ cấp 1234 đúng không?"
+    ) == ["1244"]
 
 
 def test_citation_markers_list_numbers_years_and_small_numbers_are_not_quantities():
@@ -1082,3 +1139,53 @@ def test_progress_events_survive_a_client_that_disconnects(monkeypatch):
         on_event=broken,
     )
     assert payload["citations"]
+
+
+# ── edit intent: the wording nominates, the model decides ─────────────────────────────────
+
+
+def _edit_classifier(monkeypatch, verdict):
+    """Replace the edit-intent model call inside `ask`; returns the questions it was asked."""
+    asked: list[tuple[str, bool]] = []
+
+    async def fake(question, *, viewing_article=False):
+        asked.append((question, viewing_article))
+        return verdict
+
+    monkeypatch.setattr("src.domain.ai_service.is_edit_request", fake)
+    return asked
+
+
+def test_a_question_that_only_contains_a_word_inside_another_word_costs_no_edit_call(
+    monkeypatch,
+):
+    # "credit" contains "edit": this used to be answered "Is this the article you want to update?".
+    asked = _edit_classifier(monkeypatch, True)
+    _llm(monkeypatch, "plan", ["{}"])
+    _provider(monkeypatch, "<<<GROUNDED>>>\nHạn mức tín dụng là 5 triệu [C1].")
+    search = FakeSearch({}, [_hit("Hạn mức tín dụng là 5 triệu.")])
+    payload = _ask(_service(search), "What is the credit policy?")
+    assert asked == []
+    assert search.calls and payload["citations"]
+    assert payload.get("action") is None
+
+
+def test_a_nominated_question_the_model_calls_a_question_is_answered_not_hijacked(
+    monkeypatch,
+):
+    asked = _edit_classifier(monkeypatch, False)
+    _llm(monkeypatch, "plan", ["{}"])
+    _provider(monkeypatch, "<<<GROUNDED>>>\nSiết van bằng cờ lê [C1].")
+    search = FakeSearch({}, [_hit("Siết van bằng cờ lê.")])
+    payload = _ask(_service(search), "How do I fix a leaking valve?")
+    assert asked == [("How do I fix a leaking valve?", False)]
+    assert search.calls and payload["citations"]
+    assert payload.get("action") is None
+
+
+def test_a_nominated_message_the_model_calls_an_edit_enters_the_edit_flow(monkeypatch):
+    asked = _edit_classifier(monkeypatch, True)
+    # Nothing is found, so the flow stops at "which article?" before it needs a database.
+    payload = _ask(_service(FakeSearch({}, [])), "Update the leave policy to 14 days")
+    assert asked == [("Update the leave policy to 14 days", False)]
+    assert payload["action"] == "edit_target_required"

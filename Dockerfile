@@ -211,6 +211,33 @@ FROM model AS embedding-fp32
 
 FROM embedding-${API_EMBEDDING} AS api-embedding
 
+FROM hub AS reranker
+
+# The cross-encoder's int8 ONNX export (~570 MB), used when CROSS_ENCODER_RERANKER_ENABLED=true. Off by default so an
+# image that does not rerank is no bigger for it: the stage then produces an empty directory. The revision is pinned
+# for the reason EMBEDDING_REVISION is: a moving branch would change the scores under a feature nobody is watching.
+ARG BAKE_RERANKER_MODEL=false
+ARG RERANKER_MODEL=onnx-community/bge-reranker-v2-m3-ONNX
+ARG RERANKER_REVISION=6f5ff65298512715a1e669753bc754d2bc8f367b
+ENV HF_HOME=/tmp/hf \
+    RERANKER_DIR=/opt/reranker-export
+
+RUN --mount=type=secret,id=hf_token,required=false \
+    mkdir -p "$HF_HOME" "$RERANKER_DIR" && \
+    if [ "$BAKE_RERANKER_MODEL" = "true" ]; then \
+        export HF_XET_HIGH_PERFORMANCE=1 && \
+        if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi && \
+        python -c "\
+from huggingface_hub import hf_hub_download; \
+import shutil, os; \
+target = os.environ['RERANKER_DIR']; \
+[shutil.copyfile(hf_hub_download('${RERANKER_MODEL}', name, revision='${RERANKER_REVISION}'), os.path.join(target, os.path.basename(name))) \
+ for name in ('onnx/model_int8.onnx', 'tokenizer.json')]"; \
+    fi && \
+    rm -rf "$HF_HOME" && \
+    find "$RERANKER_DIR" -exec touch -h -d @0 {} + && \
+    chmod -R a+rX "$RERANKER_DIR"
+
 # ---------------------------------------------------------------------------
 # runtime-base - the shipped base. NO libraries and NO application code.
 #
@@ -220,13 +247,6 @@ FROM embedding-${API_EMBEDDING} AS api-embedding
 # build time, so this recurs whenever an advisory lands before the upstream tag is rebuilt.
 # `upgrade`, not `dist-upgrade`: patches within the pinned release only.
 # ---------------------------------------------------------------------------
-FROM python-base AS rds-ca
-# The RDS global CA bundle (public certificates only) for DATABASE_SSL_CA. Fetched at
-# build time, unpinned on purpose: the bundle gains CAs over time and a stale local
-# copy would fail verification against new instances instead of being silently wrong.
-ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /bundle.pem
-RUN chmod 0644 /bundle.pem
-
 FROM python-base AS runtime-base
 
 RUN apt-get update && \
@@ -264,19 +284,15 @@ RUN rm -rf /usr/local/lib/python3*/site-packages/pip* /usr/local/bin/pip*
 # ---------------------------------------------------------------------------
 FROM runtime-base AS api
 
-# Database TLS: the RDS global CA bundle at the path db_ssl.py falls back to in
-# production when DATABASE_SSL_CA is unset (a task definition may still set it —
-# on-prem it MUST, pointing at the CNPG ca.crt). No ENV default here on purpose:
-# a container-level default would leak verify-full into local dev compose, whose
-# database has no TLS. runtime-base stays copy-free (test_dockerfile_image_size),
-# so each shipped stage takes the bundle itself.
-COPY --from=rds-ca /bundle.pem /etc/ssl/rds-global-bundle.pem
+# Database TLS: DATABASE_SSL_CA must point at the mounted CNPG ca.crt (the chart sets it); no CA bundle is baked in
+# (the RDS bundle stage was removed with the AWS exit, 2026-11-02).
 
 COPY --from=deps-onnx /opt/venv /opt/venv
 # pip is build-time only, and its vendored certifi trips the CRITICAL gate
 # (see runtime-base); the venv arrives with it, so it is stripped here.
 RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=api-embedding /opt/embedding-export /opt/embedding-onnx
+COPY --from=reranker /opt/reranker-export /opt/reranker-onnx
 COPY --chown=appuser:appuser . .
 
 USER appuser
@@ -294,13 +310,8 @@ CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", \
 
 FROM runtime-base AS worker
 
-# Database TLS: the RDS global CA bundle at the path db_ssl.py falls back to in
-# production when DATABASE_SSL_CA is unset (a task definition may still set it —
-# on-prem it MUST, pointing at the CNPG ca.crt). No ENV default here on purpose:
-# a container-level default would leak verify-full into local dev compose, whose
-# database has no TLS. runtime-base stays copy-free (test_dockerfile_image_size),
-# so each shipped stage takes the bundle itself.
-COPY --from=rds-ca /bundle.pem /etc/ssl/rds-global-bundle.pem
+# Database TLS: DATABASE_SSL_CA must point at the mounted CNPG ca.crt (the chart sets it); no CA bundle is baked in
+# (the RDS bundle stage was removed with the AWS exit, 2026-11-02).
 
 # paddle's native dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -314,6 +325,7 @@ COPY --from=deps-onnx-ocr /opt/venv /opt/venv
 # (see runtime-base); the venv arrives with it, so it is stripped here.
 RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=model /opt/embedding-export /opt/embedding-onnx
+COPY --from=reranker /opt/reranker-export /opt/reranker-onnx
 COPY --chown=appuser:appuser . .
 
 USER appuser
@@ -345,13 +357,8 @@ CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", \
 
 FROM runtime-base AS migrator
 
-# Database TLS: the RDS global CA bundle at the path db_ssl.py falls back to in
-# production when DATABASE_SSL_CA is unset (a task definition may still set it —
-# on-prem it MUST, pointing at the CNPG ca.crt). No ENV default here on purpose:
-# a container-level default would leak verify-full into local dev compose, whose
-# database has no TLS. runtime-base stays copy-free (test_dockerfile_image_size),
-# so each shipped stage takes the bundle itself.
-COPY --from=rds-ca /bundle.pem /etc/ssl/rds-global-bundle.pem
+# Database TLS: DATABASE_SSL_CA must point at the mounted CNPG ca.crt (the chart sets it); no CA bundle is baked in
+# (the RDS bundle stage was removed with the AWS exit, 2026-11-02).
 
 COPY --from=deps /opt/venv /opt/venv
 # pip is build-time only, and its vendored certifi trips the CRITICAL gate
