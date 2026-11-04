@@ -8,8 +8,8 @@ WHAT DECIDES THE BACKEND. Two orthogonal settings, deliberately separate:
 
     EMBEDDING_MODEL    WHICH vectors — identity of the space. Changing it invalidates
                        every stored chunk.
-    EMBEDDING_RUNTIME  HOW they are computed — torch or ONNX. Same vectors either way,
-                       once parity is proven.
+    EMBEDDING_RUNTIME  HOW they are computed — torch, ONNX, or the shared in-cluster TEI
+                       service. Same vectors either way, once parity is proven.
 
 They used to be one decision, inferred from the shape of the model name ("bge-",
 "minilm", "sentence-transformers/"). That could not express "bge-m3 on ONNX", and the
@@ -33,6 +33,7 @@ from src.lib.embeddings.base import EmbeddingProvider, EmbeddingUnavailable, fin
 from src.lib.embeddings.hosted import HostedEmbeddingProvider
 from src.lib.embeddings.local_onnx import OnnxEmbeddingProvider
 from src.lib.embeddings.local_torch import TorchEmbeddingProvider
+from src.lib.embeddings.tei import TeiEmbeddingProvider
 
 __all__ = [
     "EmbeddingUnavailable",
@@ -46,14 +47,28 @@ logger = structlog.get_logger()
 
 _LOCAL_MARKERS = ("bge-", "minilm", "sentence-transformers/", "e5-")
 
+#: EMBEDDING_RUNTIME value that computes vectors in the shared in-cluster TEI Service.
+TEI_RUNTIME = "tei"
+
 
 def is_mock() -> bool:
     return settings.EMBEDDING_MODEL == "mock"
 
 
 def _runs_in_process() -> bool:
-    """Whether EMBEDDING_MODEL names a model this process loads itself."""
+    """Whether this process loads the weights itself.
+
+    False for TEI as well as for a hosted model, and the model name decides nothing here:
+    the Service takes the same e5 model that `EMBEDDING_MODEL` names. What changes is
+    where the forward pass happens.
+    """
+    if is_tei():
+        return False
     return any(marker in settings.EMBEDDING_MODEL.lower() for marker in _LOCAL_MARKERS)
+
+
+def is_tei() -> bool:
+    return settings.EMBEDDING_RUNTIME.strip().lower() == TEI_RUNTIME
 
 
 def resolve_provider() -> EmbeddingProvider:
@@ -63,6 +78,11 @@ def resolve_provider() -> EmbeddingProvider:
     its own module-level `Lazy`. Tests patch THIS function to simulate a backend failure;
     it is the seam, so nothing below it needs a test double.
     """
+    # Before the hosted branch: a TEI deployment keeps EMBEDDING_MODEL naming a local e5
+    # model (that name is what the Service serves and what the stored vectors are labelled
+    # with), so `_runs_in_process()` alone would be the wrong question to ask first.
+    if is_tei():
+        return TeiEmbeddingProvider()
     if not _runs_in_process():
         return HostedEmbeddingProvider()
     if settings.EMBEDDING_RUNTIME == "onnx":
@@ -70,7 +90,8 @@ def resolve_provider() -> EmbeddingProvider:
     if settings.EMBEDDING_RUNTIME == "torch":
         return TorchEmbeddingProvider()
     raise EmbeddingUnavailable(
-        f"EMBEDDING_RUNTIME={settings.EMBEDDING_RUNTIME!r} is not one of 'torch', 'onnx'"
+        f"EMBEDDING_RUNTIME={settings.EMBEDDING_RUNTIME!r} is not one of "
+        "'torch', 'onnx', 'tei'"
     )
 
 
