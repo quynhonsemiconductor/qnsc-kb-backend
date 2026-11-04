@@ -135,6 +135,14 @@ def test_parse_merged():
     assert lessons.parse_merged('```json\n{"merged": "x"}\n```') == "x"
 
 
+def test_a_merged_text_over_the_limit_is_not_used_rather_than_cut_off():
+    too_long = "x" * (lessons.LESSON_BODY_LIMIT + 1)
+    just_fits = "y" * lessons.LESSON_BODY_LIMIT
+
+    assert lessons.parse_merged('{"merged": "%s"}' % too_long) is None
+    assert lessons.parse_merged('{"merged": "%s"}' % just_fits) == just_fits
+
+
 # -- saving ----------------------------------------------------------------------------------------
 
 
@@ -203,7 +211,10 @@ def test_the_daily_quota_stops_a_runaway_assistant(monkeypatch):
     with pytest.raises(HTTPException) as caught:
         _save(monkeypatch, _CountDb(3))
 
-    assert caught.value.status_code == 429 and "3 lessons a day" in caught.value.detail
+    assert (
+        caught.value.status_code == 429
+        and "3 lessons saved or changed a day" in caught.value.detail
+    )
     _save(monkeypatch, _CountDb(2))  # still under it
 
 
@@ -224,8 +235,11 @@ def test_without_any_department_it_says_so(monkeypatch):
 
 
 class _WriteDb:
-    def __init__(self):
-        self.added, self.commits = [], 0
+    def __init__(self, written_today=0):
+        self.added, self.commits, self.written_today = [], 0, written_today
+
+    async def scalar(self, _statement):
+        return self.written_today
 
     def add(self, item):
         self.added.append(item)
@@ -587,3 +601,142 @@ def test_the_listing_is_limited_to_published_lessons_the_caller_may_read():
         and "articles.owner_id" in sql
     )
     assert "LIKE" in sql.upper()
+
+
+# -- a long lesson, and writes counted ---------------------------------------------------------------
+
+
+class _LongDb(_Db):
+    def __init__(self, lesson_ids, body):
+        super().__init__(lesson_ids)
+        self.body = body
+
+    async def get(self, _model, article_id):
+        return _Article("Long lesson", self.body, LESSON_TYPE)
+
+
+def _decide_long(monkeypatch, body, reply, new_body="## Lesson\n\nNew."):
+    async def similar(_db, _user, _content):
+        return [{"article_id": "l1", "title": "Long lesson", "score": 0.5}]
+
+    async def no_hits(self, user, query, filters=None, limit=5):
+        return []
+
+    seen = []
+    monkeypatch.setattr(lessons, "find_similar_documents", similar)
+    monkeypatch.setattr(SearchService, "search", no_hits)
+    monkeypatch.setattr(llm_client, "resolve_provider", lambda: "p")
+
+    async def complete(messages, **_k):
+        seen.append(messages[1]["content"])
+        return reply, 1, "m", "p"
+
+    monkeypatch.setattr(llm_client, "complete", complete)
+    decision = _run(lessons.decide_lesson(_LongDb({"l1"}, body), USER, "T", new_body))
+    return decision, seen
+
+
+def test_the_model_sees_the_whole_of_a_lesson_it_is_asked_to_rewrite(monkeypatch):
+    body = "## Lesson\n\n" + "a" * (lessons.EXCERPT_CHARS + 500) + "\nTHE LAST LINE"
+    reply = '{"decision": "update", "target": 1, "reason": "x", "merged": "new"}'
+
+    _, seen = _decide_long(monkeypatch, body, reply)
+
+    assert (
+        "THE LAST LINE" in seen[0]
+    ), "a rewrite must not drop what lay past an excerpt"
+
+
+def test_a_document_is_still_shown_as_an_excerpt(monkeypatch):
+    decision, seen = _decide_with(monkeypatch, '{"decision": "add"}')
+    assert "EXISTING DOCUMENT 1" in seen[0]
+    assert lessons.EXCERPT_CHARS < lessons.LESSON_BODY_LIMIT
+
+
+def test_appending_that_would_overfill_a_lesson_keeps_the_new_one_on_its_own(
+    monkeypatch,
+):
+    body = "## Lesson\n\n" + "a" * (lessons.LESSON_BODY_LIMIT - 20)
+    reply = '{"decision": "update", "target": 1, "reason": "same subject"}'
+
+    decision, _ = _decide_long(monkeypatch, body, reply, new_body="b" * 100)
+
+    assert decision.action == "add" and decision.reason == "same subject"
+
+
+def test_a_merge_is_still_allowed_for_a_lesson_that_is_nearly_full(monkeypatch):
+    body = "## Lesson\n\n" + "a" * (lessons.LESSON_BODY_LIMIT - 20)
+    reply = '{"decision": "update", "target": 1, "reason": "x", "merged": "short"}'
+
+    decision, _ = _decide_long(monkeypatch, body, reply, new_body="b" * 100)
+
+    assert decision.action == "update" and decision.merged == "short"
+
+
+def test_changing_a_lesson_counts_towards_the_daily_limit(lesson_store, monkeypatch):
+    monkeypatch.setattr(settings, "LESSONS_MAX_PER_USER_PER_DAY", 2)
+    lesson_store.article = _lesson()
+    db = _WriteDb(written_today=2)
+
+    with pytest.raises(HTTPException) as caught:
+        _run(
+            lessons.update_lesson(
+                db,
+                USER,
+                str(lesson_store.article.id),
+                merged="x",
+                lesson="L",
+                context=None,
+            )
+        )
+
+    assert caught.value.status_code == 429
+    assert db.commits == 0 and lesson_store.article.version == 1
+    assert lesson_store.published == []
+
+
+def test_a_lesson_under_the_limit_can_still_be_changed(lesson_store, monkeypatch):
+    monkeypatch.setattr(settings, "LESSONS_MAX_PER_USER_PER_DAY", 2)
+    lesson_store.article = _lesson()
+
+    _run(
+        lessons.update_lesson(
+            _WriteDb(written_today=1),
+            USER,
+            str(lesson_store.article.id),
+            merged="x",
+            lesson="L",
+            context=None,
+        )
+    )
+
+    assert lesson_store.article.version == 2
+
+
+def test_a_lesson_is_never_made_longer_than_a_lesson_may_be(lesson_store):
+    lesson_store.article = _lesson()
+    db = _WriteDb()
+
+    with pytest.raises(HTTPException) as caught:
+        _run(
+            lessons.update_lesson(
+                db,
+                USER,
+                str(lesson_store.article.id),
+                merged=None,
+                lesson="z" * lessons.LESSON_BODY_LIMIT,
+                context=None,
+            )
+        )
+
+    assert caught.value.status_code == 409
+    assert db.commits == 0 and lesson_store.article.version == 1
+
+
+def test_the_default_for_answers_follows_the_setting_everywhere(monkeypatch):
+    from src.domain.search_service import default_answer_scope
+
+    monkeypatch.setattr(settings, "AI_INCLUDE_LESSONS_DEFAULT", True)
+    assert default_answer_scope() == "all"
+    monkeypatch.setattr(settings, "AI_INCLUDE_LESSONS_DEFAULT", False)
+    assert default_answer_scope() == "documents"

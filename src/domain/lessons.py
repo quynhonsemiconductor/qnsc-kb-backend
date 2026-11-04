@@ -51,6 +51,9 @@ logger = structlog.get_logger()
 LESSON_TAG = "session-lesson"
 MAX_CANDIDATES = 3
 EXCERPT_CHARS = 3000
+#: The longest a lesson may become, by a model merge or by appending. A lesson is shown to the model whole up to this,
+#: so a rewrite can never silently drop what lay beyond an excerpt.
+LESSON_BODY_LIMIT = 20_000
 #: Passages asked of retrieval, and how many of them are shown for one article.
 RETRIEVAL_LIMIT = 8
 PASSAGES_PER_ARTICLE = 3
@@ -58,6 +61,8 @@ PASSAGES_PER_ARTICLE = 3
 RETRIEVAL_TIMEOUT_SECONDS = 8.0
 #: Without a model, a match at least this similar counts as the same lesson.
 FALLBACK_UPDATE_SCORE = 0.6
+#: What appending a dated section adds besides the lesson's own text (heading, stamp, blank lines).
+_APPEND_OVERHEAD = 40
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.DOTALL)
 
 _SYSTEM_PROMPT = """You keep a team's knowledge base free of duplicates. A NEW LESSON was
@@ -143,7 +148,9 @@ def parse_merged(reply: str) -> str | None:
     payload = _payload(reply)
     merged = payload.get("merged") if payload else None
     if isinstance(merged, str) and merged.strip():
-        return merged.strip()[:20_000]
+        merged = merged.strip()
+        # Too long is not clipped (that would cut a sentence off): it is not used, and the new text is appended.
+        return merged if len(merged) <= LESSON_BODY_LIMIT else None
     return None
 
 
@@ -165,7 +172,8 @@ async def _ask_model(
         return None
     existing = "\n\n---\n\n".join(
         f"EXISTING {'LESSON' if c.is_lesson else 'DOCUMENT'} {n}: {c.title}\n"
-        f"{(c.full_body if c.is_lesson and c.full_body else c.body)[:EXCERPT_CHARS]}"
+        # A lesson is merged whole, so the model must see all of it; a document is only compared with.
+        f"{c.full_body[:LESSON_BODY_LIMIT] if c.is_lesson and c.full_body else c.body[:EXCERPT_CHARS]}"
         for n, c in enumerate(candidates, start=1)
     )
     try:
@@ -298,6 +306,14 @@ async def decide_lesson(db: Any, user: Any, title: str, body: str) -> LessonDeci
     if action == "add" or target is None:
         return LessonDecision("add", reason=reason)
     chosen = candidates[target - 1]
+    if (
+        action == "update"
+        and chosen.is_lesson
+        and not merged
+        and len(chosen.full_body) + len(body) + _APPEND_OVERHEAD > LESSON_BODY_LIMIT
+    ):
+        # Appending would make the lesson longer than a lesson may be: keep the new one on its own.
+        return LessonDecision("add", reason=reason)
     return LessonDecision(
         action,
         chosen.article_id,
@@ -327,23 +343,30 @@ def ensure_can_write_lessons(db: Any, user: Any, dept: str | None) -> None:
 
 
 async def _enforce_daily_quota(db: Any, user: Any) -> None:
-    """A runaway assistant must not fill the knowledge base: one person saves at most N lessons a day."""
+    """A runaway assistant must not fill the knowledge base: one person writes at most N lessons a day.
+
+    A write is a new lesson or a change to one: both leave a version row naming the person, so they are counted
+    together. An assistant that keeps "updating" the lesson it saved first would otherwise grow the version history,
+    the audit log and the search index without limit.
+    """
     from src.core.config import settings
 
     limit = settings.LESSONS_MAX_PER_USER_PER_DAY
     if limit <= 0:
         return
-    saved = await db.scalar(
-        select(func.count(Article.id)).where(
+    written = await db.scalar(
+        select(func.count(ArticleVersion.id))
+        .join(Article, Article.id == ArticleVersion.article_id)
+        .where(
             Article.type == LESSON_TYPE,
-            Article.owner_id == user.id,
-            Article.created_at >= datetime.utcnow() - timedelta(days=1),
+            ArticleVersion.edited_by == user.id,
+            ArticleVersion.created_at >= datetime.utcnow() - timedelta(days=1),
         )
     )
-    if (saved or 0) >= limit:
+    if (written or 0) >= limit:
         raise HTTPException(
             status_code=429,
-            detail=f"Lesson limit reached: at most {limit} lessons a day per person.",
+            detail=f"Lesson limit reached: at most {limit} lessons saved or changed a day per person.",
         )
 
 
@@ -421,11 +444,17 @@ async def update_lesson(
     ):
         raise HTTPException(status_code=404, detail="Lesson not found")
     ensure_can_write_lessons(db, user, article.dept)
+    await _enforce_daily_quota(db, user)
     if merged:
         body = merged
     else:
         stamp = datetime.utcnow().strftime("%Y-%m-%d")
         body = f"{article.body_md.rstrip()}\n\n## Update {stamp}\n\n{lesson_body(lesson, context)}"
+    if len(body) > LESSON_BODY_LIMIT:
+        raise HTTPException(
+            status_code=409,
+            detail="This lesson is as long as a lesson may be; save the new one as a separate lesson.",
+        )
     now = datetime.utcnow()
     article.body_md = body
     article.version = (article.version or 1) + 1

@@ -580,7 +580,7 @@ class Settings(BaseSettings):
     # with the department like any article, and found by search. This is the DEFAULT for whether the assistant's
     # answers may also draw on them; a request can say `sources: "documents"` to read reviewed uploads only.
     AI_INCLUDE_LESSONS_DEFAULT: bool = True
-    # A person's assistants may save at most this many lessons a day (a runaway agent must not flood the knowledge base).
+    # A person's assistants may save or change at most this many lessons a day (a runaway agent must not flood the knowledge base).
     LESSONS_MAX_PER_USER_PER_DAY: int = 50
     # Off by default, same posture as CROSS_ENCODER_RERANKER_ENABLED above: a new
     # retrieval leg with no production traffic behind it yet. It adds a third

@@ -837,6 +837,10 @@ class AIService:
                 )
             ).one()
         except Exception:  # noqa: BLE001 - a cache key must never fail an answer
+            logger.warning(
+                "Sources epoch lookup failed; cached answers will not rotate when lessons change",
+                exc_info=True,
+            )
             return "all"
         return f"all:{count}:{newest}"
 

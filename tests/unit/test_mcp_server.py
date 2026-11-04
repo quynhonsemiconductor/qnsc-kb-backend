@@ -950,3 +950,23 @@ def test_list_lessons_passes_mine_and_the_filter(h):
     call = h.calls[-1]
     assert call.method == "GET" and call.path == "/knowledge/lessons"
     assert call.params == {"q": "uart", "mine": True, "limit": 5}
+
+
+@pytest.mark.parametrize("loose", ["true", 1, "yes"])
+def test_list_lessons_refuses_a_loosely_typed_mine_rather_than_listing_everyone(
+    h, loose
+):
+    before = len(h.calls)
+
+    out = h.result("tools/call", {"name": "list_lessons", "arguments": {"mine": loose}})
+
+    assert out["isError"] is True and "'mine' must be true or false" in str(out)
+    assert len(h.calls) == before
+
+
+def test_list_lessons_sends_mine_only_when_it_is_true(h):
+    h.reply = (200, [])
+
+    h.result("tools/call", {"name": "list_lessons", "arguments": {"mine": False}})
+
+    assert "mine" not in (h.calls[-1].params or {})

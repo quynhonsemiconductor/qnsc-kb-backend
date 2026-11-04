@@ -34,6 +34,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if "articles" not in set(inspect(op.get_bind()).get_table_names()):
+    tables = set(inspect(op.get_bind()).get_table_names())
+    if not {"articles", "article_tags"} <= tables:
         return
-    op.execute("UPDATE articles SET type = 'REFERENCE' WHERE type = 'LESSON'")
+    # The rows upgrade() converted carry the lesson tag, and so does every lesson saved since: the two cannot be told
+    # apart, so a downgrade after new lessons exist turns those into REFERENCE too. Only tagged rows are touched.
+    op.execute(
+        "UPDATE articles SET type = 'REFERENCE' "
+        "WHERE type = 'LESSON' "
+        "AND id IN (SELECT article_id FROM article_tags WHERE tag = 'session-lesson')"
+    )

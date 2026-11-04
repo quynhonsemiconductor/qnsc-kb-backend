@@ -41,7 +41,7 @@ from src.repositories.ops import OpsRepository
 from src.domain.governance import GovernanceService
 from src.domain.content_restructure import clear_restructure_deferrals
 from src.domain.ai_service import AIService
-from src.domain.search_service import SearchService
+from src.domain.search_service import SearchService, default_answer_scope
 from src.repositories.chunk import ChunkRepository
 from src.repositories.ai import AIRepository
 from src.models.ops import (
@@ -1936,6 +1936,7 @@ async def run_eval_question(
 
     gov_repo = GovernanceRepository(db)
     search_service = SearchService(ChunkRepository(db), gov_repo)
+    search_service.source_scope = default_answer_scope()
     started = time.perf_counter()
     retrieved = await search_service.search(current_user, question.question, limit=10)
     expected_ids = json.loads(question.expected_chunk_ids or "[]")

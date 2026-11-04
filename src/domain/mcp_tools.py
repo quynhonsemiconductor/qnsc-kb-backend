@@ -104,6 +104,13 @@ def _int(args: dict[str, Any], key: str, default: int, low: int, high: int) -> i
     return max(low, min(value, high))
 
 
+def _optional_bool(args: dict[str, Any], key: str) -> bool | None:
+    value = args.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ToolInputError(f"'{key}' must be true or false")
+    return True if value else None
+
+
 def _tags(args: dict[str, Any]) -> list[str]:
     value = args.get("tags") or []
     if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
@@ -422,7 +429,7 @@ def _list_lessons(args: dict[str, Any]) -> Call:
         params=_drop_none(
             {
                 "q": _text(args, "q", max_len=200),
-                "mine": True if args.get("mine") is True else None,
+                "mine": _optional_bool(args, "mine"),
                 "limit": _int(args, "limit", 20, 1, 50),
             }
         ),
@@ -447,10 +454,10 @@ LESSON_TAG = "session-lesson"
 def _record_lesson(args: dict[str, Any]) -> Call:
     """A lesson learned in an AI session.
 
-    The server compares it with what is stored and either submits it as a normal article
-    awaiting review, or says which existing article to update instead, or that it is already
-    known (src/domain/lessons.py). The body shape, the `session-lesson` tag and the draft
-    review all happen there.
+    The server compares it with what is stored and either publishes it at once as a new
+    lesson, or merges it into the existing lesson it adds to, or says which reviewed document
+    to ask an editor to change, or that it is already known (src/domain/lessons.py). There is
+    no review step; the body shape and the `session-lesson` tag are applied there.
     """
     return Call(
         "POST",

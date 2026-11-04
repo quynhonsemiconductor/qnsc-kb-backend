@@ -103,6 +103,6 @@ is on; without it the tools are hidden.
   - **Anyone may retract their own.** `list_lessons` (optionally `mine`) shows what was saved,
     `forget_lesson` takes one out of search at once; the author may always do it, so may whoever
     may delete the department's articles. It is a POST of one lesson, not a delete tool.
-  - **A quota** (`LESSONS_MAX_PER_USER_PER_DAY`, 50) stops a runaway assistant.
+  - **A quota** (`LESSONS_MAX_PER_USER_PER_DAY`, 50 saves or changes a day) stops a runaway assistant. A lesson also cannot grow past 20 000 characters; past that a new lesson is saved on its own.
   `list_my_drafts` is for the other kind of submission: documents sent with `create_article` or
   `update_article` that are still waiting for review.

@@ -20,13 +20,12 @@ from src.api.deps import (
     require_permission,
     set_database_context,
 )
-from src.core.config import settings
 from src.domain.agent.depth import current_depth
 from src.domain.ai_service import AIService, normalize_answer_markdown
 from src.domain.evidence_extraction import table_evidence_preview
 from src.domain.page_evidence import attach_page_evidence
 from src.rag.answer_sections import strip_source_metadata
-from src.domain.search_service import SearchService
+from src.domain.search_service import SearchService, default_answer_scope
 from src.domain.rbac import AuthorizationService
 from src.models import User
 from src.models.ai import AiFeedback, AiUsageLog
@@ -94,7 +93,7 @@ def get_ai_service(db: AsyncSession, sources: str | None = None) -> AIService:
     chunk_repo = ChunkRepository(db)
     gov_repo = GovernanceRepository(db)
     search_service = SearchService(chunk_repo, gov_repo, FeatureFlagRepository(db))
-    chosen = sources or ("all" if settings.AI_INCLUDE_LESSONS_DEFAULT else "documents")
+    chosen = sources or default_answer_scope()
     search_service.source_scope = "documents" if chosen == "documents" else "all"
     return AIService(AIRepository(db), search_service, gov_repo)
 
