@@ -63,7 +63,9 @@ your own permissions.
 Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
 `get_article_changes`, `list_recent_changes`, `list_conversations`, `get_conversation`, `list_lessons`, `list_my_drafts`, `list_departments`,
-`list_tags`, `get_glossary`, `find_entities`, `get_entity_neighbors`.
+`list_tags`, `get_glossary`, `get_project_config` (the team's standing instructions, versioned by the
+administrators; an assistant fetches it when the server names a newer version than its CLAUDE.md block),
+`find_entities`, `get_entity_neighbors`.
 
 Write tools (write-scope tokens only): `create_article`, `update_article`,
 `request_article_edit`, `rate_answer`, `record_lesson`, `forget_lesson`. Articles go through the
