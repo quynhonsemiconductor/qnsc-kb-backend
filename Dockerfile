@@ -211,6 +211,33 @@ FROM model AS embedding-fp32
 
 FROM embedding-${API_EMBEDDING} AS api-embedding
 
+FROM hub AS reranker
+
+# The cross-encoder's int8 ONNX export (~570 MB), used when CROSS_ENCODER_RERANKER_ENABLED=true. Off by default so an
+# image that does not rerank is no bigger for it: the stage then produces an empty directory. The revision is pinned
+# for the reason EMBEDDING_REVISION is: a moving branch would change the scores under a feature nobody is watching.
+ARG BAKE_RERANKER_MODEL=false
+ARG RERANKER_MODEL=onnx-community/bge-reranker-v2-m3-ONNX
+ARG RERANKER_REVISION=6f5ff65298512715a1e669753bc754d2bc8f367b
+ENV HF_HOME=/tmp/hf \
+    RERANKER_DIR=/opt/reranker-export
+
+RUN --mount=type=secret,id=hf_token,required=false \
+    mkdir -p "$HF_HOME" "$RERANKER_DIR" && \
+    if [ "$BAKE_RERANKER_MODEL" = "true" ]; then \
+        export HF_XET_HIGH_PERFORMANCE=1 && \
+        if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi && \
+        python -c "\
+from huggingface_hub import hf_hub_download; \
+import shutil, os; \
+target = os.environ['RERANKER_DIR']; \
+[shutil.copyfile(hf_hub_download('${RERANKER_MODEL}', name, revision='${RERANKER_REVISION}'), os.path.join(target, os.path.basename(name))) \
+ for name in ('onnx/model_int8.onnx', 'tokenizer.json')]"; \
+    fi && \
+    rm -rf "$HF_HOME" && \
+    find "$RERANKER_DIR" -exec touch -h -d @0 {} + && \
+    chmod -R a+rX "$RERANKER_DIR"
+
 # ---------------------------------------------------------------------------
 # runtime-base - the shipped base. NO libraries and NO application code.
 #
@@ -265,6 +292,7 @@ COPY --from=deps-onnx /opt/venv /opt/venv
 # (see runtime-base); the venv arrives with it, so it is stripped here.
 RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=api-embedding /opt/embedding-export /opt/embedding-onnx
+COPY --from=reranker /opt/reranker-export /opt/reranker-onnx
 COPY --chown=appuser:appuser . .
 
 USER appuser
@@ -297,6 +325,7 @@ COPY --from=deps-onnx-ocr /opt/venv /opt/venv
 # (see runtime-base); the venv arrives with it, so it is stripped here.
 RUN rm -rf /opt/venv/lib/python3*/site-packages/pip* /opt/venv/bin/pip*
 COPY --from=model /opt/embedding-export /opt/embedding-onnx
+COPY --from=reranker /opt/reranker-export /opt/reranker-onnx
 COPY --chown=appuser:appuser . .
 
 USER appuser

@@ -80,6 +80,9 @@ async def attach_embeddings(db: AsyncSession, chunks: Sequence[Any]) -> None:
 class ChunkRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
+        #: chunk id -> best rank (1 = nearest) in the vector leg of the current search. Read by the reranker,
+        #: which is otherwise blind to what the embedding found. Reset by SearchService.search.
+        self.vector_ranks: dict[Any, int] = {}
 
     async def create_parent_chunk(self, parent: ParentChunk) -> ParentChunk:
         self.db.add(parent)
@@ -511,6 +514,10 @@ class ChunkRepository:
             )
             vec_res = await self.db.execute(vector_stmt)
             vector_results = vec_res.scalars().all()
+            for rank, chunk in enumerate(vector_results, 1):
+                # Several queries of one search (sub-questions) share this: keep the best rank.
+                best = self.vector_ranks.get(chunk.id)
+                self.vector_ranks[chunk.id] = rank if best is None else min(best, rank)
             logger.info(
                 "Search vector candidates loaded",
                 query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),

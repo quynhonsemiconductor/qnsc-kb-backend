@@ -109,6 +109,7 @@ services:
         # silently degrades to keyword-only. It is two files, cached as a build layer,
         # and it is the same artifact production runs.
         BAKE_EMBEDDING_MODEL: "${KB_BAKE_EMBEDDING_MODEL:-true}"
+        BAKE_RERANKER_MODEL: "${KB_BAKE_RERANKER_MODEL:-false}"
       # See the top-level `secrets:` block -- optional, and only used by the Dockerfile's
       # bake step for a public model's Hub API rate limit / transfer, never for auth to
       # anything this app itself calls at runtime.

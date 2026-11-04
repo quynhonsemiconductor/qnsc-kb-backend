@@ -21,7 +21,12 @@ from src.rag.reranker import (
     rerank_chunks_with_scores,
     retrieval_score,
 )
-from src.rag.cross_encoder import CrossEncoderUnavailable, reorder_by_cross_encoder
+from src.rag.cross_encoder import (
+    CrossEncoderUnavailable,
+    cross_passage,
+    promote,
+    select_candidates,
+)
 from src.rag.cross_encoder import breaker as cross_encoder_breaker
 from src.rag.cross_encoder import score as cross_encoder_score
 from src.rag.query_router import (
@@ -213,6 +218,7 @@ class SearchService:
         # verdict for one that never reached the embedder.
         self.vector_search_degraded = False
         self.duplicates_collapsed = 0
+        self.chunk_repo.vector_ranks = {}
         if not query.strip():
             return []
         if not any(
@@ -351,7 +357,10 @@ class SearchService:
         cross_encoder_enabled = (
             reranking_enabled
             and settings.CROSS_ENCODER_RERANKER_ENABLED
-            and needs_deep_retrieval(query)
+            and (
+                not settings.CROSS_ENCODER_ONLY_DEEP_QUERIES
+                or needs_deep_retrieval(query)
+            )
             and (
                 not self.feature_flags
                 or await self.feature_flags.is_enabled(
@@ -363,8 +372,12 @@ class SearchService:
         # hybrid_search itself is asked for `limit` rows otherwise, unchanged from before
         # this feature existed. Requesting the wider pool only when the flag is actually
         # on keeps every other search exactly as cheap as it was.
-        pool_limit = (
-            settings.CROSS_ENCODER_CANDIDATE_POOL if cross_encoder_enabled else limit
+        pool_limit = limit
+        # What the cross-encoder leaves behind it, so a search it re-scored returns as many results as before.
+        kept_after_rerank = max(
+            pool_limit,
+            settings.CROSS_ENCODER_CANDIDATE_POOL
+            + settings.CROSS_ENCODER_VECTOR_CANDIDATES,
         )
         # The entity-graph leg is off until the "rag.graph_retrieval" flag is created and
         # switched on (Admin > Feature controls), so it can be tried for some people, then
@@ -432,13 +445,22 @@ class SearchService:
         async def _rerank(pool: list) -> list[tuple]:
             if reranking_enabled:
                 result = rerank_chunks_with_scores(
-                    retrieval_query, pool, limit=pool_limit, identifiers=identifiers
+                    retrieval_query,
+                    pool,
+                    # Ranked in full when a cross-encoder follows: its vector candidates can sit far down the
+                    # lexical order, and slicing first would never let it see them.
+                    limit=len(pool) if cross_encoder_enabled else pool_limit,
+                    identifiers=identifiers,
+                    vector_ranks=self.chunk_repo.vector_ranks,
                 )
             else:
                 # Prepared against the same pool the reranker would have used, so
                 # turning the reranker off changes the ordering and not the calibration.
                 prepared = prepare_query_for_chunks(
-                    retrieval_query, pool, identifiers=identifiers
+                    retrieval_query,
+                    pool,
+                    identifiers=identifiers,
+                    vector_ranks=self.chunk_repo.vector_ranks,
                 )
                 result = [
                     (chunk, retrieval_score(retrieval_query, chunk, prepared))
@@ -451,14 +473,22 @@ class SearchService:
             )
             if attempt is not None:
                 try:
+                    candidate_indexes = select_candidates(
+                        result,
+                        self.chunk_repo.vector_ranks,
+                        settings.CROSS_ENCODER_CANDIDATE_POOL,
+                        settings.CROSS_ENCODER_VECTOR_CANDIDATES,
+                    )
                     try:
                         cross_scores = await asyncio.wait_for(
                             asyncio.to_thread(
                                 cross_encoder_score,
-                                retrieval_query,
+                                # The question as asked, not the normalised retrieval query: a cross-encoder
+                                # reads the sentence, and stopwords and word order carry meaning for it.
+                                query,
                                 [
-                                    chunk_passage(chunk)
-                                    for chunk, _lexical_score in result
+                                    cross_passage(result[index][0])
+                                    for index in candidate_indexes
                                 ],
                             ),
                             timeout=settings.CROSS_ENCODER_TIMEOUT_SECONDS,
@@ -467,7 +497,7 @@ class SearchService:
                         cross_encoder_breaker.record_timeout(attempt)
                         raise CrossEncoderUnavailable(
                             f"no answer within {settings.CROSS_ENCODER_TIMEOUT_SECONDS}s "
-                            f"for {len(result)} passages"
+                            f"for {len(candidate_indexes)} passages"
                         ) from exc
                     # Order comes from the cross-encoder; the VALUE reported and
                     # thresholded below stays the lexical score. RAG_MIN_RELEVANCE_SCORE
@@ -475,7 +505,14 @@ class SearchService:
                     # mixing in a cross-encoder's own (unbounded, model-specific) scale
                     # here would shift every threshold decision with no warning.
                     cross_encoder_breaker.record_success(attempt)
-                    result = reorder_by_cross_encoder(result, cross_scores)
+                    result = promote(
+                        result,
+                        candidate_indexes,
+                        cross_scores,
+                        settings.CROSS_ENCODER_ASSIST_TOP_K,
+                        settings.RAG_VECTOR_ASSIST_SCORE,
+                        settings.CROSS_ENCODER_ASSIST_MIN_PROBABILITY,
+                    )
                 except CrossEncoderUnavailable as exc:
                     logger.warning(
                         "Cross-encoder reranking failed, falling back to lexical order",
@@ -485,6 +522,8 @@ class SearchService:
                     # Also on CancelledError (a dropped request): a probe that ends without a result must not
                     # leave the circuit half-open forever.
                     cross_encoder_breaker.finish(attempt)
+            if cross_encoder_enabled:
+                result = result[:kept_after_rerank]
             return result
 
         ranked = await _rerank(candidates)
