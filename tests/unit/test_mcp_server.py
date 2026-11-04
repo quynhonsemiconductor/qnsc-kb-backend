@@ -622,6 +622,7 @@ SAMPLE = {
     "conversation_id": ARTICLE_ID,
     "lesson_id": ARTICLE_ID,
     "basis": "said_by_user",
+    "from_version": 1,
 }
 
 
@@ -974,3 +975,45 @@ def test_list_lessons_sends_mine_only_when_it_is_true(h):
     h.result("tools/call", {"name": "list_lessons", "arguments": {"mine": False}})
 
     assert "mine" not in (h.calls[-1].params or {})
+
+
+def test_get_article_changes_calls_the_changes_endpoint_with_the_versions_given(h):
+    h.reply = (
+        200,
+        {"summary": ['Text: 1 line(s) added, 0 removed, in 1 section(s): "A".']},
+    )
+
+    out = h.result(
+        "tools/call",
+        {
+            "name": "get_article_changes",
+            "arguments": {"article_id": ARTICLE_ID, "from_version": 2, "to_version": 5},
+        },
+    )
+
+    assert json.loads(out["content"][0]["text"])["summary"]
+    call = h.calls[-1]
+    assert call.method == "GET" and call.path == f"/articles/{ARTICLE_ID}/changes"
+    assert call.params == {"from_version": 2, "to_version": 5}
+
+
+def test_get_article_changes_defaults_to_the_latest_against_the_one_before(h):
+    h.reply = (200, {})
+    h.result(
+        "tools/call",
+        {"name": "get_article_changes", "arguments": {"article_id": ARTICLE_ID}},
+    )
+    assert h.calls[-1].params in (None, {})
+
+
+def test_get_article_changes_rejects_a_backwards_range_before_calling(h):
+    before = len(h.calls)
+    out = h.result(
+        "tools/call",
+        {
+            "name": "get_article_changes",
+            "arguments": {"article_id": ARTICLE_ID, "from_version": 4, "to_version": 2},
+        },
+    )
+    assert out["isError"] is True and "older" in str(out)
+    assert len(h.calls) == before

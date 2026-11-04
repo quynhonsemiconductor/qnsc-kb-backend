@@ -547,6 +547,25 @@ def _version(args: dict[str, Any]) -> Call:
     return Call("GET", f"/articles/{_id(args, 'article_id')}/versions/{number}")
 
 
+def _optional_version(args: dict[str, Any], key: str) -> int | None:
+    if args.get(key) is None:
+        return None
+    return _int(args, key, 1, 1, 10**9)
+
+
+def _changes(args: dict[str, Any]) -> Call:
+    older, newer = _optional_version(args, "from_version"), _optional_version(
+        args, "to_version"
+    )
+    if older is not None and newer is not None and older >= newer:
+        raise ToolInputError("'from_version' must be older than 'to_version'")
+    return Call(
+        "GET",
+        f"/articles/{_id(args, 'article_id')}/changes",
+        params=_drop_none({"from_version": older, "to_version": newer}),
+    )
+
+
 def _related(args: dict[str, Any]) -> Call:
     return Call(
         "GET",
@@ -763,6 +782,32 @@ TOOLS: tuple[Tool, ...] = (
         {"article_id": _ID, "version": {"type": "integer", "minimum": 1}},
         ("article_id", "version"),
         _version,
+    ),
+    Tool(
+        "get_article_changes",
+        "See what changed in an article",
+        "What changed in an article between two versions, without reading both: a short summary, "
+        "then per section the lines removed and added, plus changes to title, department, tags "
+        "and sensitivity. By default the latest version against the one before it. Pass "
+        "from_version (the 'version' you read earlier) to learn what changed since then, and "
+        "to_version to stop short of the latest. Use it when asked 'what is new in X' or before "
+        "relying on something you read earlier; use get_article_version to read an old version "
+        "whole. Long changes are clipped: 'truncated' says so.",
+        {
+            "article_id": _ID,
+            "from_version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The older version to compare from (default: the one before to_version)",
+            },
+            "to_version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The newer version (default: the latest)",
+            },
+        },
+        ("article_id",),
+        _changes,
     ),
     Tool(
         "list_departments",

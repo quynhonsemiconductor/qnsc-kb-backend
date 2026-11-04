@@ -27,6 +27,7 @@ from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
+from src.domain.article_changes import describe_changes
 from src.domain.articles import ArticleService
 from src.domain.source_extraction import (
     SUPPORTED_EXTENSIONS,
@@ -2703,6 +2704,35 @@ async def get_version(
     user_repo = UserRepository(db)
     article_service = ArticleService(article_repo, user_repo)
     return await article_service.get_version(current_user, id, version_num)
+
+
+@router.get("/{id}/changes")
+async def article_changes(
+    id: uuid.UUID,
+    from_version: int | None = Query(None, ge=1),
+    to_version: int | None = Query(None, ge=1),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """What changed in an article: section by section, plus the metadata that moved (src/domain/article_changes.py).
+
+    By default the latest version against the one before it. `from_version` alone compares that version with the
+    latest ("what changed since I read version N"); `to_version` bounds the other end. The caller needs the same
+    right to read the article as for its version history.
+    """
+    history = await ArticleService(
+        ArticleRepository(db), UserRepository(db)
+    ).get_history(current_user, id)
+    try:
+        result = describe_changes(list(history), from_version, to_version)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    latest = max(history, key=lambda item: item.version)
+    return {
+        "article_id": str(id),
+        "title": (latest.snapshot or {}).get("title"),
+        **result,
+    }
 
 
 @router.post(
