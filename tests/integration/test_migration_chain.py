@@ -17,4 +17,5 @@ def test_migrations_have_one_current_head():
     # table (80), and article_chunks.content_hash for skip-if-unchanged re-embedding (81).
     # Bumped for 20261104_92, which grants the runtime role DML access to the schema
     # the chain built.
-    assert script.get_heads() == ["20261104_92"]
+    # Bumped for 20261104_93, which retypes the lessons assistants already saved to LESSON.
+    assert script.get_heads() == ["20261104_93"]
