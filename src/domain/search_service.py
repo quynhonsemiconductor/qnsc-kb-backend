@@ -29,6 +29,7 @@ from src.rag.cross_encoder import (
 )
 from src.rag.cross_encoder import breaker as cross_encoder_breaker
 from src.rag.cross_encoder import score as cross_encoder_score
+from src.rag.query_translation import translate_query
 from src.rag.query_router import (
     is_comparison_query,
     needs_deep_retrieval,
@@ -69,6 +70,23 @@ def _query_embedding_key(text: str) -> tuple[str, str]:
 def reset_query_embedding_cache() -> None:
     """Drop the cache. For tests, and for a deliberate model/version switch."""
     _QUERY_EMBEDDING_CACHE.clear()
+
+
+def best_score_per_chunk(scored_sets: list[list[tuple]]) -> list[tuple]:
+    """Merge several scorings of one pool: each chunk keeps its highest score, best first.
+
+    With one scoring this is that scoring, unchanged and in the same order. Ties keep the
+    order of the first scoring that placed the chunk.
+    """
+    if len(scored_sets) == 1:
+        return scored_sets[0]
+    best: dict[Any, tuple] = {}
+    for scored in scored_sets:
+        for chunk, score in scored:
+            held = best.get(chunk.id)
+            if held is None or score > held[1]:
+                best[chunk.id] = (chunk, score)
+    return sorted(best.values(), key=lambda pair: pair[1], reverse=True)
 
 
 def _dedup_preserve_order(items: list[str]) -> list[str]:
@@ -311,6 +329,17 @@ class SearchService:
             not self.feature_flags
             or await self.feature_flags.is_enabled("rag.multi_query_retrieval", user)
         )
+        #: The question and the model's rewordings of it. Retrieval ran with all of them already;
+        #: each candidate is now also SCORED against each (see `_rerank`), because a passage
+        #: found by the English rewording of a Vietnamese question shares no words with the
+        #: Vietnamese one and was otherwise dropped by the lexical gate the moment it arrived.
+        score_variants: list[str] = []
+        if settings.QUERY_TRANSLATION_ENABLED and not multi_subject_queries:
+            translated = await translate_query(query)
+            translated_query = normalize_query(translated) if translated else ""
+            if translated_query and translated_query != retrieval_query:
+                multi_subject_queries = [retrieval_query, translated_query]
+                score_variants = list(multi_subject_queries)
         if not multi_subject_queries and multi_query_enabled:
             generated_subqueries = await generate_subqueries(query)
             if generated_subqueries:
@@ -319,6 +348,7 @@ class SearchService:
                     + [normalize_query(item) for item in generated_subqueries]
                 )
                 multi_subject_queries = [item for item in multi_subject_queries if item]
+                score_variants = list(multi_subject_queries)
 
         async def _embed_or_degrade(text: str) -> list[float] | None:
             try:
@@ -444,15 +474,22 @@ class SearchService:
         # rather than scoring the same passage again.
         async def _rerank(pool: list) -> list[tuple]:
             if reranking_enabled:
-                result = rerank_chunks_with_scores(
-                    retrieval_query,
-                    pool,
-                    # Ranked in full when a cross-encoder follows: its vector candidates can sit far down the
-                    # lexical order, and slicing first would never let it see them.
-                    limit=len(pool) if cross_encoder_enabled else pool_limit,
-                    identifiers=identifiers,
-                    vector_ranks=self.chunk_repo.vector_ranks,
-                )
+                # Ranked in full when a cross-encoder follows: its vector candidates can sit far down the
+                # lexical order, and slicing first would never let it see them.
+                keep = len(pool) if cross_encoder_enabled else pool_limit
+                scored_by_variant = [
+                    rerank_chunks_with_scores(
+                        variant,
+                        pool,
+                        limit=len(pool) if len(score_variants) > 1 else keep,
+                        identifiers=identifiers,
+                        vector_ranks=self.chunk_repo.vector_ranks,
+                    )
+                    for variant in (
+                        score_variants if len(score_variants) > 1 else [retrieval_query]
+                    )
+                ]
+                result = best_score_per_chunk(scored_by_variant)[:keep]
             else:
                 # Prepared against the same pool the reranker would have used, so
                 # turning the reranker off changes the ordering and not the calibration.
@@ -558,6 +595,8 @@ class SearchService:
                 if not normalized_followup or normalized_followup in tried_queries:
                     break
                 tried_queries.append(normalized_followup)
+                if len(score_variants) > 1:
+                    score_variants.append(normalized_followup)
                 followup_embedding = await _embed_or_degrade(normalized_followup)
                 followup_candidates = await self.chunk_repo.hybrid_search(
                     query=normalized_followup,
