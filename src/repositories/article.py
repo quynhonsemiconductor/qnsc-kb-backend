@@ -1,11 +1,25 @@
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Sequence, Any, cast
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.sql.elements import ColumnElement
-from sqlalchemy import select, update, and_, or_, exists, false, true, not_, func
+from sqlalchemy import (
+    select,
+    update,
+    and_,
+    or_,
+    exists,
+    false,
+    true,
+    not_,
+    func,
+    tuple_,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.article import (
+    LESSON_TYPE,
     Article,
     ArticleVersion,
     ArticleUserPermission,
@@ -16,6 +30,19 @@ from src.models.user import User, Department
 from src.domain.connector_providers import SOURCE_ACL_PROVIDERS
 from src.domain.rbac import AuthorizationService
 from src.domain.permissions import PermissionService
+
+
+@dataclass
+class RecentChange:
+    """One article that changed in a period: the article, its newest version, the version it had before the
+    period began (None when it was created inside the period), and how many versions the period holds.
+    """
+
+    article: Article
+    latest: ArticleVersion
+    baseline: ArticleVersion | None
+    versions: int
+    changed_at: datetime
 
 
 class ArticleRepository:
@@ -312,6 +339,123 @@ class ArticleRepository:
         for article in articles:
             AuthorizationService.restrict_article_metadata(user, article)
         return articles
+
+    async def recent_changes(
+        self,
+        user: User,
+        since: datetime,
+        dept: str | None = None,
+        scope: str | None = None,
+        limit: int = 20,
+    ) -> list[RecentChange]:
+        """Published articles the caller may read that gained a version since `since`, newest change first.
+
+        The same visibility predicate as every other read, applied to the version rows themselves: a version of an
+        article the caller cannot read is never counted, and nothing is filtered in Python. `scope` is
+        "documents" (reviewed uploads) or "lessons" (what assistants saved); anything else means both.
+        """
+        filters: list[Any] = [
+            *self._authorized_article_filters(user),
+            Article.status == "published",
+            ArticleVersion.created_at >= since,
+        ]
+        if dept:
+            filters.append(
+                or_(
+                    Article.dept == dept,
+                    Article.departments.any(Department.name == dept),
+                )
+            )
+        if scope == "documents":
+            filters.append(Article.type != LESSON_TYPE)
+        elif scope == "lessons":
+            filters.append(Article.type == LESSON_TYPE)
+        changed_at = func.max(ArticleVersion.created_at)
+        rows = (
+            await self.db.execute(
+                select(
+                    ArticleVersion.article_id,
+                    func.max(ArticleVersion.version).label("latest"),
+                    func.count(ArticleVersion.id).label("versions"),
+                    changed_at.label("changed_at"),
+                )
+                .join(Article, Article.id == ArticleVersion.article_id)
+                .where(and_(*filters))
+                .group_by(ArticleVersion.article_id)
+                .order_by(changed_at.desc())
+                .limit(limit)
+            )
+        ).all()
+        if not rows:
+            return []
+        ids = [row.article_id for row in rows]
+        articles = {
+            article.id: article
+            for article in (
+                await self.db.execute(
+                    select(Article)
+                    .where(Article.id.in_(ids))
+                    .options(selectinload(Article.departments))
+                )
+            )
+            .scalars()
+            .all()
+        }
+        before = {
+            row.article_id: row.version
+            for row in (
+                await self.db.execute(
+                    select(
+                        ArticleVersion.article_id,
+                        func.max(ArticleVersion.version).label("version"),
+                    )
+                    .where(
+                        ArticleVersion.article_id.in_(ids),
+                        ArticleVersion.created_at < since,
+                    )
+                    .group_by(ArticleVersion.article_id)
+                )
+            ).all()
+        }
+        wanted = {(row.article_id, row.latest) for row in rows} | {
+            (article_id, number) for article_id, number in before.items()
+        }
+        snapshots = {
+            (version.article_id, version.version): version
+            for version in (
+                await self.db.execute(
+                    select(ArticleVersion).where(
+                        tuple_(ArticleVersion.article_id, ArticleVersion.version).in_(
+                            list(wanted)
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        changes: list[RecentChange] = []
+        for row in rows:
+            article = articles.get(row.article_id)
+            latest = snapshots.get((row.article_id, row.latest))
+            if article is None or latest is None:
+                continue
+            AuthorizationService.restrict_article_metadata(user, article)
+            earlier = before.get(row.article_id)
+            changes.append(
+                RecentChange(
+                    article=article,
+                    latest=latest,
+                    baseline=(
+                        snapshots.get((row.article_id, earlier))
+                        if earlier is not None
+                        else None
+                    ),
+                    versions=int(row.versions),
+                    changed_at=row.changed_at,
+                )
+            )
+        return changes
 
     async def index_status_counts(self, user: User) -> dict[str, int]:
         """Published articles the caller may read, counted by search-index state.

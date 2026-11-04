@@ -5,7 +5,7 @@ import re
 import uuid
 import unicodedata
 from pathlib import Path
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, Literal, Sequence, cast
 from fastapi import (
     APIRouter,
@@ -27,7 +27,7 @@ from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
-from src.domain.article_changes import describe_changes
+from src.domain.article_changes import describe_changes, describe_recent
 from src.domain.articles import ArticleService
 from src.domain.source_extraction import (
     SUPPORTED_EXTENSIONS,
@@ -1966,6 +1966,49 @@ async def article_index_summary(
         total=total,
         not_ready=known["pending"] + known["processing"] + known["failed"],
     )
+
+
+@router.get("/recent-changes")
+async def recent_changes(
+    days: int = Query(7, ge=1, le=365),
+    since: datetime | None = Query(
+        None, description="ISO date or time; overrides `days`"
+    ),
+    dept: str | None = Query(None, max_length=100),
+    scope: Literal["all", "documents", "lessons"] = Query("all"),
+    limit: int = Query(20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """What is new or changed in the knowledge base, newest first: one entry per article, with a line on what changed.
+
+    A period is `days` back from now, or from `since`. An article created inside the period is "new"; one that
+    already existed is "updated" and says what changed since the period began (see `/{id}/changes` for the detail).
+    Only published articles the caller may read are listed, by the same rule as the article list.
+    """
+    now = datetime.now(UTC)
+    start = since if since is not None else now - timedelta(days=days)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    if start > now:
+        raise HTTPException(status_code=422, detail="'since' is in the future")
+    # Version timestamps are stored as naive UTC.
+    changes = await ArticleRepository(db).recent_changes(
+        current_user,
+        start.astimezone(UTC).replace(tzinfo=None),
+        dept=dept,
+        scope=None if scope == "all" else scope,
+        limit=limit + 1,
+    )
+    # Comparing texts is CPU work: keep it off the event loop, one thread for the whole page.
+    entries = await asyncio.to_thread(describe_recent, changes[:limit])
+    return {
+        "since": start.astimezone(UTC).isoformat(),
+        "count": len(entries),
+        "changes": entries,
+        # One more was asked for than shown, so this is known rather than guessed from a full page.
+        "truncated": len(changes) > limit,
+    }
 
 
 @router.get("/", response_model=list[ArticleResponse])

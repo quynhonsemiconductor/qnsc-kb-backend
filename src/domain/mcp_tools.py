@@ -566,6 +566,22 @@ def _changes(args: dict[str, Any]) -> Call:
     )
 
 
+def _recent_changes(args: dict[str, Any]) -> Call:
+    return Call(
+        "GET",
+        "/articles/recent-changes",
+        params=_drop_none(
+            {
+                "days": _int(args, "days", 7, 1, 365),
+                "since": _text(args, "since", max_len=40),
+                "dept": _text(args, "dept", max_len=100),
+                "scope": _choice(args, "scope", ("all", "documents", "lessons")),
+                "limit": _int(args, "limit", 20, 1, 50),
+            }
+        ),
+    )
+
+
 def _related(args: dict[str, Any]) -> Call:
     return Call(
         "GET",
@@ -808,6 +824,38 @@ TOOLS: tuple[Tool, ...] = (
         },
         ("article_id",),
         _changes,
+    ),
+    Tool(
+        "list_recent_changes",
+        "See what is new or changed in the knowledge base",
+        "Articles that are new or were updated lately, newest first, one entry each: whether it "
+        "is 'new' or 'updated', its version, when it changed and, for an update, a line on what "
+        "changed since the period began. Use it for 'what is new this week' or 'what changed "
+        "since I last checked'; open one with get_article_changes for the detail. The period is "
+        "`days` back (default 7) or from `since`; filter by dept or scope. Only published "
+        "articles the user may read are listed.",
+        {
+            "days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365,
+                "description": "How many days back (default 7)",
+            },
+            "since": {
+                "type": "string",
+                "description": "ISO date or time to start from, e.g. 2026-11-01; overrides days",
+            },
+            "dept": {"type": "string"},
+            "scope": {
+                "type": "string",
+                "enum": ["all", "documents", "lessons"],
+                "description": "documents: reviewed uploads only; lessons: what assistants "
+                "saved with record_lesson; all (default): both.",
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        (),
+        _recent_changes,
     ),
     Tool(
         "list_departments",

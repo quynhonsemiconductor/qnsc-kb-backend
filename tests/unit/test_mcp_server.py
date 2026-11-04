@@ -1017,3 +1017,47 @@ def test_get_article_changes_rejects_a_backwards_range_before_calling(h):
     )
     assert out["isError"] is True and "older" in str(out)
     assert len(h.calls) == before
+
+
+def test_list_recent_changes_calls_the_feed_with_the_period_and_filters(h):
+    h.reply = (200, {"count": 0, "changes": []})
+
+    h.result(
+        "tools/call",
+        {
+            "name": "list_recent_changes",
+            "arguments": {"days": 30, "dept": "Firmware", "scope": "documents"},
+        },
+    )
+
+    call = h.calls[-1]
+    assert call.method == "GET" and call.path == "/articles/recent-changes"
+    assert call.params == {
+        "days": 30,
+        "dept": "Firmware",
+        "scope": "documents",
+        "limit": 20,
+    }
+
+
+def test_list_recent_changes_defaults_to_a_week_and_takes_a_date(h):
+    h.reply = (200, {})
+
+    h.result("tools/call", {"name": "list_recent_changes", "arguments": {}})
+    assert h.calls[-1].params == {"days": 7, "limit": 20}
+
+    h.result(
+        "tools/call",
+        {"name": "list_recent_changes", "arguments": {"since": "2026-11-01"}},
+    )
+    assert h.calls[-1].params["since"] == "2026-11-01"
+
+
+def test_list_recent_changes_refuses_an_unknown_scope_before_calling(h):
+    before = len(h.calls)
+    out = h.result(
+        "tools/call",
+        {"name": "list_recent_changes", "arguments": {"scope": "everything"}},
+    )
+    assert out["isError"] is True and "scope" in str(out)
+    assert len(h.calls) == before

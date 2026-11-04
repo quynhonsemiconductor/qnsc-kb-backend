@@ -90,13 +90,21 @@ def _metadata_changes(before: dict, after: dict) -> list[dict[str, Any]]:
     return changes
 
 
-def diff_versions(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
-    """Compare two version snapshots. `before` is the older one."""
+def diff_versions(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    max_lines: int | None = None,
+) -> dict[str, Any]:
+    """Compare two version snapshots. `before` is the older one.
+
+    `max_lines` lowers the length above which the text is summarised by counts only (default MAX_COMPARED_LINES): a
+    caller comparing many articles in one request bounds its worst case that way.
+    """
     old_lines, new_lines = _lines(before.get("body_md")), _lines(after.get("body_md"))
     metadata = _metadata_changes(before, after)
     result: dict[str, Any] = {"metadata_changes": metadata}
 
-    if max(len(old_lines), len(new_lines)) > MAX_COMPARED_LINES:
+    if max(len(old_lines), len(new_lines)) > (max_lines or MAX_COMPARED_LINES):
         result.update(
             body={"lines_before": len(old_lines), "lines_after": len(new_lines)},
             hunks=[],
@@ -242,3 +250,41 @@ def describe_changes(
 def _stamp(version: Any) -> str | None:
     created = getattr(version, "created_at", None)
     return created.isoformat() if created else None
+
+
+#: Lines above which the feed does not compare an article line by line: it lists many articles per request.
+FEED_MAX_COMPARED_LINES = 4_000
+FEED_SUMMARY_LINES = 3
+
+
+def describe_recent(changes: list[Any]) -> list[dict[str, Any]]:
+    """The newest changes across articles as short entries, each with a line saying what changed.
+
+    `changes` are `RecentChange`s (src/repositories/article.py): `.article`, `.latest`, `.baseline`, `.versions`,
+    `.changed_at`. An article with no version from before the period is "new"; otherwise "updated", with the newest
+    version compared to the one the period started from. Pure: no database, no model call.
+    """
+    entries: list[dict[str, Any]] = []
+    for change in changes:
+        article = change.article
+        entry: dict[str, Any] = {
+            "article_id": str(article.id),
+            "title": article.title,
+            "dept": article.dept,
+            "type": article.type,
+            "kind": "new" if change.baseline is None else "updated",
+            "version": change.latest.version,
+            "versions_in_period": change.versions,
+            "changed_at": change.changed_at.isoformat(),
+        }
+        if change.baseline is not None:
+            result = diff_versions(
+                change.baseline.snapshot or {},
+                change.latest.snapshot or {},
+                max_lines=FEED_MAX_COMPARED_LINES,
+            )
+            entry["from_version"] = change.baseline.version
+            entry["summary"] = result["summary"][:FEED_SUMMARY_LINES]
+            entry["sections"] = (result.get("body") or {}).get("sections", [])[:5]
+        entries.append(entry)
+    return entries
