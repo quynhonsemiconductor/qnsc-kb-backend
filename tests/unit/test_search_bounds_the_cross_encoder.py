@@ -25,6 +25,12 @@ from src.models.rbac import Permission, Role, RolePermission
 from src.models.user import User
 from src.rag.reranker import normalize_query
 
+@pytest.fixture(autouse=True)
+def _no_queue_wait(monkeypatch):
+    # These tests bound the reranker's own time; waiting for a turn is covered in test_cross_encoder_queue.py.
+    monkeypatch.setattr(settings, "CROSS_ENCODER_QUEUE_WAIT_SECONDS", 0.0)
+
+
 COMPANY = "acme.test"
 # Two question marks: the cheapest way to satisfy needs_deep_retrieval().
 QUERY = "what is the leave policy? and who approves it?"

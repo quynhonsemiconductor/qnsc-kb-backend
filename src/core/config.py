@@ -557,9 +557,14 @@ class Settings(BaseSettings):
     # the lexical order it already has. MEASURED (scripts/bench_inference.py, docs/performance-develop.md):
     # bge-reranker-v2-m3 costs ~0.5 s per (query, passage) pair on 2 vCPU, so the default pool of 30
     # is ~15 s there. The bound is what keeps "optional enhancement" from meaning "optionally
-    # makes search look stuck". The scoring thread cannot be cancelled; while it finishes,
-    # further searches skip the cross-encoder instead of queueing behind it.
+    # makes search look stuck". The scoring thread cannot be cancelled; while it finishes, a further search waits
+    # for its turn (CROSS_ENCODER_QUEUE_WAIT_SECONDS) and then skips the cross-encoder instead of queueing behind it.
     CROSS_ENCODER_TIMEOUT_SECONDS: float = 5.0
+    # The reranker scores one search at a time. A search that arrives meanwhile waits up to this long for its turn
+    # (on top of CROSS_ENCODER_TIMEOUT_SECONDS for its own scoring) and only then falls back to the lexical order.
+    # 0 refuses at once, which is what every concurrent search but the first used to get: with several assistants
+    # asking together the order of most answers silently depended on who else was asking.
+    CROSS_ENCODER_QUEUE_WAIT_SECONDS: float = 8.0
     # After this many CONSECUTIVE timeouts the reranker is skipped for the cooldown below instead of
     # being tried (and waited on, up to the timeout) by every search. A timed-out call also keeps a
     # thread busy until it finishes, so on a CPU that is too small the feature would otherwise cost

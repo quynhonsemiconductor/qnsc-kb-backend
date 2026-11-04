@@ -27,6 +27,8 @@ class Clock:
 def small_numbers(monkeypatch):
     monkeypatch.setattr(settings, "CROSS_ENCODER_BREAKER_THRESHOLD", 3)
     monkeypatch.setattr(settings, "CROSS_ENCODER_BREAKER_COOLDOWN_SECONDS", 100.0)
+    # These tests time the reranker itself; waiting for a turn is covered in test_cross_encoder_queue.py.
+    monkeypatch.setattr(settings, "CROSS_ENCODER_QUEUE_WAIT_SECONDS", 0.0)
     cross_encoder.breaker.record_success()
 
 
