@@ -174,7 +174,7 @@ def test_the_ai_endpoint_buckets_on_the_authenticated_user(monkeypatch):
             return {"answer": "Answer", "citations": [], "log_id": None}
 
     monkeypatch.setattr(ai, "AIRepository", _FakeRepository)
-    monkeypatch.setattr(ai, "get_ai_service", lambda _db: _FakeAIService())
+    monkeypatch.setattr(ai, "get_ai_service", lambda _db, _sources=None: _FakeAIService())
     monkeypatch.setattr(ai, "ai_rate_limiter", SimpleNamespace(allow=record))
 
     asyncio.run(

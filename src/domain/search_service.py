@@ -183,6 +183,9 @@ class SearchService:
     #: the cross-encoder's order, and its few seconds (plus its turn in the queue) are spent on a request that has
     #: other model calls to make.
     use_cross_encoder: bool = True
+    #: "all", "documents" (reviewed uploads only) or "lessons" (what AI assistants saved). Set per request by the
+    #: caller; an explicit `source_scope` in `filters` wins.
+    source_scope: str = "all"
 
     def __init__(
         self,
@@ -255,6 +258,8 @@ class SearchService:
         started = time.perf_counter()
 
         effective_filters = dict(filters or {})
+        if self.source_scope != "all":
+            effective_filters.setdefault("source_scope", self.source_scope)
         if not AuthorizationService.has_permission(
             user, "article.read", requested_scope="global"
         ):

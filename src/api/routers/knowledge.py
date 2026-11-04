@@ -705,11 +705,11 @@ async def my_drafts(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    """What the caller has submitted that has not been published: waiting for a reviewer, or rejected.
+    """The documents the caller submitted that have not been published: waiting for a reviewer, or rejected.
 
-    Only the caller's own submissions, never a colleague's. Without this a lesson an assistant saved yesterday is
-    invisible to it today (it is not an article until a reviewer approves it), so it either says nothing was ever
-    recorded or records the same thing again.
+    Only the caller's own submissions, never a colleague's. A submitted document is not an article until a reviewer
+    approves it, so nothing else shows the author where it stands. (Lessons are not listed here: they are published
+    at once, see `GET /lessons`.)
     """
     rows = (
         (
@@ -760,27 +760,47 @@ async def submit_lesson(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Save a lesson from an AI session unless the knowledge base already has it.
+    """Save a lesson from an AI session, at once and without a reviewer, unless the knowledge base already has it.
 
-    Compares it with the articles the author may see (src/domain/lessons.py). A new lesson
-    goes through the ordinary draft-and-review path of POST /articles, so reviewers,
-    department policy and the contradiction check all apply; an update or a duplicate saves
-    nothing and says where to look instead.
+    A lesson is a different kind of knowledge from the reviewed documents (src/domain/lessons.py): it is published
+    straight away for the author's department and found by search and by the assistant's answers, labelled as a
+    team lesson. A new one is saved; one that adds to or corrects an earlier LESSON is merged into it in place (a new
+    version); one that concerns a reviewed DOCUMENT saves nothing and says to ask for an edit; a duplicate saves
+    nothing.
     """
-    from src.api.routers.articles import ArticleCreate, create_article
-    from src.domain.lessons import LESSON_TAG, decide_lesson, lesson_body
+    from src.domain.lessons import (
+        decide_lesson,
+        lesson_body,
+        save_new_lesson,
+        update_lesson,
+    )
 
     body = lesson_body(request.lesson, request.context)
     decision = await decide_lesson(db, current_user, request.title, body)
+    if decision.action == "update" and decision.is_lesson and decision.article_id:
+        result = await update_lesson(
+            db,
+            current_user,
+            decision.article_id,
+            merged=decision.merged,
+            lesson=request.lesson,
+            context=request.context,
+        )
+        return {
+            "decision": "update",
+            "article_id": decision.article_id,
+            "title": decision.title,
+            "reason": decision.reason,
+            "result": result,
+            "next": "Merged into the existing lesson (it is now version "
+            f"{result['version']}); nothing else to do.",
+        }
     if decision.action != "add":
-        if decision.pending:
+        if decision.action == "update":
             hint = (
-                "Nothing was saved: you already submitted this and it is waiting for review "
-                "(list_my_drafts). If it needs correcting, tell the reviewer, or save the "
-                "correction once it is published."
+                "A reviewed document already covers this. Nothing was saved: call request_article_edit "
+                f"with article_id {decision.article_id} if the document is wrong or out of date."
             )
-        elif decision.action == "update":
-            hint = f"Call update_article with article_id {decision.article_id} to add this."
         else:
             hint = "Nothing was saved: the knowledge base already says this."
         return {
@@ -788,20 +808,89 @@ async def submit_lesson(
             "article_id": decision.article_id,
             "title": decision.title,
             "reason": decision.reason,
-            "pending": decision.pending,
             "next": hint,
         }
-    tags = [t for t in request.tags if t != LESSON_TAG] + [LESSON_TAG]
-    created = await create_article(
-        ArticleCreate(
-            title=request.title,
-            body_md=body,
-            dept=request.dept,
-            language=request.language,
-            tags=tags,
-            visibility="department",
-        ),
-        current_user,
+    created = await save_new_lesson(
         db,
+        current_user,
+        title=request.title,
+        body=body,
+        dept=request.dept,
+        language=request.language,
+        tags=list(request.tags),
     )
-    return {"decision": "add", "reason": decision.reason, "result": created}
+    return {
+        "decision": "add",
+        "reason": decision.reason,
+        "result": created,
+        "next": f"Saved and shared with the {created['dept']} department; search finds it now. "
+        "list_lessons shows it and forget_lesson retracts it.",
+    }
+
+
+@router.get("/lessons")
+async def list_lessons(
+    q: str | None = Query(None, max_length=200),
+    mine: bool = Query(False),
+    limit: int = Query(20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """The lessons the caller may read, newest change first; `mine` for only the ones they saved."""
+    from src.models.article import LESSON_TYPE
+
+    filters = [
+        *ArticleRepository._authorized_article_filters(current_user),
+        Article.type == LESSON_TYPE,
+        Article.status == "published",
+        Article.lifecycle_status == "active",
+        Article.company_domain == current_user.company_domain,
+    ]
+    if mine:
+        filters.append(Article.owner_id == current_user.id)
+    if q and q.strip():
+        pattern = (
+            "%"
+            + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "%"
+        )
+        filters.append(
+            Article.title.ilike(pattern, escape="\\")
+            | Article.body_md.ilike(pattern, escape="\\")
+        )
+    rows = (
+        (
+            await db.execute(
+                select(Article)
+                .where(*filters)
+                .order_by(Article.updated_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(row.id),
+            "title": row.title,
+            "dept": row.dept,
+            "version": row.version,
+            "mine": row.owner_id == current_user.id,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "excerpt": (row.body_md or "")[:400],
+        }
+        for row in rows
+    ]
+
+
+@router.post("/lessons/{lesson_id}/retract")
+async def retract_lesson_endpoint(
+    lesson_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Take a lesson out of search and answers (its author, or whoever may delete the department's articles)."""
+    from src.domain.lessons import retract_lesson
+
+    return await retract_lesson(db, current_user, str(lesson_id))

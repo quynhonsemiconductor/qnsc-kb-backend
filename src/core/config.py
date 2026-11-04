@@ -576,6 +576,12 @@ class Settings(BaseSettings):
     # the host's cores, not from a Fargate task's CPU share, and oversubscribes the task.
     # 0 leaves torch's default; set it with the task's `cpu` in infra/live/*/main.tf.
     CROSS_ENCODER_THREADS: int = 2
+    # Lessons are what AI assistants save through the MCP server (record_lesson). They are published at once, shared
+    # with the department like any article, and found by search. This is the DEFAULT for whether the assistant's
+    # answers may also draw on them; a request can say `sources: "documents"` to read reviewed uploads only.
+    AI_INCLUDE_LESSONS_DEFAULT: bool = True
+    # A person's assistants may save at most this many lessons a day (a runaway agent must not flood the knowledge base).
+    LESSONS_MAX_PER_USER_PER_DAY: int = 50
     # Off by default, same posture as CROSS_ENCODER_RERANKER_ENABLED above: a new
     # retrieval leg with no production traffic behind it yet. It adds a third
     # candidate list to hybrid_search's existing RRF fusion (src/repositories/chunk.py) --
@@ -746,7 +752,7 @@ class Settings(BaseSettings):
     RAG_CONTEXT_MAX_TOKENS: int = 17500
     RAG_PARENT_CONTEXT_CHARS: int = 2400
     RAG_MAX_PARENTS_PER_ARTICLE: int = 15
-    PROMPT_VERSION: str = "v2.2-page-visuals"
+    PROMPT_VERSION: str = "v2.3-team-lessons"
     # Part of the ai_cache key (src/domain/ai_service.py:917-924), so this MUST move
     # whenever retrieval behaviour changes, or a cached answer from the old pipeline is
     # served for six hours as if it came from the new one. Bumped for the

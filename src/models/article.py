@@ -46,6 +46,12 @@ if TYPE_CHECKING:
     from src.models.evidence import DocumentEvidence
 
 
+#: `Article.type` of a team lesson saved by an AI assistant (src/domain/lessons.py). Lessons are published at once,
+#: without a reviewer, so everything that must tell them from reviewed documents (search scope, the label in
+#: answers, who may retract one) keys off this.
+LESSON_TYPE = "LESSON"
+
+
 class Article(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "articles"
     __table_args__ = (

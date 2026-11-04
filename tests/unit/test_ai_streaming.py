@@ -72,7 +72,7 @@ def test_streaming_answer_does_not_use_request_user_after_response_starts(monkey
     monkeypatch.setattr(ai, "AIRepository", FakeRepository)
     monkeypatch.setattr(ai, "SessionLocal", FakeSession)
     monkeypatch.setattr(ai, "UserRepository", FakeUserRepository)
-    monkeypatch.setattr(ai, "get_ai_service", lambda _db: FakeAIService())
+    monkeypatch.setattr(ai, "get_ai_service", lambda _db, _sources=None: FakeAIService())
     monkeypatch.setattr(ai, "set_database_context", set_context)
     monkeypatch.setattr(ai.ai_rate_limiter, "allow", allow)
 

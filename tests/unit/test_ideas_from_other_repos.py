@@ -222,7 +222,7 @@ def test_the_models_update_names_the_existing_article(monkeypatch):
     monkeypatch.setattr(llm_client, "resolve_provider", lambda: "p")
 
     async def fake(messages, **_k):
-        assert "EXISTING ARTICLE 2" in messages[1]["content"]
+        assert "EXISTING DOCUMENT 2" in messages[1]["content"]
         return (
             '{"decision": "update", "target": 2, "reason": "same subject"}',
             1,
@@ -284,52 +284,78 @@ def test_a_failing_model_or_search_never_blocks_saving(monkeypatch):
 
 
 def _submit(monkeypatch, decision):
-    from src.api.routers import articles, knowledge
+    from src.api.routers import knowledge
 
-    created = []
+    created, updated = [], []
 
     async def fake_decide(*_a, **_k):
         return decision
 
-    async def fake_create(article_in, current_user, db):
-        created.append(article_in)
-        return {"id": "new-draft"}
+    async def fake_save(db, user, **kwargs):
+        created.append(kwargs)
+        return {"id": "new-lesson", "dept": "Engineering", "version": 1}
+
+    async def fake_update(db, user, article_id, **kwargs):
+        updated.append((article_id, kwargs))
+        return {"id": article_id, "version": 2}
 
     monkeypatch.setattr(lessons, "decide_lesson", fake_decide)
-    monkeypatch.setattr(articles, "create_article", fake_create)
+    monkeypatch.setattr(lessons, "save_new_lesson", fake_save)
+    monkeypatch.setattr(lessons, "update_lesson", fake_update)
     request = knowledge.LessonRequest(
         title="Bus ID", lesson="IDs are 6 bits.", context="After rework.", tags=["chip"]
     )
     result = _run(knowledge.submit_lesson(request, object(), object()))
-    return result, created
+    return result, created, updated
 
 
-def test_a_new_lesson_is_submitted_for_review_as_a_tagged_department_article(
+def test_a_new_lesson_is_saved_at_once_as_a_tagged_lesson(monkeypatch):
+    result, created, _ = _submit(monkeypatch, LessonDecision("add"))
+
+    assert result["decision"] == "add" and result["result"]["id"] == "new-lesson"
+    saved = created[0]
+    assert (
+        saved["body"] == "## Lesson\n\nIDs are 6 bits.\n\n## Context\n\nAfter rework."
+    )
+    assert saved["tags"] == ["chip"]
+    assert "forget_lesson" in result["next"] and "Engineering" in result["next"]
+
+
+def test_an_update_of_a_reviewed_document_saves_nothing_and_points_at_an_edit_request(
     monkeypatch,
 ):
-    result, created = _submit(monkeypatch, LessonDecision("add"))
-
-    assert result["decision"] == "add" and result["result"] == {"id": "new-draft"}
-    article = created[0]
-    assert (
-        article.body_md == "## Lesson\n\nIDs are 6 bits.\n\n## Context\n\nAfter rework."
-    )
-    assert article.tags == ["chip", lessons.LESSON_TAG]
-    assert article.visibility == "department"
-
-
-def test_an_update_creates_nothing_and_says_which_article_to_update(monkeypatch):
-    result, created = _submit(
+    result, created, updated = _submit(
         monkeypatch, LessonDecision("update", "a1", "Bus IDs", "same subject")
     )
 
-    assert created == []
+    assert created == [] and updated == []
     assert result["decision"] == "update" and result["article_id"] == "a1"
-    assert "update_article" in result["next"] and "a1" in result["next"]
+    assert "request_article_edit" in result["next"] and "a1" in result["next"]
+
+
+def test_an_update_of_a_lesson_is_merged_into_it_in_place(monkeypatch):
+    decision = LessonDecision(
+        "update",
+        "l1",
+        "Bus IDs",
+        "corrects it",
+        merged="## Lesson\n\nIDs are 8 bits.",
+        is_lesson=True,
+    )
+
+    result, created, updated = _submit(monkeypatch, decision)
+
+    assert created == []
+    assert (
+        updated[0][0] == "l1"
+        and updated[0][1]["merged"] == "## Lesson\n\nIDs are 8 bits."
+    )
+    assert result["decision"] == "update" and result["result"]["version"] == 2
+    assert "version 2" in result["next"]
 
 
 def test_a_known_lesson_creates_nothing(monkeypatch):
-    result, created = _submit(monkeypatch, LessonDecision("skip", "a1", "Bus IDs"))
+    result, created, _ = _submit(monkeypatch, LessonDecision("skip", "a1", "Bus IDs"))
 
     assert created == [] and result["decision"] == "skip"
     assert "already says this" in result["next"]

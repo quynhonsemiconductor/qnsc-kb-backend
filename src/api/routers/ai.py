@@ -20,6 +20,7 @@ from src.api.deps import (
     require_permission,
     set_database_context,
 )
+from src.core.config import settings
 from src.domain.agent.depth import current_depth
 from src.domain.ai_service import AIService, normalize_answer_markdown
 from src.domain.evidence_extraction import table_evidence_preview
@@ -54,6 +55,9 @@ class AskRequest(BaseModel):
     language: Literal["en", "vi"] = "vi"
     # How hard to look: "quick" skips follow-up retrieval rounds, "thorough" allows more.
     depth: Literal["quick", "standard", "thorough"] = "standard"
+    # What the assistant may read: "all" (reviewed documents and the lessons AI assistants saved), "documents"
+    # (reviewed uploads only). Unset: the deployment's default (AI_INCLUDE_LESSONS_DEFAULT).
+    sources: Literal["all", "documents"] | None = None
 
 
 class ConversationCreate(BaseModel):
@@ -86,14 +90,13 @@ def _historical_source_id(citation: dict) -> str | None:
     return f"C{source_index}" if source_index > 0 else None
 
 
-def get_ai_service(db: AsyncSession) -> AIService:
+def get_ai_service(db: AsyncSession, sources: str | None = None) -> AIService:
     chunk_repo = ChunkRepository(db)
     gov_repo = GovernanceRepository(db)
-    return AIService(
-        AIRepository(db),
-        SearchService(chunk_repo, gov_repo, FeatureFlagRepository(db)),
-        gov_repo,
-    )
+    search_service = SearchService(chunk_repo, gov_repo, FeatureFlagRepository(db))
+    chosen = sources or ("all" if settings.AI_INCLUDE_LESSONS_DEFAULT else "documents")
+    search_service.source_scope = "documents" if chosen == "documents" else "all"
+    return AIService(AIRepository(db), search_service, gov_repo)
 
 
 async def _hydrate_citations(
@@ -530,7 +533,7 @@ async def ask_question(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     current_depth.set(req.depth)
-    data = await get_ai_service(db).ask(
+    data = await get_ai_service(db, req.sources).ask(
         current_user,
         req.question,
         conversation_id=conversation.id,
@@ -654,7 +657,7 @@ async def ask_question_stream(
                 await queue.put(event)
 
             task = asyncio.create_task(
-                get_ai_service(stream_db).ask(
+                get_ai_service(stream_db, req.sources).ask(
                     stream_user,
                     req.question,
                     conversation_id=uuid.UUID(conversation_id),
