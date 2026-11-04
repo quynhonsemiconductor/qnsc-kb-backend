@@ -297,7 +297,11 @@ def score(
     """
     if not passages:
         return []
-    wait = settings.CROSS_ENCODER_QUEUE_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    wait = (
+        settings.CROSS_ENCODER_QUEUE_WAIT_SECONDS
+        if wait_seconds is None
+        else wait_seconds
+    )
     if wait > 0:
         acquired = _scoring.acquire(timeout=wait)
     else:
