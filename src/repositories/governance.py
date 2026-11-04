@@ -13,7 +13,7 @@ from src.models.governance import (
     Gap,
     AuditLog,
 )
-from src.models.article import Article
+from src.models.article import LESSON_TYPE, Article
 from src.models.interaction import Vote
 from src.models.ops import SearchLog, ApiRequestMetric
 from src.models.ai import AiUsageLog
@@ -488,21 +488,28 @@ class GovernanceRepository:
     async def get_health_metrics(self) -> dict:
         now = datetime.utcnow()
 
+        # The document figures below (how many, how many owned, how many overdue) are about reviewed documents. A
+        # team lesson is published without a reviewer and has an owner but no review date, so counting it would make
+        # ownership look better and review lateness smaller than they are.
+        reviewed = and_(
+            Article.status == "published", Article.type.is_distinct_from(LESSON_TYPE)
+        )
+
         # 1. Total active (published) articles
-        total_stmt = select(func.count(Article.id)).where(Article.status == "published")
+        total_stmt = select(func.count(Article.id)).where(reviewed)
         total_res = await self.db.execute(total_stmt)
         total_articles = total_res.scalar_one() or 0
 
         # 2. Articles with owner
         owner_stmt = select(func.count(Article.id)).where(
-            and_(Article.status == "published", Article.owner_id.isnot(None))
+            and_(reviewed, Article.owner_id.isnot(None))
         )
         owner_res = await self.db.execute(owner_stmt)
         articles_with_owner = owner_res.scalar_one() or 0
 
         # 3. Overdue for review
         overdue_stmt = select(func.count(Article.id)).where(
-            and_(Article.status == "published", Article.next_review < now)
+            and_(reviewed, Article.next_review < now)
         )
         overdue_res = await self.db.execute(overdue_stmt)
         overdue_articles = overdue_res.scalar_one() or 0
