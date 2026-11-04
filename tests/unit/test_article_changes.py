@@ -280,3 +280,20 @@ def test_the_endpoint_turns_a_bad_version_into_a_422(history_for_endpoint):
         caught.value.status_code == 422
         and "Version 9 does not exist" in caught.value.detail
     )
+
+
+def test_the_comparison_runs_off_the_event_loop(history_for_endpoint, monkeypatch):
+    import threading
+
+    seen = []
+    real = articles.describe_changes
+
+    def spy(*args):
+        seen.append(threading.current_thread())
+        return real(*args)
+
+    monkeypatch.setattr(articles, "describe_changes", spy)
+
+    _call()
+
+    assert seen and seen[0] is not threading.main_thread()
