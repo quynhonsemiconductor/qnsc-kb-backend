@@ -5,14 +5,20 @@ stored and choose ADD, UPDATE or NONE, instead of appending every time. Without 
 whose assistants all record "the bus ID is 6 bits" ends up with a dozen near-identical
 articles for a reviewer to wade through.
 
-The candidates come from the same similarity search that flags duplicate uploads, so only
-articles the author is allowed to see are ever compared or named. The model makes the call
-when one is available; without one, a very close match is reported as an update and
-anything else is added. A failure never blocks saving: the default is ADD.
+Candidates come from two places, and only articles the author is allowed to see are ever
+compared or named. The retrieval the assistant itself answers with finds the PASSAGES that
+already say something about the lesson, which is what a short lesson has to be compared with:
+the whole-document text similarity that flags duplicate uploads gives a one-paragraph lesson
+about a register a score near zero against the 17 000-character specification that already
+documents it, so on its own every such lesson was added again. That text similarity is kept
+for what retrieval cannot see (drafts still waiting for review). The model makes the call when
+one is available; without one, a very close text match is reported as an update and anything
+else is added. A failure never blocks saving: the default is ADD.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -28,6 +34,11 @@ logger = structlog.get_logger()
 LESSON_TAG = "session-lesson"
 MAX_CANDIDATES = 3
 EXCERPT_CHARS = 3000
+#: Passages asked of retrieval, and how many of them are shown for one article.
+RETRIEVAL_LIMIT = 8
+PASSAGES_PER_ARTICLE = 3
+#: Retrieval must answer within this, or the lesson is judged on text similarity alone.
+RETRIEVAL_TIMEOUT_SECONDS = 8.0
 #: Without a model, a match at least this similar counts as the same lesson.
 FALLBACK_UPDATE_SCORE = 0.6
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.DOTALL)
@@ -53,6 +64,8 @@ class _Candidate:
     title: str
     score: float
     body: str = ""
+    #: Found by text similarity (so `score` is on that scale), not by retrieval.
+    lexical: bool = False
 
 
 @dataclass(frozen=True)
@@ -128,25 +141,83 @@ async def _ask_model(
     return parse_decision(reply, len(candidates))
 
 
+async def _retrieved_candidates(db: Any, user: Any, query: str) -> list[_Candidate]:
+    """The articles whose PASSAGES say something about the lesson, best first.
+
+    Uses the assistant's own retrieval, so what counts as "already documented" is what the
+    assistant would find when asked. The text shown to the model is those passages, not the
+    start of the article. Searching for a lesson is not a user looking for something and
+    finding nothing, so it never writes a knowledge-gap row.
+    """
+    from src.domain.search_service import SearchService
+    from src.repositories.chunk import ChunkRepository
+    from src.repositories.feature_flags import FeatureFlagRepository
+    from src.repositories.governance import GovernanceRepository
+
+    class _LessonSearch(SearchService):
+        async def _record_gap(self, user: Any, query: str) -> None:
+            return None
+
+    try:
+        service = _LessonSearch(
+            ChunkRepository(db), GovernanceRepository(db), FeatureFlagRepository(db)
+        )
+        hits = await asyncio.wait_for(
+            service.search(user, query, limit=RETRIEVAL_LIMIT),
+            timeout=RETRIEVAL_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001 - a lesson is saved either way
+        logger.warning("Lesson retrieval check failed", error=str(exc))
+        return []
+    by_article: dict[str, _Candidate] = {}
+    passages: dict[str, list[str]] = {}
+    for hit in hits:
+        article_id = str(hit.get("article_id") or "")
+        if not article_id:
+            continue
+        if article_id not in by_article:
+            by_article[article_id] = _Candidate(
+                article_id=article_id,
+                title=hit.get("title") or "",
+                score=float(hit.get("score") or 0),
+            )
+            passages[article_id] = []
+        text = (hit.get("chunk_text") or hit.get("parent_text") or "").strip()
+        if text and len(passages[article_id]) < PASSAGES_PER_ARTICLE:
+            passages[article_id].append(text)
+    for article_id, candidate in by_article.items():
+        candidate.body = "\n\n[...]\n\n".join(passages[article_id])
+    return list(by_article.values())[:MAX_CANDIDATES]
+
+
 async def decide_lesson(db: Any, user: Any, title: str, body: str) -> LessonDecision:
     """Never raises: any failure is an add, which is what happened before this existed."""
+    content = f"{title}\n{body}"
+    candidates = await _retrieved_candidates(db, user, content)
     try:
-        matches = await find_similar_documents(db, user, f"{title}\n{body}")
+        matches = await find_similar_documents(db, user, content)
     except Exception as exc:
         logger.warning("Lesson duplicate check failed", error=str(exc))
-        return LessonDecision("add")
-    candidates = [
-        _Candidate(
-            article_id=str(m["article_id"]),
-            title=m.get("title") or "",
-            score=float(m.get("score") or 0),
-        )
-        for m in matches[:MAX_CANDIDATES]
-        if m.get("article_id")
-    ]
+        matches = []
+    seen = {c.article_id for c in candidates}
+    for m in matches:
+        if len(candidates) >= MAX_CANDIDATES:
+            break
+        if m.get("article_id") and str(m["article_id"]) not in seen:
+            seen.add(str(m["article_id"]))
+            candidates.append(
+                _Candidate(
+                    article_id=str(m["article_id"]),
+                    title=m.get("title") or "",
+                    score=float(m.get("score") or 0),
+                    lexical=True,
+                )
+            )
     if not candidates:
         return LessonDecision("add")
     for candidate in candidates:
+        if candidate.body:
+            continue
         # The ranker returns scores, not text; the model needs what the article says.
         try:
             article = await db.get(Article, candidate.article_id)
@@ -155,8 +226,10 @@ async def decide_lesson(db: Any, user: Any, title: str, body: str) -> LessonDeci
         candidate.body = (article.body_md if article else "") or ""
     verdict = await _ask_model(title, body, candidates)
     if verdict is None:
-        top = candidates[0]
-        if top.score >= FALLBACK_UPDATE_SCORE:
+        # Without a model only text similarity is trusted to call something an update: a
+        # retrieval score says "related", not "the same".
+        top = next((c for c in candidates if c.lexical), None)
+        if top is not None and top.score >= FALLBACK_UPDATE_SCORE:
             return LessonDecision(
                 "update",
                 top.article_id,
