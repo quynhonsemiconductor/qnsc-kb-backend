@@ -613,6 +613,10 @@ class Settings(BaseSettings):
     # mostly in the target language: Vietnamese questions otherwise match the Vietnamese-language
     # documents whatever the topic. MAX_TOKENS leaves room for a reasoning model's thinking.
     QUERY_TRANSLATION_ENABLED: bool = False
+    # A question that spells an abbreviated name out ("clock divider") also carries the name (CLKDIV): taken from
+    # the published chunks, so nothing is maintained by hand (rag/abbreviations.py). The vocabulary loads in the
+    # background; until it has, questions are searched as asked.
+    QUERY_ABBREVIATION_EXPANSION_ENABLED: bool = False
     QUERY_TRANSLATION_TARGET_LANGUAGE: str = "English"
     QUERY_TRANSLATION_TIMEOUT_SECONDS: float = 4.0
     QUERY_TRANSLATION_MAX_TOKENS: int = 800

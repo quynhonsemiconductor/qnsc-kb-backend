@@ -13,7 +13,12 @@ from src.repositories.chunk import ChunkRepository, attach_embeddings
 from src.repositories.governance import GovernanceRepository
 from src.domain.permissions import PermissionService
 from src.domain.rbac import AuthorizationService
-from src.rag.identifier_terms import usable_identifiers
+from src.rag.abbreviations import (
+    find_aliases,
+    load_company_vocabulary,
+    vocabulary_cache,
+)
+from src.rag.identifier_terms import MAX_IDENTIFIER_TERMS, usable_identifiers
 from src.rag.reranker import (
     chunk_passage,
     normalize_query,
@@ -184,6 +189,17 @@ class SearchService:
     #: other model calls to make.
     use_cross_encoder: bool = True
 
+    @staticmethod
+    def _alias_names(user: Any, query: str, translated: str) -> list[str]:
+        """Names the question spells out, from the company's vocabulary; none until that is loaded (it never waits)."""
+        company = getattr(user, "company_domain", None)
+        if not settings.QUERY_ABBREVIATION_EXPANSION_ENABLED or not company:
+            return []
+        vocabulary = vocabulary_cache.get(company, load_company_vocabulary)
+        if not vocabulary:
+            return []
+        return find_aliases(f"{query} {translated}", vocabulary)
+
     def __init__(
         self,
         chunk_repo: ChunkRepository,
@@ -339,8 +355,9 @@ class SearchService:
         #: found by the English rewording of a Vietnamese question shares no words with the
         #: Vietnamese one and was otherwise dropped by the lexical gate the moment it arrived.
         score_variants: list[str] = []
+        translated = ""
         if settings.QUERY_TRANSLATION_ENABLED and not multi_subject_queries:
-            translated = await translate_query(query)
+            translated = await translate_query(query) or ""
             translated_query = normalize_query(translated) if translated else ""
             if translated_query and translated_query != retrieval_query:
                 multi_subject_queries = [retrieval_query, translated_query]
@@ -354,6 +371,27 @@ class SearchService:
                 )
                 multi_subject_queries = [item for item in multi_subject_queries if item]
                 score_variants = list(multi_subject_queries)
+
+        # The abbreviated names a question spells out ("clock divider" -> CLKDIV, src/rag/abbreviations.py) are
+        # added to it as identifiers. Not for a comparison, whose subjects are already separate queries.
+        alias_names = (
+            [] if comparison_subjects else self._alias_names(user, query, translated)
+        )
+        if alias_names:
+            extra = " ".join(alias_names)
+            retrieval_query = f"{retrieval_query} {extra}"
+            multi_subject_queries = [
+                f"{item} {extra}" for item in multi_subject_queries
+            ]
+            score_variants = [f"{item} {extra}" for item in score_variants]
+            identifiers = _dedup_preserve_order(
+                [*identifiers, *(name.lower() for name in alias_names)]
+            )[:MAX_IDENTIFIER_TERMS]
+            logger.info(
+                "Search query extended with abbreviated names",
+                query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                names=alias_names,
+            )
 
         async def _embed_or_degrade(text: str) -> list[float] | None:
             try:
