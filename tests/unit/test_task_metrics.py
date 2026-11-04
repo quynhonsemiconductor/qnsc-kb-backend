@@ -43,6 +43,44 @@ def test_success_records_a_run_and_no_failure():
         otel_metrics.reset_metrics_for_testing()
 
 
+def test_retry_and_revoked_are_not_failures():
+    reader = InMemoryMetricReader()
+    otel_metrics.reset_metrics_for_testing()
+    try:
+        assert otel_metrics.configure_metrics(metric_reader=reader) is True
+        otel_metrics.record_task_finished("sync_drive", "RETRY", 10.0)
+        otel_metrics.record_task_finished("sync_drive", "REVOKED", 0.0)
+
+        points = _data_points(reader)
+        runs = points[otel_metrics.CELERY_TASK_RUNS_METRIC]
+        assert sum(point.value for point in runs) == 2
+        assert {point.attributes["state"] for point in runs} == {"RETRY", "REVOKED"}
+        assert otel_metrics.CELERY_TASK_FAILURES_METRIC not in points
+    finally:
+        otel_metrics.reset_metrics_for_testing()
+
+
+def test_the_worker_resource_carries_its_pid_as_service_instance_id():
+    import os
+
+    reader = InMemoryMetricReader()
+    otel_metrics.reset_metrics_for_testing()
+    try:
+        assert (
+            otel_metrics.configure_metrics(
+                metric_reader=reader, process_instance_id=True
+            )
+            is True
+        )
+        otel_metrics.record_task_finished("sync_drive", "SUCCESS", 1.0)
+        data = reader.get_metrics_data()
+        assert data is not None
+        attributes = data.resource_metrics[0].resource.attributes
+        assert attributes["service.instance.id"] == str(os.getpid())
+    finally:
+        otel_metrics.reset_metrics_for_testing()
+
+
 def test_a_non_success_state_counts_as_a_failure():
     reader = InMemoryMetricReader()
     otel_metrics.reset_metrics_for_testing()
