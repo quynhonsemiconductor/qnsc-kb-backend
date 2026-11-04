@@ -370,6 +370,36 @@ async def _enforce_daily_quota(db: Any, user: Any) -> None:
         )
 
 
+async def _identical_lesson(
+    db: Any, user: Any, dept: str, title: str, body: str
+) -> Any | None:
+    """A published lesson of this department with the same title and text, if one exists.
+
+    Taken under a lock on the department so that two saves of the same lesson at once (a client that timed out and
+    asked again while the first call was still running) cannot both pass: the second waits for the first to commit
+    and then finds it. The lock is held only for this check and the insert that follows, never across the model call
+    that decides what to do with a lesson.
+    """
+    await db.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtext(f"lesson:{user.company_domain}:{dept.lower()}")
+            )
+        )
+    )
+    return await db.scalar(
+        select(Article).where(
+            Article.type == LESSON_TYPE,
+            Article.company_domain == user.company_domain,
+            Article.dept == dept,
+            Article.status == "published",
+            Article.lifecycle_status == "active",
+            Article.title == title,
+            Article.body_md == body,
+        )
+    )
+
+
 async def save_new_lesson(
     db: Any,
     user: Any,
@@ -391,6 +421,21 @@ async def save_new_lesson(
         db, user.company_domain, dept or user.dept, required=True
     )
     await _enforce_daily_quota(db, user)
+    same = await _identical_lesson(db, user, department.name, title, body)
+    if same is not None:
+        # Saved a moment ago by this call's twin; saving it again would only make a copy. Read what is needed
+        # before the rollback (which also releases the lock): afterwards the row would have to be reloaded.
+        found = {
+            "id": str(same.id),
+            "title": same.title,
+            "status": same.status,
+            "dept": same.dept,
+            "shared_with": f"{same.dept} department",
+            "version": same.version,
+            "already_saved": True,
+        }
+        await db.rollback()
+        return found
     article = await ArticleService(
         ArticleRepository(db), UserRepository(db), AuditRepository(db)
     ).create_article(

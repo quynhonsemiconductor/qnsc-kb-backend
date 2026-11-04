@@ -555,3 +555,35 @@ def test_a_quick_answer_never_runs_a_retry_round_for_an_uncovered_question():
     assert _retrieve("quick") == 1
     # standard retries once without filters when nothing is found and a reword has no budget
     assert _retrieve("standard") >= _retrieve("quick")
+
+
+def test_a_repeated_call_reports_the_lesson_that_is_already_there(monkeypatch):
+    from src.api.routers import knowledge
+    from src.domain import lessons
+
+    async def decide(*_a, **_k):
+        return LessonDecision("add")
+
+    async def twin(db, user, **kwargs):
+        return {
+            "id": "first",
+            "title": "Bus ID",
+            "dept": "Engineering",
+            "version": 1,
+            "already_saved": True,
+        }
+
+    monkeypatch.setattr(lessons, "ensure_can_write_lessons", lambda *a, **k: None)
+    monkeypatch.setattr(lessons, "decide_lesson", decide)
+    monkeypatch.setattr(lessons, "save_new_lesson", twin)
+
+    result = _run(
+        knowledge.submit_lesson(
+            knowledge.LessonRequest(title="Bus ID", lesson="IDs are 6 bits."),
+            SimpleNamespace(dept="Engineering"),
+            object(),
+        )
+    )
+
+    assert result["decision"] == "skip" and result["article_id"] == "first"
+    assert "result" not in result and "repeated call" in result["next"]

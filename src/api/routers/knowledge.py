@@ -823,6 +823,14 @@ async def submit_lesson(
         language=request.language,
         tags=list(request.tags),
     )
+    if created.get("already_saved"):
+        return {
+            "decision": "skip",
+            "article_id": created["id"],
+            "title": created["title"],
+            "reason": "This exact lesson was saved a moment ago.",
+            "next": "Nothing was saved: it is already there (a repeated call). list_lessons shows it.",
+        }
     return {
         "decision": "add",
         "reason": decision.reason,

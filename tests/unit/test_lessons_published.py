@@ -154,11 +154,16 @@ class _CountDb:
         return self.saved_today
 
 
-def _save(monkeypatch, db, **extra):
+def _save(monkeypatch, db, identical=None, **extra):
     from src.domain import departments
     from src.domain.articles import ArticleService
 
     captured = {}
+
+    async def no_twin(_db, _user, _dept, _title, _body):
+        return identical
+
+    monkeypatch.setattr(lessons, "_identical_lesson", no_twin)
 
     async def resolve(_db, _domain, name, *, required=True):
         if not name:
@@ -740,3 +745,58 @@ def test_the_default_for_answers_follows_the_setting_everywhere(monkeypatch):
     assert default_answer_scope() == "all"
     monkeypatch.setattr(settings, "AI_INCLUDE_LESSONS_DEFAULT", False)
     assert default_answer_scope() == "documents"
+
+
+# -- a repeated call does not make a copy -----------------------------------------------------------
+
+
+class _RollbackDb(_CountDb):
+    def __init__(self):
+        super().__init__(0)
+        self.rolled_back = 0
+
+    async def rollback(self):
+        self.rolled_back += 1
+
+
+def test_the_same_lesson_saved_twice_is_one_lesson(monkeypatch):
+    twin = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Console",
+        status="published",
+        dept="Engineering",
+        version=1,
+    )
+    db = _RollbackDb()
+
+    result, captured = _save(monkeypatch, db, identical=twin)
+
+    assert result["already_saved"] is True and result["id"] == str(twin.id)
+    assert captured == {}, "nothing was created"
+    assert db.rolled_back == 1, "the transaction that held the lock is ended"
+
+
+def test_a_lesson_nobody_saved_yet_is_not_flagged(monkeypatch):
+    result, captured = _save(monkeypatch, _CountDb(0))
+
+    assert "already_saved" not in result and captured["publish_without_review"] is True
+
+
+def test_the_lock_and_the_search_for_a_twin_are_scoped_to_the_department():
+    statements = []
+
+    class Db:
+        async def execute(self, statement):
+            statements.append(str(statement))
+
+        async def scalar(self, statement):
+            statements.append(str(statement))
+            return None
+
+    user = SimpleNamespace(company_domain="acme.test")
+    assert _run(lessons._identical_lesson(Db(), user, "Engineering", "T", "B")) is None
+
+    lock, lookup = statements
+    assert "pg_advisory_xact_lock" in lock and "hashtext" in lock
+    assert "articles.dept" in lookup and "articles.company_domain" in lookup
+    assert "articles.title" in lookup and "articles.body_md" in lookup
