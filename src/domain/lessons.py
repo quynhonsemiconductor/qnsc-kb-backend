@@ -311,6 +311,21 @@ async def decide_lesson(db: Any, user: Any, title: str, body: str) -> LessonDeci
 # -- saving, changing and retracting --------------------------------------------------------------
 
 
+def ensure_can_write_lessons(db: Any, user: Any, dept: str | None) -> None:
+    """The one bar for saving OR changing a lesson: `article.create` in the department, as for any new article.
+
+    Reading a lesson is not enough. Search only decides what a person may SEE; without this a role that can merely
+    read could merge new text into a colleague's lesson, which is published and indexed at once with no reviewer.
+    """
+    from src.domain.articles import ArticleService
+    from src.repositories.article import ArticleRepository
+    from src.repositories.user import UserRepository
+
+    ArticleService(ArticleRepository(db), UserRepository(db)).ensure_can_create(
+        user, dept or ""
+    )
+
+
 async def _enforce_daily_quota(db: Any, user: Any) -> None:
     """A runaway assistant must not fill the knowledge base: one person saves at most N lessons a day."""
     from src.core.config import settings
@@ -405,6 +420,7 @@ async def update_lesson(
         or article.lifecycle_status != "active"
     ):
         raise HTTPException(status_code=404, detail="Lesson not found")
+    ensure_can_write_lessons(db, user, article.dept)
     if merged:
         body = merged
     else:

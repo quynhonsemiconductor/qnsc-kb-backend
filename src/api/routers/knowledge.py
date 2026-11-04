@@ -770,11 +770,15 @@ async def submit_lesson(
     """
     from src.domain.lessons import (
         decide_lesson,
+        ensure_can_write_lessons,
         lesson_body,
         save_new_lesson,
         update_lesson,
     )
 
+    # Before any retrieval or model call, and before the answer can say what the knowledge base already holds: a
+    # person who may not save a lesson here gets a refusal, not a decision about someone else's.
+    ensure_can_write_lessons(db, current_user, request.dept or current_user.dept)
     body = lesson_body(request.lesson, request.context)
     decision = await decide_lesson(db, current_user, request.title, body)
     if decision.action == "update" and decision.is_lesson and decision.article_id:

@@ -261,7 +261,14 @@ def lesson_store(monkeypatch):
     from src.domain import events
     from src.repositories.article import ArticleRepository
 
-    holder = SimpleNamespace(article=None, published=[], deleted=[])
+    from src.domain.articles import ArticleService
+
+    holder = SimpleNamespace(article=None, published=[], deleted=[], checked=[])
+
+    def can_create(self, user, dept):
+        holder.checked.append(dept)
+
+    monkeypatch.setattr(ArticleService, "ensure_can_create", can_create)
 
     async def get_by_id(self, article_id, user=None):
         return holder.article
@@ -305,6 +312,70 @@ def test_an_update_merges_into_the_lesson_as_a_new_version_and_is_indexed_again(
     version = next(item for item in db.added if type(item).__name__ == "ArticleVersion")
     assert version.version == 2 and version.edited_by == USER.id
     assert lesson_store.published == [("ArticleUpdated", str(article.id))]
+
+
+def test_changing_a_lesson_needs_the_right_to_create_articles_in_its_department(
+    lesson_store, monkeypatch
+):
+    """Being able to READ a lesson is not enough to rewrite it: it is published and indexed at once."""
+    from src.domain.articles import ArticleService
+
+    lesson_store.article = _lesson()
+    original = lesson_store.article.body_md
+
+    def refuse(self, user, dept):
+        lesson_store.checked.append(dept)
+        raise HTTPException(status_code=403, detail="Not authorized to create articles")
+
+    monkeypatch.setattr(ArticleService, "ensure_can_create", refuse)
+    db = _WriteDb()
+
+    with pytest.raises(HTTPException) as caught:
+        _run(
+            lessons.update_lesson(
+                db,
+                USER,
+                str(lesson_store.article.id),
+                merged="rewritten",
+                lesson="x",
+                context=None,
+            )
+        )
+
+    assert caught.value.status_code == 403
+    assert lesson_store.checked == [
+        "Engineering"
+    ], "checked against the lesson's own department"
+    assert (
+        lesson_store.article.body_md == original and lesson_store.article.version == 1
+    )
+    assert db.commits == 0 and db.added == [] and lesson_store.published == []
+
+
+def test_a_person_who_may_not_save_a_lesson_is_refused_before_anything_is_looked_up(
+    monkeypatch,
+):
+    from src.domain.articles import ArticleService
+
+    def refuse(self, user, dept):
+        raise HTTPException(status_code=403, detail="Not authorized to create articles")
+
+    async def decide(*_a, **_k):
+        raise AssertionError("no retrieval or model call for someone who may not save")
+
+    monkeypatch.setattr(ArticleService, "ensure_can_create", refuse)
+    monkeypatch.setattr(lessons, "decide_lesson", decide)
+
+    with pytest.raises(HTTPException) as caught:
+        _run(
+            knowledge.submit_lesson(
+                knowledge.LessonRequest(title="t", lesson="l"),
+                current_user=USER,
+                db=object(),
+            )
+        )
+
+    assert caught.value.status_code == 403
 
 
 def test_without_merged_text_the_new_lesson_is_appended_as_a_dated_section(

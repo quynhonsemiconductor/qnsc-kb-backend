@@ -299,13 +299,16 @@ def _submit(monkeypatch, decision):
         updated.append((article_id, kwargs))
         return {"id": article_id, "version": 2}
 
+    monkeypatch.setattr(lessons, "ensure_can_write_lessons", lambda *a, **k: None)
     monkeypatch.setattr(lessons, "decide_lesson", fake_decide)
     monkeypatch.setattr(lessons, "save_new_lesson", fake_save)
     monkeypatch.setattr(lessons, "update_lesson", fake_update)
     request = knowledge.LessonRequest(
         title="Bus ID", lesson="IDs are 6 bits.", context="After rework.", tags=["chip"]
     )
-    result = _run(knowledge.submit_lesson(request, object(), object()))
+    result = _run(
+        knowledge.submit_lesson(request, SimpleNamespace(dept="Engineering"), object())
+    )
     return result, created, updated
 
 
