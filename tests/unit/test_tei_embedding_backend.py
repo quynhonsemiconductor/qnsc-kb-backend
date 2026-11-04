@@ -235,6 +235,34 @@ def test_an_oversize_batch_is_split_rather_than_retried_unchanged(monkeypatch):
     assert sizes == [32, 16, 8, 8, 16, 8, 8]
 
 
+def test_a_half_that_keeps_failing_is_not_retried_as_the_parent_window(monkeypatch):
+    """A failing half exhausts its own retries; the parent window is not re-POSTed.
+
+    The split must happen outside the retry loop. Done inside it, the parent's
+    `except` catches the half's last error, discards the split, and re-POSTs the whole
+    un-split window — which 413s again and splits again, multiplying the request count
+    (and each level's backoff) by depth instead of keeping it bounded.
+    """
+    monkeypatch.setattr(settings, "EMBEDDING_HTTP_MAX_ATTEMPTS", 3)
+    sizes: list[int] = []
+
+    def _post(url, json=None, timeout=None):
+        size = len(json["inputs"])
+        sizes.append(size)
+        if size > 8:
+            return _Response(413)
+        return _Response(503)  # every half-sized attempt fails
+
+    monkeypatch.setattr(tei.httpx, "post", _post)
+
+    with pytest.raises(RuntimeError, match="Embedding batch generation failed"):
+        embeddings.get_bge_embeddings([f"chunk {i}" for i in range(16)])
+
+    # 16 is halved once; the first half then gets exactly its retry budget. Re-POSTing
+    # the parent would show up as another 16 (and another round of halves) here.
+    assert sizes == [16, 8, 8, 8]
+
+
 def test_a_single_oversize_input_is_a_configuration_fault(monkeypatch):
     _serve(monkeypatch, statuses=[413])
 

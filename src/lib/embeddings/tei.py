@@ -161,18 +161,11 @@ class TeiEmbeddingProvider:
                     timeout=settings.TEI_EMBEDDINGS_TIMEOUT_SECONDS,
                 )
                 if response.status_code == 413 and len(window) > 1:
-                    # TEI's documented remedy for an oversized batch is a smaller one.
-                    # Half and recurse, so the split is proportional to how far over the
-                    # token budget this window actually was.
-                    middle = len(window) // 2
-                    logger.info(
-                        "TEI rejected a batch as too large; splitting it",
-                        batch_size=len(window),
-                        first_half=middle,
-                    )
-                    return self._embed_window(window[:middle]) + self._embed_window(
-                        window[middle:]
-                    )
+                    # TEI's documented remedy for an oversized batch is a smaller one:
+                    # half and recurse, so the split is proportional to how far over the
+                    # token budget this window actually was. The recursion is done AFTER
+                    # this loop, not here — see below.
+                    break
                 response.raise_for_status()
                 return self._parse(response.json(), len(window))
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
@@ -197,8 +190,22 @@ class TeiEmbeddingProvider:
                     retry_in_seconds=round(delay, 2),
                 )
                 time.sleep(delay)
+        else:
+            raise last if last else EmbeddingUnavailable("TEI embedding call failed")
 
-        raise last if last else EmbeddingUnavailable("TEI embedding call failed")
+        # Split outside the retry `try` on purpose. A half's failure is the half's: if the
+        # recursive calls ran inside the `try` above, this frame's `except` would catch a
+        # half that exhausted its own retries, discard the split, and re-POST the whole
+        # un-split window. That window 413s again, splits again, and fails again — turning
+        # a bounded `attempts` policy into one that multiplies by depth (up to
+        # attempts**depth requests, each layer also re-paying its exponential backoff).
+        middle = len(window) // 2
+        logger.info(
+            "TEI rejected a batch as too large; splitting it",
+            batch_size=len(window),
+            first_half=middle,
+        )
+        return self._embed_window(window[:middle]) + self._embed_window(window[middle:])
 
     @staticmethod
     def _parse(body: Any, expected: int) -> list[list[float]]:
