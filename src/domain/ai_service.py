@@ -2148,11 +2148,17 @@ class AIService:
         # A corpus answer is not cached whole: its sources depend on the digests, and the
         # expensive part (which documents matter) is cached by corpus.py under a key that
         # changes when any digest does.
+        # An answer written with earlier turns in front of it is not cached either. The cache
+        # is keyed by the question's words, and the lookup above is only made when there is no
+        # history, so a stored follow-up ("and the I2C one?", answered from a UART
+        # conversation) could only ever be read back by someone asking the same words with no
+        # context, and would answer a different question than the one they asked.
         if (
             not is_refusal
             and len(citations) > 0
             and not artifacts
             and corpus_context is None
+            and not conversation_messages
         ):
             cached_answer = grounded_answer
             if settings.RAG_CACHE_EXTENDED_SECTION and extended_answer:
