@@ -413,9 +413,11 @@ class _World:
         self.embeds, self.cache, self.puts = [], {}, []
         self.model = _Model([])
         self.tracer_events: list[dict] = []
+        self.scope_sources: list[str] = []
 
-        async def fake_scope(db, user, plan, embedding, limit):
+        async def fake_scope(db, user, plan, embedding, limit, source_scope="all"):
             self.scope_calls.append(embedding)
+            self.scope_sources.append(source_scope)
             return Scope(
                 total=len(candidates) if total is None else total,
                 with_digest=len(candidates) if with_digest is None else with_digest,
@@ -439,7 +441,13 @@ class _World:
         self.puts.append((key, selection, ids))
         self.cache[key] = selection
 
-    def gather(self, question="Tóm tắt các chính sách nhân sự", plan=PLAN, embed=None):
+    def gather(
+        self,
+        question="Tóm tắt các chính sách nhân sự",
+        plan=PLAN,
+        embed=None,
+        **extra,
+    ):
         async def sink(event):
             self.tracer_events.append(event)
 
@@ -455,6 +463,7 @@ class _World:
                 complete_fn=self.model,
                 cache_get=self.cache_get,
                 cache_put=self.cache_put,
+                **extra,
             )
         )
 
@@ -874,7 +883,9 @@ def test_the_cache_the_service_hands_to_the_flow_is_per_user_expires_and_tracks_
         complete_fn,
         cache_get,
         cache_put,
+        source_scope="all",
     ):
+        captured["source_scope"] = source_scope
         assert await cache_get("some-key") is None
         await cache_put("some-key", [{"id": "a1", "note": "n"}], ["a1"])
         captured["put"] = True
@@ -896,3 +907,85 @@ def test_the_cache_the_service_hands_to_the_flow_is_per_user_expires_and_tracks_
     assert (
         settings.CORPUS_CACHE_TTL_HOURS - 1 < hours <= settings.CORPUS_CACHE_TTL_HOURS
     )
+
+
+# ── team lessons in a question about the whole corpus ───────────────────────────────────────
+
+
+def _scope_sql(source_scope):
+    compiled = (
+        select(func.count(Article.id))
+        .where(*scope_conditions(_reader(), PLAN, source_scope))
+        .compile(dialect=postgresql.dialect())
+    )
+    return str(compiled).lower(), compiled.params
+
+
+def test_documents_only_leaves_the_lessons_out_of_a_corpus_question():
+    sql, params = _scope_sql("documents")
+
+    assert "articles.type is distinct from" in sql
+    assert "LESSON" in params.values()
+
+
+def test_lessons_only_keeps_nothing_else():
+    sql, params = _scope_sql("lessons")
+
+    assert "articles.type =" in sql and "LESSON" in params.values()
+    assert "is distinct from" not in sql
+
+
+def test_by_default_a_corpus_question_reads_both_kinds():
+    default, _ = _scope_sql("all")
+    plain = str(
+        select(func.count(Article.id))
+        .where(*scope_conditions(_reader(), PLAN))
+        .compile(dialect=postgresql.dialect())
+    ).lower()
+
+    assert default == plain and "is distinct from" not in default
+
+
+def test_a_digest_source_says_what_kind_of_article_it_is():
+    lesson = _cand(1, doc_type="LESSON")
+    document = _cand(2)
+
+    results = build_context_results([lesson, document], _chunks(1, 2), {}, "vi")
+
+    assert results[0]["type"] == "LESSON"
+    assert results[1]["type"] == "POLICY"
+
+
+def test_the_choice_of_sources_reaches_the_scope_query(monkeypatch):
+    world = _World(monkeypatch, [_cand(1)])
+
+    world.gather()
+    world.gather(source_scope="documents")
+
+    assert world.scope_sources == ["all", "documents"]
+
+
+# ── team lessons in a count of the collection ────────────────────────────────────────────────
+
+
+def _catalog_sql(source_scope):
+    from src.domain.catalog import CatalogFilter, catalog_conditions
+
+    compiled = (
+        select(func.count(Article.id))
+        .where(*catalog_conditions(_reader(), CatalogFilter(source_scope=source_scope)))
+        .compile(dialect=postgresql.dialect())
+    )
+    return str(compiled).lower(), compiled.params
+
+
+def test_a_count_of_the_collection_can_leave_the_lessons_out():
+    sql, params = _catalog_sql("documents")
+
+    assert "articles.type is distinct from" in sql and "LESSON" in params.values()
+
+
+def test_a_count_reads_everything_unless_told_otherwise():
+    sql, _ = _catalog_sql("all")
+
+    assert "is distinct from" not in sql and "articles.type =" not in sql

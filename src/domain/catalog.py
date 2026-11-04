@@ -22,7 +22,7 @@ from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.models.article import Article, DocumentSource
+from src.models.article import LESSON_TYPE, Article, DocumentSource
 from src.models.evidence import DocumentEvidence
 from src.models.user import User
 from src.rag.reranker import fold_diacritics
@@ -67,6 +67,8 @@ class CatalogFilter:
     until: datetime | None = None
     #: "today" | "week" | "month" | "year" | "days:<n>" | "" -- for the sentence only.
     period: str = ""
+    #: The request's choice of sources (as in search): "documents" leaves team lessons out of the count.
+    source_scope: str = "all"
 
     @property
     def is_narrowed(self) -> bool:
@@ -222,6 +224,10 @@ def catalog_conditions(user: User, flt: CatalogFilter) -> list[Any]:
     ]
     if flt.doc_types:
         conditions.append(Article.type.in_(flt.doc_types))
+    if flt.source_scope == "documents":
+        conditions.append(Article.type.is_distinct_from(LESSON_TYPE))
+    elif flt.source_scope == "lessons":
+        conditions.append(Article.type == LESSON_TYPE)
     if flt.departments:
         conditions.append(Article.dept.in_(flt.departments))
     if flt.since is not None:

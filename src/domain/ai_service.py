@@ -2337,6 +2337,8 @@ class AIService:
                 complete_fn=complete,
                 cache_get=cache_get,
                 cache_put=cache_put,
+                # "Documents only" holds for a question about the whole corpus as well.
+                source_scope=getattr(self.search_service, "source_scope", "all"),
             )
         except Exception as exc:
             logger.warning(
@@ -2366,16 +2368,17 @@ class AIService:
         started = _time.perf_counter()
         await agent.tracer.emit("catalog", "running")
         try:
-            result = await build_catalog(
-                self.ai_repo.db,
-                user,
-                filter_for_question(
-                    question,
-                    agent.plan.doc_types,
-                    agent.plan.departments,
-                    datetime.utcnow(),
-                ),
+            catalog_filter = filter_for_question(
+                question,
+                agent.plan.doc_types,
+                agent.plan.departments,
+                datetime.utcnow(),
             )
+            # "Documents only" holds for a count of the collection as well.
+            catalog_filter.source_scope = getattr(
+                self.search_service, "source_scope", "all"
+            )
+            result = await build_catalog(self.ai_repo.db, user, catalog_filter)
         except Exception as exc:
             # A failed statement leaves the transaction unusable for the retrieval that
             # follows, so it is rolled back before falling through to it.
