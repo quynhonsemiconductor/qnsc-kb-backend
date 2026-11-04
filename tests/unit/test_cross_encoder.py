@@ -114,7 +114,7 @@ def test_a_second_scoring_call_is_refused_while_the_first_is_still_running(monke
     try:
         assert started.wait(5)
         with pytest.raises(CrossEncoderUnavailable, match="still scoring"):
-            cross_encoder.score("q", ["c"])
+            cross_encoder.score("q", ["c"], wait_seconds=0)
     finally:
         release.set()
         first.join(5)

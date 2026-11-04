@@ -528,7 +528,11 @@ class SearchService:
                                     for index in candidate_indexes
                                 ],
                             ),
-                            timeout=settings.CROSS_ENCODER_TIMEOUT_SECONDS,
+                            # Its own turn (CROSS_ENCODER_QUEUE_WAIT_SECONDS, spent inside the thread, which
+                            # gives up by itself) plus the time scoring may take. Waiting for a turn is not a
+                            # timeout of the reranker and never counts towards the breaker.
+                            timeout=settings.CROSS_ENCODER_TIMEOUT_SECONDS
+                            + max(settings.CROSS_ENCODER_QUEUE_WAIT_SECONDS, 0.0),
                         )
                     except asyncio.TimeoutError as exc:
                         cross_encoder_breaker.record_timeout(attempt)

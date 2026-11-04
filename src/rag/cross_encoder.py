@@ -278,8 +278,17 @@ def warm_up() -> None:
     _model.get()
 
 
-def score(query: str, passages: list[str]) -> list[float]:
+def score(
+    query: str, passages: list[str], wait_seconds: float | None = None
+) -> list[float]:
     """Score each passage's relevance to `query`. Higher is more relevant.
+
+    Only one scoring runs at a time, so a search that arrives while another is being scored WAITS for it,
+    up to `wait_seconds` (default `CROSS_ENCODER_QUEUE_WAIT_SECONDS`), and then gives up. Refusing at once,
+    which this used to do, made the result of a search depend on whether anyone else was searching: six
+    agents asking together got the lexical order for five of them, silently, and different top results from
+    the same six asked one after another. The wait is bounded by the caller's own deadline, and a thread
+    that gives up here ends instead of queueing a job nobody is waiting for.
 
     Raises `CrossEncoderUnavailable` on any failure to load or run the model — the
     caller (`search_service.py`) is expected to catch this and fall back to the
@@ -288,9 +297,18 @@ def score(query: str, passages: list[str]) -> list[float]:
     """
     if not passages:
         return []
-    if not _scoring.acquire(blocking=False):
+    wait = (
+        settings.CROSS_ENCODER_QUEUE_WAIT_SECONDS
+        if wait_seconds is None
+        else wait_seconds
+    )
+    if wait > 0:
+        acquired = _scoring.acquire(timeout=wait)
+    else:
+        acquired = _scoring.acquire(blocking=False)
+    if not acquired:
         raise CrossEncoderUnavailable(
-            "cross-encoder is still scoring an earlier search"
+            f"cross-encoder is still scoring an earlier search (waited {max(wait, 0):g}s)"
         )
     try:
         model = _model.get()
