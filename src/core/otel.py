@@ -49,7 +49,12 @@ def signal_endpoint(signal: str) -> str | None:
     base = otlp_endpoint()
     if base is None:
         return None
-    return f"{base.rstrip('/')}/v1/{signal}"
+    trimmed = base.rstrip("/")
+    # Tolerate a caller that already supplied the full signal URL (a local run
+    # following the OTLP spec's *_ENDPOINT form) instead of doubling the path.
+    if trimmed.endswith(f"/v1/{signal}"):
+        return trimmed
+    return f"{trimmed}/v1/{signal}"
 
 
 def telemetry_disabled() -> bool:

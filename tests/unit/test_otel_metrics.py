@@ -46,6 +46,13 @@ def test_signal_endpoint_is_none_without_an_endpoint(monkeypatch):
     assert otel.signal_endpoint("metrics") is None
 
 
+def test_signal_endpoint_does_not_double_a_full_signal_url(monkeypatch):
+    monkeypatch.setattr(
+        settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://alloy:4318/v1/metrics"
+    )
+    assert otel.signal_endpoint("metrics") == "http://alloy:4318/v1/metrics"
+
+
 def test_deployment_environment_prefers_deployment_env(monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_ENV", "dev")
     monkeypatch.setenv(
