@@ -26,6 +26,9 @@ concurrency:
   group: code-review-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   review:
     permissions:
