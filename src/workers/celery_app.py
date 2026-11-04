@@ -1,7 +1,15 @@
 import ssl
+import time
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import (
+    task_postrun,
+    task_prerun,
+    worker_process_init,
+    worker_process_shutdown,
+)
+from src.core import otel_metrics
 from src.core.config import settings
 from src.lib import log_redaction
 
@@ -162,3 +170,50 @@ celery_app.conf.update(
         "link-related-articles": periodic("link_related_articles", 86400.0),
     },
 )
+
+
+# ── Worker metrics (OTLP) ────────────────────────────────────────────────────
+# The worker process had no metrics at all: a queue that stopped draining or a
+# task that failed every run was invisible until a user reported it. Record one
+# run/failure/duration triple per finished task from Celery's own signals — no
+# broker polling, no per-task network call.
+#
+# CONFIGURE IN THE CHILD, not at worker_ready: the worker uses the prefork pool
+# (Dockerfile --concurrency=1), so task signals fire in a forked child. A
+# MeterProvider created in the parent has an exporter THREAD, and threads do
+# not survive fork — the child would inherit a dead provider and silently drop
+# every point. worker_process_init runs once per child, after the fork.
+_task_started_at: dict[str, float] = {}
+
+
+@worker_process_init.connect
+def _init_worker_metrics(**_kwargs: object) -> None:
+    otel_metrics.configure_metrics()
+
+
+@worker_process_shutdown.connect
+def _flush_worker_metrics(**_kwargs: object) -> None:
+    otel_metrics.shutdown_metrics()
+
+
+@task_prerun.connect
+def _task_started(task_id: str | None = None, **_kwargs: object) -> None:
+    if task_id:
+        _task_started_at[task_id] = time.monotonic()
+
+
+@task_postrun.connect
+def _task_finished(
+    sender: object = None,
+    task_id: str | None = None,
+    state: str | None = None,
+    **_kwargs: object
+) -> None:
+    started = _task_started_at.pop(task_id, None) if task_id else None
+    if started is None:
+        return
+    otel_metrics.record_task_finished(
+        getattr(sender, "name", None),
+        state,
+        (time.monotonic() - started) * 1000.0,
+    )
