@@ -43,6 +43,8 @@ class Tool:
     required: tuple[str, ...]
     build: Callable[[dict[str, Any]], Call]
     shape: Callable[[Any], Any] | None = None
+    #: Like `shape`, but also given the arguments of the call (paging needs them).
+    shape_args: Callable[[Any, dict[str, Any]], Any] | None = None
     write: bool = False
     graph: bool = False
 
@@ -146,6 +148,74 @@ def _shape_article_list(data: Any) -> Any:
 
 def _shape_article(data: Any) -> Any:
     return _pick(data, ARTICLE_FULL)
+
+
+def _page_end(body: str, start: int, window: int) -> int:
+    """Where this page of a long body ends: at a line break when one is near the end."""
+    end = min(len(body), start + window)
+    if end >= len(body):
+        return end
+    cut = body.rfind("\n", start + (window * 4) // 5, end)
+    return cut + 1 if cut != -1 else end
+
+
+def _shape_article_page(data: Any, args: dict[str, Any]) -> Any:
+    """One window of the article body, so a long document can be read to its end.
+
+    A body longer than the window used to be cut off with a note and the rest was unreachable:
+    `search_knowledge` returns passages, not "the next 30 000 characters". `offset` and the
+    `next_offset` in the result make the whole text readable page by page.
+    """
+    article = _pick(data, ARTICLE_FULL)
+    body = article.get("body_md") if isinstance(article, dict) else None
+    if not isinstance(body, str):
+        return article
+    start = _int(args, "offset", 0, 0, 10**9)
+    window = max(settings.MCP_MAX_RESULT_CHARS // 2, 1000)
+    end = _page_end(body, start, window)
+    article = {**article, "body_md": body[start:end]}
+    article["body_chars"] = len(body)
+    article["offset"] = start
+    if end < len(body):
+        article["next_offset"] = end
+        article["truncated"] = (
+            f"{len(body) - end} more characters; call get_article again with "
+            f"offset={end} to continue."
+        )
+    return article
+
+
+CONVERSATION_MESSAGE_CHARS = 3000
+
+
+def _shape_conversations(data: Any, args: dict[str, Any]) -> Any:
+    if not isinstance(data, list):
+        return data
+    needle = (_text(args, "q", max_len=200) or "").lower()
+    rows = [
+        _pick(item, ("id", "title", "updated_at"))
+        for item in data
+        if not needle or needle in str(item.get("title") or "").lower()
+    ]
+    return rows[: _int(args, "limit", 20, 1, 50)]
+
+
+def _shape_conversation(data: Any, args: dict[str, Any]) -> Any:
+    """The last `limit` turns of a conversation, answers as written for the user."""
+    if not isinstance(data, list):
+        return data
+    turns = []
+    for message in data[-_int(args, "limit", 20, 1, 50) :]:
+        if not isinstance(message, dict):
+            continue
+        text = message.get("answer_grounded") or message.get("content")
+        turn = _pick(message, ("role", "created_at", "usage_log_id"))
+        turn["text"] = _clip(text, CONVERSATION_MESSAGE_CHARS)
+        citations = [_shape_citation(c) for c in (message.get("citations") or [])[:10]]
+        if citations:
+            turn["citations"] = citations
+        turns.append(_drop_none(turn))
+    return turns
 
 
 def _shape_versions(data: Any) -> Any:
@@ -320,6 +390,22 @@ def _create_article(args: dict[str, Any]) -> Call:
     )
 
 
+def _get_article(args: dict[str, Any]) -> Call:
+    _int(args, "offset", 0, 0, 10**9)  # refused before the call, not after it
+    return Call("GET", f"/articles/{_id(args, 'article_id')}")
+
+
+def _conversations(args: dict[str, Any]) -> Call:
+    _text(args, "q", max_len=200)
+    _int(args, "limit", 20, 1, 50)
+    return Call("GET", "/ai/conversations")
+
+
+def _conversation(args: dict[str, Any]) -> Call:
+    _int(args, "limit", 20, 1, 50)
+    return Call("GET", f"/ai/conversations/{_id(args, 'conversation_id')}/messages")
+
+
 LESSON_TAG = "session-lesson"
 
 
@@ -472,14 +558,52 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "get_article",
         "Read an article",
-        "The full text (Markdown) and metadata of one article: title, department, "
-        "version, status, tags. Very long articles are truncated and say so; ask "
-        "search_knowledge for the part you need. Pass the 'version' you read to "
-        "update_article.",
-        {"article_id": _ID},
+        "The text (Markdown) and metadata of one article: title, department, version, "
+        "status, tags. A long article comes in pages: when the result has next_offset, "
+        "call again with offset=next_offset to read on (body_chars is the full length). "
+        "Pass the 'version' you read to update_article.",
+        {
+            "article_id": _ID,
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Character to start reading from (next_offset of the "
+                "previous page)",
+            },
+        },
         ("article_id",),
-        lambda a: Call("GET", f"/articles/{_id(a, 'article_id')}"),
-        _shape_article,
+        _get_article,
+        shape_args=_shape_article_page,
+    ),
+    Tool(
+        "list_conversations",
+        "List your past conversations",
+        "The questions this user has asked the knowledge base before, newest first, each "
+        "with a conversation_id. Use it to pick up an earlier line of questioning or to "
+        "check whether something was already asked; pass q to filter by title. Only the "
+        "user's own conversations are ever listed.",
+        {
+            "q": {"type": "string", "description": "Match against titles"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        (),
+        _conversations,
+        shape_args=_shape_conversations,
+    ),
+    Tool(
+        "get_conversation",
+        "Read a past conversation",
+        "The turns of one earlier conversation (the last `limit`, default 20): who said "
+        "what, with the citations of each answer. Take the conversation_id from "
+        "list_conversations or from an earlier ask_knowledge_base answer, and pass it to "
+        "ask_knowledge_base to continue that conversation.",
+        {
+            "conversation_id": {"type": "string", "format": "uuid"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        ("conversation_id",),
+        _conversation,
+        shape_args=_shape_conversation,
     ),
     Tool(
         "list_articles",
@@ -733,14 +857,46 @@ def _cap_article_body(data: Any, limit: int) -> Any:
     return data
 
 
-def format_result(tool: Tool, status_code: int, payload: Any) -> dict[str, Any]:
+#: What a model should do about an error it cannot otherwise act on. Matched on the text of
+#: the REST error, so the REST message stays the single source of what went wrong.
+ERROR_HINTS = (
+    (
+        "A department is required",
+        "Pass `dept` (call list_departments for the names): this user has no default "
+        "department to file under.",
+    ),
+    (
+        "Department does not exist or is inactive",
+        "Call list_departments and pass one of its names exactly.",
+    ),
+)
+
+
+def _hint_for(detail: str) -> str:
+    for marker, hint in ERROR_HINTS:
+        if marker in detail:
+            return f" {hint}"
+    return ""
+
+
+def format_result(
+    tool: Tool,
+    status_code: int,
+    payload: Any,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """An MCP `tools/call` result. HTTP errors become tool errors the model can act on."""
     if status_code >= 400:
         detail = payload.get("detail") if isinstance(payload, dict) else payload
         if not isinstance(detail, str):
             detail = json.dumps(detail, ensure_ascii=False, default=str)
-        return error_result(f"Error {status_code}: {cap_text(detail, 2000)}")
-    data = tool.shape(payload) if tool.shape else payload
+        return error_result(
+            f"Error {status_code}: {cap_text(detail, 2000)}{_hint_for(detail)}"
+        )
+    if tool.shape_args is not None:
+        data = tool.shape_args(payload, arguments or {})
+    else:
+        data = tool.shape(payload) if tool.shape else payload
     data = _cap_article_body(data, settings.MCP_MAX_RESULT_CHARS // 2)
     text = cap_text(json.dumps(data, ensure_ascii=False, default=str, indent=2))
     return {"content": [{"type": "text", "text": text}], "isError": False}

@@ -62,13 +62,30 @@ your own permissions.
 
 Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
-`list_departments`, `list_tags`, `get_glossary`, `find_entities`, `get_entity_neighbors`.
+`list_conversations`, `get_conversation`, `list_departments`, `list_tags`, `get_glossary`,
+`find_entities`, `get_entity_neighbors`.
 
 Write tools (write-scope tokens only): `create_article`, `update_article`,
 `request_article_edit`, `rate_answer`. Articles go through the normal review workflow.
 
 `find_entities` and `get_entity_neighbors` appear only when `KNOWLEDGE_GRAPH_ENABLED`
 is on; without it the tools are hidden.
+
+## Working with it over many sessions
+
+- **Long documents come in pages.** `get_article` returns about 30 000 characters at a time;
+  when the result has `next_offset`, call again with `offset=<next_offset>` until it has none.
+  `body_chars` is the full length.
+- **Past questions persist.** Every `ask_knowledge_base` runs inside a conversation stored on
+  the server. `list_conversations` (optionally filtered by title) and `get_conversation`
+  give an assistant back the user's own earlier questions and answers after a restart, and
+  the `conversation_id` can be passed to `ask_knowledge_base` to carry on. They only ever show
+  the token owner's own conversations.
+- **What the team should remember goes in as a lesson.** `record_lesson` files it as a draft
+  that goes through review; once approved everyone's assistant finds it with
+  `search_knowledge`. A lesson needs a department: pass `dept` unless the user has one set.
+- **A call that does not return is cut off** after 120 s with a tool error instead of holding
+  the client open.
 
 Results are trimmed for the model: a search hit is one passage (not the parent section
 and every child chunk), a citation carries a short excerpt. Use `get_article` for the

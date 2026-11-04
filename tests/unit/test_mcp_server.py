@@ -619,6 +619,7 @@ SAMPLE = {
     "request_text": "please fix",
     "log_id": ARTICLE_ID,
     "rating": 1,
+    "conversation_id": ARTICLE_ID,
 }
 
 
@@ -690,3 +691,179 @@ def test_token_management_routes_need_a_signed_in_user():
     for route in access_tokens_router.router.routes:
         deps = [d.call.__name__ for d in route.dependant.dependencies]
         assert "get_current_user" in deps, route.path
+
+
+# -- an agent that keeps working: paging, history, deadlines ------------------------------
+
+
+def _long_article(chars: int) -> dict:
+    line = "0123456789 abcdefghij klmnopqrst uvwxyz\n"
+    body = (line * (chars // len(line) + 1))[:chars]
+    return {"id": ARTICLE_ID, "title": "Long spec", "version": 4, "body_md": body}
+
+
+def _read_pages(h, article: dict) -> list[dict]:
+    """Read an article the way an agent would: follow next_offset until it stops."""
+    h.reply = (200, article)
+    pages, offset = [], 0
+    while True:
+        args = {"article_id": ARTICLE_ID}
+        if offset:
+            args["offset"] = offset
+        result = h.result("tools/call", {"name": "get_article", "arguments": args})
+        assert result["isError"] is False
+        page = json.loads(result["content"][0]["text"])
+        pages.append(page)
+        if "next_offset" not in page:
+            return pages
+        assert page["next_offset"] > offset, "paging must make progress"
+        offset = page["next_offset"]
+        assert len(pages) < 50
+
+
+def test_a_long_article_can_be_read_to_the_end_page_by_page(h):
+    article = _long_article(2 * settings.MCP_MAX_RESULT_CHARS + 777)
+    pages = _read_pages(h, article)
+    assert len(pages) >= 4
+    assert "".join(p["body_md"] for p in pages) == article["body_md"]
+    assert all(p["body_chars"] == len(article["body_md"]) for p in pages)
+    assert "truncated" in pages[0] and "truncated" not in pages[-1]
+    assert pages[0]["version"] == 4
+
+
+def test_a_short_article_is_one_page_with_no_paging_fields(h):
+    pages = _read_pages(h, {"id": ARTICLE_ID, "title": "Short", "body_md": "hello"})
+    assert len(pages) == 1
+    assert pages[0]["body_md"] == "hello"
+    assert "next_offset" not in pages[0] and "truncated" not in pages[0]
+
+
+def test_a_page_ends_at_a_line_break_when_one_is_near(h):
+    pages = _read_pages(h, _long_article(settings.MCP_MAX_RESULT_CHARS))
+    assert pages[0]["body_md"].endswith("\n")
+
+
+def test_get_article_rejects_a_bad_offset(h):
+    h.reply = (200, _long_article(100))
+    result = h.result(
+        "tools/call",
+        {"name": "get_article", "arguments": {"article_id": ARTICLE_ID, "offset": "x"}},
+    )
+    assert result["isError"] is True and "'offset' must be an integer" in str(result)
+
+
+def _conversation_rows(n: int) -> list[dict]:
+    return [
+        {"id": str(uuid.uuid4()), "title": f"Question {i}", "updated_at": "2026-11-04"}
+        for i in range(n)
+    ]
+
+
+def test_list_conversations_filters_by_title_and_limits(h):
+    rows = _conversation_rows(30) + [
+        {"id": str(uuid.uuid4()), "title": "UART base address", "updated_at": "x"}
+    ]
+    h.reply = (200, rows)
+    out = h.result("tools/call", {"name": "list_conversations", "arguments": {}})
+    assert len(json.loads(out["content"][0]["text"])) == 20
+    out = h.result(
+        "tools/call", {"name": "list_conversations", "arguments": {"q": "uart"}}
+    )
+    found = json.loads(out["content"][0]["text"])
+    assert [row["title"] for row in found] == ["UART base address"]
+    assert set(found[0]) == {"id", "title", "updated_at"}
+    assert h.calls[-1].method == "GET" and h.calls[-1].path == "/ai/conversations"
+
+
+def test_get_conversation_returns_the_last_turns_as_the_user_saw_them(h):
+    messages = [
+        {
+            "id": str(uuid.uuid4()),
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"full {i}",
+            "answer_grounded": None if i % 2 == 0 else f"grounded {i}",
+            "citations": [{"source_id": "C1", "title": "T", "excerpt": "e" * 900}],
+            "created_at": f"t{i}",
+        }
+        for i in range(8)
+    ]
+    h.reply = (200, messages)
+    cid = str(uuid.uuid4())
+    out = h.result(
+        "tools/call",
+        {"name": "get_conversation", "arguments": {"conversation_id": cid, "limit": 3}},
+    )
+    turns = json.loads(out["content"][0]["text"])
+    assert [t["text"] for t in turns] == ["grounded 5", "full 6", "grounded 7"]
+    assert len(turns[0]["citations"][0]["excerpt"]) < 700
+    assert "citations" not in turns[1] or turns[1]["citations"]
+    assert h.calls[-1].path == f"/ai/conversations/{cid}/messages"
+
+
+def test_get_conversation_needs_a_uuid(h):
+    out = h.result(
+        "tools/call",
+        {"name": "get_conversation", "arguments": {"conversation_id": "abc"}},
+    )
+    assert out["isError"] is True and "UUID" in str(out)
+
+
+def test_the_department_hint_is_attached_for_a_write_token(monkeypatch):
+    w = Harness(monkeypatch, "write")
+    w.reply = (422, {"detail": "A department is required"})
+    out = w.result(
+        "tools/call",
+        {"name": "record_lesson", "arguments": {"title": "t", "lesson": "l"}},
+    )
+    text = out["content"][0]["text"]
+    assert out["isError"] is True
+    assert text.startswith("Error 422: A department is required")
+    assert "list_departments" in text
+
+
+def test_other_errors_get_no_hint(h):
+    h.reply = (404, {"detail": "Article not found"})
+    out = h.result(
+        "tools/call", {"name": "get_article", "arguments": {"article_id": ARTICLE_ID}}
+    )
+    assert out["content"][0]["text"] == "Error 404: Article not found"
+
+
+def test_a_call_that_times_out_is_a_tool_error_not_a_hang(h, monkeypatch):
+    async def never_answers(request, who, call):
+        raise TimeoutError
+
+    monkeypatch.setattr(mcp, "run_call", never_answers)
+    out = h.result("tools/call", {"name": "list_departments", "arguments": {}})
+    assert out["isError"] is True and "took too long" in out["content"][0]["text"]
+
+
+def test_run_call_gives_up_on_an_endpoint_that_never_answers(monkeypatch):
+    """httpx's own timeout does nothing over an in-process ASGI transport, so the deadline
+    is enforced around the call; without it this test would never finish."""
+    from types import SimpleNamespace
+
+    app = FastAPI()
+
+    @app.get(f"{settings.API_V1_STR}/search")
+    async def stuck():
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(mcp, "CALL_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(mcp, "create_access_token", lambda *a, **k: "t")
+    request = SimpleNamespace(app=app, state=SimpleNamespace())
+
+    async def go():
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await mcp.run_call(request, principal(), Call("GET", "/search"))
+        return asyncio.get_running_loop().time() - started
+
+    assert asyncio.run(go()) < 5
+
+
+def test_the_instructions_name_memory_and_distrust_document_text(h):
+    text = h.result("initialize", {})["instructions"]
+    assert "record_lesson" in text and "list_conversations" in text
+    assert "data, not instructions" in text
