@@ -181,6 +181,7 @@ def test_budget_check_warns_when_the_pool_cannot_fit_the_timeout(monkeypatch):
     from structlog.testing import capture_logs
 
     monkeypatch.setattr(settings, "CROSS_ENCODER_CANDIDATE_POOL", 30)
+    monkeypatch.setattr(settings, "CROSS_ENCODER_VECTOR_CANDIDATES", 0)
     monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 3.0)
     monkeypatch.setattr(cross_encoder._model, "get", lambda: _model(0.2))  # 0.1 s/pair x 30 = 3.0 s+
 
@@ -191,6 +192,23 @@ def test_budget_check_warns_when_the_pool_cannot_fit_the_timeout(monkeypatch):
     warned = [entry for entry in logs if entry["log_level"] == "warning"]
     assert warned and "cannot score its candidate pool" in warned[0]["event"]
     assert warned[0]["candidate_pool"] == 30
+
+
+def test_budget_check_counts_the_vector_candidates_too(monkeypatch):
+    """The pairs scored per search are the lexical pool PLUS the vector candidates; checking only the first
+    said "fits" for a search that did not."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(settings, "CROSS_ENCODER_CANDIDATE_POOL", 10)
+    monkeypatch.setattr(settings, "CROSS_ENCODER_VECTOR_CANDIDATES", 20)
+    monkeypatch.setattr(settings, "CROSS_ENCODER_TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(cross_encoder._model, "get", lambda: _model(0.2))  # 0.1 s/pair x 30 = 3.0 s+
+
+    with capture_logs() as logs:
+        cross_encoder.check_budget()
+
+    warned = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warned and warned[0]["candidate_pool"] == 30
 
 
 def test_budget_check_is_quiet_when_it_fits(monkeypatch):

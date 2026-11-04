@@ -508,23 +508,40 @@ class Settings(BaseSettings):
     # not by what a developer happens to have installed locally.
     CROSS_ENCODER_RERANKER_ENABLED: bool = False
     CROSS_ENCODER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    # `onnx` runs the int8 export on ONNX Runtime (no torch, ~4.8 pairs/s on 2 threads, scores correlate 0.995 with
+    # the torch ones); `torch` runs CROSS_ENCODER_MODEL through sentence-transformers (~0.5 s a pair on 2 vCPU) and
+    # needs the `ml` group. The onnx export is baked by KB_BAKE_RERANKER_MODEL=true.
+    CROSS_ENCODER_RUNTIME: str = "onnx"
+    CROSS_ENCODER_ONNX_DIR: str = "/opt/reranker-onnx"
+    CROSS_ENCODER_ONNX_FILE: str = "model_int8.onnx"
+    CROSS_ENCODER_MAX_TOKENS: int = 512
+    CROSS_ENCODER_BATCH_SIZE: int = 8
+    # False: run on every question. True: only where `needs_deep_retrieval` says the question is complex (the
+    # earlier behaviour, chosen when a pair cost 0.5 s). Register lookups are not complex and gain the most:
+    # a chunk holding the answer ranked 1st for 16 of 54 chip-spec questions without it and 27 with it.
+    CROSS_ENCODER_ONLY_DEEP_QUERIES: bool = False
+    # The cross-encoder's first CROSS_ENCODER_ASSIST_TOP_K are scored at least RAG_VECTOR_ASSIST_SCORE when it is
+    # at least this sure, so the lexical context gate cannot drop the passage the model recognised as the answer.
+    CROSS_ENCODER_ASSIST_TOP_K: int = 3
+    CROSS_ENCODER_ASSIST_MIN_PROBABILITY: float = 0.05
     # Off by default for the same reason: a change to what the reader sees on the live
     # answer path, with no production traffic behind it yet to confirm the ambiguity
     # heuristic (rag/query_router.py::detect_ambiguous_departments) actually fires on
     # real questions rather than on ordinary ones with two loosely-relevant departments.
     CLARIFICATION_ON_AMBIGUOUS_DEPARTMENTS_ENABLED: bool = False
-    # How many hybrid_search candidates are re-scored. A cross-encoder pays for every
-    # (query, passage) pair it scores, unlike a bi-encoder embedding computed once per
-    # passage at index time — so this is a cost/latency dial, not a recall ceiling like
-    # RAG_CANDIDATE_POOL_SIZE below.
-    CROSS_ENCODER_CANDIDATE_POOL: int = 30
+    # How many of the lexical order's first candidates are re-scored, plus CROSS_ENCODER_VECTOR_CANDIDATES the vector
+    # search ranked highest. A cross-encoder pays for every (query, passage) pair it scores, unlike a bi-encoder
+    # embedding computed once at index time, so this is a cost/latency dial: 10 + 5 is ~14 pairs, ~3 s on 2 threads,
+    # and gets most of what 30 does (a chunk with the answer within the first 5: 39 of 54 against 42, lexical alone 30).
+    CROSS_ENCODER_CANDIDATE_POOL: int = 10
+    CROSS_ENCODER_VECTOR_CANDIDATES: int = 5
     # A search must not wait on the reranker longer than this: on timeout the request returns
     # the lexical order it already has. MEASURED (scripts/bench_inference.py, docs/performance-develop.md):
     # bge-reranker-v2-m3 costs ~0.5 s per (query, passage) pair on 2 vCPU, so the default pool of 30
     # is ~15 s there. The bound is what keeps "optional enhancement" from meaning "optionally
     # makes search look stuck". The scoring thread cannot be cancelled; while it finishes,
     # further searches skip the cross-encoder instead of queueing behind it.
-    CROSS_ENCODER_TIMEOUT_SECONDS: float = 3.0
+    CROSS_ENCODER_TIMEOUT_SECONDS: float = 5.0
     # After this many CONSECUTIVE timeouts the reranker is skipped for the cooldown below instead of
     # being tried (and waited on, up to the timeout) by every search. A timed-out call also keeps a
     # thread busy until it finishes, so on a CPU that is too small the feature would otherwise cost
