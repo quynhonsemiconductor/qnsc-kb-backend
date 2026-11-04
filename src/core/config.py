@@ -259,8 +259,22 @@ class Settings(BaseSettings):
     # onnx still requires an export (model.onnx + tokenizer.json) in EMBEDDING_ONNX_DIR;
     # see src/lib/embeddings/local_onnx.py. Until that exists, embeddings are unavailable
     # either way — but the failure now names the thing that is actually missing.
+    #
+    # "tei" moves the forward pass out of this process and onto the shared in-cluster
+    # text-embeddings-inference Service (platform/ai/tei-e5.yaml in the gitops repo), which
+    # serves the same model, revision and fp32 dtype, so the vector space does not move. The
+    # in-process export stays in the image for one release after a deployment flips, so the
+    # flip is a values change in both directions. See src/lib/embeddings/tei.py.
     EMBEDDING_RUNTIME: str = "onnx"
     EMBEDDING_ONNX_DIR: str = "/opt/embedding-onnx"
+    # The TEI client's endpoint: an in-cluster Service, `http://<service>.<namespace>.svc`
+    # and nothing else — see validate_in_cluster_endpoint in src/lib/embeddings/tei.py for
+    # why this deliberately does NOT go through llm_endpoint_security (that guard exists for
+    # endpoints an administrator types in, and refuses exactly this shape).
+    TEI_EMBEDDINGS_URL: str = ""
+    # Per request, not per item: one GPU batch of ≤32 chunks answers well inside this. A
+    # longer wait buys nothing — the caller's keyword fallback is the degradation path.
+    TEI_EMBEDDINGS_TIMEOUT_SECONDS: float = 30.0
     # PER MODEL, and not inferable from the export: an ONNX graph does not carry the
     # pooling config sentence-transformers reads. Every e5 model to date (small, base,
     # large, and large-instruct) publishes pooling_mode_mean_tokens=true in its
