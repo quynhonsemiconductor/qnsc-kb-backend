@@ -62,6 +62,16 @@ HTTP_SERVER_DURATION_METRIC = "http.server.duration"
 HTTP_SERVER_REQUESTS_METRIC = "http.server.requests"
 HTTP_SERVER_ERRORS_METRIC = "http.server.errors"
 
+#: Celery worker task metrics. The worker is a separate process from the API
+#: and had NO metrics at all, so a queue that stopped draining or a task that
+#: started failing every run was invisible until a user noticed. Names follow
+#: the OTel -> Prometheus convention (counters get `_total`): the exported
+#: series are `celery_task_runs_total`, `celery_task_failures_total` and
+#: `celery_task_duration_milliseconds_*`.
+CELERY_TASK_RUNS_METRIC = "celery.task.runs"
+CELERY_TASK_FAILURES_METRIC = "celery.task.failures"
+CELERY_TASK_DURATION_METRIC = "celery.task.duration"
+
 #: Histogram boundaries in milliseconds — the OpenTelemetry JS defaults, verbatim
 #: (rova/opshub's SDK uses the same set unless a product overrides it). Chosen for
 #: comparability with the Node products' p50/p95/p99, and because it is the
@@ -97,10 +107,17 @@ MAX_ROUTE_LABEL_LENGTH = 128
 
 _METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
+#: Longest Celery task name kept. Celery task names are static decorators, so
+#: this is a tripwire like MAX_ROUTE_LABEL_LENGTH, not an expected cut.
+MAX_TASK_LABEL_LENGTH = 128
+
 _provider: Any = None
 _duration: Any = None
 _requests: Any = None
 _errors: Any = None
+_task_runs: Any = None
+_task_failures: Any = None
+_task_duration: Any = None
 
 
 def _metric_reader() -> Any:
@@ -120,6 +137,7 @@ def configure_metrics(metric_reader: MetricReader | None = None) -> bool:
     and needs no endpoint, no network and no exporter thread.
     """
     global _provider, _duration, _requests, _errors
+    global _task_runs, _task_failures, _task_duration
 
     if telemetry_disabled():
         return False
@@ -155,6 +173,23 @@ def configure_metrics(metric_reader: MetricReader | None = None) -> bool:
     )
     _errors = meter.create_counter(
         HTTP_SERVER_ERRORS_METRIC, description="Inbound HTTP requests that failed"
+    )
+
+    # Created in the same provider, and only exported by the process that
+    # configures it: the API never records a task, the worker never records an
+    # HTTP request, so each process emits only its own families.
+    _task_runs = meter.create_counter(
+        CELERY_TASK_RUNS_METRIC,
+        description="Celery tasks that finished, by task and outcome",
+    )
+    _task_failures = meter.create_counter(
+        CELERY_TASK_FAILURES_METRIC,
+        description="Celery tasks that finished in a non-success state",
+    )
+    _task_duration = meter.create_histogram(
+        CELERY_TASK_DURATION_METRIC,
+        unit="ms",
+        description="Celery task wall-clock duration",
     )
     return True
 
@@ -213,6 +248,37 @@ def record_http_request(
         logger.debug("Could not record the HTTP metric", exc_info=True)
 
 
+def task_label(task_name: str | None) -> str:
+    """The bounded task-name label. A missing name is not dropped: an empty one
+    is what makes a misconfigured signal visible instead of silent."""
+    label = (task_name or "").strip() or "unknown"
+    return label[:MAX_TASK_LABEL_LENGTH]
+
+
+def record_task_finished(
+    task_name: str | None, state: str | None, duration_ms: float
+) -> None:
+    """Record one finished Celery task. A no-op until configure_metrics() ran.
+
+    Called from Celery's ``task_postrun`` signal (celery_app.py), which fires
+    once per task whether it succeeded, failed or was revoked. ``state`` is
+    Celery's task state; anything other than SUCCESS counts as a failure for
+    the failure counter while the runs counter keeps the exact state, so the
+    dashboard can separate FAILURE from RETRY/REVOKED.
+    """
+    if _task_runs is None:
+        return
+    task = task_label(task_name)
+    outcome = (state or "UNKNOWN").strip().upper()
+    try:
+        _task_runs.add(1, {"task": task, "state": outcome})
+        if outcome != "SUCCESS":
+            _task_failures.add(1, {"task": task, "state": outcome})
+        _task_duration.record(duration_ms, {"task": task})
+    except Exception:  # Telemetry must never break a worker task.
+        logger.debug("Could not record the Celery task metric", exc_info=True)
+
+
 def shutdown_metrics() -> None:
     """Flush the last interval and stop the exporter reader.
 
@@ -231,8 +297,10 @@ def shutdown_metrics() -> None:
 def reset_metrics_for_testing() -> None:
     """Forget the provider and instruments so a test can configure again."""
     global _provider, _duration, _requests, _errors
+    global _task_runs, _task_failures, _task_duration
     provider = _provider
     _provider = _duration = _requests = _errors = None
+    _task_runs = _task_failures = _task_duration = None
     if provider is not None:
         try:
             provider.shutdown()
