@@ -486,6 +486,10 @@ class Settings(BaseSettings):
     EVIDENCE_VISION_ENABLED: bool = False
     EVIDENCE_VISION_MAX_IMAGES: int = 2
     EVIDENCE_VISION_MAX_TOTAL_BYTES: int = 8000000
+    # Per authenticated user, not per source address: the whole office reaches the API
+    # through one Cloudflare address, so an address-keyed bucket would hand every member
+    # the same 30 asks a minute. 30/min is one ask every two seconds — more than a person
+    # following up on an answer uses, and enough that a scripted loop hits the cap fast.
     AI_RATE_LIMIT_PER_MINUTE: int = 30
     # MCP server (POST {API_V1_STR}/mcp), authenticated with personal access tokens.
     MCP_ENABLED: bool = True

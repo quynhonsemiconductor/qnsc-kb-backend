@@ -119,6 +119,75 @@ def test_auth_limiter_buckets_per_client(monkeypatch):
     assert asyncio.run(limiter.allow(client_ip_from_request(b1))) == (True, 0)
 
 
+def test_ai_limiter_shares_one_per_user_bucket_across_pods(monkeypatch):
+    """The AI limit is per person and stored in Valkey, so API pods count together.
+
+    A per-process counter would give every pod its own `AI_RATE_LIMIT_PER_MINUTE`, which
+    resets on deploy and multiplies the limit by the replica count. Two limiter objects
+    sharing one store stand in for two pods here.
+    """
+    _CountingRedis.store.clear()
+    monkeypatch.setattr("src.core.rate_limit.Redis", _CountingRedis)
+    pod_a = RedisRateLimiter("ai", limit=2, window_seconds=60)
+    pod_b = RedisRateLimiter("ai", limit=2, window_seconds=60)
+
+    assert asyncio.run(pod_a.allow("user-a")) == (True, 0)
+    assert asyncio.run(pod_b.allow("user-a")) == (True, 0)
+    assert asyncio.run(pod_a.allow("user-a"))[0] is False
+    assert asyncio.run(pod_b.allow("user-a"))[0] is False
+    # A different person — including one behind the same office address — is unaffected.
+    assert asyncio.run(pod_b.allow("user-b")) == (True, 0)
+
+
+def test_the_ai_endpoint_buckets_on_the_authenticated_user(monkeypatch):
+    """A shared office IP must not put every member in one AI bucket.
+
+    The handler passes the authenticated user's id and never sees an address, so two
+    people behind the same Cloudflare address are limited independently.
+    """
+    import uuid
+
+    from src.api.routers import ai
+
+    user = SimpleNamespace(id=uuid.uuid4())
+    seen: list[str] = []
+
+    async def record(key):
+        seen.append(key)
+        return True, 0
+
+    class _FakeRepository:
+        def __init__(self, _db):
+            self.conversation_id = uuid.uuid4()
+
+        async def create_conversation(self, *_args):
+            return SimpleNamespace(id=self.conversation_id, title="Question")
+
+        async def start_user_turn(self, *_args, **_kwargs):
+            return None
+
+        async def add_message(self, *_args, **_kwargs):
+            return None
+
+    class _FakeAIService:
+        async def ask(self, *_args, **_kwargs):
+            return {"answer": "Answer", "citations": [], "log_id": None}
+
+    monkeypatch.setattr(ai, "AIRepository", _FakeRepository)
+    monkeypatch.setattr(ai, "get_ai_service", lambda _db: _FakeAIService())
+    monkeypatch.setattr(ai, "ai_rate_limiter", SimpleNamespace(allow=record))
+
+    asyncio.run(
+        ai.ask_question(
+            ai.AskRequest(question="What is the leave policy?"),
+            current_user=user,
+            db=object(),
+        )
+    )
+
+    assert seen == [str(user.id)]
+
+
 def test_auth_limiter_fails_closed_when_redis_is_unavailable(monkeypatch):
     """The auth limiter refuses instead of degrading on a Redis outage."""
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
