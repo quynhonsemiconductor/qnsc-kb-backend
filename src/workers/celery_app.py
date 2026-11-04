@@ -183,12 +183,17 @@ celery_app.conf.update(
 # MeterProvider created in the parent has an exporter THREAD, and threads do
 # not survive fork — the child would inherit a dead provider and silently drop
 # every point. worker_process_init runs once per child, after the fork.
+#
+# `--pool=solo` has NO child process and does not emit worker_process_init, so
+# task_prerun also calls configure_metrics (idempotent once a provider exists).
+# kb's deployments use the Dockerfile's prefork `--concurrency=1`; the fallback
+# means a solo-pool dev/local run still reports instead of silently no-op'ing.
 _task_started_at: dict[str, float] = {}
 
 
 @worker_process_init.connect
 def _init_worker_metrics(**_kwargs: object) -> None:
-    otel_metrics.configure_metrics()
+    otel_metrics.configure_metrics(process_instance_id=True)
 
 
 @worker_process_shutdown.connect
@@ -198,6 +203,9 @@ def _flush_worker_metrics(**_kwargs: object) -> None:
 
 @task_prerun.connect
 def _task_started(task_id: str | None = None, **_kwargs: object) -> None:
+    # Idempotent: covers --pool=solo (and any pool where the init signal did
+    # not fire for this process) without creating a second provider.
+    otel_metrics.configure_metrics(process_instance_id=True)
     if task_id:
         _task_started_at[task_id] = time.monotonic()
 

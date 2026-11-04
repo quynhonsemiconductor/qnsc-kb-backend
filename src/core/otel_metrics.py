@@ -37,6 +37,7 @@ record_http_request() are no-ops, which is what keeps unit tests silent.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from src.core.otel import resource_attributes, signal_endpoint, telemetry_disabled
@@ -130,11 +131,19 @@ def _metric_reader() -> Any:
     )
 
 
-def configure_metrics(metric_reader: MetricReader | None = None) -> bool:
+def configure_metrics(
+    metric_reader: MetricReader | None = None, *, process_instance_id: bool = False
+) -> bool:
     """Build the MeterProvider and the RED instruments. Returns True when live.
 
     ``metric_reader`` is a test seam: a unit test passes an InMemoryMetricReader
     and needs no endpoint, no network and no exporter thread.
+
+    ``process_instance_id`` adds ``service.instance.id=<pid>``. The API does NOT
+    set it (the collector already identifies the pod), but the worker is a
+    prefork parent with one child and a restart reuses the pod name: the pid is
+    what separates this process's series from the previous one's in the overlap
+    window after a restart.
     """
     global _provider, _duration, _requests, _errors
     global _task_runs, _task_failures, _task_duration
@@ -149,8 +158,11 @@ def configure_metrics(metric_reader: MetricReader | None = None) -> bool:
     if reader is None:
         return False
 
+    attributes = resource_attributes()
+    if process_instance_id:
+        attributes["service.instance.id"] = str(os.getpid())
     provider = MeterProvider(
-        resource=Resource.create(resource_attributes()),
+        resource=Resource.create(attributes),
         metric_readers=[reader],
     )
     # The instruments are taken from THIS provider, not from the global meter
@@ -262,9 +274,14 @@ def record_task_finished(
 
     Called from Celery's ``task_postrun`` signal (celery_app.py), which fires
     once per task whether it succeeded, failed or was revoked. ``state`` is
-    Celery's task state; anything other than SUCCESS counts as a failure for
-    the failure counter while the runs counter keeps the exact state, so the
-    dashboard can separate FAILURE from RETRY/REVOKED.
+    Celery's task state.
+
+    ONLY ``FAILURE`` increments the failure counter. ``RETRY`` is a task that
+    will run again (not a terminal failure), and ``REVOKED`` is a deliberate
+    cancellation — by ``expires`` (the stale-beat guard), operator shutdown or
+    an admin revoke — not the task's own failure. Both remain visible in the
+    runs counter under their exact state, so the dashboard can show them
+    without them inflating the pageable failure rate.
     """
     if _task_runs is None:
         return
@@ -272,7 +289,7 @@ def record_task_finished(
     outcome = (state or "UNKNOWN").strip().upper()
     try:
         _task_runs.add(1, {"task": task, "state": outcome})
-        if outcome != "SUCCESS":
+        if outcome == "FAILURE":
             _task_failures.add(1, {"task": task, "state": outcome})
         _task_duration.record(duration_ms, {"task": task})
     except Exception:  # Telemetry must never break a worker task.
