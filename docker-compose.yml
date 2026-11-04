@@ -17,7 +17,7 @@ services:
     # directory and on the old /data mount. Run `docker compose down -v` once to drop the old pgdata,
     # then re-run migrations. Dev data is disposable; the alternative is pg_upgrade for a
     # database nobody needs to keep.
-    image: pgvector/pgvector:0.8.2-pg18
+    image: pgvector/pgvector:0.8.6-pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
     ports:
       # Loopback-only: dev Postgres uses well-known credentials and must not
       # be reachable from the LAN. The HOST port is KB_DB_PORT (default 5432): set it in
@@ -42,7 +42,7 @@ services:
   # The service keeps the name `redis` (REDIS_URL points at redis:6379 inside the network). The engine is Valkey, the
   # one production runs on ElastiCache; it speaks the Redis protocol, so REDIS_URL is unchanged.
   redis:
-    image: valkey/valkey:8.1.10-alpine
+    image: valkey/valkey:8.1.11-alpine@sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a
     ports:
       - "127.0.0.1:${KB_REDIS_PORT:-6379}:6379"
     command: ["valkey-server", "--requirepass", "${KB_LOCAL_REDIS_PASSWORD:?set KB_LOCAL_REDIS_PASSWORD in .env (see .env.example)}"]
