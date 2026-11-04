@@ -2724,7 +2724,10 @@ async def article_changes(
         ArticleRepository(db), UserRepository(db)
     ).get_history(current_user, id)
     try:
-        result = describe_changes(list(history), from_version, to_version)
+        # Comparing two texts is CPU work that grows with their length: keep it off the event loop.
+        result = await asyncio.to_thread(
+            describe_changes, list(history), from_version, to_version
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     latest = max(history, key=lambda item: item.version)
