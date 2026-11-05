@@ -27,7 +27,12 @@ from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
-from src.domain.article_changes import describe_changes, describe_recent
+from src.domain.article_changes import (
+    compare_selected,
+    describe_recent,
+    first_version_result,
+    select_versions,
+)
 from src.domain.articles import ArticleService
 from src.domain.source_extraction import (
     SUPPORTED_EXTENSIONS,
@@ -2765,22 +2770,29 @@ async def article_changes(
     latest ("what changed since I read version N"); `to_version` bounds the other end. The caller needs the same
     right to read the article as for its version history.
     """
-    history = await ArticleService(
-        ArticleRepository(db), UserRepository(db)
-    ).get_history(current_user, id)
+    repo = ArticleRepository(db)
+    article, index = await ArticleService(repo, UserRepository(db)).get_version_index(
+        current_user, id
+    )
     try:
-        # Comparing two texts is CPU work that grows with their length: keep it off the event loop.
-        result = await asyncio.to_thread(
-            describe_changes, list(history), from_version, to_version
-        )
+        selection = select_versions(index, from_version, to_version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    latest = max(history, key=lambda item: item.version)
-    return {
-        "article_id": str(id),
-        "title": (latest.snapshot or {}).get("title"),
-        **result,
-    }
+    # Only the snapshots the question names are loaded (each holds the whole text), not every version of the article.
+    newer = await repo.get_version_by_number(
+        id, selection.new_number, user=current_user
+    )
+    if selection.from_version is None:
+        result = first_version_result(selection, newer)
+    else:
+        older = await repo.get_version_by_number(
+            id, selection.from_version, user=current_user
+        )
+        if older is None or newer is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        # Comparing two texts is CPU work that grows with their length: keep it off the event loop.
+        result = await asyncio.to_thread(compare_selected, selection, older, newer)
+    return {"article_id": str(id), "title": article.title, **result}
 
 
 @router.post(

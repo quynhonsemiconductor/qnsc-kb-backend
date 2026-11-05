@@ -586,6 +586,25 @@ class ArticleRepository:
         )
         return result.scalars().all()
 
+    async def version_index(
+        self, article_id: uuid.UUID, user: User | None = None
+    ) -> list[Any]:
+        """The version numbers and times of an article, newest first, without their snapshots.
+
+        The same visibility predicate as `get_versions`; for a question that needs two snapshots at most, loading
+        every one of them (each holds the whole text) is the cost this avoids.
+        """
+        filters: list[Any] = [ArticleVersion.article_id == article_id]
+        if user is not None:
+            filters.extend(self._authorized_article_filters(user))
+        result = await self.db.execute(
+            select(ArticleVersion.version, ArticleVersion.created_at)
+            .join(Article, Article.id == ArticleVersion.article_id)
+            .where(and_(*filters))
+            .order_by(ArticleVersion.version.desc())
+        )
+        return list(result.all())
+
     async def get_version_by_number(
         self,
         article_id: uuid.UUID,

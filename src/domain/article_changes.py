@@ -12,6 +12,7 @@ says so (`truncated`), because the reader is usually a model with a limited cont
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -197,55 +198,96 @@ def diff_versions(
     return result
 
 
-def describe_changes(
-    versions: list[Any], from_version: int | None, to_version: int | None
-) -> dict[str, Any]:
-    """Pick the two versions and compare them.
+@dataclass(frozen=True)
+class Selection:
+    """Which two versions a question about changes is about, decided from the version numbers alone.
 
-    `versions` is the article's history, any order, each with `.version`, `.snapshot` and `.created_at`. By default
-    the latest against the one before it; `from_version` alone compares that version with the latest, which is how a
-    reader who read version N asks what changed since. Raises ValueError with a message for the caller.
+    `from_version` is None for the first version of an article (nothing earlier to compare with). Deciding this needs
+    no snapshot, so a caller can load only the two it names.
     """
-    by_number = {item.version: item for item in versions}
-    if not by_number:
+
+    numbers: list[int]
+    latest: int
+    new_number: int
+    from_version: int | None
+
+
+def select_versions(
+    versions: list[Any], from_version: int | None, to_version: int | None
+) -> Selection:
+    """Pick the two versions. `versions` is the article's history, any order, each with `.version`.
+
+    By default the latest against the one before it; `from_version` alone compares that version with the latest, which
+    is how a reader who read version N asks what changed since. Raises ValueError with a message for the caller.
+    """
+    numbers = sorted({item.version for item in versions})
+    if not numbers:
         raise ValueError("This article has no stored versions.")
-    numbers = sorted(by_number)
     latest = numbers[-1]
     new_number = to_version if to_version is not None else latest
-    if new_number not in by_number:
+    if new_number not in numbers:
         raise ValueError(
             f"Version {new_number} does not exist; versions are {numbers[0]}..{latest}."
         )
     if from_version is None:
         earlier = [n for n in numbers if n < new_number]
-        if not earlier:
-            return {
-                "first_version": True,
-                "version": new_number,
-                "created_at": _stamp(by_number[new_number]),
-                "summary": [
-                    f"Version {new_number} is the first version; there is nothing earlier to compare."
-                ],
-            }
-        from_version = earlier[-1]
-    if from_version not in by_number:
+        return Selection(numbers, latest, new_number, earlier[-1] if earlier else None)
+    if from_version not in numbers:
         raise ValueError(
             f"Version {from_version} does not exist; versions are {numbers[0]}..{latest}."
         )
     if from_version >= new_number:
         raise ValueError("'from_version' must be older than 'to_version'.")
-    old, new = by_number[from_version], by_number[new_number]
-    result = diff_versions(old.snapshot or {}, new.snapshot or {})
-    between = [n for n in numbers if from_version < n <= new_number]
+    return Selection(numbers, latest, new_number, from_version)
+
+
+def first_version_result(selection: Selection, version: Any) -> dict[str, Any]:
+    """The answer for an article's first version: there is nothing earlier to compare it with."""
     return {
-        "from_version": from_version,
-        "to_version": new_number,
+        "first_version": True,
+        "version": selection.new_number,
+        "created_at": _stamp(version),
+        "summary": [
+            f"Version {selection.new_number} is the first version; there is nothing earlier to compare."
+        ],
+    }
+
+
+def compare_selected(selection: Selection, old: Any, new: Any) -> dict[str, Any]:
+    """Compare the two versions a selection named (each with `.snapshot` and `.created_at`)."""
+    assert selection.from_version is not None
+    result = diff_versions(old.snapshot or {}, new.snapshot or {})
+    between = [
+        n
+        for n in selection.numbers
+        if selection.from_version < n <= selection.new_number
+    ]
+    return {
+        "from_version": selection.from_version,
+        "to_version": selection.new_number,
         "from_at": _stamp(old),
         "to_at": _stamp(new),
         "versions_covered": between,
-        "latest_version": latest,
+        "latest_version": selection.latest,
         **result,
     }
+
+
+def describe_changes(
+    versions: list[Any], from_version: int | None, to_version: int | None
+) -> dict[str, Any]:
+    """Pick the two versions and compare them; `versions` carry `.version`, `.snapshot` and `.created_at`.
+
+    The endpoint does the same in two steps (`select_versions`, then the two snapshots it names) so that an article
+    with a long history does not load every snapshot to compare two.
+    """
+    selection = select_versions(versions, from_version, to_version)
+    by_number = {item.version: item for item in versions}
+    if selection.from_version is None:
+        return first_version_result(selection, by_number[selection.new_number])
+    return compare_selected(
+        selection, by_number[selection.from_version], by_number[selection.new_number]
+    )
 
 
 def _stamp(version: Any) -> str | None:

@@ -232,14 +232,31 @@ def test_no_versions_at_all_is_a_message():
 @pytest.fixture
 def history_for_endpoint(monkeypatch):
     from src.domain.articles import ArticleService
+    from src.repositories.article import ArticleRepository
 
-    holder = SimpleNamespace(history=list(reversed(HISTORY)), asked=[])
+    holder = SimpleNamespace(
+        history=list(reversed(HISTORY)), asked=[], loaded=[], index_loaded=0
+    )
 
-    async def get_history(self, user, article_id):
+    async def get_version_index(self, user, article_id):
         holder.asked.append((user, article_id))
-        return holder.history
+        holder.index_loaded += 1
+        index = [
+            SimpleNamespace(version=item.version, created_at=item.created_at)
+            for item in holder.history
+        ]
+        return SimpleNamespace(title="UART"), index
 
-    monkeypatch.setattr(ArticleService, "get_history", get_history)
+    async def get_version_by_number(self, article_id, version_num, user=None):
+        holder.loaded.append(version_num)
+        return next(
+            (item for item in holder.history if item.version == version_num), None
+        )
+
+    monkeypatch.setattr(ArticleService, "get_version_index", get_version_index)
+    monkeypatch.setattr(
+        ArticleRepository, "get_version_by_number", get_version_by_number
+    )
     return holder
 
 
@@ -286,13 +303,13 @@ def test_the_comparison_runs_off_the_event_loop(history_for_endpoint, monkeypatc
     import threading
 
     seen = []
-    real = articles.describe_changes
+    real = articles.compare_selected
 
     def spy(*args):
         seen.append(threading.current_thread())
         return real(*args)
 
-    monkeypatch.setattr(articles, "describe_changes", spy)
+    monkeypatch.setattr(articles, "compare_selected", spy)
 
     _call()
 
@@ -527,3 +544,65 @@ def test_the_repository_reads_one_row_more_than_the_page_to_know_about_more():
     assert more is True
     assert "LIMIT" in str(db.statements[0].compile()).upper()
     assert db.statements[0]._limit_clause.value == 3, "limit + 1"
+
+
+def test_only_the_snapshots_the_question_names_are_loaded(history_for_endpoint):
+    _call()
+    assert sorted(history_for_endpoint.loaded) == [
+        2,
+        3,
+    ], "the latest and the one before"
+
+    history_for_endpoint.loaded.clear()
+    _call(from_version=1)
+    assert sorted(history_for_endpoint.loaded) == [1, 3]
+
+    history_for_endpoint.loaded.clear()
+    _call(from_version=1, to_version=2)
+    assert sorted(history_for_endpoint.loaded) == [1, 2]
+
+
+def test_the_first_version_loads_one_snapshot_and_compares_nothing(
+    history_for_endpoint,
+):
+    history_for_endpoint.history = [HISTORY[0]]
+
+    out = _call()
+
+    assert out["first_version"] is True and history_for_endpoint.loaded == [1]
+
+
+def test_a_bad_version_is_refused_before_any_snapshot_is_loaded(history_for_endpoint):
+    with pytest.raises(HTTPException):
+        _call(from_version=9)
+
+    assert history_for_endpoint.loaded == []
+
+
+def test_the_version_index_selects_numbers_and_times_not_snapshots():
+    import asyncio
+
+    from src.repositories.article import ArticleRepository
+    from tests.unit.test_query_authorization import _DB, _reader
+
+    db = _DB()
+    asyncio.run(ArticleRepository(db).version_index(uuid.uuid4(), _reader()))
+
+    sql = str(db.statement.compile()).lower()
+    select_list = sql.split(" from ")[0]
+    assert "article_versions.version" in select_list
+    assert (
+        "snapshot" not in select_list
+    ), "the text of every version is what this avoids"
+    assert "articles.company_domain" in sql, "the same visibility rules as the history"
+
+
+def test_select_versions_decides_from_numbers_alone():
+    from src.domain.article_changes import select_versions
+
+    numbers_only = [SimpleNamespace(version=n) for n in (3, 1, 2)]
+
+    chosen = select_versions(numbers_only, None, None)
+    assert (chosen.from_version, chosen.new_number, chosen.latest) == (2, 3, 3)
+    assert select_versions(numbers_only[1:2], None, None).from_version is None
+    assert select_versions(numbers_only, 1, 2).numbers == [1, 2, 3]
