@@ -43,8 +43,8 @@ Unsetting the variable again is a clean disarm and never touches a PR already op
 
 Merge the Release Please PR in each repository. Versions are independent (`qnsc-kb-backend` is on
 `0.1.x`, `qnsc-kb-frontend` on `0.1.x` with its own sequence); what has to match is the **window**,
-not the number. Both release PRs should be merged one after the other, and each must be merged from
-a commit that GHCR · Publish has built — the promote workflow waits for that run and then retags
+not the number. Merge the two one after the other: each merge is a new commit on that repository's
+`main`, GHCR · Publish builds it, and the promote run then waits for that build before it retags
 `sha-<commit>`.
 
 Each merge is a push to `main`, so GHCR · Publish starts building the release commit; Release Please
@@ -64,15 +64,15 @@ Neither list can be partial: `release-retag` fails before writing any tag if one
 not published for that commit, and it verifies each digest's build attestation against the source
 repository and `refs/heads/main`. The two runs take different promotion branches
 (`promote/kb-<source-repo>-<tag>`, ci v1.34.1) so they cannot collide or exit green without
-promoting — this is why the four kb workflows pin the promote reusable at v1.34.1 and not v1.33.1.
+promoting — this is why both promote workflows pin the reusable at v1.34.1 and not v1.33.1.
 
 `web` is deliberately **not** in the backend's list: the SPA image is built from the frontend's own
 commit and a backend commit never published a `kb-web` digest.
 
 ## 3. Review and merge the two promote PRs (owner)
 
-Both PRs are titled `chore(kb): promote prod to vX.Y.Z` (same title, different repositories of
-origin). Before merging, check in each PR:
+Both PRs are titled `chore(kb): promote prod to vX.Y.Z` — the same title, opened by
+`qnsc-kb-backend` and `qnsc-kb-frontend` respectively. Before merging, check in each PR:
 
 - The `## Digests` block lists exactly the services in the table above, with `sha256:` digests.
 - The digests equal what GHCR holds for the release commit, for example:
