@@ -373,3 +373,12 @@ def test_a_question_with_a_name_is_searched_twice_and_merged(monkeypatch):
 
     assert passes == [False, True]
     assert [h["chunk_id"] for h in results] == ["A", "B", "N"], "cut to the limit"
+
+
+def test_the_vocabulary_statement_takes_the_pattern_and_company_as_parameters():
+    import inspect
+
+    source = inspect.getsource(abbreviations.load_company_vocabulary)
+
+    assert ":pattern" in source and ":company" in source
+    assert 'f"""' not in source and "{NAME_PATTERN}" not in source

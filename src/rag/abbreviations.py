@@ -266,10 +266,11 @@ async def load_company_vocabulary(company_domain: str) -> dict[str, int]:
 
     from src.api.deps import SessionLocal, set_database_context
 
-    statement = text(f"""
+    # The pattern is a bind parameter, not text spliced into the statement.
+    statement = text("""
         SELECT name, count(DISTINCT article_id) AS uses
         FROM (
-            SELECT c.article_id, (regexp_matches(c.chunk_text, '{NAME_PATTERN}', 'g'))[1] AS name
+            SELECT c.article_id, (regexp_matches(c.chunk_text, :pattern, 'g'))[1] AS name
             FROM article_chunks c
             JOIN articles a ON a.id = c.article_id
             WHERE a.company_domain = :company
@@ -280,5 +281,9 @@ async def load_company_vocabulary(company_domain: str) -> dict[str, int]:
         """)
     async with SessionLocal() as db:
         await set_database_context(db, company_domain)
-        rows = (await db.execute(statement, {"company": company_domain})).all()
+        rows = (
+            await db.execute(
+                statement, {"company": company_domain, "pattern": NAME_PATTERN}
+            )
+        ).all()
     return {str(name): int(uses) for name, uses in rows}
