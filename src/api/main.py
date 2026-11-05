@@ -53,10 +53,18 @@ from src.core.otel_metrics import (
     shutdown_metrics,
 )
 from src.core.tracing import configure_tracing, get_tracer, shutdown_tracing, trace
+from src.core.shutdown import (
+    MIN_CLEANUP_SECONDS,
+    ShutdownState,
+    hard_exit,
+    in_pod,
+    resolve_shutdown_plan,
+)
 from src.core.warmup import FAILED, READY, TIMEOUT, embedding_warmup
 from src.rag import cross_encoder
 from src.lib import log_redaction
 from src.lib.embeddings import warm_up as warm_up_embeddings
+from src.lib.observability import is_probe_path
 import structlog
 
 # Before anything can log a URL: httpx/httpcore to WARNING and credentials in query strings redacted.
@@ -410,6 +418,18 @@ async def reconcile_published_indexes() -> None:
 
 # Set once `_bootstrap_database` has finished. Readiness answers 503 until then.
 database_bootstrapped = False
+
+# Contract section 3: the plan is validated at import, so a bad pair of
+# SHUTDOWN_* values refuses to boot. `shutdown_state.begin` runs the moment
+# SIGTERM lands (src/api/serve.py), which is why /readyz answers 503 for the
+# whole sequence and not just for the lifespan cleanup.
+SHUTDOWN_PLAN = resolve_shutdown_plan(
+    settings.SHUTDOWN_TIMEOUT_MS, settings.SHUTDOWN_ENDPOINT_DELAY_MS, in_pod()
+)
+shutdown_state = ShutdownState()
+# Contract section 2: every readiness check together answers within 800 ms; a
+# hung dependency reads as that check being `down`, not as a probe timeout.
+READY_TIMEOUT_S = 0.8
 _bootstrap_task: "asyncio.Task | None" = None
 # The inline-mode maintenance loops, started only once the bootstrap has succeeded.
 _inline_tasks: "list[asyncio.Task]" = []
@@ -795,6 +815,72 @@ async def _inline_webhook_maintenance_loop() -> None:
             logger.exception("Inline webhook maintenance pass failed")
 
 
+async def _stop_work_and_flush() -> BaseException | None:
+    """Contract §3 step 4: stop work before the resources it uses go away.
+
+    The API runs no job handlers, so "work" here is the startup bootstrap and the
+    inline-mode maintenance loops; telemetry flushes after they stop, for the
+    reason the comment below keeps. Returns the bootstrap task's exception, if it
+    died unobserved, so the caller can raise it after the budget is spent.
+    """
+    bootstrap_error: BaseException | None = None
+    if _bootstrap_task and not _bootstrap_task.done():
+        _bootstrap_task.cancel()
+        try:
+            await _bootstrap_task
+        except asyncio.CancelledError:
+            pass
+    elif _bootstrap_task and not _bootstrap_task.cancelled():
+        bootstrap_error = _bootstrap_task.exception()
+    if _preload_task and not _preload_task.done():
+        _preload_task.cancel()
+        try:
+            await _preload_task
+        except asyncio.CancelledError:
+            pass
+    for task in _inline_tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    _inline_tasks.clear()
+    # Telemetry LAST, after the workloads stopped: a forced flush before the
+    # last spans and the last 60-second metric window exist loses them on every
+    # deploy. Best-effort — a failing exporter must not turn a clean shutdown
+    # into a failed one.
+    for shutdown_signal, name in (
+        (shutdown_metrics, "metrics"),
+        (shutdown_tracing, "traces"),
+    ):
+        try:
+            shutdown_signal()
+        except Exception:
+            logger.exception("OpenTelemetry shutdown failed", signal=name)
+    return bootstrap_error
+
+
+async def _run_shutdown_cleanup(state: ShutdownState) -> BaseException | None:
+    """The whole shutdown sequence is bounded by SHUTDOWN_TIMEOUT_MS (§3).
+
+    The deadline was started when SIGTERM landed (src/api/serve.py), so `remaining`
+    is what is left of it after uvicorn's in-flight wait. Past the deadline the
+    process exits 1 itself instead of waiting for the kubelet's SIGKILL — a job
+    interrupted by a drain costs one retry, so a clean exit is what keeps that
+    retry cheap.
+    """
+    remaining = max(state.remaining(time.monotonic()), MIN_CLEANUP_SECONDS)
+    try:
+        return await asyncio.wait_for(_stop_work_and_flush(), timeout=remaining)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Shutdown exceeded the hard deadline",
+            timeout_ms=int(SHUTDOWN_PLAN.timeout_seconds * 1000),
+        )
+        hard_exit(1)
+        return None  # never reached: hard_exit does not return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Migrations run in the deployment entrypoint. The database bootstrap runs in the
@@ -803,40 +889,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        bootstrap_error: BaseException | None = None
-        if _bootstrap_task and not _bootstrap_task.done():
-            _bootstrap_task.cancel()
-            try:
-                await _bootstrap_task
-            except asyncio.CancelledError:
-                pass
-        elif _bootstrap_task and not _bootstrap_task.cancelled():
-            bootstrap_error = _bootstrap_task.exception()
-        if _preload_task and not _preload_task.done():
-            _preload_task.cancel()
-            try:
-                await _preload_task
-            except asyncio.CancelledError:
-                pass
-        for task in _inline_tasks:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        _inline_tasks.clear()
-        # Telemetry LAST, after the workloads stopped: a forced flush before the
-        # last spans and the last 60-second metric window exist loses them on every
-        # deploy. Best-effort — a failing exporter must not turn a clean shutdown
-        # into a failed one.
-        for shutdown_signal, name in (
-            (shutdown_metrics, "metrics"),
-            (shutdown_tracing, "traces"),
-        ):
-            try:
-                shutdown_signal()
-            except Exception:
-                logger.exception("OpenTelemetry shutdown failed", signal=name)
+        # §3: the signal handler (src/api/serve.py) already flipped readiness and
+        # served the endpoint-removal delay before uvicorn stopped accepting
+        # connections. A direct lifespan close (tests, Ctrl-C without the launcher)
+        # begins here instead — same flag, same deadline bookkeeping.
+        if not shutdown_state.draining:
+            shutdown_state.begin(SHUTDOWN_PLAN, time.monotonic())
+        bootstrap_error = await _run_shutdown_cleanup(shutdown_state)
         if bootstrap_error is not None:
             # Raised last, after every other task is cleaned up. A bootstrap that died with an
             # error must not vanish unobserved at shutdown. In production a non-retryable error
@@ -927,6 +986,11 @@ app.add_middleware(
 
 @app.middleware("http")
 async def request_logging_middleware(request, call_next):
+    if is_probe_path(request.url.path):
+        # §2: probes create no spans and no access-log lines, and they are not
+        # traffic worth a metric point. The probe handlers still answer through
+        # call_next; none of the request bookkeeping below applies to them.
+        return await call_next(request)
     started = time.perf_counter()
     request_id = _request_id_from(request)
     request.state.request_id = request_id
@@ -1201,11 +1265,105 @@ async def health_ready():
     }
 
 
-@app.get("/readyz", tags=["system"])
-async def readyz():
-    """Alias of `/health/ready`, behaviour identical — including the 503 while the
-    embedding model warms. The platform probe/monitor path is `/readyz` everywhere
-    (ONPREM-PLAN §8.2), so the edge and Synthetic Monitoring point at one name for
-    every product instead of remembering KB's.
+async def _readiness_checks(checks=None) -> dict[str, str]:
+    """§2 built-in checks, run in parallel: database, cache, embedding model.
+
+    Every check is bounded by READY_TIMEOUT_S, so together they answer within the
+    contract's 800 ms. The cause of a down check is logged and never returned:
+    the endpoint is unauthenticated, and host or role names do not belong in it.
     """
-    return await health_ready()
+
+    async def _database() -> None:
+        from src.api.deps import engine
+        from sqlalchemy import text
+
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
+    async def _cache() -> None:
+        from redis.asyncio import Redis
+
+        redis = Redis.from_url(
+            settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2
+        )
+        try:
+            await redis.ping()
+        finally:
+            await redis.aclose()
+
+    async def _embedding() -> None:
+        if not embedding_warmup.holds_readiness:
+            raise RuntimeError(embedding_warmup.describe())
+
+    async def _one(name: str, run) -> tuple[str, str]:
+        try:
+            await asyncio.wait_for(run(), READY_TIMEOUT_S)
+            return name, "up"
+        except Exception as exc:
+            logger.warning("Readiness check down", check=name, error=str(exc))
+            return name, "down"
+
+    if checks is None:
+        checks = [
+            ("database", _database),
+            ("cache", _cache),
+            ("embedding", _embedding),
+        ]
+    results = await asyncio.gather(*(_one(name, run) for name, run in checks))
+    state: dict[str, str] = dict(results)
+    if not database_bootstrapped:
+        # The database answers, but the startup bootstrap (seed data, RLS checks)
+        # has not finished: it retries in the background, see `_bootstrap_database`.
+        state["database"] = "down"
+        logger.warning(
+            "Readiness check down", check="database", error="bootstrap pending"
+        )
+    return state
+
+
+async def _readyz_response() -> JSONResponse:
+    if shutdown_state.draining:
+        # Section 3 step 1, held for the whole shutdown sequence. While draining
+        # the contract fixes the body exactly: no per-check detail once the
+        # process is on its way out.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "shuttingDown": True, "checks": {}},
+        )
+    checks = await _readiness_checks()
+    ok = all(value == "up" for value in checks.values())
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={
+            "status": "ok" if ok else "error",
+            "shuttingDown": False,
+            "checks": checks,
+        },
+    )
+
+
+@app.get("/readyz", tags=["system"], include_in_schema=False)
+async def readyz():
+    """Kubernetes readiness, contract §2 body.
+
+    `{status, shuttingDown, checks}` — the same shape rova and opshub answer, so
+    one probe/monitor path and one body work for every product. A check being
+    down answers 503 with that check `down`; the embedding model still warming
+    is one such check (it holds `/health/ready` today, whose semantics this
+    endpoint mirrors). The deploy pipeline keeps polling `/health/deps`, which
+    stays the legacy shape on purpose. Probes sit outside the OpenAPI document
+    per §2.
+    """
+    return await _readyz_response()
+
+
+@app.get("/v1/readyz", include_in_schema=False)
+async def readyz_v1():
+    """§2 compatibility alias while the ECS/ALB estate runs next to the chart."""
+    return await _readyz_response()
+
+
+@app.get("/v1/healthz", include_in_schema=False)
+async def healthz_v1():
+    """§2 compatibility alias for `/livez`."""
+    return {"status": "alive"}
