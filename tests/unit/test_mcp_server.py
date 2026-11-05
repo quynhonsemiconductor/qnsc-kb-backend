@@ -622,6 +622,7 @@ SAMPLE = {
     "conversation_id": ARTICLE_ID,
     "lesson_id": ARTICLE_ID,
     "basis": "said_by_user",
+    "from_version": 1,
 }
 
 
@@ -974,3 +975,135 @@ def test_list_lessons_sends_mine_only_when_it_is_true(h):
     h.result("tools/call", {"name": "list_lessons", "arguments": {"mine": False}})
 
     assert "mine" not in (h.calls[-1].params or {})
+
+
+def test_get_article_changes_calls_the_changes_endpoint_with_the_versions_given(h):
+    h.reply = (
+        200,
+        {"summary": ['Text: 1 line(s) added, 0 removed, in 1 section(s): "A".']},
+    )
+
+    out = h.result(
+        "tools/call",
+        {
+            "name": "get_article_changes",
+            "arguments": {"article_id": ARTICLE_ID, "from_version": 2, "to_version": 5},
+        },
+    )
+
+    assert json.loads(out["content"][0]["text"])["summary"]
+    call = h.calls[-1]
+    assert call.method == "GET" and call.path == f"/articles/{ARTICLE_ID}/changes"
+    assert call.params == {"from_version": 2, "to_version": 5}
+
+
+def test_get_article_changes_defaults_to_the_latest_against_the_one_before(h):
+    h.reply = (200, {})
+    h.result(
+        "tools/call",
+        {"name": "get_article_changes", "arguments": {"article_id": ARTICLE_ID}},
+    )
+    assert h.calls[-1].params in (None, {})
+
+
+def test_get_article_changes_rejects_a_backwards_range_before_calling(h):
+    before = len(h.calls)
+    out = h.result(
+        "tools/call",
+        {
+            "name": "get_article_changes",
+            "arguments": {"article_id": ARTICLE_ID, "from_version": 4, "to_version": 2},
+        },
+    )
+    assert out["isError"] is True and "older" in str(out)
+    assert len(h.calls) == before
+
+
+def test_list_recent_changes_calls_the_feed_with_the_period_and_filters(h):
+    h.reply = (200, {"count": 0, "changes": []})
+
+    h.result(
+        "tools/call",
+        {
+            "name": "list_recent_changes",
+            "arguments": {"days": 30, "dept": "Firmware", "scope": "documents"},
+        },
+    )
+
+    call = h.calls[-1]
+    assert call.method == "GET" and call.path == "/articles/recent-changes"
+    assert call.params == {
+        "days": 30,
+        "dept": "Firmware",
+        "scope": "documents",
+        "limit": 20,
+    }
+
+
+def test_list_recent_changes_defaults_to_a_week_and_takes_a_date(h):
+    h.reply = (200, {})
+
+    h.result("tools/call", {"name": "list_recent_changes", "arguments": {}})
+    assert h.calls[-1].params == {"days": 7, "limit": 20}
+
+    h.result(
+        "tools/call",
+        {"name": "list_recent_changes", "arguments": {"since": "2026-11-01"}},
+    )
+    assert h.calls[-1].params["since"] == "2026-11-01"
+
+
+def test_list_recent_changes_refuses_an_unknown_scope_before_calling(h):
+    before = len(h.calls)
+    out = h.result(
+        "tools/call",
+        {"name": "list_recent_changes", "arguments": {"scope": "everything"}},
+    )
+    assert out["isError"] is True and "scope" in str(out)
+    assert len(h.calls) == before
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_required_text_is_refused_not_searched(h, blank):
+    before = len(h.calls)
+
+    out = h.result(
+        "tools/call", {"name": "search_knowledge", "arguments": {"query": blank}}
+    )
+
+    assert out["isError"] is True and "'query' is required" in str(out)
+    assert len(h.calls) == before
+
+
+def test_a_blank_optional_text_is_left_out_of_the_call(h):
+    h.reply = (200, [])
+
+    h.result(
+        "tools/call",
+        {"name": "list_articles", "arguments": {"q": "  ", "dept": "Firmware"}},
+    )
+
+    assert h.calls[-1].params == {"dept": "Firmware", "limit": 20, "offset": 0}
+
+
+@pytest.mark.parametrize("since", ["2026-11-01", "2026-11-01T09:00:00", " 2026-11-01 "])
+def test_list_recent_changes_takes_an_iso_date_or_time(h, since):
+    h.reply = (200, {})
+
+    h.result(
+        "tools/call", {"name": "list_recent_changes", "arguments": {"since": since}}
+    )
+
+    assert h.calls[-1].params["since"] == since.strip()
+
+
+@pytest.mark.parametrize("since", ["yesterday", "11/01/2026", "last week"])
+def test_list_recent_changes_explains_a_date_it_cannot_read(h, since):
+    before = len(h.calls)
+
+    out = h.result(
+        "tools/call", {"name": "list_recent_changes", "arguments": {"since": since}}
+    )
+
+    assert out["isError"] is True and "ISO date or time" in str(out)
+    assert len(h.calls) == before

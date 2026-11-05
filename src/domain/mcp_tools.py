@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -76,7 +77,9 @@ def _text(
     args: dict[str, Any], key: str, *, required: bool = False, max_len: int = 4000
 ) -> str | None:
     value = args.get(key)
-    if value is None or value == "":
+    # Blank is empty: a query of spaces used to go through and come back as "nothing found", which an assistant
+    # reads as an answer rather than as a mistake of its own.
+    if value is None or (isinstance(value, str) and not value.strip()):
         if required:
             raise ToolInputError(f"'{key}' is required")
         return None
@@ -547,6 +550,54 @@ def _version(args: dict[str, Any]) -> Call:
     return Call("GET", f"/articles/{_id(args, 'article_id')}/versions/{number}")
 
 
+def _optional_version(args: dict[str, Any], key: str) -> int | None:
+    if args.get(key) is None:
+        return None
+    return _int(args, key, 1, 1, 10**9)
+
+
+def _changes(args: dict[str, Any]) -> Call:
+    older, newer = _optional_version(args, "from_version"), _optional_version(
+        args, "to_version"
+    )
+    if older is not None and newer is not None and older >= newer:
+        raise ToolInputError("'from_version' must be older than 'to_version'")
+    return Call(
+        "GET",
+        f"/articles/{_id(args, 'article_id')}/changes",
+        params=_drop_none({"from_version": older, "to_version": newer}),
+    )
+
+
+def _iso_start(args: dict[str, Any], key: str) -> str | None:
+    value = _text(args, key, max_len=40)
+    if value is None:
+        return None
+    try:
+        datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ToolInputError(
+            f"'{key}' must be an ISO date or time, e.g. 2026-11-01 or 2026-11-01T09:00:00"
+        ) from None
+    return value.strip()
+
+
+def _recent_changes(args: dict[str, Any]) -> Call:
+    return Call(
+        "GET",
+        "/articles/recent-changes",
+        params=_drop_none(
+            {
+                "days": _int(args, "days", 7, 1, 365),
+                "since": _iso_start(args, "since"),
+                "dept": _text(args, "dept", max_len=100),
+                "scope": _choice(args, "scope", ("all", "documents", "lessons")),
+                "limit": _int(args, "limit", 20, 1, 50),
+            }
+        ),
+    )
+
+
 def _related(args: dict[str, Any]) -> Call:
     return Call(
         "GET",
@@ -763,6 +814,64 @@ TOOLS: tuple[Tool, ...] = (
         {"article_id": _ID, "version": {"type": "integer", "minimum": 1}},
         ("article_id", "version"),
         _version,
+    ),
+    Tool(
+        "get_article_changes",
+        "See what changed in an article",
+        "What changed in an article between two versions, without reading both: a short summary, "
+        "then per section the lines removed and added, plus changes to title, department, tags "
+        "and sensitivity. By default the latest version against the one before it. Pass "
+        "from_version (the 'version' you read earlier) to learn what changed since then, and "
+        "to_version to stop short of the latest. Use it when asked 'what is new in X' or before "
+        "relying on something you read earlier; use get_article_version to read an old version "
+        "whole. Long changes are clipped: 'truncated' says so.",
+        {
+            "article_id": _ID,
+            "from_version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The older version to compare from (default: the one before to_version)",
+            },
+            "to_version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The newer version (default: the latest)",
+            },
+        },
+        ("article_id",),
+        _changes,
+    ),
+    Tool(
+        "list_recent_changes",
+        "See what is new or changed in the knowledge base",
+        "Articles that are new or were updated lately, newest first, one entry each: whether it "
+        "is 'new' or 'updated', its version, when it changed and, for an update, a line on what "
+        "changed since the period began. Use it for 'what is new this week' or 'what changed "
+        "since I last checked'; open one with get_article_changes for the detail. The period is "
+        "`days` back (default 7) or from `since`; filter by dept or scope. Only published "
+        "articles the user may read are listed.",
+        {
+            "days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365,
+                "description": "How many days back (default 7)",
+            },
+            "since": {
+                "type": "string",
+                "description": "ISO date or time to start from, e.g. 2026-11-01; overrides days",
+            },
+            "dept": {"type": "string"},
+            "scope": {
+                "type": "string",
+                "enum": ["all", "documents", "lessons"],
+                "description": "documents: reviewed uploads only; lessons: what assistants "
+                "saved with record_lesson; all (default): both.",
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        (),
+        _recent_changes,
     ),
     Tool(
         "list_departments",
