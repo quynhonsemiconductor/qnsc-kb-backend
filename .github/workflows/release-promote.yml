@@ -3,12 +3,16 @@
 # commit and opens the reviewed gitops prod PR. It builds NOTHING.
 #
 # GATED: kb prod is not launched yet (P3: Entra prod apps, Key Vault secrets,
-# CNPG prod database). values/kb/tags.prod.yaml exists as a sha-0000000
-# placeholder, so the reusable's "no prod values" stop would NOT fire; without
-# this gate a tag would open a real prod PR. Set the repository variable
-# KB_PROD_PROMOTE_ENABLED=true at the P3 cutover. Unset is a clean skip, not red.
+# CNPG prod database). values/kb/tags.prod.yaml is NOT on gitops main yet
+# (gitops#255 adds it), so with the gate open the reusable stops with its own
+# "no prod values" error — a RED run, not a PR. Set the repository variable
+# KB_PROD_PROMOTE_ENABLED=true only when the prod values and the release are
+# ready; unset is a clean skip, not red.
 #
-# `web` is not in `services`: qnsc-kb has no web image yet (C's kb-frontend).
+# `web` is not in `services`: the SPA image is built from qnsc-kb-frontend's own
+# commit, which this repository's sha never published. qnsc-kb-frontend therefore
+# promotes `web` from its own release tag (qnsc-kb-frontend#155); the two promote
+# PRs write different keys of values/kb/tags.prod.yaml.
 # =============================================================================
 name: Release · Promote
 
@@ -48,7 +52,11 @@ jobs:
       contents: read
       packages: write
       attestations: read
-    uses: quynhonsemiconductor/ci/.github/workflows/release-promote.yml@400b7e9868e9ba6d172d956a08041ba19b574689  # v1.33.1
+    # v1.34.1 (not v1.33.1): the promotion branch is unique per SOURCE repository
+    # (ci#305). kb promotes from two repositories against the same gitops
+    # product, so a shared `promote/kb-<tag>` branch would make the second
+    # repository's run collide or exit green without promoting.
+    uses: quynhonsemiconductor/ci/.github/workflows/release-promote.yml@0cc991aa5f421622ce37c831b90f818676c94add  # v1.34.1
     with:
       product: kb
       gitops-product: kb
