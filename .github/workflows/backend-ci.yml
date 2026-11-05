@@ -227,6 +227,34 @@ jobs:
       - name: Unit tests
         run: poetry run pytest -q
 
+      # test_provision_admin_rls.py SKIPS when it connects as a superuser or when RLS is
+      # off — and the main test database is both. This second database gives the test the
+      # shape production has: migrations run as the master user, the app connects as a
+      # NON-superuser role, and ENABLE_RLS creates FORCEd policies. A skip here would
+      # defeat the test, so this step runs the file directly and expects it to execute.
+      - name: Provision-admin RLS integration test
+        run: |
+          poetry run python - <<'PY'
+          import asyncio
+          import asyncpg
+
+          async def main() -> None:
+              conn = await asyncpg.connect("postgresql://postgres:postgres@localhost:5432/postgres")
+              await conn.execute("CREATE ROLE kb_rls_test LOGIN PASSWORD 'kb-rls-test'")
+              await conn.execute("CREATE DATABASE qnsc_kb_rls OWNER postgres")
+              await conn.close()
+
+          asyncio.run(main())
+          PY
+          export MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/qnsc_kb_rls
+          export ENABLE_RLS=true
+          export APP_DATABASE_ROLE=kb_rls_test
+          export APP_DATABASE_PASSWORD=kb-rls-test
+          poetry run python scripts/bootstrap_db_role.py
+          poetry run alembic -c migrations/alembic.ini upgrade head
+          DATABASE_URL=postgresql+asyncpg://kb_rls_test:kb-rls-test@localhost:5432/qnsc_kb_rls \
+            poetry run pytest -q tests/integration/test_provision_admin_rls.py
+
       # Proves the DATABASE_SSL_CA decision (src/core/db_ssl.py) against a real Postgres
       # speaking TLS with a self-signed CA (SAN localhost): verify-full connects, a CA the
       # server does not chain to is refused. The fail-closed-in-production case needs no
