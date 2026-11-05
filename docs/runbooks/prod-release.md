@@ -140,7 +140,7 @@ should not drift), and `APP_COMMIT_SHA` is not needed: this build reads the comm
 | Symptom | Cause | Fix |
 |---|---|---|
 | Promote run skipped, no jobs | `KB_PROD_PROMOTE_ENABLED` unset in **that** repository | set the variable (step 0); the gate is per repo |
-| `values/kb/tags.prod.yaml does not exist` | `gitops#255` not merged | merge it, then push the tag again (`gh run rerun` re-runs the promote for the same tag) |
+| `values/kb/tags.prod.yaml does not exist` | `gitops#255` not merged | merge it, then `gh run rerun <run-id> --failed` |
 | `kb-<svc>:sha-<commit> is not published for this commit` | The tag's commit has no GHCR · Publish run (a recovered/bootstrapped tag, or a release PR whose merge only touched Markdown and was path-ignored) | Cut the next release from a `main` commit that published; a release tag is never moved |
 | `promote/kb-…` exists on gitops but no PR | An earlier run failed after pushing the branch | Delete the branch, re-run: a promotion branch is never repointed |
 | `prod is already at vX.Y.Z; nothing to promote` | The digest and tag are already in `tags.prod.yaml` | Nothing to do; the previous promotion merged |
