@@ -36,7 +36,7 @@ jobs:
       contents: read
       actions: read # wait-for-run reads the run list
     steps:
-      - uses: quynhonsemiconductor/ci/actions/wait-for-run@400b7e9868e9ba6d172d956a08041ba19b574689  # v1.33.1
+      - uses: quynhonsemiconductor/ci/actions/wait-for-run@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           workflow: ghcr-publish.yml
           sha: ${{ github.sha }}
@@ -56,7 +56,7 @@ jobs:
     # (ci#305). kb promotes from two repositories against the same gitops
     # product, so a shared `promote/kb-<tag>` branch would make the second
     # repository's run collide or exit green without promoting.
-    uses: quynhonsemiconductor/ci/.github/workflows/release-promote.yml@0cc991aa5f421622ce37c831b90f818676c94add  # v1.34.1
+    uses: quynhonsemiconductor/ci/.github/workflows/release-promote.yml@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
     with:
       product: kb
       gitops-product: kb

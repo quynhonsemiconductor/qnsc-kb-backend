@@ -57,7 +57,7 @@ jobs:
       attestations: write
     # SHA-pinned, NOT @v1 — ci's v1 tag moves on every merge, and a moving ref
     # would let a ci merge change this product's publish pipeline unseen.
-    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+    uses: quynhonsemiconductor/ci/.github/workflows/ghcr-publish.yml@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
     with:
       product: kb
       # ONE publish call, so the reusable's OWN dev bump is used (unlike the
