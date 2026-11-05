@@ -2,9 +2,12 @@
 
 The release number is a constant in `src/version.py`. The commit is not known to the code:
 the deploy pipeline (the shared `ci` reusable) builds the image without build arguments and
-tags it `sha-<commit>`, and the ECS task definition points at that tag. So the commit is read
-back from the image reference the container is running, which the ECS agent publishes at the
-task metadata endpoint. `APP_COMMIT_SHA` overrides it for any host that is not ECS.
+tags it `sha-<commit>`. Two hosts publish that tag back to the process: the ECS agent at the
+task metadata endpoint, and the on-prem chart, which derives `APP_COMMIT` from the image tag in
+the generated `values/<product>/tags.<env>.yaml` (charts/qnsc-service, from 0.19.3). A release
+tag is `vX.Y.Z` and names no commit, so the chart sets `APP_COMMIT` only for a `sha-<commit>`
+build; prod on-prem reports the commit as unknown rather than inventing one. `APP_COMMIT_SHA`
+overrides both for any host that supplies neither.
 
 Nothing here can fail a request: a metadata endpoint that is absent (local run, tests) or
 slow gives `commit=None`, and the answer says "unknown" instead of guessing.
@@ -32,6 +35,9 @@ logger = structlog.get_logger()
 
 # `<registry>/qnsc-kb-api:sha-<40 hex>`, optionally followed by `@sha256:<digest>`.
 _IMAGE_COMMIT = re.compile(r":sha-([0-9a-f]{7,40})(?:@|$)")
+# A commit an environment supplied, not one read from an image reference: hex only, so a
+# misconfigured APP_COMMIT ("prod", a tag, a URL) is ignored instead of shown to the user.
+_EXPLICIT_COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 # The ECS agent serves task metadata on a link-local address; anything else in the variable
 # is not the agent, and is not fetched.
@@ -136,6 +142,21 @@ def _build(commit: str | None, digest: str | None) -> BuildInfo:
     )
 
 
+def explicit_commit() -> str | None:
+    """The commit an environment declares: `APP_COMMIT_SHA` first, then the chart's `APP_COMMIT`.
+
+    Only a bare hexadecimal commit counts. `APP_COMMIT` is the chart's derivation from a
+    `sha-<commit>` image tag; on a release tag (`vX.Y.Z`) the chart leaves it unset, so prod
+    on-prem answers "unknown" — honest, because that tag names no commit. Anything that is not
+    a commit is ignored rather than echoed through `/system/version`.
+    """
+    for value in (settings.APP_COMMIT_SHA, settings.APP_COMMIT):
+        candidate = (value or "").strip().lower()
+        if _EXPLICIT_COMMIT.fullmatch(candidate):
+            return candidate
+    return None
+
+
 async def get_build_info(metadata_uri: str | None = None) -> BuildInfo:
     """The running build. A found commit is kept for the process's life (an image never
     changes under a running container); a miss is retried at most once a minute."""
@@ -143,7 +164,7 @@ async def get_build_info(metadata_uri: str | None = None) -> BuildInfo:
     if _cache is not None:
         return _cache
 
-    explicit = (settings.APP_COMMIT_SHA or "").strip().lower()
+    explicit = explicit_commit()
     if explicit:
         _cache = _build(explicit, None)
         return _cache

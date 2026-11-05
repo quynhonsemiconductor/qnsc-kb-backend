@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # The commit this build was made from, for a host that is not ECS. On ECS it is read back
     # from the image tag (`sha-<commit>`), so this stays empty there. See core/build_info.py.
     APP_COMMIT_SHA: str | None = None
+    # The commit the CHART derived from the running image tag (charts/qnsc-service
+    # APP_COMMIT, set only when the tag is `sha-<commit>` — a release tag names no commit).
+    # Consulted after APP_COMMIT_SHA, and only when it is a bare hexadecimal commit: a value
+    # that is not one is ignored rather than echoed through /system/version.
+    APP_COMMIT: str | None = None
     CORS_ORIGINS: str = "http://localhost:5173"
     FRONTEND_URL: str = "http://localhost:5173"
     # Schema lifecycle is owned exclusively by Alembic migrations.
