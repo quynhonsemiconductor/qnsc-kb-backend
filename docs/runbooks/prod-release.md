@@ -99,10 +99,10 @@ If any of them is still `sha-<commit>` (the hand-seeded provisional digests in `
 is not on the release: that seed is only a placeholder that lets the chart render before the first
 promotion, and **never** a go-live state.
 
-## 4. Charts and prod values (what breaks a later bump)
+## 4. Charts and prod values (what breaks enabling the row)
 
-`gitops#255` pins the kb prod row at chart **0.19.1**. Chart **0.19.2** made the data-egress
-NetworkPolicy select the cache by pod label; from 0.19.2 on, rendering kb prod **fails** while
+`gitops#255` enables the kb prod row at chart **0.19.3**. Chart **0.19.2** made the data-egress
+NetworkPolicy select the cache by pod label, and from 0.19.2 on rendering kb prod **fails** while
 `values/kb/prod.yaml` has no `data.cache.instance`:
 
 ```
@@ -110,7 +110,10 @@ a Redis/Valkey URL is configured (REDIS_URL or VALKEY_URL) but data.cache.instan
 allow-egress-data would render no 6379 rule and the app could not reach its cache.
 ```
 
-The fix is one value (the prod Valkey's pod label, `platform/kb-prod/valkey-kb.yaml`):
+`scripts/render.sh` fetches the chart the enabled row pins, so this fails the very PR that
+uncomments the row — not a later bump. `values/rova/prod.yaml` and `values/opshub/prod.yaml`
+already carry the value; kb prod is the one that does not. The fix is one value (the prod Valkey's
+pod label, `platform/kb-prod/valkey-kb.yaml`):
 
 ```yaml
 data:
@@ -121,13 +124,15 @@ data:
 
 Verified 2026-11-05: with that added, chart 0.19.3 renders (four digests, the 6379 rule, and
 `APP_VERSION=vX.Y.Z` on api/worker; release tags name no commit, so `APP_COMMIT` is absent by the
-chart's own design). Until the value is in, keep the row on 0.19.1.
+chart's own design). Until the value is in, the prod row cannot render at 0.19.x and the PR that
+uncomments it cannot pass `render.sh`.
 
 Two more prod values worth carrying from dev while `prod.yaml` is open: `DEPLOYMENT_ENV: prod`
 (gitops#260 added `DEPLOYMENT_ENV: dev`; the app's OTel label reads it first and falls back to the
 chart's `deployment.environment`, so prod is labelled correctly either way — but the two files
 should not drift), and `APP_COMMIT_SHA` is not needed: this build reads the commit from
-`APP_COMMIT` when the image tag is `sha-<commit>`, and reports "unknown" otherwise.
+`APP_COMMIT` when the image tag is `sha-<commit>` (qnsc-kb-backend PR #382), and reports
+"unknown" otherwise.
 
 ## 5. Failure modes and what they mean
 
