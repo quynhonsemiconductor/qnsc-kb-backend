@@ -65,6 +65,7 @@ INSTRUCTIONS = (
     "- To find or verify where something is written, or to collect evidence yourself: "
     "search_knowledge, then get_article for the whole document. Quote the article, do "
     "not paraphrase from the snippet alone when the detail matters.\n"
+    "- To tell the user what is new in the knowledge base lately: list_recent_changes.\n"
     "- To tell the user what changed in a document, or what is new since you last read "
     "it: get_article_changes (pass the 'version' you read as from_version). Do not compare "
     "two versions yourself.\n"

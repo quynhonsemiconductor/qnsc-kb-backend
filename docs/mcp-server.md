@@ -62,8 +62,10 @@ your own permissions.
 
 Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
-`get_article_changes`, `list_conversations`, `get_conversation`, `list_lessons`, `list_my_drafts`, `list_departments`,
-`list_tags`, `get_glossary`, `find_entities`, `get_entity_neighbors`.
+`get_article_changes`, `list_recent_changes`, `list_conversations`, `get_conversation`, `list_lessons`, `list_my_drafts`, `list_departments`,
+`list_tags`, `get_glossary`, `get_project_config` (the team's standing instructions, versioned by the
+administrators; an assistant fetches it when the server names a newer version than its CLAUDE.md block),
+`find_entities`, `get_entity_neighbors`.
 
 Write tools (write-scope tokens only): `create_article`, `update_article`,
 `request_article_edit`, `rate_answer`, `record_lesson`, `forget_lesson`. Articles go through the
@@ -83,6 +85,10 @@ is on; without it the tools are hidden.
   `from_version` (the `version` returned by `get_article` when it was read) to learn what changed
   since then. Whitespace-only edits are ignored and long changes are clipped (`truncated`). The
   caller needs the same right to read the article as for `list_article_versions`.
+- **"What is new?" has a tool too.** `list_recent_changes` lists the articles that are new or were
+  updated in the last `days` (or since a date), newest first, each with a line on what changed;
+  `get_article_changes` gives the detail. `scope` separates reviewed documents from lessons. Only
+  published articles the caller may read are listed.
 - **Past questions persist.** Every `ask_knowledge_base` runs inside a conversation stored on
   the server. `list_conversations` (optionally filtered by title) and `get_conversation`
   give an assistant back the user's own earlier questions and answers after a restart, and

@@ -1,7 +1,7 @@
 import uuid
 import structlog
 from datetime import date, datetime
-from typing import Sequence
+from typing import Any, Sequence
 from fastapi import HTTPException, status
 from src.models.article import Article, ArticleVersion, ArticleTag
 from src.models.user import User
@@ -470,6 +470,19 @@ class ArticleService:
             raise HTTPException(status_code=403, detail="Access denied")
 
         return await self.article_repo.get_versions(article_id, user=user)
+
+    async def get_version_index(
+        self, user: User, article_id: uuid.UUID
+    ) -> tuple[Article, list[Any]]:
+        """The article and its version numbers and times, for whoever may read its history (as `get_history`)."""
+        article = await self.article_repo.get_by_id(article_id, user=user)
+        if not article or article.status == "deleted":
+            raise HTTPException(status_code=404, detail="Article not found")
+
+        if not PermissionService.can_view_article(user, article):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        return article, await self.article_repo.version_index(article_id, user=user)
 
     async def get_version(
         self, user: User, article_id: uuid.UUID, version_num: int

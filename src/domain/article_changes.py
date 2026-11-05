@@ -12,6 +12,7 @@ says so (`truncated`), because the reader is usually a model with a limited cont
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -90,13 +91,22 @@ def _metadata_changes(before: dict, after: dict) -> list[dict[str, Any]]:
     return changes
 
 
-def diff_versions(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
-    """Compare two version snapshots. `before` is the older one."""
+def diff_versions(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    max_lines: int | None = None,
+) -> dict[str, Any]:
+    """Compare two version snapshots. `before` is the older one.
+
+    `max_lines` lowers the length above which the text is summarised by counts only (default MAX_COMPARED_LINES): a
+    caller comparing many articles in one request bounds its worst case that way.
+    """
     old_lines, new_lines = _lines(before.get("body_md")), _lines(after.get("body_md"))
     metadata = _metadata_changes(before, after)
     result: dict[str, Any] = {"metadata_changes": metadata}
 
-    if max(len(old_lines), len(new_lines)) > MAX_COMPARED_LINES:
+    ceiling = MAX_COMPARED_LINES if max_lines is None else max_lines
+    if max(len(old_lines), len(new_lines)) > ceiling:
         result.update(
             body={"lines_before": len(old_lines), "lines_after": len(new_lines)},
             hunks=[],
@@ -188,57 +198,136 @@ def diff_versions(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
     return result
 
 
-def describe_changes(
-    versions: list[Any], from_version: int | None, to_version: int | None
-) -> dict[str, Any]:
-    """Pick the two versions and compare them.
+@dataclass(frozen=True)
+class Selection:
+    """Which two versions a question about changes is about, decided from the version numbers alone.
 
-    `versions` is the article's history, any order, each with `.version`, `.snapshot` and `.created_at`. By default
-    the latest against the one before it; `from_version` alone compares that version with the latest, which is how a
-    reader who read version N asks what changed since. Raises ValueError with a message for the caller.
+    `from_version` is None for the first version of an article (nothing earlier to compare with). Deciding this needs
+    no snapshot, so a caller can load only the two it names.
     """
-    by_number = {item.version: item for item in versions}
-    if not by_number:
+
+    numbers: list[int]
+    latest: int
+    new_number: int
+    from_version: int | None
+
+
+def select_versions(
+    versions: list[Any], from_version: int | None, to_version: int | None
+) -> Selection:
+    """Pick the two versions. `versions` is the article's history, any order, each with `.version`.
+
+    By default the latest against the one before it; `from_version` alone compares that version with the latest, which
+    is how a reader who read version N asks what changed since. Raises ValueError with a message for the caller.
+    """
+    numbers = sorted({item.version for item in versions})
+    if not numbers:
         raise ValueError("This article has no stored versions.")
-    numbers = sorted(by_number)
     latest = numbers[-1]
     new_number = to_version if to_version is not None else latest
-    if new_number not in by_number:
+    if new_number not in numbers:
         raise ValueError(
             f"Version {new_number} does not exist; versions are {numbers[0]}..{latest}."
         )
     if from_version is None:
         earlier = [n for n in numbers if n < new_number]
-        if not earlier:
-            return {
-                "first_version": True,
-                "version": new_number,
-                "created_at": _stamp(by_number[new_number]),
-                "summary": [
-                    f"Version {new_number} is the first version; there is nothing earlier to compare."
-                ],
-            }
-        from_version = earlier[-1]
-    if from_version not in by_number:
+        return Selection(numbers, latest, new_number, earlier[-1] if earlier else None)
+    if from_version not in numbers:
         raise ValueError(
             f"Version {from_version} does not exist; versions are {numbers[0]}..{latest}."
         )
     if from_version >= new_number:
         raise ValueError("'from_version' must be older than 'to_version'.")
-    old, new = by_number[from_version], by_number[new_number]
-    result = diff_versions(old.snapshot or {}, new.snapshot or {})
-    between = [n for n in numbers if from_version < n <= new_number]
+    return Selection(numbers, latest, new_number, from_version)
+
+
+def first_version_result(selection: Selection, version: Any) -> dict[str, Any]:
+    """The answer for an article's first version: there is nothing earlier to compare it with."""
     return {
-        "from_version": from_version,
-        "to_version": new_number,
+        "first_version": True,
+        "version": selection.new_number,
+        "created_at": _stamp(version),
+        "summary": [
+            f"Version {selection.new_number} is the first version; there is nothing earlier to compare."
+        ],
+    }
+
+
+def compare_selected(selection: Selection, old: Any, new: Any) -> dict[str, Any]:
+    """Compare the two versions a selection named (each with `.snapshot` and `.created_at`)."""
+    assert selection.from_version is not None
+    result = diff_versions(old.snapshot or {}, new.snapshot or {})
+    between = [
+        n
+        for n in selection.numbers
+        if selection.from_version < n <= selection.new_number
+    ]
+    return {
+        "from_version": selection.from_version,
+        "to_version": selection.new_number,
         "from_at": _stamp(old),
         "to_at": _stamp(new),
         "versions_covered": between,
-        "latest_version": latest,
+        "latest_version": selection.latest,
         **result,
     }
+
+
+def describe_changes(
+    versions: list[Any], from_version: int | None, to_version: int | None
+) -> dict[str, Any]:
+    """Pick the two versions and compare them; `versions` carry `.version`, `.snapshot` and `.created_at`.
+
+    The endpoint does the same in two steps (`select_versions`, then the two snapshots it names) so that an article
+    with a long history does not load every snapshot to compare two.
+    """
+    selection = select_versions(versions, from_version, to_version)
+    by_number = {item.version: item for item in versions}
+    if selection.from_version is None:
+        return first_version_result(selection, by_number[selection.new_number])
+    return compare_selected(
+        selection, by_number[selection.from_version], by_number[selection.new_number]
+    )
 
 
 def _stamp(version: Any) -> str | None:
     created = getattr(version, "created_at", None)
     return created.isoformat() if created else None
+
+
+#: Lines above which the feed does not compare an article line by line: it lists many articles per request.
+FEED_MAX_COMPARED_LINES = 4_000
+FEED_SUMMARY_LINES = 3
+
+
+def describe_recent(changes: list[Any]) -> list[dict[str, Any]]:
+    """The newest changes across articles as short entries, each with a line saying what changed.
+
+    `changes` are `RecentChange`s (src/repositories/article.py): `.article`, `.latest`, `.baseline`, `.versions`,
+    `.changed_at`. An article with no version from before the period is "new"; otherwise "updated", with the newest
+    version compared to the one the period started from. Pure: no database, no model call.
+    """
+    entries: list[dict[str, Any]] = []
+    for change in changes:
+        article = change.article
+        entry: dict[str, Any] = {
+            "article_id": str(article.id),
+            "title": article.title,
+            "dept": article.dept,
+            "type": article.type,
+            "kind": "new" if change.baseline is None else "updated",
+            "version": change.latest.version,
+            "versions_in_period": change.versions,
+            "changed_at": change.changed_at.isoformat(),
+        }
+        if change.baseline is not None:
+            result = diff_versions(
+                change.baseline.snapshot or {},
+                change.latest.snapshot or {},
+                max_lines=FEED_MAX_COMPARED_LINES,
+            )
+            entry["from_version"] = change.baseline.version
+            entry["summary"] = result["summary"][:FEED_SUMMARY_LINES]
+            entry["sections"] = (result.get("body") or {}).get("sections", [])[:5]
+        entries.append(entry)
+    return entries

@@ -5,7 +5,7 @@ import re
 import uuid
 import unicodedata
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Sequence, cast
 from fastapi import (
     APIRouter,
@@ -27,7 +27,12 @@ from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
 from src.repositories.article import ArticleRepository
 from src.repositories.user import UserRepository
-from src.domain.article_changes import describe_changes
+from src.domain.article_changes import (
+    compare_selected,
+    describe_recent,
+    first_version_result,
+    select_versions,
+)
 from src.domain.articles import ArticleService
 from src.domain.source_extraction import (
     SUPPORTED_EXTENSIONS,
@@ -1968,6 +1973,51 @@ async def article_index_summary(
     )
 
 
+@router.get("/recent-changes")
+async def recent_changes(
+    days: int = Query(7, ge=1, le=365),
+    since: datetime | None = Query(
+        None, description="ISO date or time; overrides `days`"
+    ),
+    dept: str | None = Query(None, max_length=100),
+    scope: Literal["all", "documents", "lessons"] = Query("all"),
+    limit: int = Query(20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """What is new or changed in the knowledge base, newest first: one entry per article, with a line on what changed.
+
+    A period is `days` back from now, or from `since`. An article created inside the period is "new"; one that
+    already existed is "updated" and says what changed since the period began (see `/{id}/changes` for the detail).
+    Only published articles the caller may read are listed, by the same rule as the article list.
+    """
+    # Version timestamps are stored, and answered, as naive UTC; `since` is read and echoed the same way.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if since is None:
+        start = now - timedelta(days=days)
+    elif since.tzinfo is None:
+        start = since
+    else:
+        start = since.astimezone(timezone.utc).replace(tzinfo=None)
+    if start > now:
+        raise HTTPException(status_code=422, detail="'since' is in the future")
+    changes, more = await ArticleRepository(db).recent_changes(
+        current_user,
+        start,
+        dept=dept,
+        scope=None if scope == "all" else scope,
+        limit=limit,
+    )
+    # Comparing texts is CPU work: keep it off the event loop, one thread for the whole page.
+    entries = await asyncio.to_thread(describe_recent, changes)
+    return {
+        "since": start.isoformat(),
+        "count": len(entries),
+        "changes": entries,
+        "truncated": more,
+    }
+
+
 @router.get("/", response_model=list[ArticleResponse])
 async def list_articles(
     dept: str | None = Query(None),
@@ -2720,22 +2770,29 @@ async def article_changes(
     latest ("what changed since I read version N"); `to_version` bounds the other end. The caller needs the same
     right to read the article as for its version history.
     """
-    history = await ArticleService(
-        ArticleRepository(db), UserRepository(db)
-    ).get_history(current_user, id)
+    repo = ArticleRepository(db)
+    article, index = await ArticleService(repo, UserRepository(db)).get_version_index(
+        current_user, id
+    )
     try:
-        # Comparing two texts is CPU work that grows with their length: keep it off the event loop.
-        result = await asyncio.to_thread(
-            describe_changes, list(history), from_version, to_version
-        )
+        selection = select_versions(index, from_version, to_version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    latest = max(history, key=lambda item: item.version)
-    return {
-        "article_id": str(id),
-        "title": (latest.snapshot or {}).get("title"),
-        **result,
-    }
+    # Only the snapshots the question names are loaded (each holds the whole text), not every version of the article.
+    newer = await repo.get_version_by_number(
+        id, selection.new_number, user=current_user
+    )
+    if selection.from_version is None:
+        result = first_version_result(selection, newer)
+    else:
+        older = await repo.get_version_by_number(
+            id, selection.from_version, user=current_user
+        )
+        if older is None or newer is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        # Comparing two texts is CPU work that grows with their length: keep it off the event loop.
+        result = await asyncio.to_thread(compare_selected, selection, older, newer)
+    return {"article_id": str(id), "title": article.title, **result}
 
 
 @router.post(
