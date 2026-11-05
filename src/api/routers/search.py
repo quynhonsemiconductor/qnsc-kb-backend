@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,10 @@ async def search(
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
     limit: int = Query(5, ge=1, le=20),
+    scope: Literal["all", "documents", "lessons"] = Query(
+        "all",
+        description="documents: reviewed uploads only; lessons: what AI assistants saved; all: both",
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
@@ -32,6 +36,8 @@ async def search(
     search_service = SearchService(chunk_repo, gov_repo, FeatureFlagRepository(db))
 
     filters: dict[str, Any] = {}
+    if scope != "all":
+        filters["source_scope"] = scope
     if dept:
         filters["dept"] = dept
     if sensitivity:

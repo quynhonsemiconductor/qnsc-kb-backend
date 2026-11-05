@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from src.core.config import settings
 from src.core.privacy import REDACTED_OPERATIONAL_CONTENT
 from src.core.rate_limit import corpus_rate_limiter
@@ -69,7 +69,7 @@ from src.domain.evidence_extraction import (
     table_evidence_preview,
 )
 from src.domain.source_storage import load_source
-from src.models.article import Article, DocumentSource
+from src.models.article import LESSON_TYPE, Article, DocumentSource
 from src.models.evidence import DocumentEvidence
 from src.domain.article_edit_requests import create_article_edit_request
 from src.domain.articles import ArticleService
@@ -138,6 +138,10 @@ to the reader beside the answer wherever you cite that source, and they can enla
 and download them. When they help, refer to them (for example "see the figure below").
 Never say the Knowledge Base cannot show images, figures or tables, and never describe
 what a figure looks like beyond what the passages say.
+
+3d. A source may carry `<kind>`: it is a team lesson an assistant saved, not a reviewed
+document. You may use it, and when you rely on it say it is an unreviewed team lesson. If a
+reviewed document and a lesson disagree, apply rule 3a and say which one is the lesson.
 
 3a. If two authorized passages make incompatible claims about the same fact, do not
 choose a winner. State that the Knowledge Base contains conflicting information,
@@ -814,6 +818,32 @@ class AIService:
         self.search_service = search_service
         self.gov_repo = gov_repo
 
+    async def _sources_epoch(self, user: User) -> str:
+        """Which sources an answer was built from, for the answer cache.
+
+        "documents" when lessons are out of scope. Otherwise it changes whenever a lesson is saved, edited or
+        retracted: lessons are published at once, so a cached answer written before a lesson existed would
+        otherwise be served for six hours to the person who had just saved it.
+        """
+        if getattr(self.search_service, "source_scope", "all") == "documents":
+            return "documents"
+        try:
+            count, newest = (
+                await self.ai_repo.db.execute(
+                    select(func.count(Article.id), func.max(Article.updated_at)).where(
+                        Article.type == LESSON_TYPE,
+                        Article.company_domain == user.company_domain,
+                    )
+                )
+            ).one()
+        except Exception:  # noqa: BLE001 - a cache key must never fail an answer
+            logger.warning(
+                "Sources epoch lookup failed; cached answers will not rotate when lessons change",
+                exc_info=True,
+            )
+            return "all"
+        return f"all:{count}:{newest}"
+
     def _check_input_guardrail(self, question: str) -> bool:
         """Reject the handful of injection attempts that are worth a friendly message.
 
@@ -1163,7 +1193,8 @@ class AIService:
             f"{settings.PROMPT_VERSION}|{settings.RETRIEVAL_VERSION}|"
             f"extended={int(settings.RAG_ENABLE_EXTENDED_SECTION)}|"
             f"cache_extended={int(settings.RAG_CACHE_EXTENDED_SECTION)}|"
-            f"query_language={language}|{question.strip()}"
+            f"query_language={language}|sources={await self._sources_epoch(user)}|"
+            f"{question.strip()}"
         )
         question_hash = hashlib.sha256(cache_input.encode("utf-8")).hexdigest()
         # A newly-created conversation has no prior context, even though the
@@ -1634,7 +1665,12 @@ class AIService:
             context_blocks.append(
                 f"<authorized-document id=\"{res['source_id']}\">\n"
                 f"<title>{fence_untrusted(res['title'])}</title>\n"
-                f"<section>{fence_untrusted(res.get('heading') or res['section_ref'] or 'General')}</section>\n"
+                + (
+                    "<kind>team lesson saved by an assistant, not reviewed by an editor</kind>\n"
+                    if res.get("type") == LESSON_TYPE
+                    else ""
+                )
+                + f"<section>{fence_untrusted(res.get('heading') or res['section_ref'] or 'General')}</section>\n"
                 f"<page>{res.get('page_number') or 'unknown'}</page>\n"
                 + (
                     "<visuals>"

@@ -133,19 +133,6 @@ def _rank(content: str, candidates: list[tuple[str, str, str, str]]) -> list[dic
     return sorted(matches, key=lambda item: item["score"], reverse=True)[:MATCH_LIMIT]
 
 
-async def rank_texts(
-    content: str, candidates: list[tuple[str, str, str, str]]
-) -> list[dict]:
-    """Rank `(id, title, status, body)` candidates by similarity to `content`, off the event loop.
-
-    For texts the caller has already loaded and permission-checked: `find_similar_documents` does that for
-    articles; this serves things that are not articles yet, such as a user's own drafts.
-    """
-    if not candidates:
-        return []
-    return await asyncio.to_thread(_rank, content, candidates)
-
-
 async def find_similar_documents(
     db: AsyncSession, user: User, content: str
 ) -> list[dict]:

@@ -985,6 +985,8 @@ class GovernanceService:
                 "HOWTO",
                 "PLAYBOOK",
                 "REFERENCE",
+                # An approved change to a lesson keeps its type.
+                "LESSON",
             }:
                 raise HTTPException(status_code=422, detail="Invalid article type")
             if sensitivity not in {"public", "internal", "confidential", "restricted"}:

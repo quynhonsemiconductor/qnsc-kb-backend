@@ -11,7 +11,12 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import defer, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from src.models.chunk import ParentChunk, ArticleChunk, ChunkMetadata
-from src.models.article import Article, ArticleTag, ArticleUserPermission
+from src.models.article import (
+    LESSON_TYPE,
+    Article,
+    ArticleTag,
+    ArticleUserPermission,
+)
 from src.models.graph import ArticleEntityMention, GraphEntity, GraphRelationship
 from src.models.user import Department, User
 from src.core.config import settings
@@ -422,6 +427,12 @@ class ChunkRepository:
             where_clauses.append(ArticleChunk.sensitivity == filters["sensitivity"])
         if filters.get("type"):
             where_clauses.append(Article.type == filters["type"])
+        # "documents": only what was uploaded and reviewed; "lessons": only what assistants saved. Anything
+        # else (the default, "all") searches both.
+        if filters.get("source_scope") == "documents":
+            where_clauses.append(Article.type != LESSON_TYPE)
+        elif filters.get("source_scope") == "lessons":
+            where_clauses.append(Article.type == LESSON_TYPE)
         if filters.get("status"):
             where_clauses.append(Article.status == filters["status"])
         if filters.get("language"):

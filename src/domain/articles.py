@@ -71,7 +71,10 @@ class ArticleService:
         next_review: datetime | None = None,
         external_id: str | None = None,
         original_body_md: str | None = None,
+        publish_without_review: bool = False,
     ) -> Article:
+        """`publish_without_review` is for team lessons only (src/domain/lessons.py): it publishes for a caller who
+        may create but not publish. Nothing reachable from a request body sets it."""
         department = await resolve_active_department(
             self.article_repo.db, user.company_domain, dept
         )
@@ -107,7 +110,9 @@ class ArticleService:
             )
             for scope in ("own", "department", "company", "global")
         )
-        initial_status = "published" if can_publish else "draft"
+        initial_status = (
+            "published" if (can_publish or publish_without_review) else "draft"
+        )
 
         article = Article(
             title=title,

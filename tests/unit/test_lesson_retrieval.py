@@ -111,13 +111,13 @@ def test_one_article_with_several_passages_is_one_candidate_with_the_passages_to
 
     _run(lessons.decide_lesson(_Db(), None, "T", "B"))
 
-    assert seen[0].count("EXISTING ARTICLE") == 2
+    assert seen[0].count("EXISTING DOCUMENT") == 2
     assert "first passage" in seen[0] and "second passage" in seen[0]
-    assert seen[0].index("first passage") < seen[0].index("EXISTING ARTICLE 2")
+    assert seen[0].index("first passage") < seen[0].index("EXISTING DOCUMENT 2")
 
 
-def test_a_pending_draft_found_only_by_text_is_still_a_candidate(monkeypatch):
-    _retrieval(monkeypatch, [])  # drafts are not searchable until published
+def test_an_article_found_only_by_text_is_still_a_candidate(monkeypatch):
+    _retrieval(monkeypatch, [])  # retrieval found nothing; the text comparison did
     _lexical(monkeypatch, ("draft", 0.7))
     _model(monkeypatch, '{"decision": "skip", "target": 1, "reason": "already queued"}')
 
@@ -134,7 +134,7 @@ def test_at_most_three_candidates_and_retrieval_comes_first(monkeypatch):
 
     _run(lessons.decide_lesson(_Db(), None, "T", "B"))
 
-    assert seen[0].count("EXISTING ARTICLE") == 3
+    assert seen[0].count("EXISTING DOCUMENT") == 3
     assert (
         seen[0].index("Title r1")
         < seen[0].index("Title r2")

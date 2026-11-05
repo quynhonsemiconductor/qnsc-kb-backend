@@ -178,11 +178,22 @@ async def get_text_embeddings(texts: list[str]) -> list[list[float]] | None:
         return None
 
 
+def default_answer_scope() -> str:
+    """What an answer may read when the request does not say: the deployment's AI_INCLUDE_LESSONS_DEFAULT.
+
+    One place for it, so no call site that builds an answering service can bypass the setting.
+    """
+    return "all" if settings.AI_INCLUDE_LESSONS_DEFAULT else "documents"
+
+
 class SearchService:
     #: False for a search nobody is waiting on a screen for (the duplicate check of a lesson): it does not need
     #: the cross-encoder's order, and its few seconds (plus its turn in the queue) are spent on a request that has
     #: other model calls to make.
     use_cross_encoder: bool = True
+    #: "all", "documents" (reviewed uploads only) or "lessons" (what AI assistants saved). Set per request by the
+    #: caller; an explicit `source_scope` in `filters` wins.
+    source_scope: str = "all"
 
     def __init__(
         self,
@@ -255,6 +266,8 @@ class SearchService:
         started = time.perf_counter()
 
         effective_filters = dict(filters or {})
+        if self.source_scope != "all":
+            effective_filters.setdefault("source_scope", self.source_scope)
         if not AuthorizationService.has_permission(
             user, "article.read", requested_scope="global"
         ):

@@ -365,6 +365,7 @@ def test_a_lesson_goes_to_the_server_to_be_checked_against_what_is_stored():
             "lesson": "S_BUS IDs are 6 bits.",
             "context": "After the xbar rework.",
             "tags": ["chip"],
+            "basis": "confirmed_by_user",
         }
     )
 
@@ -381,7 +382,7 @@ def test_a_lesson_goes_to_the_server_to_be_checked_against_what_is_stored():
 
 def test_a_lesson_without_optional_fields_sends_only_what_it_has():
     call = mcp_tools.TOOLS_BY_NAME["record_lesson"].build(
-        {"title": "T", "lesson": "Do X."}
+        {"title": "T", "lesson": "Do X.", "basis": "tested_in_session"}
     )
 
     assert call.body == {
@@ -392,13 +393,49 @@ def test_a_lesson_without_optional_fields_sends_only_what_it_has():
     }
 
 
-@pytest.mark.parametrize("missing", ["title", "lesson"])
-def test_a_lesson_needs_a_title_and_text(missing):
-    args = {"title": "T", "lesson": "Do X."}
+@pytest.mark.parametrize("missing", ["title", "lesson", "basis"])
+def test_a_lesson_needs_a_title_a_text_and_what_it_rests_on(missing):
+    args = {"title": "T", "lesson": "Do X.", "basis": "said_by_user"}
     del args[missing]
 
     with pytest.raises(ToolInputError):
         mcp_tools.TOOLS_BY_NAME["record_lesson"].build(args)
+
+
+@pytest.mark.parametrize(
+    "basis",
+    ["inferred", "read_in_document", "assistant_conclusion", "", "SAID_BY_USER"],
+)
+def test_a_lesson_that_rests_on_the_assistants_own_conclusion_is_refused(basis):
+    with pytest.raises(ToolInputError) as caught:
+        mcp_tools.TOOLS_BY_NAME["record_lesson"].build(
+            {"title": "T", "lesson": "Do X.", "basis": basis}
+        )
+
+    assert "said, confirmed or tested" in str(caught.value) or "required" in str(
+        caught.value
+    )
+
+
+@pytest.mark.parametrize(
+    "basis", ["said_by_user", "confirmed_by_user", "tested_in_session"]
+)
+def test_each_honest_basis_is_accepted_and_is_not_sent_to_the_server(basis):
+    call = mcp_tools.TOOLS_BY_NAME["record_lesson"].build(
+        {"title": "T", "lesson": "Do X.", "basis": basis}
+    )
+
+    assert "basis" not in call.body
+
+
+def test_the_tool_and_the_server_tell_the_assistant_not_to_save_its_own_conclusions():
+    from src.api.routers.mcp import INSTRUCTIONS
+
+    tool = mcp_tools.TOOLS_BY_NAME["record_lesson"]
+
+    assert "never your own conclusions" in tool.description
+    assert "basis" in tool.required
+    assert "never your own conclusions" in INSTRUCTIONS
 
 
 # --- recording model-found conflicts --------------------------------------------------

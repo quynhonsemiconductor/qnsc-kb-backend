@@ -620,6 +620,8 @@ SAMPLE = {
     "log_id": ARTICLE_ID,
     "rating": 1,
     "conversation_id": ARTICLE_ID,
+    "lesson_id": ARTICLE_ID,
+    "basis": "said_by_user",
 }
 
 
@@ -813,7 +815,10 @@ def test_the_department_hint_is_attached_for_a_write_token(monkeypatch):
     w.reply = (422, {"detail": "A department is required"})
     out = w.result(
         "tools/call",
-        {"name": "record_lesson", "arguments": {"title": "t", "lesson": "l"}},
+        {
+            "name": "record_lesson",
+            "arguments": {"title": "t", "lesson": "l", "basis": "said_by_user"},
+        },
     )
     text = out["content"][0]["text"]
     assert out["isError"] is True
@@ -883,10 +888,89 @@ def test_list_my_drafts_reads_the_callers_unpublished_submissions(h):
     assert call.params == {"limit": 5}
 
 
-def test_list_my_drafts_is_a_read_tool_and_the_instructions_name_it(h):
-    names = {tool["name"] for tool in h.result("tools/list")["tools"]}
-    assert "list_my_drafts" in names
-    assert (
-        "list_my_drafts"
-        in h.result("initialize", {"protocolVersion": "2025-06-18"})["instructions"]
+def test_the_lesson_tools_and_the_scope_options_are_offered_and_explained(monkeypatch):
+    read = Harness(monkeypatch, "read")
+    read_names = {tool["name"] for tool in read.result("tools/list")["tools"]}
+    assert {"list_lessons", "list_my_drafts"} <= read_names
+    assert "forget_lesson" not in read_names, "retracting needs a write token"
+    write = Harness(monkeypatch, "write")
+    assert "forget_lesson" in {t["name"] for t in write.result("tools/list")["tools"]}
+    text = read.result("initialize", {"protocolVersion": "2025-06-18"})["instructions"]
+    assert "list_lessons" in text
+    assert "scope='documents'" in text and "sources='documents'" in text
+
+
+def test_search_and_ask_can_leave_lessons_out(h):
+    h.reply = (200, [])
+    h.result(
+        "tools/call",
+        {
+            "name": "search_knowledge",
+            "arguments": {"query": "uart", "scope": "documents"},
+        },
     )
+    assert h.calls[-1].params["scope"] == "documents"
+    h.result("tools/call", {"name": "search_knowledge", "arguments": {"query": "uart"}})
+    assert "scope" not in h.calls[-1].params
+
+    h.reply = (200, {"answer": "a", "citations": []})
+    h.result(
+        "tools/call",
+        {
+            "name": "ask_knowledge_base",
+            "arguments": {"question": "uart base?", "sources": "documents"},
+        },
+    )
+    assert h.calls[-1].body["sources"] == "documents"
+    out = h.result(
+        "tools/call",
+        {
+            "name": "ask_knowledge_base",
+            "arguments": {"question": "uart base?", "sources": "everything"},
+        },
+    )
+    assert out["isError"] is True and "'sources' must be one of" in str(out)
+
+
+def test_retracting_a_lesson_is_a_post_to_its_own_endpoint(monkeypatch):
+    w = Harness(monkeypatch, "write")
+    w.reply = (200, {"id": ARTICLE_ID, "retracted": True})
+    w.result(
+        "tools/call", {"name": "forget_lesson", "arguments": {"lesson_id": ARTICLE_ID}}
+    )
+    call = w.calls[-1]
+    assert (
+        call.method == "POST"
+        and call.path == f"/knowledge/lessons/{ARTICLE_ID}/retract"
+    )
+
+
+def test_list_lessons_passes_mine_and_the_filter(h):
+    h.reply = (200, [])
+    h.result(
+        "tools/call",
+        {"name": "list_lessons", "arguments": {"q": "uart", "mine": True, "limit": 5}},
+    )
+    call = h.calls[-1]
+    assert call.method == "GET" and call.path == "/knowledge/lessons"
+    assert call.params == {"q": "uart", "mine": True, "limit": 5}
+
+
+@pytest.mark.parametrize("loose", ["true", 1, "yes"])
+def test_list_lessons_refuses_a_loosely_typed_mine_rather_than_listing_everyone(
+    h, loose
+):
+    before = len(h.calls)
+
+    out = h.result("tools/call", {"name": "list_lessons", "arguments": {"mine": loose}})
+
+    assert out["isError"] is True and "'mine' must be true or false" in str(out)
+    assert len(h.calls) == before
+
+
+def test_list_lessons_sends_mine_only_when_it_is_true(h):
+    h.reply = (200, [])
+
+    h.result("tools/call", {"name": "list_lessons", "arguments": {"mine": False}})
+
+    assert "mine" not in (h.calls[-1].params or {})

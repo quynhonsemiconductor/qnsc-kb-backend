@@ -62,11 +62,12 @@ your own permissions.
 
 Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
-`list_conversations`, `get_conversation`, `list_my_drafts`, `list_departments`, `list_tags`, `get_glossary`,
-`find_entities`, `get_entity_neighbors`.
+`list_conversations`, `get_conversation`, `list_lessons`, `list_my_drafts`, `list_departments`,
+`list_tags`, `get_glossary`, `find_entities`, `get_entity_neighbors`.
 
 Write tools (write-scope tokens only): `create_article`, `update_article`,
-`request_article_edit`, `rate_answer`. Articles go through the normal review workflow.
+`request_article_edit`, `rate_answer`, `record_lesson`, `forget_lesson`. Articles go through the
+normal review workflow; lessons do not (below).
 
 `find_entities` and `get_entity_neighbors` appear only when `KNOWLEDGE_GRAPH_ENABLED`
 is on; without it the tools are hidden.
@@ -81,46 +82,29 @@ is on; without it the tools are hidden.
   give an assistant back the user's own earlier questions and answers after a restart, and
   the `conversation_id` can be passed to `ask_knowledge_base` to carry on. They only ever show
   the token owner's own conversations.
-- **What the team should remember goes in as a lesson.** `record_lesson` files it as a draft
-  that goes through review; once approved everyone's assistant finds it with
-  `search_knowledge`. A lesson needs a department: pass `dept` unless the user has one set.
-  Until then it is not searchable, so `list_my_drafts` shows the user's own submissions that
-  are waiting (or were rejected, with the reviewer's note); `record_lesson` also compares a new
-  lesson with them and answers `skip` instead of filing the same thing twice.
-- **A call that does not return is cut off** after 120 s with a tool error instead of holding
-  the client open.
-
-Results are trimmed for the model: a search hit is one passage (not the parent section
-and every child chunk), a citation carries a short excerpt. Use `get_article` for the
-whole text.
-
-Resources: `kb://article/{id}` (Markdown). Prompts: `explore_knowledge_base`,
-`summarize_article`, `answer_with_sources`, `compare_articles`, `find_knowledge_gaps`.
-
-Deliberately not offered: deleting or restoring articles, approving drafts, reindexing,
-connectors, user and role administration.
-
-## How it is built
-
-Each tool maps onto an existing REST endpoint (`src/domain/mcp_tools.py`). The transport
-(`src/api/routers/mcp.py`) mints the token owner a five-minute access JWT and calls the
-application in-process, so the endpoint enforces exactly what it enforces for the web app:
-RBAC, ACLs, row-level security, the per-user AI rate limit and audit. There is no second
-implementation of "who may see this". A test checks that every tool targets a route that
-exists. Requests are also limited per token (`MCP_RATE_LIMIT_PER_MINUTE`).
-
-## Troubleshooting
-
-- `401`: the token is wrong, revoked or expired; create a new one under Account.
-- `403`/read-only error on a write tool: the token has `read` scope.
-- `404` on the endpoint: `MCP_ENABLED` is off, or the build predates MCP.
-- A dropped connection (`ECONNRESET`) on a long question: repeat the call. It was seen
-  once on kb-dev and the retry succeeded; the cause is not established.
-
-## Operating notes
-
-- The route is under `/api/v1`, so any ingress rule that already forwards the API forwards
-  MCP. Streaming is not used, so no proxy buffering settings are needed.
-- Browser requests with a foreign `Origin` are refused (DNS-rebinding defence); MCP
-  clients send none.
-- Changing the owner's password does not revoke tokens; revoke them from the token list.
+- **What the team should remember goes in as a lesson, and does not wait for a reviewer.**
+  Reviewed documents (uploads, `create_article`, `update_article`) keep their review workflow.
+  What an assistant learns in a session is a different kind of knowledge: `record_lesson`
+  publishes it **at once** for the author's department, as an article of type `LESSON`, so
+  `search_knowledge` and `ask_knowledge_base` find it straight away (a colleague's assistant
+  found one 9 s after it was saved). A lesson needs a department: pass `dept` unless the user
+  has one set. `basis` is required (`said_by_user`, `confirmed_by_user`, `tested_in_session`): a lesson
+  records what the person said, confirmed or tested with the assistant, not conclusions the assistant drew alone from
+  reading documents, and not something the person did not agree to. What keeps this safe:
+  - **Reviewed and unreviewed stay distinguishable.** A search hit has `type: LESSON`; an answer
+    that relies on a lesson says it is an unreviewed team lesson, and when a reviewed document
+    and a lesson disagree it presents both.
+  - **The assistant can choose.** `search_knowledge` takes `scope` (`all`, `documents`,
+    `lessons`) and `ask_knowledge_base` takes `sources` (`all`, `documents`); the web assistant
+    sends the same `sources`. Left out, `AI_INCLUDE_LESSONS_DEFAULT` decides for answers
+    (default on) and search covers both.
+  - **A lesson is never duplicated or silently replaced.** `record_lesson` first compares it with
+    what is stored: new -> `add`; adds to or corrects an earlier LESSON -> `update`, merged into
+    it in place (a new version and an audit row, the newer fact wins); concerns a reviewed
+    DOCUMENT -> `update` but nothing saved, use `request_article_edit`; already known -> `skip`.
+  - **Anyone may retract their own.** `list_lessons` (optionally `mine`) shows what was saved,
+    `forget_lesson` takes one out of search at once; the author may always do it, so may whoever
+    may delete the department's articles. It is a POST of one lesson, not a delete tool.
+  - **A quota** (`LESSONS_MAX_PER_USER_PER_DAY`, 50 saves or changes a day) stops a runaway assistant. A lesson also cannot grow past 20 000 characters; past that a new lesson is saved on its own.
+  `list_my_drafts` is for the other kind of submission: documents sent with `create_article` or
+  `update_article` that are still waiting for review.

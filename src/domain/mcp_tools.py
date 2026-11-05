@@ -104,6 +104,13 @@ def _int(args: dict[str, Any], key: str, default: int, low: int, high: int) -> i
     return max(low, min(value, high))
 
 
+def _optional_bool(args: dict[str, Any], key: str) -> bool | None:
+    value = args.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ToolInputError(f"'{key}' must be true or false")
+    return True if value else None
+
+
 def _tags(args: dict[str, Any]) -> list[str]:
     value = args.get("tags") or []
     if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
@@ -315,6 +322,13 @@ _LANG = {"type": "string", "enum": ["vi", "en"], "description": "Answer language
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 50}
 
 
+def _choice(args: dict[str, Any], name: str, allowed: tuple[str, ...]) -> str | None:
+    value = _text(args, name, max_len=20)
+    if value is not None and value not in allowed:
+        raise ToolInputError(f"'{name}' must be one of: {', '.join(allowed)}")
+    return value
+
+
 def _search(args: dict[str, Any]) -> Call:
     return Call(
         "GET",
@@ -326,6 +340,7 @@ def _search(args: dict[str, Any]) -> Call:
                 "type": _text(args, "type", max_len=50),
                 "tag": _text(args, "tag", max_len=50),
                 "language": _text(args, "language", max_len=20),
+                "scope": _choice(args, "scope", ("all", "documents", "lessons")),
                 "limit": _int(args, "limit", 5, 1, 20),
             }
         ),
@@ -348,6 +363,7 @@ def _ask(args: dict[str, Any]) -> Call:
                 "conversation_id": _id(args, "conversation_id", required=False),
                 "article_id": _id(args, "article_id", required=False),
                 "language": language,
+                "sources": _choice(args, "sources", ("all", "documents")),
             }
         ),
     )
@@ -406,6 +422,26 @@ def _conversation(args: dict[str, Any]) -> Call:
     return Call("GET", f"/ai/conversations/{_id(args, 'conversation_id')}/messages")
 
 
+def _list_lessons(args: dict[str, Any]) -> Call:
+    return Call(
+        "GET",
+        "/knowledge/lessons",
+        params=_drop_none(
+            {
+                "q": _text(args, "q", max_len=200),
+                "mine": _optional_bool(args, "mine"),
+                "limit": _int(args, "limit", 20, 1, 50),
+            }
+        ),
+    )
+
+
+def _forget_lesson(args: dict[str, Any]) -> Call:
+    # A POST, not a DELETE: this server offers nothing that deletes. It takes ONE lesson out of search, and only
+    # the person who saved it (or someone who may delete the department's articles) is allowed to.
+    return Call("POST", f"/knowledge/lessons/{_id(args, 'lesson_id')}/retract")
+
+
 def _my_drafts(args: dict[str, Any]) -> Call:
     return Call(
         "GET", "/knowledge/my-drafts", params={"limit": _int(args, "limit", 20, 1, 50)}
@@ -415,14 +451,37 @@ def _my_drafts(args: dict[str, Any]) -> Call:
 LESSON_TAG = "session-lesson"
 
 
+#: Where a lesson comes from. A lesson is shared with the team at once and unreviewed, so it must be something a
+#: person stood behind: said, confirmed or tested together with the assistant. What an assistant concluded alone
+#: from reading documents is not on this list (the documents already say it, and a guess shared as a lesson
+#: misleads the next person).
+LESSON_BASES = ("said_by_user", "confirmed_by_user", "tested_in_session")
+
+
+def _lesson_basis(args: dict[str, Any]) -> str:
+    value = _text(args, "basis", required=True, max_len=30)
+    if value not in LESSON_BASES:
+        raise ToolInputError(
+            "'basis' must be one of: "
+            + ", ".join(LESSON_BASES)
+            + ". A lesson records what the person "
+            "said, confirmed or tested with you in this conversation; do not record your own conclusions "
+            "from documents (the documents already hold them) and do not record without the person's "
+            "agreement."
+        )
+    return value
+
+
 def _record_lesson(args: dict[str, Any]) -> Call:
     """A lesson learned in an AI session.
 
-    The server compares it with what is stored and either submits it as a normal article
-    awaiting review, or says which existing article to update instead, or that it is already
-    known (src/domain/lessons.py). The body shape, the `session-lesson` tag and the draft
-    review all happen there.
+    The server compares it with what is stored and either publishes it at once as a new
+    lesson, or merges it into the existing lesson it adds to, or says which reviewed document
+    to ask an editor to change, or that it is already known (src/domain/lessons.py). There is
+    no review step; the body shape and the `session-lesson` tag are applied there. `basis` is checked here and not
+    sent: it makes the assistant say what the lesson rests on before it is shared.
     """
+    _lesson_basis(args)
     return Call(
         "POST",
         "/knowledge/lessons",
@@ -530,6 +589,12 @@ TOOLS: tuple[Tool, ...] = (
             },
             "tag": {"type": "string"},
             "language": {"type": "string", "description": "vi or en"},
+            "scope": {
+                "type": "string",
+                "enum": ["all", "documents", "lessons"],
+                "description": "documents: reviewed uploads only; lessons: what assistants "
+                "saved with record_lesson; all (default): both. A lesson's type is LESSON.",
+            },
             "limit": {"type": "integer", "minimum": 1, "maximum": 20},
         },
         ("query",),
@@ -556,6 +621,13 @@ TOOLS: tuple[Tool, ...] = (
                 "description": "Continue this conversation",
             },
             "article_id": {**_ID, "description": "Limit the question to one article"},
+            "sources": {
+                "type": "string",
+                "enum": ["all", "documents"],
+                "description": "all: reviewed documents and the lessons assistants saved "
+                "(an answer says when it relies on a lesson); documents: reviewed uploads only. "
+                "Default: the deployment's setting.",
+            },
         },
         ("question",),
         _ask,
@@ -612,12 +684,38 @@ TOOLS: tuple[Tool, ...] = (
         shape_args=_shape_conversation,
     ),
     Tool(
+        "list_lessons",
+        "List team lessons",
+        "The lessons assistants saved with record_lesson that this user may read, newest change "
+        "first. Pass mine=true for only the ones this user saved, q to filter by title or text. "
+        "Use it to see what the team already recorded, or to find a lesson to retract.",
+        {
+            "q": {"type": "string", "description": "Match against title or text"},
+            "mine": {"type": "boolean", "description": "Only lessons this user saved"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        (),
+        _list_lessons,
+    ),
+    Tool(
+        "forget_lesson",
+        "Retract a lesson",
+        "Take a lesson out of search and answers because it is wrong or obsolete. Allowed for "
+        "the person who saved it and for whoever may delete the department's articles. A "
+        "lesson that is merely out of date is better corrected by calling record_lesson with "
+        "the new fact, which merges into it. Requires a token with write scope.",
+        {"lesson_id": {**_ID, "description": "Lesson id (from list_lessons)"}},
+        ("lesson_id",),
+        _forget_lesson,
+        write=True,
+    ),
+    Tool(
         "list_my_drafts",
         "List what you submitted that is still waiting for review",
-        "Lessons and articles this user submitted that are not published yet: waiting for a "
-        "reviewer, or rejected with the reviewer's note. Check it before record_lesson, or when "
-        "asked 'did we record that?': a saved lesson is not found by search_knowledge until a "
-        "reviewer approves it. Only the user's own submissions are listed.",
+        "Documents this user submitted with create_article or update_article that are not "
+        "published yet: waiting for a reviewer, or rejected with the reviewer's note. Lessons "
+        "are not here: record_lesson publishes at once (see list_lessons). Only the user's own "
+        "submissions are listed.",
         {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
         (),
         _my_drafts,
@@ -763,13 +861,17 @@ TOOLS: tuple[Tool, ...] = (
         "record_lesson",
         "Record a lesson learned in this session",
         "Save something worth keeping from this session -- a decision and its reason, a fix "
-        "that worked, a rule you were told -- so the next person's AI can find it. Write the "
-        "lesson so it makes sense without this conversation. The server first checks what is "
-        "already stored: the result says decision 'add' (submitted for review like any "
-        "article, tagged 'session-lesson'), 'update' (an existing article covers the subject; "
-        "call update_article with the article_id returned) or 'skip' (already known, or "
-        "you already submitted it and it awaits review (list_my_drafts); nothing was saved). "
-        "Requires a token with write scope.",
+        "that worked, a rule you were told -- so the next person's AI can find it. Save ONLY what "
+        "the person said, confirmed or tested with you in this conversation, and only when they "
+        "asked you to or agreed to it: never your own conclusions from reading documents (the "
+        "documents already hold them; a guess shared as a lesson misleads the team). Write the "
+        "lesson so it makes sense without this conversation. A lesson is published at once for "
+        "the user's department, with no reviewer: search_knowledge and ask_knowledge_base find "
+        "it straight away, labelled as an unreviewed team lesson. The server first checks what "
+        "is already stored: the result says decision 'add' (saved), 'update' (it was merged into "
+        "an earlier lesson, or a reviewed document already covers it: then nothing was saved, "
+        "use request_article_edit if the document is wrong) or 'skip' (already known; nothing "
+        "was saved). Requires a token with write scope.",
         {
             "title": {"type": "string", "maxLength": 255},
             "lesson": {
@@ -780,11 +882,17 @@ TOOLS: tuple[Tool, ...] = (
                 "type": "string",
                 "description": "Optional: where it applies and why it holds",
             },
+            "basis": {
+                "type": "string",
+                "enum": list(LESSON_BASES),
+                "description": "What it rests on: said_by_user (the person told you), confirmed_by_user "
+                "(you proposed it and they agreed) or tested_in_session (you tried it together)",
+            },
             "dept": {"type": "string"},
             "language": {"type": "string", "description": "vi or en"},
             "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 19},
         },
-        ("title", "lesson"),
+        ("title", "lesson", "basis"),
         _record_lesson,
         write=True,
     ),
