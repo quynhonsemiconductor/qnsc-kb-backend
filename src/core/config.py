@@ -113,6 +113,19 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_TIMEOUT_SECONDS: float = 30.0
+
+    # PLATFORM-CONTRACT section 3, shutdown. SHUTDOWN_TIMEOUT_MS is the hard deadline for
+    # the whole SIGTERM sequence (readiness 503 -> endpoint-removal delay -> stop
+    # work -> flush telemetry -> exit) and must stay below the chart's
+    # terminationGracePeriodSeconds (default 30000); raise them together.
+    # SHUTDOWN_ENDPOINT_DELAY_MS is how long the process keeps serving AFTER
+    # /readyz answers 503, so requests already routed to the pod still land; unset
+    # it means the contract default, 5000 in a pod (KUBERNETES_SERVICE_HOST set)
+    # and 0 elsewhere. A delay at or above the deadline refuses to boot
+    # (src/core/shutdown.py). uvicorn's own in-flight wait is derived from the
+    # deadline in src/api/serve.py, which is why it is not in the Dockerfile CMD.
+    SHUTDOWN_TIMEOUT_MS: int | None = None
+    SHUTDOWN_ENDPOINT_DELAY_MS: int | None = None
     # Connections older than this are replaced instead of reused: a load balancer or the server drops idle
     # ones silently, and the first request to find out used to be the one that failed.
     DB_POOL_RECYCLE_SECONDS: int = 1800
