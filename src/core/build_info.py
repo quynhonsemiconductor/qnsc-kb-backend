@@ -6,7 +6,7 @@ tags it `sha-<commit>`. Two hosts publish that tag back to the process: the ECS 
 task metadata endpoint, and the on-prem chart, which derives `APP_COMMIT` from the image tag in
 the generated `values/<product>/tags.<env>.yaml` (charts/qnsc-service, from 0.19.3). A release
 tag is `vX.Y.Z` and names no commit, so the chart sets `APP_COMMIT` only for a `sha-<commit>`
-build; prod on-prem reports the commit as unknown rather than inventing one. `APP_COMMIT_SHA`
+build; prod on-prem reports the commit as unknown rather than inventing one. A valid `APP_COMMIT_SHA`
 overrides both for any host that supplies neither.
 
 Nothing here can fail a request: a metadata endpoint that is absent (local run, tests) or
@@ -148,12 +148,19 @@ def explicit_commit() -> str | None:
     Only a bare hexadecimal commit counts. `APP_COMMIT` is the chart's derivation from a
     `sha-<commit>` image tag; on a release tag (`vX.Y.Z`) the chart leaves it unset, so prod
     on-prem answers "unknown" — honest, because that tag names no commit. Anything that is not
-    a commit is ignored rather than echoed through `/system/version`.
+    a commit is ignored rather than echoed through `/system/version`; the variable name is
+    logged, never the value, so a misconfigured host is visible without leaking it.
     """
-    for value in (settings.APP_COMMIT_SHA, settings.APP_COMMIT):
+    for name, value in (
+        ("APP_COMMIT_SHA", settings.APP_COMMIT_SHA),
+        ("APP_COMMIT", settings.APP_COMMIT),
+    ):
         candidate = (value or "").strip().lower()
+        if not candidate:
+            continue
         if _EXPLICIT_COMMIT.fullmatch(candidate):
             return candidate
+        logger.warning(f"{name} is not a hex commit, ignored")
     return None
 
 

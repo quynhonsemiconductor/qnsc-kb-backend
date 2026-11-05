@@ -110,6 +110,26 @@ def test_an_app_commit_that_is_not_a_commit_is_ignored(monkeypatch):
         assert _run(get_build_info()).commit is None, value
 
 
+def test_a_rejected_commit_variable_is_warned_about_by_name_without_its_value(monkeypatch):
+    # A host set the variable to something that is not a commit; the name is enough to fix
+    # it, and the value is never echoed (it can be a URL or another secret-bearing mistake).
+    warnings = []
+
+    class _Recorder:
+        def warning(self, message, **kwargs):
+            warnings.append((message, kwargs))
+
+    monkeypatch.setattr(build_info, "logger", _Recorder())
+    monkeypatch.setattr(settings, "APP_COMMIT_SHA", "https://example.invalid/commit")
+    monkeypatch.setattr(settings, "APP_COMMIT", "abc1234")
+    info = _run(get_build_info())
+    assert info.commit == "abc1234"
+    assert len(warnings) == 1
+    message = warnings[0][0]
+    assert "APP_COMMIT_SHA" in message and "not a hex commit, ignored" in message
+    assert "example.invalid" not in str(warnings)
+
+
 def test_only_the_link_local_agent_is_ever_fetched(monkeypatch):
     called = []
     monkeypatch.setattr(
