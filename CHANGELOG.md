@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.1.3](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.2...v0.1.3) (2026-11-05)
+
+
+### ✨ Features
+
+* also search a Vietnamese question in English, keeping each passage's better score ([#363](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/363)) ([0e14877](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/0e14877a304a0728ebaa9a47d93fcda6a658085f))
+* **embeddings:** add a tei runtime for the shared embedding service ([#359](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/359)) ([4ebb1e6](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/4ebb1e630258c14fc651c39e39a6be1db46332ab))
+* find and rank chip registers by the names a question uses ([#352](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/352)) ([5b45635](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/5b45635ab84df3f2a56893bb47667b70c3906fab))
+* let a chunk the embedding ranked near the top reach the model ([#353](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/353)) ([62b7dfe](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/62b7dfe568cecfceebc1d11279278765d4661749))
+* **mcp:** an assistant can see and is not duplicating its own pending lessons; saving one is faster ([#366](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/366)) ([08d0d67](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/08d0d67d4c704b1a947730f1f6f8225e31514015))
+* **mcp:** get_article_changes, list_recent_changes, and faster version compares ([#368](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/368)) ([64e7c8f](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/64e7c8f46b26b1faefc75681f9ee9e2f471c2367))
+* **mcp:** lessons are published at once, apart from reviewed documents, and can be left out of search and answers ([#367](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/367)) ([83ccf9e](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/83ccf9e583eac56009edbf6ebe3a6d00314b57c2))
+* **mcp:** read long articles to the end, recall past conversations, bound a stuck call ([#360](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/360)) ([075f416](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/075f4162cc5a0f0aa7cfea0155a3a1b69f9645cc))
+* **otel:** export HTTP metrics to the OTLP receiver ([#369](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/369)) ([0d7024d](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/0d7024dc429d6a9da771bd4dc81602e1f5886dfe))
+* **search:** a question that spells an abbreviated name out also carries the name ([#375](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/375)) ([e1124f7](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/e1124f7c018d94013a408b302ef55a2fe8f50afa))
+* **version:** report the commit the chart derives from the image tag ([#382](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/382)) ([a1a805c](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/a1a805c692083f76ba6e783eb61b500369a14088))
+* **worker:** export Celery task run, failure and duration metrics ([#371](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/371)) ([81ab399](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/81ab3997c99aaf8ad8cb59cd119dc8004e50f283))
+
+
+### 🐛 Bug Fixes
+
+* a search waits its turn for the cross-encoder instead of silently losing it ([#365](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/365)) ([d1458cb](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/d1458cb504a03245c6a47959091d62094ddc8c05))
+* compare a lesson with the passages the assistant would find, not only whole-document text overlap ([#361](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/361)) ([076b73d](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/076b73d75667ea48c998947bde16822c8dddbcba))
+* **db:** grant the runtime role DML access to migrated tables ([#364](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/364)) ([9d3aac8](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/9d3aac881822ead7747477f89f6de784a84a11af))
+* do not cache an answer that was written with earlier turns in front of it ([#358](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/358)) ([c80b641](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/c80b64128fc17a1776e705ac0fb9f690d39f9621))
+* give the LLM connection test room for a reasoning model to think ([#350](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/350)) ([aa76c99](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/aa76c995055cfb85ebe0aa273042f26f4eda09a6))
+* **lessons:** the home page and the health figures speak about reviewed documents, not team lessons ([#373](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/373)) ([3efb06f](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/3efb06f3cee950d74cc19529eaa2b20d79161a04))
+* recognise a section marker written on the same line as its text ([#351](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/351)) ([025c108](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/025c108bbb4e19e2d313947204e31995a86385f2))
+* **worker:** instance id, failure semantics, solo-pool fallback ([#374](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/374)) ([5738d84](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/5738d849674738a691e9cf7bf032a25f3bc75865))
+
 ## [0.1.2](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.1...v0.1.2) (2026-11-03)
 
 

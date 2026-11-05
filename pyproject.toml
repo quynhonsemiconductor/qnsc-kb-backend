@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "qnsc-kb-backend"
-version = "0.1.2"
+version = "0.1.3"
 description = "Knowledge Base Backend API for QNSC"
 authors = ["quynhonsemiconductor"]
 readme = "README.md"
