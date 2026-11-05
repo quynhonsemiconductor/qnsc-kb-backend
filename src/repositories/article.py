@@ -260,6 +260,7 @@ class ArticleRepository:
         index_status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        exclude_type: str | None = None,
     ) -> Sequence[Article]:
         stmt = select(Article).options(
             selectinload(Article.departments),
@@ -283,6 +284,8 @@ class ArticleRepository:
             )
         if type_:
             filters.append(Article.type == type_)
+        if exclude_type:
+            filters.append(Article.type.is_distinct_from(exclude_type))
         if sensitivity:
             filters.append(Article.sensitivity == sensitivity)
         if status:

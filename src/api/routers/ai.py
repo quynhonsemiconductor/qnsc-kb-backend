@@ -160,6 +160,7 @@ async def _hydrate_citations(
                     "parent_chunk_id": str(parent.id),
                     "article_id": str(chunk.article_id),
                     "title": article.title,
+                    "article_type": getattr(article, "type", None),
                     "section_ref": parent.section_ref,
                     "heading": chunk.heading or parent.heading,
                     "source_ref": f"{article.title} - {chunk.heading or parent.heading or parent.section_ref or 'General'}",

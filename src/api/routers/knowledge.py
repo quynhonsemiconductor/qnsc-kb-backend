@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_db, get_current_user, require_permission
 from src.models import User
-from src.models.article import Article, ArticleTag, DocumentSource
+from src.models.article import LESSON_TYPE, Article, ArticleTag, DocumentSource
 from src.models.governance import Gap, PendingDraft, ConflictRecord
 from src.models.ai import AiUsageLog
 from src.models.chunk import ArticleChunk
@@ -80,6 +80,7 @@ def _article_card(article: Article) -> dict[str, Any]:
             for department in getattr(article, "departments", [])
         ],
         "external_id": article.external_id,
+        "type": article.type,
         "status": article.status,
         "language": article.language,
         "version": article.version,
@@ -102,6 +103,10 @@ async def home_summary(
 ) -> dict[str, Any]:
     article_filters = ArticleRepository._authorized_article_filters(current_user)
     published_filters = [*article_filters, Article.status == "published"]
+    # What the home page says about the knowledge base (how much has an owner, what is due for review, what was
+    # reviewed lately) is about reviewed documents. Team lessons are published without a reviewer, so counting them
+    # would flatter those figures and show unreviewed text as "verified"; they get a count of their own.
+    document_filters = [*published_filters, Article.type.is_distinct_from(LESSON_TYPE)]
     home_has_full_company_access = AuthorizationService.has_permission(
         current_user, "governance.read", requested_scope="global"
     ) or AuthorizationService.has_full_company_article_access(current_user)
@@ -131,13 +136,21 @@ async def home_summary(
     )
     gaps = await db.scalar(gaps_stmt) or 0
     total_articles = int(
-        await db.scalar(select(func.count(Article.id)).where(and_(*published_filters)))
+        await db.scalar(select(func.count(Article.id)).where(and_(*document_filters)))
+        or 0
+    )
+    lessons = int(
+        await db.scalar(
+            select(func.count(Article.id)).where(
+                and_(*published_filters, Article.type == LESSON_TYPE)
+            )
+        )
         or 0
     )
     owned_articles = int(
         await db.scalar(
             select(func.count(Article.id)).where(
-                and_(*published_filters, Article.owner_id.is_not(None))
+                and_(*document_filters, Article.owner_id.is_not(None))
             )
         )
         or 0
@@ -146,7 +159,7 @@ async def home_summary(
         await db.scalar(
             select(func.count(Article.id)).where(
                 and_(
-                    *published_filters,
+                    *document_filters,
                     (
                         Article.needs_update.is_(True)
                         | (
@@ -162,18 +175,19 @@ async def home_summary(
     department_count = int(
         await db.scalar(
             select(func.count(func.distinct(Article.dept))).where(
-                and_(*published_filters)
+                and_(*document_filters)
             )
         )
         or 0
     )
     articles = list(
         await ArticleRepository(db).list_articles(
-            current_user, status="published", limit=6
+            current_user, status="published", limit=6, exclude_type=LESSON_TYPE
         )
     )
     return {
         "total_articles": total_articles,
+        "lessons": lessons,
         "departments": department_count,
         "with_owner_percent": (
             round(owned_articles / total_articles * 100) if total_articles else 0

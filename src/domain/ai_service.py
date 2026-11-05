@@ -2065,6 +2065,8 @@ class AIService:
                         "parent_chunk_id": context_row.get("parent_chunk_id"),
                         "article_id": context_row["article_id"],
                         "title": context_row["title"],
+                        # LESSON marks what an assistant saved without review, so the screen can say so.
+                        "article_type": context_row.get("type"),
                         "section_ref": context_row["section_ref"],
                         "heading": context_row.get("heading"),
                         "source_ref": f"{context_row['title']} - {context_row.get('heading') or context_row['section_ref'] or 'General'}",
@@ -2335,6 +2337,8 @@ class AIService:
                 complete_fn=complete,
                 cache_get=cache_get,
                 cache_put=cache_put,
+                # "Documents only" holds for a question about the whole corpus as well.
+                source_scope=getattr(self.search_service, "source_scope", "all"),
             )
         except Exception as exc:
             logger.warning(
@@ -2364,16 +2368,17 @@ class AIService:
         started = _time.perf_counter()
         await agent.tracer.emit("catalog", "running")
         try:
-            result = await build_catalog(
-                self.ai_repo.db,
-                user,
-                filter_for_question(
-                    question,
-                    agent.plan.doc_types,
-                    agent.plan.departments,
-                    datetime.utcnow(),
-                ),
+            catalog_filter = filter_for_question(
+                question,
+                agent.plan.doc_types,
+                agent.plan.departments,
+                datetime.utcnow(),
             )
+            # "Documents only" holds for a count of the collection as well.
+            catalog_filter.source_scope = getattr(
+                self.search_service, "source_scope", "all"
+            )
+            result = await build_catalog(self.ai_repo.db, user, catalog_filter)
         except Exception as exc:
             # A failed statement leaves the transaction unusable for the retrieval that
             # follows, so it is rolled back before falling through to it.

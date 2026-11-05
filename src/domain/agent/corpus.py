@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import settings
 from src.domain.agent.core import Budget, Tracer, parse_json_object
 from src.domain.agent.plan import AgentPlan, _folded
-from src.models.article import Article
+from src.models.article import LESSON_TYPE, Article
 from src.models.chunk import ArticleChunk
 from src.models.digest import ArticleDigest
 from src.models.user import User
@@ -361,12 +361,22 @@ class Scope:
     candidates: list[Candidate]
 
 
-def scope_conditions(user: User, plan: AgentPlan) -> list[Any]:
-    """Authorization first, then only what the question narrowed to."""
+def scope_conditions(
+    user: User, plan: AgentPlan, source_scope: str = "all"
+) -> list[Any]:
+    """Authorization first, then only what the question narrowed to.
+
+    `source_scope` is the request's choice of sources (the same one search takes): "documents" leaves out the team
+    lessons assistants saved without review, "lessons" keeps only those, anything else keeps both.
+    """
     conditions: list[Any] = [
         *ArticleRepository._authorized_article_filters(user),
         Article.status == "published",
     ]
+    if source_scope == "documents":
+        conditions.append(Article.type.is_distinct_from(LESSON_TYPE))
+    elif source_scope == "lessons":
+        conditions.append(Article.type == LESSON_TYPE)
     if plan.doc_types:
         conditions.append(Article.type.in_(plan.doc_types))
     if plan.departments:
@@ -380,8 +390,9 @@ async def load_scope(
     plan: AgentPlan,
     query_embedding: list[float] | None,
     limit: int,
+    source_scope: str = "all",
 ) -> Scope:
-    conditions = scope_conditions(user, plan)
+    conditions = scope_conditions(user, plan, source_scope)
     total = int(
         (
             await db.execute(select(func.count(Article.id)).where(*conditions))
@@ -542,6 +553,8 @@ def build_context_results(
                 "parent_chunk_id": chunk["parent_chunk_id"],
                 "article_id": candidate.article_id,
                 "title": candidate.title,
+                # Carried so the answer can tell a team lesson from a reviewed document.
+                "type": candidate.doc_type or None,
                 "section_ref": section,
                 "heading": None,
                 "page_number": None,
@@ -578,6 +591,7 @@ async def gather_corpus_context(
     complete_fn: Callable[..., Awaitable[tuple[str, int, str, str]]],
     cache_get: Callable[[str], Awaitable[list[dict[str, Any]] | None]],
     cache_put: Callable[[str, list[dict[str, Any]], list[str]], Awaitable[None]],
+    source_scope: str = "all",
 ) -> CorpusContext | None:
     """Everything between "this is a corpus question" and "here are the sources".
 
@@ -595,7 +609,9 @@ async def gather_corpus_context(
             logger.warning(
                 "Corpus query embedding failed; using newest", error=str(exc)
             )
-    scope = await load_scope(db, user, plan, query_embedding, settings.CORPUS_MAX_DOCS)
+    scope = await load_scope(
+        db, user, plan, query_embedding, settings.CORPUS_MAX_DOCS, source_scope
+    )
     coverage = Coverage(total=scope.total, with_digest=scope.with_digest)
     if not scope.candidates:
         await tracer.emit(
