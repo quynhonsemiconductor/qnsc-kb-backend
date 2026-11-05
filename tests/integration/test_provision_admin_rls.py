@@ -22,14 +22,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 ROOT = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+# CI sets this: a skip would exit 0 while proving nothing, so the required case FAILS.
+REQUIRED = os.getenv("KB_RLS_TEST_REQUIRED") == "1"
 
-pytestmark = [
-    pytest.mark.asyncio,
-    pytest.mark.skipif(
-        not DATABASE_URL.startswith("postgresql"),
-        reason="needs a real PostgreSQL database with RLS and an application role",
-    ),
-]
+pytestmark = [pytest.mark.asyncio]
+
+
+def _unavailable(reason: str) -> None:
+    if REQUIRED:
+        pytest.fail(f"provision-admin RLS test is required but unavailable: {reason}")
+    pytest.skip(reason)
 
 
 def _provision_module():
@@ -44,6 +46,8 @@ def _provision_module():
 
 @pytest.mark.asyncio
 async def test_provision_succeeds_as_the_application_role_with_rls_on(monkeypatch):
+    if not DATABASE_URL.startswith("postgresql"):
+        _unavailable("DATABASE_URL is not a PostgreSQL URL")
     engine = create_async_engine(DATABASE_URL)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -59,8 +63,9 @@ async def test_provision_succeeds_as_the_application_role_with_rls_on(monkeypatc
                 )
             )
         if superuser or not rls:
-            pytest.skip(
-                f"database role {role!r} bypasses RLS (superuser={superuser}, forced_rls={rls})"
+            _unavailable(
+                f"database role {role!r} bypasses RLS "
+                f"(superuser={superuser}, forced_rls={rls})"
             )
 
         module = _provision_module()
