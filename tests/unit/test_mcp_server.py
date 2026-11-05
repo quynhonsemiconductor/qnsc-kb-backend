@@ -621,6 +621,7 @@ SAMPLE = {
     "rating": 1,
     "conversation_id": ARTICLE_ID,
     "lesson_id": ARTICLE_ID,
+    "basis": "said_by_user",
 }
 
 
@@ -814,7 +815,10 @@ def test_the_department_hint_is_attached_for_a_write_token(monkeypatch):
     w.reply = (422, {"detail": "A department is required"})
     out = w.result(
         "tools/call",
-        {"name": "record_lesson", "arguments": {"title": "t", "lesson": "l"}},
+        {
+            "name": "record_lesson",
+            "arguments": {"title": "t", "lesson": "l", "basis": "said_by_user"},
+        },
     )
     text = out["content"][0]["text"]
     assert out["isError"] is True

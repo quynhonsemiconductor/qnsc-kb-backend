@@ -88,7 +88,9 @@ is on; without it the tools are hidden.
   publishes it **at once** for the author's department, as an article of type `LESSON`, so
   `search_knowledge` and `ask_knowledge_base` find it straight away (a colleague's assistant
   found one 9 s after it was saved). A lesson needs a department: pass `dept` unless the user
-  has one set. What keeps this safe:
+  has one set. `basis` is required (`said_by_user`, `confirmed_by_user`, `tested_in_session`): a lesson
+  records what the person said, confirmed or tested with the assistant, not conclusions the assistant drew alone from
+  reading documents, and not something the person did not agree to. What keeps this safe:
   - **Reviewed and unreviewed stay distinguishable.** A search hit has `type: LESSON`; an answer
     that relies on a lesson says it is an unreviewed team lesson, and when a reviewed document
     and a lesson disagree it presents both.

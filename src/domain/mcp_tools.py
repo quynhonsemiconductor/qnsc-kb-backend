@@ -451,14 +451,37 @@ def _my_drafts(args: dict[str, Any]) -> Call:
 LESSON_TAG = "session-lesson"
 
 
+#: Where a lesson comes from. A lesson is shared with the team at once and unreviewed, so it must be something a
+#: person stood behind: said, confirmed or tested together with the assistant. What an assistant concluded alone
+#: from reading documents is not on this list (the documents already say it, and a guess shared as a lesson
+#: misleads the next person).
+LESSON_BASES = ("said_by_user", "confirmed_by_user", "tested_in_session")
+
+
+def _lesson_basis(args: dict[str, Any]) -> str:
+    value = _text(args, "basis", required=True, max_len=30)
+    if value not in LESSON_BASES:
+        raise ToolInputError(
+            "'basis' must be one of: "
+            + ", ".join(LESSON_BASES)
+            + ". A lesson records what the person "
+            "said, confirmed or tested with you in this conversation; do not record your own conclusions "
+            "from documents (the documents already hold them) and do not record without the person's "
+            "agreement."
+        )
+    return value
+
+
 def _record_lesson(args: dict[str, Any]) -> Call:
     """A lesson learned in an AI session.
 
     The server compares it with what is stored and either publishes it at once as a new
     lesson, or merges it into the existing lesson it adds to, or says which reviewed document
     to ask an editor to change, or that it is already known (src/domain/lessons.py). There is
-    no review step; the body shape and the `session-lesson` tag are applied there.
+    no review step; the body shape and the `session-lesson` tag are applied there. `basis` is checked here and not
+    sent: it makes the assistant say what the lesson rests on before it is shared.
     """
+    _lesson_basis(args)
     return Call(
         "POST",
         "/knowledge/lessons",
@@ -838,7 +861,10 @@ TOOLS: tuple[Tool, ...] = (
         "record_lesson",
         "Record a lesson learned in this session",
         "Save something worth keeping from this session -- a decision and its reason, a fix "
-        "that worked, a rule you were told -- so the next person's AI can find it. Write the "
+        "that worked, a rule you were told -- so the next person's AI can find it. Save ONLY what "
+        "the person said, confirmed or tested with you in this conversation, and only when they "
+        "asked you to or agreed to it: never your own conclusions from reading documents (the "
+        "documents already hold them; a guess shared as a lesson misleads the team). Write the "
         "lesson so it makes sense without this conversation. A lesson is published at once for "
         "the user's department, with no reviewer: search_knowledge and ask_knowledge_base find "
         "it straight away, labelled as an unreviewed team lesson. The server first checks what "
@@ -856,11 +882,17 @@ TOOLS: tuple[Tool, ...] = (
                 "type": "string",
                 "description": "Optional: where it applies and why it holds",
             },
+            "basis": {
+                "type": "string",
+                "enum": list(LESSON_BASES),
+                "description": "What it rests on: said_by_user (the person told you), confirmed_by_user "
+                "(you proposed it and they agreed) or tested_in_session (you tried it together)",
+            },
             "dept": {"type": "string"},
             "language": {"type": "string", "description": "vi or en"},
             "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 19},
         },
-        ("title", "lesson"),
+        ("title", "lesson", "basis"),
         _record_lesson,
         write=True,
     ),
