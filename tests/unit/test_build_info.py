@@ -23,6 +23,7 @@ ECS = "http://169.254.170.2/v4/abc"
 def _fresh(monkeypatch):
     build_info.reset_cache()
     monkeypatch.setattr(settings, "APP_COMMIT_SHA", None)
+    monkeypatch.setattr(settings, "APP_COMMIT", None)
     yield
     build_info.reset_cache()
 
@@ -81,6 +82,52 @@ def test_outside_ecs_the_commit_is_unknown_not_guessed(monkeypatch):
     info = _run(get_build_info())
     assert info.commit is None and info.commit_short is None
     assert info.version == __version__
+
+
+def test_the_charts_app_commit_is_the_commit_outside_ecs(monkeypatch):
+    # The on-prem chart derives APP_COMMIT from the `sha-<commit>` image tag
+    # (charts/qnsc-service, 0.19.3), so an on-prem dev pod reports its build instead of
+    # "unknown". APP_COMMIT carries no `sha-` prefix — the chart strips it.
+    monkeypatch.delenv("ECS_CONTAINER_METADATA_URI_V4", raising=False)
+    monkeypatch.setattr(settings, "APP_COMMIT", SHA[:12])
+    info = _run(get_build_info())
+    assert info.commit == SHA[:12]
+    assert info.commit_short == SHA[:7]
+
+
+def test_app_commit_sha_still_wins_over_the_charts_app_commit(monkeypatch):
+    monkeypatch.setattr(settings, "APP_COMMIT_SHA", SHA)
+    monkeypatch.setattr(settings, "APP_COMMIT", "abc1234")
+    assert _run(get_build_info()).commit == SHA
+
+
+def test_an_app_commit_that_is_not_a_commit_is_ignored(monkeypatch):
+    # A release tag names no commit and the chart omits APP_COMMIT; anything else that reaches
+    # this variable (a tag, a URL, a truncated value) must not be shown as the running commit.
+    monkeypatch.delenv("ECS_CONTAINER_METADATA_URI_V4", raising=False)
+    for value in ("v0.1.2", "sha-" + SHA[:12], "prod", "abc", SHA[:12] + "zz"):
+        monkeypatch.setattr(settings, "APP_COMMIT", value)
+        assert _run(get_build_info()).commit is None, value
+
+
+def test_a_rejected_commit_variable_is_warned_about_by_name_without_its_value(monkeypatch):
+    # A host set the variable to something that is not a commit; the name is enough to fix
+    # it, and the value is never echoed (it can be a URL or another secret-bearing mistake).
+    warnings = []
+
+    class _Recorder:
+        def warning(self, message, **kwargs):
+            warnings.append((message, kwargs))
+
+    monkeypatch.setattr(build_info, "logger", _Recorder())
+    monkeypatch.setattr(settings, "APP_COMMIT_SHA", "https://example.invalid/commit")
+    monkeypatch.setattr(settings, "APP_COMMIT", "abc1234")
+    info = _run(get_build_info())
+    assert info.commit == "abc1234"
+    assert len(warnings) == 1
+    message = warnings[0][0]
+    assert "APP_COMMIT_SHA" in message and "not a hex commit, ignored" in message
+    assert "example.invalid" not in str(warnings)
 
 
 def test_only_the_link_local_agent_is_ever_fetched(monkeypatch):
