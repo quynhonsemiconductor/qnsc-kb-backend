@@ -18,10 +18,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import structlog
 import uvicorn
 
 from src.api import main as api
 from src.lib.observability import ProbeAccessFilter
+
+logger = structlog.get_logger()
 
 
 class ContractServer(uvicorn.Server):
@@ -33,7 +36,7 @@ class ContractServer(uvicorn.Server):
             # default path — `should_exit = True` right away — would close the
             # listeners before that delay, refusing requests already routed here.
             state.begin(api.SHUTDOWN_PLAN, asyncio.get_event_loop().time())
-            logging.getLogger("uvicorn.error").info(
+            logger.info(
                 "Shutdown: draining",
                 delay_ms=int(api.SHUTDOWN_PLAN.endpoint_delay_seconds * 1000),
                 timeout_ms=int(api.SHUTDOWN_PLAN.timeout_seconds * 1000),

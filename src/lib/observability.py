@@ -33,7 +33,7 @@ class ProbeAccessFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        args = record.args or ()
+        args = record.args if isinstance(record.args, tuple) else ()
         candidate = str(args[2]) if len(args) > 2 else ""
         return not is_probe_path(candidate)
 
