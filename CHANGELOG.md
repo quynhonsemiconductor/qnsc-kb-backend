@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.3...v0.1.4) (2026-11-05)
+
+
+### 🐛 Bug Fixes
+
+* **scripts:** provision_admin sets the Admin RLS context; add --no-password ([#384](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/384)) ([114c5a4](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/114c5a4b94a4d4c31a67219873e16840c554d7e9))
+
 ## [0.1.3](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.2...v0.1.3) (2026-11-05)
 
 
