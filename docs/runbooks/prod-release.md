@@ -101,7 +101,8 @@ promotion, and **never** a go-live state.
 
 ## 4. Charts and prod values (what breaks enabling the row)
 
-`gitops#255` enables the kb prod row at chart **0.19.3**. Chart **0.19.2** made the data-egress
+`gitops#255` carries the kb prod row at chart **0.19.3**, still commented; the PR that uncomments
+it (after the data layer is live) is the one that renders it. Chart **0.19.2** made the data-egress
 NetworkPolicy select the cache by pod label, and from 0.19.2 on rendering kb prod **fails** while
 `values/kb/prod.yaml` has no `data.cache.instance`:
 
