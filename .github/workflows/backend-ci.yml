@@ -89,7 +89,7 @@ jobs:
         # queue's files and could return false — the queue entry must always run it. The
         # skipped step leaves the output empty and the gate's `!= 'false'` branch runs it.
         if: github.event_name == 'pull_request'
-        uses: quynhonsemiconductor/ci/actions/changed-paths@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/changed-paths@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           ignore: |
             **/*.md
@@ -100,7 +100,7 @@ jobs:
             **/test_*.py
             **/*_test.py
       - id: paths
-        uses: quynhonsemiconductor/ci/actions/changed-paths@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/changed-paths@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           ignore: |
             **/*.md
@@ -611,7 +611,7 @@ jobs:
       # CRITICAL blocks this job, hence `Backend CI required`; HIGH is reported. This used to be its own job in the security
       # workflow that rebuilt the same image from scratch.
       - name: Container CVE scan (Trivy)
-        uses: quynhonsemiconductor/ci/actions/scan-image@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/scan-image@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           image-ref: qnsc-kb-api:scan
 
@@ -700,7 +700,7 @@ jobs:
 
       - name: Detect breaking API changes
         if: github.event_name == 'pull_request'
-        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/validate-openapi-contract@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           current-spec-path: openapi.json
           base-spec-path: /tmp/openapi-base.json
@@ -708,7 +708,7 @@ jobs:
       # Uploaded on every run so the frontend repo has a spec to check its client
       # against, and so a reviewer can read what the API surface became.
       - name: Publish OpenAPI spec
-        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/publish-openapi-spec@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           spec-path: openapi.json
 
@@ -741,7 +741,7 @@ jobs:
       #    empty, this branch runs, and the gate fails: it cannot turn "could not decide" into a pass.
       - name: Every job must have succeeded
         if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart != 'false' }}
-        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           results: ${{ join(needs.*.result, ',') }}
 
@@ -751,19 +751,19 @@ jobs:
       # when the quickstart was skipped.
       - name: Everything but the quickstart must have succeeded
         if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart == 'false' }}
-        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           results: ${{ needs.changes.result }},${{ needs.quality.result }},${{ needs.test.result }},${{ needs.migrations.result }},${{ needs.build.result }},${{ needs.openapi.result }}
 
       - name: The quickstart was skipped by its path filter (and only by that)
         if: ${{ needs.changes.outputs.run == 'true' && needs.changes.outputs.quickstart == 'false' }}
-        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           results: ${{ needs.quickstart.result }}
           allow-skipped: true
 
       - name: Nothing here to test (every changed file is ignorable)
         if: ${{ needs.changes.outputs.run != 'true' }}
-        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@400b7e9868e9ba6d172d956a08041ba19b574689 # v1.33.1
+        uses: quynhonsemiconductor/ci/actions/assert-jobs-succeeded@956804ad4aa2dcf930909553d306d72b3708fd5d # v1.34.1+ci#308
         with:
           results: ${{ needs.changes.result }}
