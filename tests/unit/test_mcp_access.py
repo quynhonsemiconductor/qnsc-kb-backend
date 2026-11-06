@@ -151,6 +151,10 @@ def test_the_first_access_subject_is_bound_and_a_different_one_is_refused(monkey
         async def rollback(self):
             pass
 
+        async def refresh(self, obj):
+            # What the authoritative re-read sees after the UPDATE committed.
+            obj.access_subject = "access-sub"
+
     reads = {"count": 0}
 
     class Repo:

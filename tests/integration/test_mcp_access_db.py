@@ -13,9 +13,11 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.api.deps import set_database_context
+from src.domain.rbac import bootstrap_rbac
 from src.models.user import User
 from src.repositories.user import AmbiguousEmailError, UserRepository
 
@@ -36,9 +38,11 @@ async def factory():
 
 
 async def _add(db, *, email: str, user_id=None) -> uuid.UUID:
+    # Core INSERT, deliberately: the ORM validator lowercases `email`, and these tests
+    # exist to prove the lookup against legacy rows that were stored with mixed case.
     user_id = user_id or uuid.uuid4()
-    db.add(
-        User(
+    await db.execute(
+        insert(User).values(
             id=user_id,
             email=email,
             name="MCP Test",
@@ -108,3 +112,49 @@ async def test_the_exact_address_wins_and_a_lowercase_collision_is_an_explicit_e
                 await UserRepository(db).get_by_email(f"dup.{token}@example.test")
         finally:
             await _cleanup(db, lower_id, mixed_id, dup_a_id, dup_b_id)
+
+
+@pytest.mark.asyncio
+async def test_two_sessions_cannot_bind_the_same_account_to_different_subjects(factory):
+    """The first-bind race: the loser must see the winner's row, not its own stale object.
+
+    Both sessions load the unbound row into their identity maps before either writes.
+    `expire_on_commit=False` plus an ORM-synchronised UPDATE used to leave the loser with
+    an object that looked bound to its own `sub` even though its UPDATE matched zero rows.
+    """
+    from src.api.routers import mcp
+    from src.domain.access_jwt import AccessIdentity
+
+    token = uuid.uuid4().hex[:10]
+    email = f"race.{token}@example.test"
+    winner = f"race-winner-{token}"
+    loser_sub = f"race-loser-{token}"
+    async with factory() as setup:
+        await set_database_context(setup, None, True)
+        user_id = await _add(setup, email=email)
+        await setup.commit()
+        # Bootstrap now, so neither session runs it during the race; that bootstrap is a
+        # separate concurrent-writer problem, not the binding under test. It backfills
+        # the user with a Staff role, so `active_user_with_context` skips its own call.
+        await bootstrap_rbac(setup)
+        await setup.commit()
+
+    async with factory() as a, factory() as b:
+        writer = await UserRepository(a).get_by_email(email)
+        loser = await UserRepository(b).get_by_email(email)
+        assert writer is not None and loser is not None
+        assert writer.access_subject is None and loser.access_subject is None
+
+        await mcp.resolve_access_principal(
+            a, AccessIdentity(sub=winner, email=email, oid=None)
+        )
+        with pytest.raises(mcp.AccessDeniedError):
+            await mcp.resolve_access_principal(
+                b, AccessIdentity(sub=loser_sub, email=email, oid=None)
+            )
+
+    async with factory() as check:
+        await set_database_context(check, None, True)
+        row = await check.get(User, user_id)
+        assert row is not None and row.access_subject == winner
+        await _cleanup(check, user_id)

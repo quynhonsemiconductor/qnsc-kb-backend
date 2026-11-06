@@ -39,7 +39,7 @@ from src.core.config import settings
 from src.domain.auth import AuthService
 from src.domain.rbac import bootstrap_rbac
 from src.models.rbac import Role
-from src.repositories.user import UserRepository
+from src.repositories.user import AmbiguousEmailError, UserRepository
 
 
 async def main() -> int:
@@ -74,7 +74,15 @@ async def main() -> int:
             await db.execute(text("SET app.global_admin = 'true'"))
 
             repo = UserRepository(db)
-            if await repo.get_by_email(email):
+            try:
+                existing = await repo.get_by_email(email)
+            except AmbiguousEmailError:
+                print(
+                    f"more than one account matches {email} case-insensitively; "
+                    "resolve the collision before creating an administrator"
+                )
+                return 1
+            if existing:
                 print(f"user {email} already exists — nothing to do")
                 return 0
 
@@ -112,6 +120,7 @@ async def main() -> int:
             # one with company_domain = NULL. A company-scoped Admin is not the same thing
             # and cannot administer another tenant.
             user = await repo.get_by_id(user.id)
+            assert user is not None, "the administrator vanished inside the transaction"
             user.roles = [admin_role]
             await db.commit()
 

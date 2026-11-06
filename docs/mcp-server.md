@@ -24,7 +24,9 @@ The account gate and tenant context are the **same helper the REST dependency us
 The first verified Access `sub` is bound to the account; a later token for the same email
 with a different Access identity is refused, so a reassigned mailbox does not inherit the
 account. Clearing `users.access_subject` rebinds it. The email lookup prefers the exact
-stored address; if two rows collide case-insensitively it refuses rather than choosing one.
+stored address, then the normalised form; a case-insensitive collision refuses rather than
+choosing one. Every account and invitation create path normalises the address, and a
+`lower(email)` expression index backs the fallback.
 
 An Access caller is **read-only**, and that is a property of the call, not only of the
 tool list: every tool it can see is GET-backed (so `ask_knowledge_base`, which POSTs to
@@ -33,9 +35,11 @@ is refused before the REST call. The person's own RBAC, department scope, ACLs a
 row-level security still apply to every result, exactly as in the web app.
 
 The Access branch has a cheap address-keyed pre-authentication budget
-(`MCP_AUTH_RATE_LIMIT_PER_MINUTE`) before any JWKS lookup, a 60 s JWKS refresh cooldown,
-and a bounded negative cache for unknown `kid`s. A repeated bogus key never reaches the
-JWKS client.
+(`MCP_AUTH_RATE_LIMIT_PER_MINUTE`) before any JWKS lookup. The key set has its own cache;
+a miss (a new Cloudflare `kid`) is re-checked inside a lock and refreshed at most once per
+60 s cooldown, so a rotation verifies on first presentation while a burst of bogus kids
+costs one fetch. A JWKS outage is bounded to the same one fetch per cooldown; the cooldown
+is checked before the lock so a slow origin cannot park every request.
 
 Personal access tokens keep working when these settings are unset; if an Access header
 arrives while the server is not configured for Access, the answer is `503`, not a bad-token

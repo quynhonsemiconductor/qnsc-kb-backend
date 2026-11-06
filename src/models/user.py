@@ -14,8 +14,8 @@ from sqlalchemy import (
     Text,
     JSON,
 )
-from sqlalchemy import true
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import func, true
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
 # User <-> Department membership. ``users.dept`` remains the primary
@@ -99,6 +99,16 @@ class DepartmentManager(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "users"
 
+    @validates("email")
+    def _normalise_email(self, key: str, value: str) -> str:
+        # Every create and every assignment: an IdP may hand back a different case for the
+        # same mailbox, and a case variant must never become a second account. Return the
+        # original object when it is already canonical so an unchanged assign is a no-op.
+        if not isinstance(value, str):
+            return value
+        normalised = value.strip().lower()
+        return normalised if normalised != value else value
+
     email: Mapped[str] = mapped_column(
         String(255), unique=True, index=True, nullable=False
     )
@@ -122,6 +132,10 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     access_subject: Mapped[str | None] = mapped_column(
         String(255), unique=True, index=True, nullable=True
     )
+
+    # The Access lookup falls back to lower(email); without this expression index that
+    # fallback is a sequential scan on a table read on every authenticated request.
+    __table_args__ = (Index("ix_users_email_lower", func.lower(email)),)
 
     departments: Mapped[list[Department]] = relationship(
         "Department",
@@ -175,6 +189,13 @@ class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UniqueConstraint("token_hash", name="uq_invitations_token_hash"),
         Index("ix_invitations_email_domain", "email", "company_domain"),
     )
+
+    @validates("email")
+    def _normalise_email(self, key: str, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        normalised = value.strip().lower()
+        return normalised if normalised != value else value
 
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)

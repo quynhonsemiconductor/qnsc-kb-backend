@@ -49,9 +49,8 @@ ACCESS_JWT_HEADER = "cf-access-jwt-assertion"
 DEFAULT_CLOCK_TOLERANCE_SECONDS = 60
 DEFAULT_JWKS_TIMEOUT_SECONDS = 10.0
 DEFAULT_JWKS_COOLDOWN_SECONDS = 60.0
-DEFAULT_UNKNOWN_KID_TTL_SECONDS = 60.0
+DEFAULT_JWKS_CACHE_SECONDS = 300.0
 DEFAULT_OID_CLAIM_PATH = "oid"
-MAX_NEGATIVE_KID_ENTRIES = 1024
 
 
 class AccessJwtError(Exception):
@@ -88,9 +87,9 @@ class AccessJwtConfig:
     #: Minimum seconds between forced JWKS refreshes after an unknown `kid`. This is the
     #: storm guard: PyJWT's own default is 30, too short for an unauthenticated endpoint.
     jwks_cooldown_seconds: float = DEFAULT_JWKS_COOLDOWN_SECONDS
-    #: An unknown `kid` is refused from a negative cache for this long, so repeating the
-    #: same bogus key never even reaches the JWKS client.
-    unknown_kid_ttl_seconds: float = DEFAULT_UNKNOWN_KID_TTL_SECONDS
+    #: How long a fetched key set is used before an unforced refetch. A fetch on expiry
+    #: goes through the same cooldown gate as an unknown kid.
+    jwks_cache_seconds: float = DEFAULT_JWKS_CACHE_SECONDS
 
 
 def _claim_at(payload: Mapping[str, Any], path: str) -> Any:
@@ -146,51 +145,110 @@ class AccessJwtVerifier:
         self._oid_claim_path = config.oid_claim_path
         self._allow_email_fallback = config.allow_email_fallback
         self._clock_tolerance = config.clock_tolerance_seconds
-        self._unknown_kid_ttl = config.unknown_kid_ttl_seconds
-        if self._unknown_kid_ttl < 0:
-            raise AccessJwtError("malformed", "unknown_kid_ttl_seconds must be >= 0")
         if config.jwks_cooldown_seconds < 0:
             raise AccessJwtError("malformed", "jwks_cooldown_seconds must be >= 0")
-        self._unknown_kids: dict[str, float] = {}
-        self._unknown_kids_lock = threading.Lock()
+        if config.jwks_cache_seconds <= 0:
+            raise AccessJwtError("malformed", "jwks_cache_seconds must be > 0")
+        #: The key set this verifier serves. We own the cache instead of PyJWT's, because
+        #: BOTH an unknown kid and a cache-expiry refetch must pass through one gate.
+        self._keys: list[PyJWK] | None = None
+        self._keys_at: float | None = None
+        self._keys_lock = threading.Lock()
+        self._last_fetch_attempt: float | None = None
+        self._last_forced_refresh: float | None = None
+        self._refresh_cooldown = config.jwks_cooldown_seconds
+        self._cache_seconds = config.jwks_cache_seconds
         self._jwk_client = jwk_client or PyJWKClient(
             f"{team_domain}/cdn-cgi/access/certs",
-            cache_keys=True,
+            cache_keys=False,
+            cache_jwk_set=False,
             timeout=config.jwks_timeout_seconds,
-            # PyJWT's default is 30 s; an unauthenticated endpoint needs the longer
-            # cooldown so a stream of unknown kids cannot force a refresh per request.
-            cooldown_duration=config.jwks_cooldown_seconds,
+            cooldown_duration=0,
         )
 
-    def _known_unknown_kid(self, kid: str) -> bool:
-        now = time.monotonic()
-        with self._unknown_kids_lock:
-            expires = self._unknown_kids.get(kid)
-            if expires is None:
-                return False
-            if expires <= now:
-                del self._unknown_kids[kid]
-                return False
-            return True
+    @staticmethod
+    def _cooling(last: float | None, cooldown: float) -> bool:
+        return last is not None and time.monotonic() - last < cooldown
 
-    def _remember_unknown_kid(self, kid: str) -> None:
-        if self._unknown_kid_ttl <= 0:
-            return
-        now = time.monotonic()
-        with self._unknown_kids_lock:
-            if len(self._unknown_kids) >= MAX_NEGATIVE_KID_ENTRIES:
-                # Drop expired entries first; if the cache is still full of live ones, the
-                # oldest is evicted. Bounded memory is the point: `kid` is caller input.
-                for key, expiry in list(self._unknown_kids.items()):
-                    if expiry <= now:
-                        del self._unknown_kids[key]
-                if len(self._unknown_kids) >= MAX_NEGATIVE_KID_ENTRIES:
-                    self._unknown_kids.pop(next(iter(self._unknown_kids)))
-            self._unknown_kids[kid] = now + self._unknown_kid_ttl
+    def _fetch_keys(self) -> list[PyJWK]:
+        """One outbound JWKS fetch. The timestamp is consumed even on failure."""
+        try:
+            keys = self._jwk_client.get_signing_keys(refresh=True)
+        finally:
+            self._last_fetch_attempt = time.monotonic()
+        self._keys = keys
+        self._keys_at = time.monotonic()
+        return keys
 
-    def _forget_unknown_kid(self, kid: str) -> None:
-        with self._unknown_kids_lock:
-            self._unknown_kids.pop(kid, None)
+    def _current_keys(self) -> list[PyJWK]:
+        """The current key set, refetching on expiry through the shared cooldown gate."""
+        now = time.monotonic()
+        if self._keys is not None and self._keys_at is not None:
+            if now - self._keys_at < self._cache_seconds:
+                return self._keys
+        # Expiry. Check the cooldown BEFORE the lock: during an outage a request must
+        # fail fast rather than queue behind a thread waiting on the network.
+        if self._cooling(self._last_fetch_attempt, self._refresh_cooldown):
+            if self._keys is None:
+                raise AccessJwtError(
+                    "jwks_unavailable", "the team JWKS could not be fetched"
+                )
+            return self._keys
+        with self._keys_lock:
+            now = time.monotonic()
+            if (
+                self._keys is not None
+                and self._keys_at is not None
+                and now - self._keys_at < self._cache_seconds
+            ):
+                return self._keys
+            if self._cooling(self._last_fetch_attempt, self._refresh_cooldown):
+                if self._keys is None:
+                    raise AccessJwtError(
+                        "jwks_unavailable", "the team JWKS could not be fetched"
+                    )
+                return self._keys
+            return self._fetch_keys()
+
+    def _key_for(self, kid: str) -> PyJWK | None:
+        """The signing key for `kid`, refreshing at most once per cooldown on a miss.
+
+        A new Cloudflare `kid` is a rotation, not an error. The cooldown is checked
+        before the lock so an outage cannot park every request; inside the lock the kid is
+        re-checked in the CURRENT set first, so a second thread waiting behind a refresh
+        sees the rotated key instead of a stale "unknown".
+        """
+        keys = self._current_keys()
+        key = PyJWKClient.match_kid(keys, kid)
+        if key is not None:
+            return key
+
+        if self._cooling(self._last_forced_refresh, self._refresh_cooldown):
+            # Another thread may have refreshed while this one was deciding. Re-check
+            # without taking the lock: the set is already in memory.
+            return PyJWKClient.match_kid(self._current_keys(), kid)
+
+        with self._keys_lock:
+            now = time.monotonic()
+            fresh = (
+                self._keys is not None
+                and self._keys_at is not None
+                and now - self._keys_at < self._cache_seconds
+            )
+            if not fresh and not self._cooling(
+                self._last_fetch_attempt, self._refresh_cooldown
+            ):
+                self._fetch_keys()
+            key = PyJWKClient.match_kid(self._keys or [], kid)
+            if key is not None:
+                return key
+            if self._cooling(self._last_forced_refresh, self._refresh_cooldown):
+                return None
+            try:
+                keys = self._fetch_keys()
+            finally:
+                self._last_forced_refresh = time.monotonic()
+            return PyJWKClient.match_kid(keys, kid)
 
     def verify(self, token: str) -> AccessIdentity:
         """Verify a raw Access JWT and return the person it names."""
@@ -207,30 +265,20 @@ class AccessJwtVerifier:
         if not isinstance(kid, str) or not kid:
             raise AccessJwtError("malformed", "the Access JWT carries no `kid`")
 
-        if self._known_unknown_kid(kid):
-            # No JWKS client call at all: the same bogus key was already refused recently.
-            raise AccessJwtError(
-                "invalid_signature", "the Access JWT signature is invalid"
-            )
-
         try:
-            signing_key: PyJWK = self._jwk_client.get_signing_key(kid)
+            signing_key = self._key_for(kid)
         except PyJWKClientConnectionError:
             raise AccessJwtError(
                 "jwks_unavailable", "the team JWKS could not be fetched"
             ) from None
-        except PyJWKSetError:
-            # The JWKS itself is unusable, not this token. Do not negative-cache the kid:
-            # the next request should be allowed to try again once the set recovers.
+        except (PyJWKSetError, PyJWKClientError):
             raise AccessJwtError(
                 "jwks_unavailable", "the team JWKS could not be used"
             ) from None
-        except PyJWKClientError:
-            self._remember_unknown_kid(kid)
+        if signing_key is None:
             raise AccessJwtError(
                 "invalid_signature", "the Access JWT signature is invalid"
-            ) from None
-        self._forget_unknown_kid(kid)
+            )
 
         try:
             claims = jwt.decode(

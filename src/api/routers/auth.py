@@ -27,7 +27,7 @@ from src.api.deps import (
     require_permission,
     set_database_context,
 )
-from src.repositories.user import UserRepository
+from src.repositories.user import AmbiguousEmailError, UserRepository
 from src.domain.auth import AuthService
 from src.domain.factory_reset import is_reset_operator
 from src.core.config import settings
@@ -941,9 +941,14 @@ async def accept_invitation(
     await set_database_context(db, None, True)
     item = await _live_invitation(db, payload.token)
 
-    existing = (
-        await db.execute(select(User).where(User.email == item.email))
-    ).scalar_one_or_none()
+    invited_email = item.email.strip().lower()
+    try:
+        existing = await UserRepository(db).get_by_email(invited_email)
+    except AmbiguousEmailError:
+        raise HTTPException(
+            status_code=409,
+            detail="More than one account matches this invitation's email",
+        ) from None
     if existing is not None and existing.active:
         raise HTTPException(
             status_code=409, detail="An active account already exists for this email"
@@ -960,7 +965,7 @@ async def accept_invitation(
         user.auth_version += 1
     else:
         user = User(
-            email=item.email,
+            email=invited_email,
             name=item.name,
             password_hash=get_password_hash(payload.password),
             company_domain=item.company_domain,
@@ -2659,7 +2664,10 @@ async def refresh_token(
         raise HTTPException(
             status_code=401, detail="Refresh token has been revoked or expired"
         )
-    user = await UserRepository(db).get_by_email(refresh_subject)
+    try:
+        user = await UserRepository(db).get_by_email(refresh_subject)
+    except AmbiguousEmailError:
+        raise HTTPException(status_code=401, detail="Account is unavailable") from None
     if (
         not user
         or not user.active
@@ -2828,11 +2836,14 @@ async def entra_callback(
             )
         )
     ).scalar_one_or_none()
-    user = (
-        await UserRepository(db).get_by_id(identity.user_id)
-        if identity
-        else await UserRepository(db).get_by_email(email)
-    )
+    try:
+        user = (
+            await UserRepository(db).get_by_id(identity.user_id)
+            if identity
+            else await UserRepository(db).get_by_email(email)
+        )
+    except AmbiguousEmailError:
+        raise HTTPException(status_code=403, detail="Account is unavailable") from None
     invitation = None
     if user is None:
         invitation = (
@@ -2840,7 +2851,7 @@ async def entra_callback(
                 await db.execute(
                     select(Invitation)
                     .where(
-                        Invitation.email == email,
+                        func.lower(Invitation.email) == email.strip().lower(),
                         Invitation.company_domain == email.rsplit("@", 1)[-1],
                         Invitation.used_at.is_(None),
                         Invitation.revoked_at.is_(None),
