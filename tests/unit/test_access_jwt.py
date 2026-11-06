@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt.exceptions import PyJWKClientConnectionError
+from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 from src.domain.access_jwt import (
     AccessJwtConfig,
@@ -22,13 +22,26 @@ KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 class FakeJwkClient:
-    def __init__(self, *, key=None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        key=None,
+        error: Exception | None = None,
+        unknown_kids: set[str] | None = None,
+    ) -> None:
         self._key = key if key is not None else KEY.public_key()
         self._error = error
+        self._unknown_kids = unknown_kids or set()
+        self.lookups: list[str] = []
 
-    def get_signing_key_from_jwt(self, token: str):
+    def get_signing_key(self, kid: str):
+        self.lookups.append(kid)
         if self._error is not None:
             raise self._error
+        if kid in self._unknown_kids:
+            raise PyJWKClientError(
+                f'Unable to find a signing key that matches: "{kid}"'
+            )
         return SimpleNamespace(key=self._key)
 
 
@@ -161,3 +174,56 @@ def test_configuration_is_pinned():
         AccessJwtVerifier(
             AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE, oid_claim_path="")
         )
+
+
+def test_an_unknown_kid_is_negative_cached_before_a_second_lookup():
+    client = FakeJwkClient(unknown_kids={"test-key"})
+    v = AccessJwtVerifier(
+        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
+        jwk_client=client,
+    )
+    token = access_token()
+    for _ in range(3):
+        assert rejection(token, v=v) == "invalid_signature"
+    # One lookup, then the negative cache answers: a repeated bogus kid cannot drive the
+    # JWKS client (and so cannot drive an outbound refresh) again inside the TTL.
+    assert client.lookups == ["test-key"]
+
+
+def test_the_negative_cache_is_bounded():
+    client = FakeJwkClient(unknown_kids={f"kid-{i}" for i in range(20)})
+    v = AccessJwtVerifier(
+        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
+        jwk_client=client,
+    )
+    for i in range(20):
+        token = access_token()
+        # Re-sign with a distinct unknown kid.
+        token = jwt.encode(
+            jwt.decode(
+                token,
+                KEY.public_key(),
+                algorithms=["RS256"],
+                audience=AUDIENCE,
+                issuer=TEAM,
+            ),
+            KEY,
+            algorithm="RS256",
+            headers={"kid": f"kid-{i}"},
+        )
+        assert rejection(token, v=v) == "invalid_signature"
+    from src.domain import access_jwt as module
+
+    assert len(v._unknown_kids) <= module.MAX_NEGATIVE_KID_ENTRIES
+
+
+def test_the_jwks_cooldown_is_at_least_a_minute(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("src.domain.access_jwt.PyJWKClient", Client)
+    AccessJwtVerifier(AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE))
+    assert captured["cooldown_duration"] >= 60

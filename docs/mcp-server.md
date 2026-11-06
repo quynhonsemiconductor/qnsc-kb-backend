@@ -19,13 +19,44 @@ against the team JWKS, `iss` (the team origin), `aud` (the Access application's 
 RS256, `exp` and `nbf`; it then maps the token's IdP-verified **email** to an ACTIVE user.
 An unknown or deactivated account is refused, never provisioned.
 
-An Access caller is **read-only**: the write tools are neither listed nor callable,
-whatever the person's role. The person's own RBAC, department scope, ACLs and row-level
-security still apply to every result, exactly as in the web app.
+The account gate and tenant context are the **same helper the REST dependency uses**
+(`active_user_with_context`): active, roles provisioned, and the same `app.*` settings.
+The first verified Access `sub` is bound to the account; a later token for the same email
+with a different Access identity is refused, so a reassigned mailbox does not inherit the
+account. Clearing `users.access_subject` rebinds it.
+
+An Access caller is **read-only**, and that is a property of the call, not only of the
+tool list: every tool it can see is GET-backed (so `ask_knowledge_base`, which POSTs to
+`/ai/ask` and records a conversation, is not offered), and a direct call to a non-GET tool
+is refused before the REST call. The person's own RBAC, department scope, ACLs and
+row-level security still apply to every result, exactly as in the web app.
+
+The Access branch has a cheap address-keyed pre-authentication budget
+(`MCP_AUTH_RATE_LIMIT_PER_MINUTE`) before any JWKS lookup, a 60 s JWKS refresh cooldown,
+and a bounded negative cache for unknown `kid`s. A repeated bogus key never reaches the
+JWKS client.
 
 Personal access tokens keep working when these settings are unset; if an Access header
 arrives while the server is not configured for Access, the answer is `503`, not a bad-token
 `401`.
+
+## Surface and middleware
+
+`/mcp` is mounted outside `API_V1_STR`, so it is worth naming what still covers it. The
+production app's global chain is:
+
+- `CORSMiddleware` — applies to every route; an allowed `Origin` gets the expected
+  `Access-Control-Allow-Origin` on `/mcp` (pinned by `test_mcp_asgi.py`).
+- `unhandled_error_boundary` — a 500 on `/mcp` still passes back through CORS.
+- `request_logging_middleware` — request id, security headers (`nosniff`, `DENY`,
+  `no-referrer`, permissions policy), `no-store, private` (extended to `/mcp`), metrics
+  and the `X-Request-ID` header.
+
+There is no global authentication dependency: `/mcp` authenticates itself (Access JWT or
+personal token) and then acts through the app's own REST route, whose `get_current_user`
+re-checks the account per call. There is no global body-size middleware either: the route
+enforces `MAX_BODY_BYTES` (2.5 MB) on `Content-Length` and on the bytes read, and the test
+suite posts an oversized body to `/mcp` to prove it.
 
 ## Getting a token
 

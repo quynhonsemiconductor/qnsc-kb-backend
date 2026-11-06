@@ -12,12 +12,16 @@ import jwt
 import pytest
 from fastapi import FastAPI, Request
 
+from src.api import deps
 from src.api.routers import mcp
 from src.core.config import settings
 from src.core.rate_limit import InMemoryRateLimiter
 from src.domain.access_jwt import AccessIdentity, AccessJwtError
 
 USER_ID = uuid.uuid4()
+STAFF_ROLE = SimpleNamespace(
+    active=True, name="Staff", company_domain="qnsc.vn", permissions=[]
+)
 
 
 def identity(email: str | None = "An.Nguyen@qnsc.vn") -> AccessIdentity:
@@ -31,8 +35,9 @@ def user(**overrides):
         "company_domain": "qnsc.vn",
         "active": True,
         "auth_version": 4,
-        "roles": [],
+        "roles": [STAFF_ROLE],
         "role": "Staff",
+        "access_subject": "access-sub",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -41,9 +46,10 @@ def user(**overrides):
 # -- resolving the Access identity to a KB user ------------------------------------
 
 
-def test_access_identity_is_mapped_with_the_rest_rls_context(monkeypatch):
+def test_access_identity_is_mapped_through_the_shared_rest_gate(monkeypatch):
     contexts: list[tuple] = []
     looked_up: list[str] = []
+    helper_calls: list[object] = []
 
     class Repo:
         def __init__(self, db):
@@ -56,23 +62,45 @@ def test_access_identity_is_mapped_with_the_rest_rls_context(monkeypatch):
     async def fake_context(db, *args):
         contexts.append((db, *args))
 
+    async def fake_helper(db, candidate):
+        helper_calls.append(candidate)
+        return candidate
+
     monkeypatch.setattr(mcp, "UserRepository", Repo)
     monkeypatch.setattr(mcp, "set_database_context", fake_context)
+    monkeypatch.setattr(mcp, "active_user_with_context", fake_helper)
 
     db = object()
     principal = asyncio.run(mcp.resolve_access_principal(db, identity()))
 
-    # The domain first, so identity RLS can find the row; then the user's own context,
-    # exactly as get_current_user applies it.
-    assert contexts == [
-        (db, "qnsc.vn"),
-        (db, "qnsc.vn", False, str(USER_ID), False, False, False, False),
-    ]
+    # The domain context is set before the identity lookup; the REST gate/context is the
+    # shared helper, not a second implementation of "usable account".
+    assert contexts == [(db, "qnsc.vn")]
     assert looked_up == ["an.nguyen@qnsc.vn"]
+    assert helper_calls == [user()]
     assert principal == mcp.AccessPrincipal(
         user_id=USER_ID, email="an.nguyen@qnsc.vn", auth_version=4
     )
     assert principal.can_write is False
+
+
+def test_the_shared_gate_is_the_rest_one(monkeypatch):
+    contexts: list[tuple] = []
+
+    async def fake_context(db, *args):
+        contexts.append((db, *args))
+
+    monkeypatch.setattr(deps, "set_database_context", fake_context)
+
+    db = object()
+    prepared = asyncio.run(deps.active_user_with_context(db, user()))
+    assert prepared is not None and prepared.id == USER_ID
+    assert contexts == [
+        (db, "qnsc.vn", False, str(USER_ID), False, False, False, False)
+    ]
+
+    assert asyncio.run(deps.active_user_with_context(db, None)) is None
+    assert asyncio.run(deps.active_user_with_context(db, user(active=False))) is None
 
 
 def test_an_unknown_or_inactive_user_is_refused(monkeypatch):
@@ -90,6 +118,8 @@ def test_an_unknown_or_inactive_user_is_refused(monkeypatch):
 
     monkeypatch.setattr(mcp, "UserRepository", Repo)
     monkeypatch.setattr(mcp, "set_database_context", fake_context)
+    monkeypatch.setattr(mcp, "active_user_with_context", deps.active_user_with_context)
+    monkeypatch.setattr(deps, "set_database_context", fake_context)
 
     db = object()
     with pytest.raises(mcp.AccessDeniedError):
@@ -103,6 +133,63 @@ def test_an_unknown_or_inactive_user_is_refused(monkeypatch):
     monkeypatch.setattr(mcp, "UserRepository", InactiveRepo)
     with pytest.raises(mcp.AccessDeniedError):
         asyncio.run(mcp.resolve_access_principal(object(), identity()))
+
+
+def test_the_first_access_subject_is_bound_and_a_different_one_is_refused(monkeypatch):
+    class FakeDB:
+        def __init__(self):
+            self.executed: list[object] = []
+            self.commits = 0
+
+        async def execute(self, statement, *args):
+            self.executed.append(statement)
+            return SimpleNamespace(rowcount=1)
+
+        async def commit(self):
+            self.commits += 1
+
+        async def rollback(self):
+            pass
+
+    reads = {"count": 0}
+
+    class Repo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_by_email(self, email):
+            reads["count"] += 1
+            # First read unbound, the read after the binding write carries the subject.
+            return user(access_subject=None if reads["count"] == 1 else "access-sub")
+
+    async def fake_helper(db, candidate):
+        return candidate
+
+    monkeypatch.setattr(mcp, "UserRepository", Repo)
+    monkeypatch.setattr(mcp, "active_user_with_context", fake_helper)
+
+    async def fake_context(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(mcp, "set_database_context", fake_context)
+    monkeypatch.setattr(deps, "set_database_context", fake_context)
+
+    db = FakeDB()
+    principal = asyncio.run(mcp.resolve_access_principal(db, identity()))
+    assert principal.user_id == USER_ID and db.commits == 1 and len(db.executed) == 1
+
+    # A verified token for the SAME email but a different Access identity is refused: the
+    # mailbox was reassigned, so the account does not follow it.
+    class MismatchedRepo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_by_email(self, email):
+            return user(access_subject="someone-else")
+
+    monkeypatch.setattr(mcp, "UserRepository", MismatchedRepo)
+    with pytest.raises(mcp.AccessDeniedError):
+        asyncio.run(mcp.resolve_access_principal(FakeDB(), identity()))
 
 
 def test_an_identity_without_an_email_never_touches_the_database(monkeypatch):
@@ -154,6 +241,7 @@ class Harness:
         monkeypatch.setattr(mcp, "resolve_access_principal", fake_resolve)
         monkeypatch.setattr(mcp, "run_call", fake_run_call)
         monkeypatch.setattr(mcp, "_limiter", InMemoryRateLimiter(limit=1000))
+        monkeypatch.setattr(mcp, "_preauth_limiter", InMemoryRateLimiter(limit=1000))
         self.app = FastAPI()
         self.app.include_router(mcp.router, prefix="/mcp")
 
@@ -184,6 +272,8 @@ def test_the_edge_header_authenticates_and_lists_only_read_tools(monkeypatch):
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert "search_knowledge" in names and "get_article" in names
     assert not {"create_article", "update_article", "record_lesson"} & names
+    # ask POSTs to /ai/ask and records a conversation, so it is not offered to Access.
+    assert "ask_knowledge_base" not in names
     assert h.identities and h.identities[0].sub == "access-sub"
 
 
@@ -273,3 +363,24 @@ def test_run_call_acts_as_the_access_user_without_a_socket_or_the_edge_header():
     claims = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
     assert claims["sub"] == "an.nguyen@qnsc.vn" and claims["av"] == 4
     assert claims["type"] == "access"
+
+
+def test_access_cannot_call_a_post_backed_read_tool_even_by_name(monkeypatch):
+    h = Harness(monkeypatch)
+    response = h.rpc(
+        "tools/call",
+        {"name": "ask_knowledge_base", "arguments": {"question": "what is x?"}},
+        headers=access_headers(),
+    )
+    result = response.json()["result"]
+    assert result["isError"] is True and "read-only" in result["content"][0]["text"]
+    assert h.calls == []
+
+
+def test_the_pre_auth_budget_runs_before_the_jwks_verifier(monkeypatch):
+    h = Harness(monkeypatch)
+    monkeypatch.setattr(mcp, "_preauth_limiter", InMemoryRateLimiter(limit=2))
+    statuses = [h.rpc("ping", headers=access_headers()).status_code for _ in range(3)]
+    assert statuses == [200, 200, 429]
+    # The third request never reached the verifier (or the per-person budget).
+    assert len(h.identities) == 2

@@ -1,6 +1,6 @@
 import uuid
 from typing import Sequence
-from sqlalchemy import select, and_, false
+from sqlalchemy import select, and_, false, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.user import User, Department, DepartmentManager
@@ -71,9 +71,13 @@ class UserRepository:
         return result.scalars().all()
 
     async def get_by_email(self, email: str) -> User | None:
+        # Case-insensitive: an IdP may return a different local-part case for the same
+        # mailbox, and an Access email is not guaranteed to match the stored casing. The
+        # exact comparison stays first so the common lower-case row still uses the index.
+        normalized = email.strip().lower()
         result = await self.db.execute(
             select(User)
-            .where(User.email == email)
+            .where(or_(User.email == normalized, func.lower(User.email) == normalized))
             .options(selectinload(User.departments))
             .options(
                 selectinload(User.department_ownerships).selectinload(

@@ -47,6 +47,10 @@ class Tool:
     #: Like `shape`, but also given the arguments of the call (paging needs them).
     shape_args: Callable[[Any, dict[str, Any]], Any] | None = None
     write: bool = False
+    #: Whether the tool's REST call is a plain GET. Every read tool except
+    #: `ask_knowledge_base` is; ask POSTs to /ai/ask and records a conversation/log, so
+    #: it is not offered to a strictly read-only Access principal.
+    get_only: bool = True
     graph: bool = False
 
     def definition(self) -> dict[str, Any]:
@@ -683,6 +687,7 @@ TOOLS: tuple[Tool, ...] = (
         ("question",),
         _ask,
         _shape_answer,
+        get_only=False,
     ),
     Tool(
         "get_article",
@@ -1062,8 +1067,18 @@ def available(tool: Tool, can_write: bool) -> bool:
     return settings.KNOWLEDGE_GRAPH_ENABLED or not tool.graph
 
 
-def visible_tools(can_write: bool) -> list[Tool]:
-    return [tool for tool in TOOLS if available(tool, can_write)]
+def visible_tools(can_write: bool, *, access: bool = False) -> list[Tool]:
+    """The catalogue for this principal.
+
+    `access=True` is the Cloudflare Access connection: strictly GET-only, on top of the
+    write scope. It is not a replacement for the method check in the call path — the tool
+    list is advice, and a caller can still name any tool.
+    """
+    return [
+        tool
+        for tool in TOOLS
+        if available(tool, can_write) and (not access or tool.get_only)
+    ]
 
 
 # -- result formatting --------------------------------------------------------------

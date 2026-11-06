@@ -506,6 +506,9 @@ class Settings(BaseSettings):
     # The AUD tag of the `/mcp` Access application. A token minted for another app is rejected.
     MCP_ACCESS_AUD: str | None = None
     MCP_RATE_LIMIT_PER_MINUTE: int = 120
+    #: Pre-authentication budget for the Access branch, keyed by client address. It sits
+    #: before any JWKS work, so an unknown-kid flood cannot force key fetches faster.
+    MCP_AUTH_RATE_LIMIT_PER_MINUTE: int = 120
     MCP_TOKEN_MAX_DAYS: int = 365
     MCP_TOKENS_PER_USER: int = 20
     MCP_MAX_RESULT_CHARS: int = 60000

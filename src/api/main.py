@@ -973,8 +973,12 @@ async def request_logging_middleware(request, call_next):
         response.headers["Permissions-Policy"] = (
             "camera=(), microphone=(), geolocation=()"
         )
-        if request.url.path.startswith(settings.API_V1_STR + "/"):
-            # API responses can contain private article and AI content.  Do
+        if (
+            request.url.path.startswith(settings.API_V1_STR + "/")
+            or request.url.path == "/mcp"
+            or request.url.path.startswith("/mcp/")
+        ):
+            # API and MCP responses can contain private article and AI content. Do
             # not let browsers or shared proxies retain them after logout.
             response.headers["Cache-Control"] = "no-store, private"
         if settings.ENVIRONMENT.lower() in {"production", "prod"}:

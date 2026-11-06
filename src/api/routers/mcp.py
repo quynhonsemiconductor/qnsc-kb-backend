@@ -33,10 +33,13 @@ import httpx
 import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import SessionLocal, set_database_context
+from src.api.deps import SessionLocal, active_user_with_context, set_database_context
 from src.core.config import settings
-from src.core.rate_limit import InMemoryRateLimiter
+from src.core.rate_limit import InMemoryRateLimiter, client_ip_from_request
 from src.core.security import create_access_token
 from src.domain import mcp_tools
 from src.domain.access_jwt import (
@@ -53,7 +56,7 @@ from src.domain.access_tokens import (
     looks_like_token,
 )
 from src.domain.mcp_tools import Call, ToolInputError
-from src.domain.rbac import AuthorizationService
+from src.models.user import User
 from src.repositories.user import UserRepository
 from src.version import __version__
 
@@ -125,6 +128,12 @@ INSTRUCTIONS = (
 
 _limiter = InMemoryRateLimiter(
     limit=settings.MCP_RATE_LIMIT_PER_MINUTE, window_seconds=60
+)
+#: Cheap pre-authentication guard for the Access branch, keyed by address. It runs before
+#: any JWKS work, so a caller cannot drive key lookups faster than this budget allows.
+#: The post-auth budget above is per person; this one exists to blunt a fetch storm.
+_preauth_limiter = InMemoryRateLimiter(
+    limit=settings.MCP_AUTH_RATE_LIMIT_PER_MINUTE, window_seconds=60
 )
 
 
@@ -206,13 +215,19 @@ def _deny_access(identity: AccessIdentity, reason: str) -> AccessDeniedError:
 
 
 async def resolve_access_principal(
-    db: Any, identity: AccessIdentity
+    db: AsyncSession, identity: AccessIdentity
 ) -> AccessPrincipal:
     """Map a verified Access identity to an active KB user, with the REST RLS context.
 
     The tenant is derived from the email domain for the first lookup (the same shape as
-    `get_current_user`), then the user's own `company_domain` and authorization flags are
-    applied exactly as the REST dependency does. No user is ever provisioned here.
+    `get_current_user`); `active_user_with_context` is then the SAME gate and context the
+    REST dependency uses (active, roles provisioned, tenant/flags). No user is ever
+    provisioned here.
+
+    The account is bound to the first Access `sub` it sees. The email fallback exists
+    because the Entra `oid` claim does not reach the origin (P0 gate d), and an email can
+    be reassigned; the binding means a new mailbox owner with a different Access identity
+    is refused instead of inheriting the account.
     """
     email = (identity.email or "").strip().lower()
     if "@" not in email:
@@ -222,20 +237,32 @@ async def resolve_access_principal(
         raise _deny_access(identity, "no_email_claim")
 
     await set_database_context(db, domain)
-    user = await UserRepository(db).get_by_email(email)
-    if user is None or not user.active:
+    user = await active_user_with_context(
+        db, await UserRepository(db).get_by_email(email)
+    )
+    if user is None:
         raise _deny_access(identity, "no_active_employee")
 
-    await set_database_context(
-        db,
-        user.company_domain,
-        AuthorizationService.is_global_administrator(user),
-        str(user.id),
-        AuthorizationService.has_global_article_access(user),
-        AuthorizationService.has_global_identity_management(user),
-        AuthorizationService.has_global_connector_management(user),
-        AuthorizationService.has_global_governance_access(user),
-    )
+    if user.access_subject is None:
+        # First seen: bind atomically. The IS NULL predicate makes two concurrent first
+        # logins race to one winner; the loser re-reads and must match the winner.
+        try:
+            await db.execute(
+                update(User)
+                .where(User.id == user.id, User.access_subject.is_(None))
+                .values(access_subject=identity.sub)
+            )
+            await db.commit()
+        except IntegrityError:
+            # This Access identity is already bound to another account.
+            await db.rollback()
+            raise _deny_access(identity, "access_subject_taken") from None
+        user = await UserRepository(db).get_by_email(user.email)
+        if user is None:
+            raise _deny_access(identity, "no_active_employee")
+    if user.access_subject != identity.sub:
+        raise _deny_access(identity, "access_subject_mismatch")
+
     return AccessPrincipal(
         user_id=user.id,
         email=user.email.strip().lower(),
@@ -324,7 +351,8 @@ async def _initialize(ctx: Context, params: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _tools_list(ctx: Context, params: dict[str, Any]) -> dict[str, Any]:
-    tools = mcp_tools.visible_tools(ctx.principal.can_write)
+    access = isinstance(ctx.principal, AccessPrincipal)
+    tools = mcp_tools.visible_tools(ctx.principal.can_write, access=access)
     return {"tools": [tool.definition() for tool in tools]}
 
 
@@ -356,9 +384,23 @@ async def _tools_call(ctx: Context, params: dict[str, Any]) -> dict[str, Any]:
     )
     try:
         call = tool.build(arguments)
-        status, payload = await ctx.call(call)
     except ToolInputError as exc:
         return mcp_tools.error_result(f"Invalid arguments: {exc}")
+    if isinstance(ctx.principal, AccessPrincipal) and call.method.upper() != "GET":
+        # Defence in depth: the Access tool list is GET-only already, but a caller can
+        # name any tool directly. Read-only is a property of the CALL, not of a flag.
+        logger.warning(
+            "MCP Access refused a non-GET call",
+            tool=tool.name,
+            method=call.method,
+            user_id=str(ctx.principal.user_id),
+        )
+        return mcp_tools.error_result(
+            "This Cloudflare Access connection is read-only: only GET-backed tools are "
+            "available."
+        )
+    try:
+        status, payload = await ctx.call(call)
     except (httpx.TimeoutException, TimeoutError):
         return mcp_tools.error_result(
             "The knowledge base took too long to answer. Try again, or ask a narrower "
@@ -561,6 +603,19 @@ async def mcp_endpoint(request: Request) -> Response:
 
     identity: AccessIdentity | None = None
     if access_token is not None:
+        # Before any JWKS work: a cheap address-keyed budget bounds how fast an
+        # unauthenticated caller can drive key lookups. The per-person budget below
+        # cannot do this because there is no verified person yet.
+        allowed, retry_after = _preauth_limiter.allow(
+            f"ip:{client_ip_from_request(request)}"
+        )
+        if not allowed:
+            logger.warning("MCP pre-auth rate limit exceeded")
+            return JSONResponse(
+                {"detail": "Too many MCP authentication attempts. Slow down."},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
         try:
             # PyJWT's JWKS client is synchronous (it may fetch on an unknown kid), so
             # keep a cold or rotating key set off the event loop.
@@ -593,11 +648,13 @@ async def mcp_endpoint(request: Request) -> Response:
 
     # Per person for Access, per token for a personal access token. Neither is per IP:
     # in-process traffic means an address carries no security meaning (MCP-PLAN §4).
-    limit_key = (
-        f"access:{principal.user_id}"
-        if isinstance(principal, AccessPrincipal)
-        else f"token:{principal.token_id}"
-    )
+    if isinstance(principal, AccessPrincipal):
+        limit_key = f"access:{principal.user_id}"
+    else:
+        token_id = principal.token_id
+        if token_id is None:  # pragma: no cover - TokenPrincipal always carries one
+            return _unauthorized()
+        limit_key = f"token:{token_id}"
     allowed, retry_after = _limiter.allow(limit_key)
     if not allowed:
         return JSONResponse(

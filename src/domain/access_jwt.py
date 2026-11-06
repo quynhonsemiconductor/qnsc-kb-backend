@@ -22,12 +22,14 @@ never for clients.
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import jwt
-from jwt import PyJWKClient
+from jwt import PyJWK, PyJWKClient
 from jwt.exceptions import (
     ExpiredSignatureError,
     ImmatureSignatureError,
@@ -46,7 +48,10 @@ ACCESS_JWT_HEADER = "cf-access-jwt-assertion"
 
 DEFAULT_CLOCK_TOLERANCE_SECONDS = 60
 DEFAULT_JWKS_TIMEOUT_SECONDS = 10.0
+DEFAULT_JWKS_COOLDOWN_SECONDS = 60.0
+DEFAULT_UNKNOWN_KID_TTL_SECONDS = 60.0
 DEFAULT_OID_CLAIM_PATH = "oid"
+MAX_NEGATIVE_KID_ENTRIES = 1024
 
 
 class AccessJwtError(Exception):
@@ -80,6 +85,12 @@ class AccessJwtConfig:
     allow_email_fallback: bool = False
     clock_tolerance_seconds: int = DEFAULT_CLOCK_TOLERANCE_SECONDS
     jwks_timeout_seconds: float = DEFAULT_JWKS_TIMEOUT_SECONDS
+    #: Minimum seconds between forced JWKS refreshes after an unknown `kid`. This is the
+    #: storm guard: PyJWT's own default is 30, too short for an unauthenticated endpoint.
+    jwks_cooldown_seconds: float = DEFAULT_JWKS_COOLDOWN_SECONDS
+    #: An unknown `kid` is refused from a negative cache for this long, so repeating the
+    #: same bogus key never even reaches the JWKS client.
+    unknown_kid_ttl_seconds: float = DEFAULT_UNKNOWN_KID_TTL_SECONDS
 
 
 def _claim_at(payload: Mapping[str, Any], path: str) -> Any:
@@ -135,11 +146,51 @@ class AccessJwtVerifier:
         self._oid_claim_path = config.oid_claim_path
         self._allow_email_fallback = config.allow_email_fallback
         self._clock_tolerance = config.clock_tolerance_seconds
+        self._unknown_kid_ttl = config.unknown_kid_ttl_seconds
+        if self._unknown_kid_ttl < 0:
+            raise AccessJwtError("malformed", "unknown_kid_ttl_seconds must be >= 0")
+        if config.jwks_cooldown_seconds < 0:
+            raise AccessJwtError("malformed", "jwks_cooldown_seconds must be >= 0")
+        self._unknown_kids: dict[str, float] = {}
+        self._unknown_kids_lock = threading.Lock()
         self._jwk_client = jwk_client or PyJWKClient(
             f"{team_domain}/cdn-cgi/access/certs",
             cache_keys=True,
             timeout=config.jwks_timeout_seconds,
+            # PyJWT's default is 30 s; an unauthenticated endpoint needs the longer
+            # cooldown so a stream of unknown kids cannot force a refresh per request.
+            cooldown_duration=config.jwks_cooldown_seconds,
         )
+
+    def _known_unknown_kid(self, kid: str) -> bool:
+        now = time.monotonic()
+        with self._unknown_kids_lock:
+            expires = self._unknown_kids.get(kid)
+            if expires is None:
+                return False
+            if expires <= now:
+                del self._unknown_kids[kid]
+                return False
+            return True
+
+    def _remember_unknown_kid(self, kid: str) -> None:
+        if self._unknown_kid_ttl <= 0:
+            return
+        now = time.monotonic()
+        with self._unknown_kids_lock:
+            if len(self._unknown_kids) >= MAX_NEGATIVE_KID_ENTRIES:
+                # Drop expired entries first; if the cache is still full of live ones, the
+                # oldest is evicted. Bounded memory is the point: `kid` is caller input.
+                for key, expiry in list(self._unknown_kids.items()):
+                    if expiry <= now:
+                        del self._unknown_kids[key]
+                if len(self._unknown_kids) >= MAX_NEGATIVE_KID_ENTRIES:
+                    self._unknown_kids.pop(next(iter(self._unknown_kids)))
+            self._unknown_kids[kid] = now + self._unknown_kid_ttl
+
+    def _forget_unknown_kid(self, kid: str) -> None:
+        with self._unknown_kids_lock:
+            self._unknown_kids.pop(kid, None)
 
     def verify(self, token: str) -> AccessIdentity:
         """Verify a raw Access JWT and return the person it names."""
@@ -152,20 +203,34 @@ class AccessJwtVerifier:
             raise AccessJwtError("malformed", "the Access JWT is malformed") from None
         if header.get("alg") != "RS256":
             raise AccessJwtError("wrong_algorithm", "the Access JWT `alg` is not RS256")
+        kid = header.get("kid")
+        if not isinstance(kid, str) or not kid:
+            raise AccessJwtError("malformed", "the Access JWT carries no `kid`")
+
+        if self._known_unknown_kid(kid):
+            # No JWKS client call at all: the same bogus key was already refused recently.
+            raise AccessJwtError(
+                "invalid_signature", "the Access JWT signature is invalid"
+            )
 
         try:
-            signing_key = self._jwk_client.get_signing_key_from_jwt(token)
+            signing_key: PyJWK = self._jwk_client.get_signing_key(kid)
         except PyJWKClientConnectionError:
             raise AccessJwtError(
                 "jwks_unavailable", "the team JWKS could not be fetched"
             ) from None
-        except (PyJWKSetError, PyJWKClientError):
-            # The key set served but the token's `kid` is unknown, or the set is unusable.
-            # A token problem is a 401; an unusable set is treated the same way here
-            # because PyJWT does not separate them and the safe outcome is refusal.
+        except PyJWKSetError:
+            # The JWKS itself is unusable, not this token. Do not negative-cache the kid:
+            # the next request should be allowed to try again once the set recovers.
+            raise AccessJwtError(
+                "jwks_unavailable", "the team JWKS could not be used"
+            ) from None
+        except PyJWKClientError:
+            self._remember_unknown_kid(kid)
             raise AccessJwtError(
                 "invalid_signature", "the Access JWT signature is invalid"
             ) from None
+        self._forget_unknown_kid(kid)
 
         try:
             claims = jwt.decode(
