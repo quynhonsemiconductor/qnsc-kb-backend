@@ -984,10 +984,14 @@ class Settings(BaseSettings):
     MAX_CONNECTOR_API_RESPONSE_BYTES: int = 5 * 1024 * 1024
     MAX_CONNECTOR_FILES: int = 2_000
     METRICS_RETENTION_DAYS: int = 30
-    #: The rest of the scheduled retention sweep. Bounds are deliberate: security audit
-    #: logs go back a year, operational telemetry 90 days, expired credentials seven days
-    #: past expiry so a clock-skewed retry still fails cleanly rather than 404s.
-    RETENTION_AUDIT_DAYS: int = 365
+    #: The rest of the scheduled retention sweep. Audit logs are deliberately NOT capped
+    #: (owner decision, RETENTION.md §5/§6): tiny volume, revisit with numbers. Operational
+    #: telemetry 90 days; expired credentials seven days past expiry so a clock-skewed
+    #: retry still fails cleanly rather than 404s.
+    RETENTION_SWEEP_ENABLED: bool = True
+    #: Count-only until the owner reads the first run's counts and flips this.
+    RETENTION_DRY_RUN: bool = True
+    RETENTION_MAX_PASSES_PER_TABLE: int = 20
     RETENTION_TELEMETRY_DAYS: int = 90
     RETENTION_SESSION_GRACE_DAYS: int = 7
     RETENTION_OUTBOX_DAYS: int = 30

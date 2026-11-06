@@ -16,6 +16,7 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    text,
     update,
 )
 from sqlalchemy import Table
@@ -52,9 +53,9 @@ from src.domain.connector_providers import (
     REMOTE_PROVIDERS,
     cursor_type as provider_cursor_type,
 )
-from src.models.governance import AuditLog, PendingDraft
+from src.models.governance import PendingDraft
 from src.models.user import User
-from src.models.ai import AiCache, AiUsageLog
+from src.models.ai import AiCache, AiFeedback, AiUsageLog
 from src.workers.loop import reset_worker_loop, sync_run
 
 logger = structlog.get_logger()
@@ -225,6 +226,7 @@ def replay_outbox_task():
                     # whose handler always raises was re-selected and re-dispatched on
                     # every tick, forever.
                     event.status = "dead"
+                    event.dead_at = datetime.utcnow()
                     continue
                 event.status = "processing"
                 event.attempts += 1
@@ -250,17 +252,27 @@ def replay_outbox_task():
 # sweep failed on every run and the table only ever grew.
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_COMMAND_TIMEOUT_SECONDS = 120
+#: One process-wide lock for the sweep. Two replicas starting the daily task at once must
+#: not both delete; the second exits cleanly.
+_RETENTION_LOCK_KEY = 27_490
 
 
 @celery_app.task(name="prune_operational_metrics")
 def prune_operational_metrics() -> None:
-    """Bound telemetry growth and remove physically expired answer caches."""
+    """Bound append-only growth with a count-only first run and a kill switch."""
 
-    async def prune_batched(db, table, predicate) -> int:
-        """Delete matching rows in bounded passes; returns the total removed."""
+    async def eligible_count(db, table, predicate) -> int:
+        return int(
+            await db.scalar(select(func.count()).select_from(table).where(predicate))
+            or 0
+        )
+
+    async def prune_batched(db, table, predicate) -> tuple[int, bool]:
+        """Delete matching rows in bounded passes; (count, hit_pass_cap)."""
+        if settings.RETENTION_DRY_RUN:
+            return await eligible_count(db, table, predicate), False
         removed = 0
-        while True:
-            # A subquery over the primary key, because Postgres has no DELETE ... LIMIT.
+        for _ in range(settings.RETENTION_MAX_PASSES_PER_TABLE):
             victims = select(table.c.id).where(predicate).limit(_PRUNE_BATCH_ROWS)
             deleted = (
                 await db.execute(table.delete().where(table.c.id.in_(victims)))
@@ -268,9 +280,13 @@ def prune_operational_metrics() -> None:
             await db.commit()
             removed += deleted
             if deleted < _PRUNE_BATCH_ROWS:
-                return removed
+                return removed, False
+        return removed, True
 
     async def prune() -> None:
+        if not settings.RETENTION_SWEEP_ENABLED:
+            logger.info("Retention sweep disabled")
+            return
         # Its own engine, because the shared one pins command_timeout to 5 s (deps.py) so
         # that no request can hold a pooled connection longer than that. asyncpg enforces
         # that ceiling CLIENT-side, which is why a server-side `SET LOCAL
@@ -295,118 +311,167 @@ def prune_operational_metrics() -> None:
                 class_=AsyncSession,
             )
             async with factory() as db:
+                # The sweep owns its tenant bypass: audit and telemetry rows span every
+                # tenant, and a policy-scoped session would silently delete nothing.
+                # RETENTION.md documents this exception.
                 await set_database_context(db, None, True)
-                now = datetime.utcnow()
-                metrics_cutoff = now - timedelta(days=settings.METRICS_RETENTION_DAYS)
-                telemetry_cutoff = now - timedelta(
-                    days=settings.RETENTION_TELEMETRY_DAYS
+                locked = await db.scalar(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": _RETENTION_LOCK_KEY},
                 )
-                audit_cutoff = now - timedelta(days=settings.RETENTION_AUDIT_DAYS)
-                credential_cutoff = now - timedelta(
-                    days=settings.RETENTION_SESSION_GRACE_DAYS
-                )
-                outbox_cutoff = now - timedelta(days=settings.RETENTION_OUTBOX_DAYS)
-                notification_cutoff = now - timedelta(
-                    days=settings.RETENTION_NOTIFICATION_DAYS
-                )
-                connector_cutoff = now - timedelta(
-                    days=settings.RETENTION_CONNECTOR_DAYS
-                )
+                if not locked:
+                    logger.info("Retention sweep already running; skipped")
+                    return
+                try:
+                    now = datetime.utcnow()
+                    metrics_cutoff = now - timedelta(
+                        days=settings.METRICS_RETENTION_DAYS
+                    )
+                    telemetry_cutoff = now - timedelta(
+                        days=settings.RETENTION_TELEMETRY_DAYS
+                    )
+                    credential_cutoff = now - timedelta(
+                        days=settings.RETENTION_SESSION_GRACE_DAYS
+                    )
+                    outbox_cutoff = now - timedelta(days=settings.RETENTION_OUTBOX_DAYS)
+                    notification_cutoff = now - timedelta(
+                        days=settings.RETENTION_NOTIFICATION_DAYS
+                    )
+                    connector_cutoff = now - timedelta(
+                        days=settings.RETENTION_CONNECTOR_DAYS
+                    )
 
-                targets = [
-                    (
-                        "api_request_metrics",
-                        ApiRequestMetric.__table__,
-                        ApiRequestMetric.created_at < metrics_cutoff,
-                    ),
-                    # Cache answers can contain authorized document passages. Their
-                    # expiry must remove storage as well as disable reads.
-                    ("ai_cache", AiCache.__table__, AiCache.expires_at < now),
-                    # Security audit: one year, never less than RETENTION_AUDIT_DAYS.
-                    (
-                        "audit_logs",
-                        AuditLog.__table__,
-                        AuditLog.created_at < audit_cutoff,
-                    ),
-                    # AI/search telemetry can contain question text; keep 90 days.
-                    (
-                        "ai_usage_logs",
-                        AiUsageLog.__table__,
-                        AiUsageLog.created_at < telemetry_cutoff,
-                    ),
-                    (
-                        "search_logs",
-                        SearchLog.__table__,
-                        SearchLog.created_at < telemetry_cutoff,
-                    ),
-                    # Expired credentials: expiry + 7 days. Revoked tokens are also
-                    # removable after the same grace, without waiting for their expiry.
-                    (
-                        "refresh_sessions",
-                        RefreshSession.__table__,
-                        RefreshSession.expires_at < credential_cutoff,
-                    ),
-                    (
-                        "personal_access_tokens",
-                        PersonalAccessToken.__table__,
-                        or_(
-                            PersonalAccessToken.expires_at < credential_cutoff,
-                            PersonalAccessToken.revoked_at < credential_cutoff,
+                    targets = [
+                        (
+                            "api_request_metrics",
+                            ApiRequestMetric.__table__,
+                            ApiRequestMetric.created_at < metrics_cutoff,
                         ),
-                    ),
-                    (
-                        "password_reset_tokens",
-                        PasswordResetToken.__table__,
-                        PasswordResetToken.expires_at < credential_cutoff,
-                    ),
-                    # Terminal work only: a pending or running row is never deleted by age.
-                    (
-                        "outbox_events",
-                        OutboxEvent.__table__,
-                        and_(
-                            OutboxEvent.status.in_(["completed", "dead"]),
-                            OutboxEvent.created_at < outbox_cutoff,
+                        # Cache answers can contain authorized document passages. Their
+                        # expiry must remove storage as well as disable reads.
+                        ("ai_cache", AiCache.__table__, AiCache.expires_at < now),
+                        # AI/search telemetry can contain question text; keep 90 days.
+                        # Feedback is NOT silently destroyed with its usage row: an
+                        # answered question a reviewer acted on stays until the feedback
+                        # itself is reviewed/removed.
+                        (
+                            "ai_usage_logs",
+                            AiUsageLog.__table__,
+                            and_(
+                                AiUsageLog.created_at < telemetry_cutoff,
+                                ~exists(
+                                    select(AiFeedback.id).where(
+                                        AiFeedback.ai_usage_log_id == AiUsageLog.id
+                                    )
+                                ),
+                            ),
                         ),
-                    ),
-                    (
-                        "notification_queue",
-                        NotificationQueue.__table__,
-                        and_(
-                            NotificationQueue.status.in_(["sent", "dead"]),
-                            NotificationQueue.created_at < notification_cutoff,
+                        (
+                            "search_logs",
+                            SearchLog.__table__,
+                            SearchLog.created_at < telemetry_cutoff,
                         ),
-                    ),
-                    (
-                        "connector_jobs",
-                        ConnectorJob.__table__,
-                        and_(
-                            ConnectorJob.status.in_(["completed", "failed"]),
-                            ConnectorJob.created_at < connector_cutoff,
+                        # Expired credentials: expiry + 7 days. Revoked tokens are also
+                        # removable after the same grace, without waiting for their expiry.
+                        (
+                            "refresh_sessions",
+                            RefreshSession.__table__,
+                            RefreshSession.expires_at < credential_cutoff,
                         ),
-                    ),
-                    (
-                        "sync_errors",
-                        SyncError.__table__,
-                        SyncError.created_at < connector_cutoff,
-                    ),
-                    (
-                        "dead_letter_jobs",
-                        DeadLetterJob.__table__,
-                        DeadLetterJob.failed_at < connector_cutoff,
-                    ),
-                    (
-                        "connector_notifications",
-                        ConnectorNotification.__table__,
-                        and_(
-                            ConnectorNotification.status == "processed",
-                            ConnectorNotification.received_at < connector_cutoff,
+                        (
+                            "personal_access_tokens",
+                            PersonalAccessToken.__table__,
+                            or_(
+                                PersonalAccessToken.expires_at < credential_cutoff,
+                                PersonalAccessToken.revoked_at < credential_cutoff,
+                            ),
                         ),
-                    ),
-                ]
-                removed: dict[str, int] = {}
-                for label, table, predicate in targets:
-                    removed[label] = await prune_batched(db, table, predicate)
-            logger.info("Operational retention sweep completed", deleted=removed)
+                        (
+                            "password_reset_tokens",
+                            PasswordResetToken.__table__,
+                            PasswordResetToken.expires_at < credential_cutoff,
+                        ),
+                        # Terminal work only: a pending or running row is never deleted by
+                        # age. The clock is the TERMINAL timestamp, not created_at.
+                        (
+                            "outbox_events",
+                            OutboxEvent.__table__,
+                            and_(
+                                OutboxEvent.status.in_(["completed", "dead"]),
+                                func.coalesce(
+                                    OutboxEvent.completed_at,
+                                    OutboxEvent.dead_at,
+                                    OutboxEvent.created_at,
+                                )
+                                < outbox_cutoff,
+                            ),
+                        ),
+                        (
+                            "notification_queue",
+                            NotificationQueue.__table__,
+                            and_(
+                                NotificationQueue.status.in_(["sent", "dead"]),
+                                func.coalesce(
+                                    NotificationQueue.sent_at,
+                                    NotificationQueue.created_at,
+                                )
+                                < notification_cutoff,
+                            ),
+                        ),
+                        (
+                            "connector_jobs",
+                            ConnectorJob.__table__,
+                            and_(
+                                ConnectorJob.status.in_(["completed", "failed"]),
+                                func.coalesce(
+                                    ConnectorJob.completed_at,
+                                    ConnectorJob.created_at,
+                                )
+                                < connector_cutoff,
+                            ),
+                        ),
+                        (
+                            "sync_errors",
+                            SyncError.__table__,
+                            SyncError.created_at < connector_cutoff,
+                        ),
+                        (
+                            "dead_letter_jobs",
+                            DeadLetterJob.__table__,
+                            DeadLetterJob.failed_at < connector_cutoff,
+                        ),
+                        (
+                            "connector_notifications",
+                            ConnectorNotification.__table__,
+                            and_(
+                                ConnectorNotification.status == "processed",
+                                func.coalesce(
+                                    ConnectorNotification.processed_at,
+                                    ConnectorNotification.created_at,
+                                )
+                                < connector_cutoff,
+                            ),
+                        ),
+                    ]
+                    counts: dict[str, int] = {}
+                    capped: list[str] = []
+                    for label, table, predicate in targets:
+                        removed, hit_cap = await prune_batched(db, table, predicate)
+                        counts[label] = removed
+                        if hit_cap:
+                            capped.append(label)
+                    logger.info(
+                        "Operational retention sweep completed",
+                        dry_run=settings.RETENTION_DRY_RUN,
+                        counts=counts,
+                        capped=capped,
+                    )
+                finally:
+                    await db.execute(
+                        text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": _RETENTION_LOCK_KEY},
+                    )
+                    await db.commit()
         finally:
             await prune_engine.dispose()
 
@@ -877,7 +942,7 @@ async def _run_orphan_source_cleanup() -> int:
     from src.domain.source_storage import delete_source, list_source_objects
     from src.models.article import DocumentSource
     from src.models.connectors import DocumentVersion
-    from src.models.governance import AuditLog, PendingDraft
+    from src.models.governance import PendingDraft
 
     if not settings.SOURCE_STORAGE_BUCKET:
         logger.warning("Skipping R2 orphan sweep because no bucket is configured")

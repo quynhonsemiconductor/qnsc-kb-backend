@@ -138,11 +138,6 @@ class NotificationQueue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "created_at",
             postgresql_where=text("type = 'email' AND status IN ('pending', 'failed')"),
         ),
-        Index(
-            "ix_notification_queue_terminal_created",
-            "created_at",
-            postgresql_where=text("status IN ('sent', 'dead')"),
-        ),
     )
 
 
@@ -157,13 +152,6 @@ class DeadLetterJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "outbox_events"
-    __table_args__ = (
-        Index(
-            "ix_outbox_events_terminal_created",
-            "created_at",
-            postgresql_where=text("status IN ('completed', 'dead')"),
-        ),
-    )
 
     event_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -175,6 +163,10 @@ class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime, default=datetime.utcnow, nullable=False, index=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Terminal timestamps. Retention keys on these, never on created_at: a retried
+    #: event can finish days after it was enqueued.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dead_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SearchLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
