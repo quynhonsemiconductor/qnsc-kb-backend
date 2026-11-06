@@ -14,6 +14,7 @@ changes is useful; one that can approve its own proposals is not.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -197,6 +198,161 @@ def _shape_article_page(data: Any, args: dict[str, Any]) -> Any:
             f"offset={end} to continue."
         )
     return article
+
+
+#: A section boundary is a level 2-6 heading. A level 1 heading is the document title, so
+#: splitting on it would put the whole body in one section (the chunker makes the same choice).
+_SECTION_HEADING = re.compile(r"^\s{0,3}(#{2,6})\s+(\S.*?)\s*#*\s*$")
+
+
+def _article_sections(markdown: str) -> list[dict[str, Any]]:
+    """Split an article body at Markdown section headings, keeping each heading.
+
+    Fenced code blocks are content: a ``# comment`` inside one is not a section. A preamble
+    (the H1 and any front matter) stays with the first real section, so the first section is
+    the whole document when there are no ``##`` headings at all.
+    """
+    sections: list[dict[str, Any]] = []
+    current: list[str] = []
+    current_heading: str | None = None
+    current_level = 0
+    in_fence = False
+    seen_boundary = False
+
+    for line in markdown.splitlines():
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+        match = None if in_fence else _SECTION_HEADING.match(line)
+        if match is not None:
+            if current and seen_boundary:
+                sections.append(
+                    {
+                        "index": len(sections) + 1,
+                        "heading": current_heading,
+                        "level": current_level,
+                        "body_md": "\n".join(current).strip(),
+                    }
+                )
+                current = []
+            seen_boundary = True
+            if current_heading is None or not current:
+                current_heading = match.group(2).strip()
+                current_level = len(match.group(1))
+        current.append(line)
+
+    if current and "\n".join(current).strip():
+        sections.append(
+            {
+                "index": len(sections) + 1,
+                "heading": current_heading,
+                "level": current_level,
+                "body_md": "\n".join(current).strip(),
+            }
+        )
+
+    if not sections and markdown.strip():
+        # No section heading at all: one untitled section is the honest answer, rather than
+        # an empty list that reads as an empty article.
+        sections = [
+            {
+                "index": 1,
+                "heading": None,
+                "level": 0,
+                "body_md": markdown.strip(),
+            }
+        ]
+    return sections
+
+
+def _shape_article_sections(data: Any, args: dict[str, Any]) -> Any:
+    """One section, or the table of contents when the caller named none."""
+    article = _pick(data, ARTICLE_FULL)
+    if not isinstance(article, dict):
+        return article
+    body = article.get("body_md")
+    if not isinstance(body, str):
+        return article
+
+    sections = _article_sections(body)
+    headings = [
+        {
+            "index": section["index"],
+            "heading": section["heading"],
+            "level": section["level"],
+        }
+        for section in sections
+    ]
+    base = {
+        "article_id": article.get("id"),
+        "title": article.get("title"),
+        "version": article.get("version"),
+        "section_count": len(sections),
+    }
+
+    heading = _text(args, "heading", max_len=255)
+    index = _int(args, "index", 0, 0, 10_000)
+    if heading is None and index == 0:
+        return {
+            **base,
+            "sections": headings,
+            "hint": "Call again with heading or index to read one section.",
+        }
+
+    if heading is not None:
+        needle = heading.strip().lower()
+        section = next(
+            (
+                item
+                for item in sections
+                if isinstance(item.get("heading"), str)
+                and needle in str(item["heading"]).lower()
+            ),
+            None,
+        )
+        selector = f"heading {heading!r}"
+    else:
+        section = sections[index - 1] if 1 <= index <= len(sections) else None
+        selector = f"index {index}"
+
+    if section is None:
+        return {
+            **base,
+            "sections": headings,
+            "message": f"No section matches {selector}.",
+        }
+    return {
+        **base,
+        **section,
+        "body_md": section["body_md"],
+    }
+
+
+SOURCE_SUMMARY = (
+    "id",
+    "article_id",
+    "article_title",
+    "source_system",
+    "source_ref",
+    "filename",
+    "mime_type",
+    "ingested_at",
+    "has_file",
+    "source_changed",
+)
+
+
+def _shape_sources(data: Any) -> Any:
+    """One row per indexed source, with only what identifies it and its article."""
+    if not isinstance(data, dict):
+        return data
+    result = _pick(data, ("total", "limit", "offset"))
+    sources = data.get("sources")
+    result["sources"] = (
+        [_pick(item, SOURCE_SUMMARY) for item in sources]
+        if isinstance(sources, list)
+        else sources
+    )
+    return result
 
 
 CONVERSATION_MESSAGE_CHARS = 3000
@@ -610,6 +766,30 @@ def _related(args: dict[str, Any]) -> Call:
     )
 
 
+def _article_section(args: dict[str, Any]) -> Call:
+    # Validate here, where a bad argument becomes a tool error; the shape then reads the
+    # same arguments to pick the section out of the authorized article body.
+    _id(args, "article_id")
+    _text(args, "heading", max_len=255)
+    _int(args, "index", 0, 0, 10_000)
+    return Call("GET", f"/articles/{_id(args, 'article_id')}")
+
+
+def _list_sources(args: dict[str, Any]) -> Call:
+    return Call(
+        "GET",
+        "/knowledge/sources",
+        params=_drop_none(
+            {
+                "q": _text(args, "q", max_len=255),
+                "source_system": _text(args, "source_system", max_len=100),
+                "limit": _int(args, "limit", 20, 1, 50),
+                "offset": _int(args, "offset", 0, 0, 100_000),
+            }
+        ),
+    )
+
+
 def _entities(args: dict[str, Any]) -> Call:
     return Call(
         "GET",
@@ -708,6 +888,50 @@ TOOLS: tuple[Tool, ...] = (
         ("article_id",),
         _get_article,
         shape_args=_shape_article_page,
+    ),
+    Tool(
+        "get_article_section",
+        "Read one section of an article",
+        "One Markdown section of an article, chosen by heading (case-insensitive, a "
+        "substring is enough) or by its 1-based index. Call it with only article_id to "
+        "get the section list first. Use it instead of reading a long document whole when "
+        "search_knowledge showed the passage you need. Only articles the user may read are "
+        "served; section text is cut out of the same authorized article body.",
+        {
+            "article_id": _ID,
+            "heading": {
+                "type": "string",
+                "description": "Section heading to match (case-insensitive substring)",
+            },
+            "index": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based section index from a previous call",
+            },
+        },
+        ("article_id",),
+        _article_section,
+        shape_args=_shape_article_sections,
+    ),
+    Tool(
+        "list_sources",
+        "List document sources",
+        "The files and connector records behind the articles, newest first: source system, "
+        "filename or reference, MIME type and ingestion time, with the article each one "
+        "produced. Only sources whose article the user may read are listed. Use it to "
+        "answer 'where did this come from' or to find a document by its original filename.",
+        {
+            "q": {
+                "type": "string",
+                "description": "Match filename, source ref or title",
+            },
+            "source_system": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "offset": {"type": "integer", "minimum": 0},
+        },
+        (),
+        _list_sources,
+        _shape_sources,
     ),
     Tool(
         "list_conversations",

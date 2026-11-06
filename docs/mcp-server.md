@@ -100,7 +100,10 @@ You do not need to learn the tool names: the server tells the client how to use 
   with citations (article, page).
 - "Find where the boot sequence is documented and quote it" runs `search_knowledge`,
   then `get_article`.
-- "What documents do we have about onboarding?" runs `list_articles`.
+- "Read just the Setup section of the VPN article" runs `get_article_section`, so a
+  long document does not have to be paged through whole.
+- "What documents do we have about onboarding?" runs `list_articles`; `list_sources`
+  answers where a document came from and finds one by its original filename.
 - In Claude Code, type `/` and pick a prompt from `qnsc-kb`. Start with
   `explore_knowledge_base`: it tours what is in the knowledge base and suggests
   questions.
@@ -111,7 +114,8 @@ your own permissions.
 
 ## What it offers
 
-Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
+Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`,
+`get_article_section`, `list_sources`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
 `get_article_changes`, `list_recent_changes`, `list_conversations`, `get_conversation`, `list_lessons`, `list_my_drafts`, `list_departments`,
 `list_tags`, `get_glossary`, `get_project_config` (the team's standing instructions, versioned by the
