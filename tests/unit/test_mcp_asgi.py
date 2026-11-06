@@ -31,9 +31,8 @@ USER_ID = uuid.uuid4()
 
 
 class FakeJwkClient:
-    def get_signing_key(self, kid: str):
-        assert kid == KID
-        return SimpleNamespace(key=KEY.public_key())
+    def get_signing_keys(self, refresh: bool = False):
+        return [SimpleNamespace(key=KEY.public_key(), key_id=KID)]
 
 
 def token(

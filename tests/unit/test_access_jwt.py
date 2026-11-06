@@ -22,27 +22,32 @@ KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 class FakeJwkClient:
+    """A tiny JWKS: a set of kids, a refresh that may publish a rotated key, and counters."""
+
     def __init__(
         self,
         *,
-        key=None,
+        keys: dict[str, object] | None = None,
         error: Exception | None = None,
-        unknown_kids: set[str] | None = None,
+        rotate_to: str | None = None,
+        rotate_key=None,
     ) -> None:
-        self._key = key if key is not None else KEY.public_key()
+        self._keys = dict(keys or {"test-key": KEY.public_key()})
         self._error = error
-        self._unknown_kids = unknown_kids or set()
-        self.lookups: list[str] = []
+        self._rotate_to = rotate_to
+        self._rotate_key = rotate_key or KEY.public_key()
+        self.fetches = 0
+        self.refreshes = 0
 
-    def get_signing_key(self, kid: str):
-        self.lookups.append(kid)
+    def get_signing_keys(self, refresh: bool = False):
+        self.fetches += 1
         if self._error is not None:
             raise self._error
-        if kid in self._unknown_kids:
-            raise PyJWKClientError(
-                f'Unable to find a signing key that matches: "{kid}"'
-            )
-        return SimpleNamespace(key=self._key)
+        if refresh:
+            self.refreshes += 1
+            if self._rotate_to is not None:
+                self._keys[self._rotate_to] = self._rotate_key
+        return [SimpleNamespace(key=key, key_id=kid) for kid, key in self._keys.items()]
 
 
 def verifier(*, allow_email_fallback: bool = True, **overrides) -> AccessJwtVerifier:
@@ -55,7 +60,9 @@ def verifier(*, allow_email_fallback: bool = True, **overrides) -> AccessJwtVeri
     return AccessJwtVerifier(config, jwk_client=FakeJwkClient())
 
 
-def access_token(*, remove: tuple[str, ...] = (), **overrides) -> str:
+def access_token(
+    *, kid: str = "test-key", remove: tuple[str, ...] = (), **overrides
+) -> str:
     now = int(time.time())
     claims = {
         "iss": TEAM,
@@ -69,7 +76,7 @@ def access_token(*, remove: tuple[str, ...] = (), **overrides) -> str:
     claims.update(overrides)
     for key in remove:
         claims.pop(key, None)
-    return jwt.encode(claims, KEY, algorithm="RS256", headers={"kid": "test-key"})
+    return jwt.encode(claims, KEY, algorithm="RS256", headers={"kid": kid})
 
 
 def rejection(token: str, *, v: AccessJwtVerifier | None = None) -> str:
@@ -176,8 +183,8 @@ def test_configuration_is_pinned():
         )
 
 
-def test_an_unknown_kid_is_negative_cached_before_a_second_lookup():
-    client = FakeJwkClient(unknown_kids={"test-key"})
+def test_an_unknown_kid_is_negative_cached_before_a_second_refresh():
+    client = FakeJwkClient(keys={"other-key": KEY.public_key()})
     v = AccessJwtVerifier(
         AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
         jwk_client=client,
@@ -185,33 +192,51 @@ def test_an_unknown_kid_is_negative_cached_before_a_second_lookup():
     token = access_token()
     for _ in range(3):
         assert rejection(token, v=v) == "invalid_signature"
-    # One lookup, then the negative cache answers: a repeated bogus kid cannot drive the
-    # JWKS client (and so cannot drive an outbound refresh) again inside the TTL.
-    assert client.lookups == ["test-key"]
+    # Cached set, one forced refresh, then the negative cache answers: a repeated bogus
+    # kid cannot drive the JWKS client again inside the TTL.
+    assert client.fetches == 2 and client.refreshes == 1
+    assert v._unknown_kids
+
+
+def test_a_real_key_rotation_refreshes_once_and_then_verifies():
+    client = FakeJwkClient(
+        keys={"old-key": KEY.public_key()},
+        rotate_to="new-key",
+        rotate_key=KEY.public_key(),
+    )
+    v = AccessJwtVerifier(
+        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE, allow_email_fallback=True),
+        jwk_client=client,
+    )
+    identity = v.verify(access_token(kid="new-key"))
+    assert identity.sub == "access-sub-1"
+    assert (
+        client.refreshes == 1
+    ), "a new Cloudflare kid must trigger exactly one refresh"
+    # The rotated key is now in the cached set: no second refresh.
+    assert v.verify(access_token(kid="new-key")).sub == "access-sub-1"
+    assert client.refreshes == 1
+
+
+def test_different_unknown_kids_share_one_refresh_per_cooldown():
+    client = FakeJwkClient(keys={"other-key": KEY.public_key()})
+    v = AccessJwtVerifier(
+        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
+        jwk_client=client,
+    )
+    for kid in ("bogus-a", "bogus-b", "bogus-c"):
+        assert rejection(access_token(kid=kid), v=v) == "invalid_signature"
+    assert client.refreshes == 1
 
 
 def test_the_negative_cache_is_bounded():
-    client = FakeJwkClient(unknown_kids={f"kid-{i}" for i in range(20)})
+    client = FakeJwkClient(keys={"other-key": KEY.public_key()})
     v = AccessJwtVerifier(
         AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
         jwk_client=client,
     )
     for i in range(20):
-        token = access_token()
-        # Re-sign with a distinct unknown kid.
-        token = jwt.encode(
-            jwt.decode(
-                token,
-                KEY.public_key(),
-                algorithms=["RS256"],
-                audience=AUDIENCE,
-                issuer=TEAM,
-            ),
-            KEY,
-            algorithm="RS256",
-            headers={"kid": f"kid-{i}"},
-        )
-        assert rejection(token, v=v) == "invalid_signature"
+        assert rejection(access_token(kid=f"kid-{i}"), v=v) == "invalid_signature"
     from src.domain import access_jwt as module
 
     assert len(v._unknown_kids) <= module.MAX_NEGATIVE_KID_ENTRIES

@@ -24,7 +24,9 @@ The account gate and tenant context are the **same helper the REST dependency us
 The first verified Access `sub` is bound to the account; a later token for the same email
 with a different Access identity is refused, so a reassigned mailbox does not inherit the
 account. Clearing `users.access_subject` rebinds it. The email lookup prefers the exact
-stored address; if two rows collide case-insensitively it refuses rather than choosing one.
+stored address, then the normalised form; a case-insensitive collision refuses rather than
+choosing one. Every account and invitation create path normalises the address, and a
+`lower(email)` expression index backs the fallback.
 
 An Access caller is **read-only**, and that is a property of the call, not only of the
 tool list: every tool it can see is GET-backed (so `ask_knowledge_base`, which POSTs to

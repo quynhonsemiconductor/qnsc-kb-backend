@@ -34,7 +34,8 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.orm.exc import ObjectDeletedError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import SessionLocal, active_user_with_context, set_database_context
@@ -255,15 +256,23 @@ async def resolve_access_principal(
                 update(User)
                 .where(User.id == user.id, User.access_subject.is_(None))
                 .values(access_subject=identity.sub)
+                .returning(User.id)
+                # Do not let SQLAlchemy mutate the in-session object from an UPDATE whose
+                # rowcount is zero: with expire_on_commit=False that leaves a stale object
+                # looking bound and the loser of a race would proceed.
+                .execution_options(synchronize_session=False)
             )
             await db.commit()
         except IntegrityError:
             # This Access identity is already bound to another account.
             await db.rollback()
             raise _deny_access(identity, "access_subject_taken") from None
-        user = await UserRepository(db).get_by_email(user.email)
-        if user is None:
-            raise _deny_access(identity, "no_active_employee")
+        try:
+            # The authoritative value, read after the commit. `expire_on_commit=False`
+            # makes the identity map reuse the pre-update object unless we do this.
+            await db.refresh(user)
+        except (InvalidRequestError, ObjectDeletedError):
+            raise _deny_access(identity, "no_active_employee") from None
     if user.access_subject != identity.sub:
         raise _deny_access(identity, "access_subject_mismatch")
 

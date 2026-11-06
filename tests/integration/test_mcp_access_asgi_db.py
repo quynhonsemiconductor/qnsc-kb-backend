@@ -43,9 +43,8 @@ RUN = uuid.uuid4().hex[:10]
 class FakeJwkClient:
     """The one fake: the key set. Every other layer is the production code."""
 
-    def get_signing_key(self, kid: str):
-        assert kid == KID
-        return SimpleNamespace(key=KEY.public_key())
+    def get_signing_keys(self, refresh: bool = False):
+        return [SimpleNamespace(key=KEY.public_key(), key_id=KID)]
 
 
 def token(email: str, sub: str) -> str:

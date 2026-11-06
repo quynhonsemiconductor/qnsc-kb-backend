@@ -153,6 +153,11 @@ class AccessJwtVerifier:
             raise AccessJwtError("malformed", "jwks_cooldown_seconds must be >= 0")
         self._unknown_kids: dict[str, float] = {}
         self._unknown_kids_lock = threading.Lock()
+        #: Serialises forced refreshes; the timestamp makes them at most one per cooldown,
+        #: including across a burst of DIFFERENT unknown kids.
+        self._refresh_lock = threading.Lock()
+        self._last_forced_refresh: float | None = None
+        self._refresh_cooldown = config.jwks_cooldown_seconds
         self._jwk_client = jwk_client or PyJWKClient(
             f"{team_domain}/cdn-cgi/access/certs",
             cache_keys=True,
@@ -192,6 +197,34 @@ class AccessJwtVerifier:
         with self._unknown_kids_lock:
             self._unknown_kids.pop(kid, None)
 
+    def _cached_key(self, kid: str) -> PyJWK | None:
+        """The key from the cached JWK set, without forcing a refresh."""
+        return PyJWKClient.match_kid(self._jwk_client.get_signing_keys(), kid)
+
+    def _refresh_for(self, kid: str) -> PyJWK | None:
+        """Refresh the JWK set at most once per cooldown and look the kid up again.
+
+        Cloudflare rotates signing keys by publishing a NEW ``kid``. PyJWT's own
+        ``get_signing_key`` only refreshes when its cooldown permits, so a rotation that
+        lands soon after a fetch would be refused for the rest of that window. This
+        explicit refresh is what makes a new kid work on its first presentation while
+        still bounding an unknown-kid storm to one outbound fetch per cooldown.
+        """
+        now = time.monotonic()
+        with self._refresh_lock:
+            if (
+                self._last_forced_refresh is not None
+                and now - self._last_forced_refresh < self._refresh_cooldown
+            ):
+                return None
+            try:
+                keys = self._jwk_client.get_signing_keys(refresh=True)
+            finally:
+                # Even a failed fetch consumes the window: an outage must not be turned
+                # into one outbound attempt per request.
+                self._last_forced_refresh = time.monotonic()
+            return PyJWKClient.match_kid(keys, kid)
+
     def verify(self, token: str) -> AccessIdentity:
         """Verify a raw Access JWT and return the person it names."""
         if not isinstance(token, str) or not token.strip():
@@ -214,22 +247,34 @@ class AccessJwtVerifier:
             )
 
         try:
-            signing_key: PyJWK = self._jwk_client.get_signing_key(kid)
+            signing_key = self._cached_key(kid)
         except PyJWKClientConnectionError:
             raise AccessJwtError(
                 "jwks_unavailable", "the team JWKS could not be fetched"
             ) from None
-        except PyJWKSetError:
+        except (PyJWKSetError, PyJWKClientError):
             # The JWKS itself is unusable, not this token. Do not negative-cache the kid:
             # the next request should be allowed to try again once the set recovers.
             raise AccessJwtError(
                 "jwks_unavailable", "the team JWKS could not be used"
             ) from None
-        except PyJWKClientError:
-            self._remember_unknown_kid(kid)
-            raise AccessJwtError(
-                "invalid_signature", "the Access JWT signature is invalid"
-            ) from None
+
+        if signing_key is None:
+            try:
+                signing_key = self._refresh_for(kid)
+            except PyJWKClientConnectionError:
+                raise AccessJwtError(
+                    "jwks_unavailable", "the team JWKS could not be fetched"
+                ) from None
+            except (PyJWKSetError, PyJWKClientError):
+                raise AccessJwtError(
+                    "jwks_unavailable", "the team JWKS could not be used"
+                ) from None
+            if signing_key is None:
+                self._remember_unknown_kid(kid)
+                raise AccessJwtError(
+                    "invalid_signature", "the Access JWT signature is invalid"
+                )
         self._forget_unknown_kid(kid)
 
         try:
