@@ -143,3 +143,51 @@ def test_the_source_builder_forwards_filters_and_clamps_the_limit():
         "limit": 50,
         "offset": 10,
     }
+
+
+def test_a_denied_article_does_not_leak_title_or_body():
+    tool = mcp_tools.TOOLS_BY_NAME["get_article"]
+    result = mcp_tools.format_result(
+        tool,
+        403,
+        {
+            "detail": "Access denied",
+            "title": "Secret acquisition plan",
+            "body_md": "the body nobody may read",
+        },
+        {"article_id": ARTICLE_ID},
+    )
+    text = result["content"][0]["text"]
+    assert result["isError"] is True and "Access denied" in text
+    assert "Secret acquisition plan" not in text and "nobody may read" not in text
+
+
+def test_a_denied_source_does_not_leak_filename_or_reference():
+    tool = mcp_tools.TOOLS_BY_NAME["list_sources"]
+    result = mcp_tools.format_result(
+        tool,
+        403,
+        {
+            "detail": "Access denied",
+            "sources": [
+                {"filename": "redundancy-plan-2026.pdf", "source_ref": "secret/ref"}
+            ],
+        },
+        {},
+    )
+    text = result["content"][0]["text"]
+    assert result["isError"] is True and "Access denied" in text
+    assert "redundancy-plan-2026" not in text and "secret/ref" not in text
+
+
+def test_a_denied_section_does_not_leak_section_text():
+    tool = mcp_tools.TOOLS_BY_NAME["get_article_section"]
+    result = mcp_tools.format_result(
+        tool,
+        403,
+        {"detail": "Access denied", "body_md": "section text nobody may read"},
+        {"article_id": ARTICLE_ID, "heading": "Setup"},
+    )
+    text = result["content"][0]["text"]
+    assert result["isError"] is True and "Access denied" in text
+    assert "nobody may read" not in text

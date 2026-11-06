@@ -59,6 +59,28 @@ re-checks the account per call. There is no global body-size middleware either: 
 enforces `MAX_BODY_BYTES` (2.5 MB) on `Content-Length` and on the bytes read, and the test
 suite posts an oversized body to `/mcp` to prove it.
 
+## What authorizes a read
+
+Both read tools that take an article ID and the source list call routes that enforce the
+same predicate, not department visibility alone.
+
+- `GET /api/v1/articles/{id}` — route `src/api/routers/articles.py:2176` →
+  `ArticleService.get_article` (`src/domain/articles.py:407`) → `ArticleRepository.get_by_id`
+  (`src/repositories/article.py:234`, filter applied at `:239`) →
+  `_authorized_article_filters` (`src/repositories/article.py:62`). That predicate evaluates
+  `article_user_permissions` explicit deny first (`:88`, `:104`), tenant (`:113`),
+  department/owner/public scope (`:115`-`:160`), and the provider-ACL intersection
+  (`:167`-`:181`). `PermissionService.can_view_article` checks again at
+  `src/domain/articles.py:422`.
+- `GET /api/v1/knowledge/sources` — route `src/api/routers/knowledge.py:295` applies
+  `ArticleRepository._authorized_article_filters(current_user)` at `:303`, then joins
+  `DocumentSource` to `Article`; a source row is only reachable through an article the
+  caller may read.
+
+The tool layer keeps a denial opaque: on a 4xx it returns only the REST `detail` text, never
+the payload, so a rejected article cannot leak its title or body and a rejected source cannot
+leak its filename (`test_mcp_read_tools.py`).
+
 ## Getting a token
 
 Account menu → Access tokens → Create. The token is shown once. Choose `read` (search,
