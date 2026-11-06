@@ -57,7 +57,7 @@ from src.domain.access_tokens import (
 )
 from src.domain.mcp_tools import Call, ToolInputError
 from src.models.user import User
-from src.repositories.user import UserRepository
+from src.repositories.user import AmbiguousEmailError, UserRepository
 from src.version import __version__
 
 logger = structlog.get_logger()
@@ -237,9 +237,13 @@ async def resolve_access_principal(
         raise _deny_access(identity, "no_email_claim")
 
     await set_database_context(db, domain)
-    user = await active_user_with_context(
-        db, await UserRepository(db).get_by_email(email)
-    )
+    try:
+        user = await active_user_with_context(
+            db, await UserRepository(db).get_by_email(email)
+        )
+    except AmbiguousEmailError:
+        # Two rows collide case-insensitively: refuse rather than pick one.
+        raise _deny_access(identity, "ambiguous_email") from None
     if user is None:
         raise _deny_access(identity, "no_active_employee")
 

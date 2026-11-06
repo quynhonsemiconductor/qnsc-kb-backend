@@ -1,8 +1,9 @@
-"""Real-DB proof that the Access email lookup is case-insensitive.
+"""Real-DB proof for the Access email lookup.
 
 An IdP may return a different local-part case for the same mailbox, and the KB stores
-whatever the account was created with. `UserRepository.get_by_email` normalises the input
-and compares both the exact and lower-cased column, so a mixed-case stored row is found.
+whatever the account was created with. `UserRepository.get_by_email` tries the exact
+address first, then `lower(email)`; two rows that collide case-insensitively are an
+explicit refusal, never SQLAlchemy's `MultipleResultsFound`.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.api.deps import set_database_context
 from src.models.user import User
-from src.repositories.user import UserRepository
+from src.repositories.user import AmbiguousEmailError, UserRepository
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL", "").startswith("postgresql"),
@@ -34,32 +35,76 @@ async def factory():
         await engine.dispose()
 
 
+async def _add(db, *, email: str, user_id=None) -> uuid.UUID:
+    user_id = user_id or uuid.uuid4()
+    db.add(
+        User(
+            id=user_id,
+            email=email,
+            name="MCP Test",
+            password_hash="x",
+            company_domain="example.test",
+            role="Staff",
+            active=True,
+            auth_version=0,
+        )
+    )
+    return user_id
+
+
+async def _cleanup(db, *user_ids: uuid.UUID) -> None:
+    for user_id in user_ids:
+        row = await db.get(User, user_id)
+        if row is not None:
+            await db.delete(row)
+    await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_a_mixed_case_stored_email_is_found_by_its_lowercase_form(factory):
     email = f"MiXeD.{uuid.uuid4().hex[:10]}@Example.TEST"
-    user_id = uuid.uuid4()
     async with factory() as db:
         # The insert and the cleanup are maintenance operations, not a tenant request.
         await set_database_context(db, None, True)
-        db.add(
-            User(
-                id=user_id,
-                email=email,
-                name="Mixed Case",
-                password_hash="x",
-                company_domain="example.test",
-                role="Staff",
-                active=True,
-                auth_version=0,
-            )
-        )
+        user_id = await _add(db, email=email)
         await db.commit()
         try:
             found = await UserRepository(db).get_by_email(email.lower())
             assert found is not None and found.id == user_id
             assert found.email == email
+            # A different case still finds the same single row.
+            assert (await UserRepository(db).get_by_email(email.upper())).id == user_id
         finally:
-            row = await db.get(User, user_id)
-            if row is not None:
-                await db.delete(row)
-                await db.commit()
+            await _cleanup(db, user_id)
+
+
+@pytest.mark.asyncio
+async def test_the_exact_address_wins_and_a_lowercase_collision_is_an_explicit_error(
+    factory,
+):
+    token = uuid.uuid4().hex[:10]
+    lower = f"exact.{token}@example.test"
+    mixed = f"Exact.{token}@Example.TEST"
+    dup_a = f"Dup.{token}@Example.TEST"
+    dup_b = f"dUp.{token}@Example.TEST"
+    async with factory() as db:
+        await set_database_context(db, None, True)
+        lower_id = await _add(db, email=lower)
+        mixed_id = await _add(db, email=mixed)
+        dup_a_id = await _add(db, email=dup_a)
+        dup_b_id = await _add(db, email=dup_b)
+        await db.commit()
+        try:
+            found = await UserRepository(db).get_by_email(lower)
+            assert found is not None and found.id == lower_id, "exact match must win"
+            # The address exactly as given wins too, even though its lower-cased form
+            # also matches the other row.
+            found = await UserRepository(db).get_by_email(mixed)
+            assert found is not None and found.id == mixed_id
+
+            # Neither stored row is the all-lowercase form, so the lower() fallback sees
+            # the collision and refuses explicitly.
+            with pytest.raises(AmbiguousEmailError):
+                await UserRepository(db).get_by_email(f"dup.{token}@example.test")
+        finally:
+            await _cleanup(db, lower_id, mixed_id, dup_a_id, dup_b_id)
