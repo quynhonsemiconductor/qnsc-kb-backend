@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 from src.api.deps import set_database_context
 from src.core.config import settings
 from src.models.governance import AuditLog
+from src.models.ai import AiCache
 from src.models.ops import ApiRequestMetric, SearchLog
 from src.workers.tasks import prune_operational_metrics
 
@@ -101,6 +102,7 @@ def test_dry_run_still_runs_the_cleanup_that_was_live_before(monkeypatch):
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     metric_id = uuid.uuid4()
     search_id = uuid.uuid4()
+    cache_id = uuid.uuid4()
     old = datetime(2020, 1, 1)
 
     async def setup() -> None:
@@ -114,6 +116,19 @@ def test_dry_run_still_runs_the_cleanup_that_was_live_before(monkeypatch):
                     path="/retention-dry",
                     status_code=200,
                     duration_ms=1,
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+            await db.execute(
+                insert(AiCache).values(
+                    id=cache_id,
+                    cache_key=f"retention-dry-{cache_id}",
+                    question_hash="h",
+                    authorization_fingerprint="f",
+                    answer="a",
+                    citations="[]",
+                    expires_at=old,
                     created_at=old,
                     updated_at=old,
                 )

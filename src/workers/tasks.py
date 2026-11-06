@@ -341,28 +341,28 @@ def prune_operational_metrics() -> None:
                     # These two ran live before the retention sweep existed. They keep
                     # deleting even while the NEW tables are count-only: the switch and
                     # the dry run gate the new retention rules, not the old cleanup.
-                    live_deleted = {
-                        "api_request_metrics": (
-                            await prune_batched(
-                                db,
-                                ApiRequestMetric.__table__,
-                                ApiRequestMetric.created_at < metrics_cutoff,
-                                dry_run=False,
-                            )
-                        )[0],
-                        "ai_cache": (
-                            await prune_batched(
-                                db,
-                                AiCache.__table__,
-                                AiCache.expires_at < now,
-                                dry_run=False,
-                            )
-                        )[0],
-                    }
+                    capped: list[str] = []
+                    live_deleted: dict[str, int] = {}
+                    for label, table, predicate in (
+                        (
+                            "api_request_metrics",
+                            ApiRequestMetric.__table__,
+                            ApiRequestMetric.created_at < metrics_cutoff,
+                        ),
+                        ("ai_cache", AiCache.__table__, AiCache.expires_at < now),
+                    ):
+                        removed, hit_cap = await prune_batched(
+                            db, table, predicate, dry_run=False
+                        )
+                        live_deleted[label] = removed
+                        if hit_cap:
+                            # A backlog now drains over several nights; keep it visible.
+                            capped.append(label)
                     if not settings.RETENTION_SWEEP_ENABLED:
                         logger.info(
                             "Retention sweep disabled; pre-existing cleanup ran",
                             deleted=live_deleted,
+                            capped=capped,
                         )
                         return
                     targets = [
@@ -470,7 +470,6 @@ def prune_operational_metrics() -> None:
                         ),
                     ]
                     counts: dict[str, int] = {}
-                    capped: list[str] = []
                     for label, table, predicate in targets:
                         removed, hit_cap = await prune_batched(
                             db,
