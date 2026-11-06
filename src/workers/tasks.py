@@ -267,9 +267,9 @@ def prune_operational_metrics() -> None:
             or 0
         )
 
-    async def prune_batched(db, table, predicate) -> tuple[int, bool]:
+    async def prune_batched(db, table, predicate, *, dry_run: bool) -> tuple[int, bool]:
         """Delete matching rows in bounded passes; (count, hit_pass_cap)."""
-        if settings.RETENTION_DRY_RUN:
+        if dry_run:
             return await eligible_count(db, table, predicate), False
         removed = 0
         for _ in range(settings.RETENTION_MAX_PASSES_PER_TABLE):
@@ -284,9 +284,6 @@ def prune_operational_metrics() -> None:
         return removed, True
 
     async def prune() -> None:
-        if not settings.RETENTION_SWEEP_ENABLED:
-            logger.info("Retention sweep disabled")
-            return
         # Its own engine, because the shared one pins command_timeout to 5 s (deps.py) so
         # that no request can hold a pooled connection longer than that. asyncpg enforces
         # that ceiling CLIENT-side, which is why a server-side `SET LOCAL
@@ -341,15 +338,34 @@ def prune_operational_metrics() -> None:
                         days=settings.RETENTION_CONNECTOR_DAYS
                     )
 
-                    targets = [
+                    # These two ran live before the retention sweep existed. They keep
+                    # deleting even while the NEW tables are count-only: the switch and
+                    # the dry run gate the new retention rules, not the old cleanup.
+                    capped: list[str] = []
+                    live_deleted: dict[str, int] = {}
+                    for label, table, predicate in (
                         (
                             "api_request_metrics",
                             ApiRequestMetric.__table__,
                             ApiRequestMetric.created_at < metrics_cutoff,
                         ),
-                        # Cache answers can contain authorized document passages. Their
-                        # expiry must remove storage as well as disable reads.
                         ("ai_cache", AiCache.__table__, AiCache.expires_at < now),
+                    ):
+                        removed, hit_cap = await prune_batched(
+                            db, table, predicate, dry_run=False
+                        )
+                        live_deleted[label] = removed
+                        if hit_cap:
+                            # A backlog now drains over several nights; keep it visible.
+                            capped.append(label)
+                    if not settings.RETENTION_SWEEP_ENABLED:
+                        logger.info(
+                            "Retention sweep disabled; pre-existing cleanup ran",
+                            deleted=live_deleted,
+                            capped=capped,
+                        )
+                        return
+                    targets = [
                         # AI/search telemetry can contain question text; keep 90 days.
                         # Feedback is NOT silently destroyed with its usage row: an
                         # answered question a reviewer acted on stays until the feedback
@@ -454,15 +470,20 @@ def prune_operational_metrics() -> None:
                         ),
                     ]
                     counts: dict[str, int] = {}
-                    capped: list[str] = []
                     for label, table, predicate in targets:
-                        removed, hit_cap = await prune_batched(db, table, predicate)
+                        removed, hit_cap = await prune_batched(
+                            db,
+                            table,
+                            predicate,
+                            dry_run=settings.RETENTION_DRY_RUN,
+                        )
                         counts[label] = removed
                         if hit_cap:
                             capped.append(label)
                     logger.info(
                         "Operational retention sweep completed",
                         dry_run=settings.RETENTION_DRY_RUN,
+                        deleted=live_deleted,
                         counts=counts,
                         capped=capped,
                     )

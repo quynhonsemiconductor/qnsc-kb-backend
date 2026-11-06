@@ -21,7 +21,8 @@ from sqlalchemy.pool import NullPool
 from src.api.deps import set_database_context
 from src.core.config import settings
 from src.models.governance import AuditLog
-from src.models.ops import SearchLog
+from src.models.ai import AiCache
+from src.models.ops import ApiRequestMetric, SearchLog
 from src.workers.tasks import prune_operational_metrics
 
 pytestmark = pytest.mark.skipif(
@@ -91,5 +92,89 @@ def test_an_eligible_row_is_deleted_and_audit_logs_are_kept(monkeypatch):
         gone, kept = asyncio.run(check())
         assert gone is None, "the eligible search_logs row was not deleted"
         assert kept == audit_id, "audit_logs must never be capped"
+    finally:
+        asyncio.run(cleanup())
+
+
+def test_dry_run_still_runs_the_cleanup_that_was_live_before(monkeypatch):
+    """Metrics and AI cache predate the retention sweep; dry-run must not stop them."""
+    engine = create_async_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    metric_id = uuid.uuid4()
+    search_id = uuid.uuid4()
+    cache_id = uuid.uuid4()
+    old = datetime(2020, 1, 1)
+
+    async def setup() -> None:
+        async with factory() as db:
+            await set_database_context(db, None, True)
+            await db.execute(
+                insert(ApiRequestMetric).values(
+                    id=metric_id,
+                    request_id="retention-dry",
+                    method="GET",
+                    path="/retention-dry",
+                    status_code=200,
+                    duration_ms=1,
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+            await db.execute(
+                insert(AiCache).values(
+                    id=cache_id,
+                    cache_key=f"retention-dry-{cache_id}",
+                    question_hash="h",
+                    authorization_fingerprint="f",
+                    answer="a",
+                    citations="[]",
+                    expires_at=old,
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+            await db.execute(
+                insert(SearchLog).values(
+                    id=search_id,
+                    query="retention dry",
+                    result_count=0,
+                    latency_ms=1,
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+            await db.commit()
+
+    async def check() -> tuple[object, object]:
+        async with factory() as db:
+            await set_database_context(db, None, True)
+            metric = await db.scalar(
+                select(ApiRequestMetric.id).where(ApiRequestMetric.id == metric_id)
+            )
+            search = await db.scalar(
+                select(SearchLog.id).where(SearchLog.id == search_id)
+            )
+            return metric, search
+
+    async def cleanup() -> None:
+        async with factory() as db:
+            await set_database_context(db, None, True)
+            await db.execute(
+                delete(ApiRequestMetric).where(ApiRequestMetric.id == metric_id)
+            )
+            await db.execute(delete(SearchLog).where(SearchLog.id == search_id))
+            await db.commit()
+        await engine.dispose()
+
+    try:
+        asyncio.run(setup())
+        monkeypatch.setattr(settings, "RETENTION_SWEEP_ENABLED", True)
+        monkeypatch.setattr(settings, "RETENTION_DRY_RUN", True)
+        prune_operational_metrics.run()
+        metric, search = asyncio.run(check())
+        assert (
+            metric is None
+        ), "metrics cleanup stopped when the new sweep dry-run began"
+        assert search == search_id, "dry-run must not delete a new-sweep table"
     finally:
         asyncio.run(cleanup())
