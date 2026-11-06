@@ -102,8 +102,12 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     @validates("email")
     def _normalise_email(self, key: str, value: str) -> str:
         # Every create and every assignment: an IdP may hand back a different case for the
-        # same mailbox, and a case variant must never become a second account.
-        return value.strip().lower() if isinstance(value, str) else value
+        # same mailbox, and a case variant must never become a second account. Return the
+        # original object when it is already canonical so an unchanged assign is a no-op.
+        if not isinstance(value, str):
+            return value
+        normalised = value.strip().lower()
+        return normalised if normalised != value else value
 
     email: Mapped[str] = mapped_column(
         String(255), unique=True, index=True, nullable=False
@@ -188,7 +192,10 @@ class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     @validates("email")
     def _normalise_email(self, key: str, value: str) -> str:
-        return value.strip().lower() if isinstance(value, str) else value
+        if not isinstance(value, str):
+            return value
+        normalised = value.strip().lower()
+        return normalised if normalised != value else value
 
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)

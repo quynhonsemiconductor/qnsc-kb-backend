@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from src.core.config import settings
 from src.core.db_ssl import ssl_connect_args
 from src.models import User
-from src.repositories.user import UserRepository
+from src.repositories.user import AmbiguousEmailError, UserRepository
 from src.domain.rbac import AuthorizationService, bootstrap_rbac
 from src.domain.admin_bootstrap import ensure_bootstrap_admin
 from src.domain.llm_config import load_runtime_config
@@ -180,7 +180,10 @@ async def active_user_with_context(db: AsyncSession, user: User | None) -> User 
         # Same bootstrap as get_current_user: a pre-RBAC row gets roles on first use, then
         # is reloaded so the caller sees the assignments.
         await bootstrap_rbac(db)
-        user = await UserRepository(db).get_by_email(user.email)
+        try:
+            user = await UserRepository(db).get_by_email(user.email)
+        except AmbiguousEmailError:
+            return None
         if user is None or not user.active:
             return None
     await set_database_context(
@@ -310,7 +313,10 @@ async def get_current_user(
     # a temporary global bypass.
     await set_database_context(db, email.rsplit("@", 1)[1])
     user_repo = UserRepository(db)
-    user = await user_repo.get_by_email(email)
+    try:
+        user = await user_repo.get_by_email(email)
+    except AmbiguousEmailError:
+        raise credentials_exception from None
     if user is None:
         raise credentials_exception
     if not user.active:

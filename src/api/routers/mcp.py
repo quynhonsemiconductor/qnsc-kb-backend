@@ -273,6 +273,10 @@ async def resolve_access_principal(
             await db.refresh(user)
         except (InvalidRequestError, ObjectDeletedError):
             raise _deny_access(identity, "no_active_employee") from None
+        # The binding write is a fresh statement; the account may have been deactivated
+        # between the gate above and this row. Re-run the same gate on the persisted row.
+        if not user.active:
+            raise _deny_access(identity, "no_active_employee")
     if user.access_subject != identity.sub:
         raise _deny_access(identity, "access_subject_mismatch")
 

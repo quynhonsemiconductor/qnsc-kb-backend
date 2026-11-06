@@ -40,3 +40,16 @@ def test_invitation_email_is_normalised():
         expires_at=datetime.utcnow() + timedelta(days=1),
     )
     assert invitation.email == "invitee@example.test"
+
+
+def test_no_bulk_update_bypasses_the_email_validator():
+    """A core UPDATE does not run ORM validators, so none may write `email` in bulk."""
+    from pathlib import Path
+
+    offenders = [
+        str(path)
+        for path in Path("src").rglob("*.py")
+        if ".values(email=" in path.read_text(encoding="utf-8")
+        or '.values({"email"' in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []

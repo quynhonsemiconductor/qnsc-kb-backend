@@ -9,7 +9,7 @@ from src.core.security import (
 )
 from src.core.config import settings
 from src.models.user import User
-from src.repositories.user import UserRepository
+from src.repositories.user import AmbiguousEmailError, UserRepository
 
 # One bcrypt comparison happens on every authentication attempt, including the ones where
 # no account exists. Returning 401 before hashing made the unknown-email path finish in
@@ -24,7 +24,15 @@ class AuthService:
         self.user_repo = user_repo
 
     async def authenticate_user(self, email: str, password: str) -> User:
-        user = await self.user_repo.get_by_email(email)
+        try:
+            user = await self.user_repo.get_by_email(email)
+        except AmbiguousEmailError:
+            verify_password(password, _ABSENT_ACCOUNT_PASSWORD_HASH)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from None
         if not user:
             verify_password(password, _ABSENT_ACCOUNT_PASSWORD_HASH)
             raise HTTPException(
@@ -62,7 +70,13 @@ class AuthService:
             )
         if role not in {"Admin", "CEO", "Reviewer", "Staff"}:
             raise HTTPException(status_code=422, detail="Invalid role")
-        existing = await self.user_repo.get_by_email(email)
+        try:
+            existing = await self.user_repo.get_by_email(email)
+        except AmbiguousEmailError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            ) from None
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

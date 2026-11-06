@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 class FakeJwkClient:
-    """A tiny JWKS: a set of kids, a refresh that may publish a rotated key, and counters."""
+    """A tiny JWKS: a set of kids, an optional rotation on a later fetch, and counters."""
 
     def __init__(
         self,
@@ -31,23 +32,27 @@ class FakeJwkClient:
         error: Exception | None = None,
         rotate_to: str | None = None,
         rotate_key=None,
+        rotate_after: int = 1,
     ) -> None:
         self._keys = dict(keys or {"test-key": KEY.public_key()})
         self._error = error
         self._rotate_to = rotate_to
         self._rotate_key = rotate_key or KEY.public_key()
+        self._rotate_after = rotate_after
+        self._lock = threading.Lock()
         self.fetches = 0
-        self.refreshes = 0
 
     def get_signing_keys(self, refresh: bool = False):
-        self.fetches += 1
-        if self._error is not None:
-            raise self._error
-        if refresh:
-            self.refreshes += 1
-            if self._rotate_to is not None:
+        with self._lock:
+            self.fetches += 1
+            fetch_number = self.fetches
+            if self._error is not None:
+                raise self._error
+            if self._rotate_to is not None and fetch_number >= self._rotate_after:
                 self._keys[self._rotate_to] = self._rotate_key
-        return [SimpleNamespace(key=key, key_id=kid) for kid, key in self._keys.items()]
+            return [
+                SimpleNamespace(key=key, key_id=kid) for kid, key in self._keys.items()
+            ]
 
 
 def verifier(*, allow_email_fallback: bool = True, **overrides) -> AccessJwtVerifier:
@@ -183,7 +188,7 @@ def test_configuration_is_pinned():
         )
 
 
-def test_an_unknown_kid_is_negative_cached_before_a_second_refresh():
+def test_an_unknown_kid_is_refused_without_a_second_fetch():
     client = FakeJwkClient(keys={"other-key": KEY.public_key()})
     v = AccessJwtVerifier(
         AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
@@ -192,10 +197,8 @@ def test_an_unknown_kid_is_negative_cached_before_a_second_refresh():
     token = access_token()
     for _ in range(3):
         assert rejection(token, v=v) == "invalid_signature"
-    # Cached set, one forced refresh, then the negative cache answers: a repeated bogus
-    # kid cannot drive the JWKS client again inside the TTL.
-    assert client.fetches == 2 and client.refreshes == 1
-    assert v._unknown_kids
+    # Initial fetch + one forced refresh, then the cooldown answers: no fetch per request.
+    assert client.fetches == 2
 
 
 def test_a_real_key_rotation_refreshes_once_and_then_verifies():
@@ -203,6 +206,7 @@ def test_a_real_key_rotation_refreshes_once_and_then_verifies():
         keys={"old-key": KEY.public_key()},
         rotate_to="new-key",
         rotate_key=KEY.public_key(),
+        rotate_after=2,
     )
     v = AccessJwtVerifier(
         AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE, allow_email_fallback=True),
@@ -210,45 +214,75 @@ def test_a_real_key_rotation_refreshes_once_and_then_verifies():
     )
     identity = v.verify(access_token(kid="new-key"))
     assert identity.sub == "access-sub-1"
-    assert (
-        client.refreshes == 1
-    ), "a new Cloudflare kid must trigger exactly one refresh"
-    # The rotated key is now in the cached set: no second refresh.
+    assert client.fetches == 2, "a new Cloudflare kid must trigger one refresh"
+    # The rotated key is now in the cached set: no second fetch.
     assert v.verify(access_token(kid="new-key")).sub == "access-sub-1"
-    assert client.refreshes == 1
+    assert client.fetches == 2
 
 
-def test_different_unknown_kids_share_one_refresh_per_cooldown():
-    client = FakeJwkClient(keys={"other-key": KEY.public_key()})
+def test_a_bogus_kid_does_not_stop_a_later_rotation_from_verifying():
+    client = FakeJwkClient(
+        keys={"old-key": KEY.public_key()},
+        rotate_to="new-key",
+        rotate_key=KEY.public_key(),
+        rotate_after=2,
+    )
+    v = AccessJwtVerifier(
+        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE, allow_email_fallback=True),
+        jwk_client=client,
+    )
+    assert rejection(access_token(kid="bogus"), v=v) == "invalid_signature"
+    assert v.verify(access_token(kid="new-key")).sub == "access-sub-1"
+    assert client.fetches == 2
+
+
+def test_a_concurrent_rotation_verifies_on_both_threads():
+    client = FakeJwkClient(
+        keys={"old-key": KEY.public_key()},
+        rotate_to="new-key",
+        rotate_key=KEY.public_key(),
+        rotate_after=2,
+    )
+    v = AccessJwtVerifier(
+        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE, allow_email_fallback=True),
+        jwk_client=client,
+    )
+    token = access_token(kid="new-key")
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def verify() -> None:
+        barrier.wait()
+        results.append(v.verify(token).sub)
+
+    threads = [threading.Thread(target=verify) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results == ["access-sub-1", "access-sub-1"]
+    assert client.fetches == 2
+
+
+def test_a_jwks_outage_fetches_once_per_cooldown():
+    client = FakeJwkClient(error=PyJWKClientConnectionError("down"))
     v = AccessJwtVerifier(
         AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
         jwk_client=client,
     )
-    for kid in ("bogus-a", "bogus-b", "bogus-c"):
-        assert rejection(access_token(kid=kid), v=v) == "invalid_signature"
-    assert client.refreshes == 1
+    for _ in range(5):
+        assert rejection(access_token(), v=v) == "jwks_unavailable"
+    assert client.fetches == 1
 
 
-def test_the_negative_cache_is_bounded():
-    client = FakeJwkClient(keys={"other-key": KEY.public_key()})
-    v = AccessJwtVerifier(
-        AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE),
-        jwk_client=client,
-    )
-    for i in range(20):
-        assert rejection(access_token(kid=f"kid-{i}"), v=v) == "invalid_signature"
-    from src.domain import access_jwt as module
-
-    assert len(v._unknown_kids) <= module.MAX_NEGATIVE_KID_ENTRIES
-
-
-def test_the_jwks_cooldown_is_at_least_a_minute(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class Client:
-        def __init__(self, *args, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("src.domain.access_jwt.PyJWKClient", Client)
-    AccessJwtVerifier(AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE))
-    assert captured["cooldown_duration"] >= 60
+def test_the_cache_and_cooldown_are_validated():
+    with pytest.raises(AccessJwtError):
+        AccessJwtVerifier(
+            AccessJwtConfig(team_domain=TEAM, audience=AUDIENCE, jwks_cache_seconds=0)
+        )
+    with pytest.raises(AccessJwtError):
+        AccessJwtVerifier(
+            AccessJwtConfig(
+                team_domain=TEAM, audience=AUDIENCE, jwks_cooldown_seconds=-1
+            )
+        )

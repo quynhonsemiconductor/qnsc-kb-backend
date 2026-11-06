@@ -2664,7 +2664,10 @@ async def refresh_token(
         raise HTTPException(
             status_code=401, detail="Refresh token has been revoked or expired"
         )
-    user = await UserRepository(db).get_by_email(refresh_subject)
+    try:
+        user = await UserRepository(db).get_by_email(refresh_subject)
+    except AmbiguousEmailError:
+        raise HTTPException(status_code=401, detail="Account is unavailable") from None
     if (
         not user
         or not user.active
@@ -2833,11 +2836,14 @@ async def entra_callback(
             )
         )
     ).scalar_one_or_none()
-    user = (
-        await UserRepository(db).get_by_id(identity.user_id)
-        if identity
-        else await UserRepository(db).get_by_email(email)
-    )
+    try:
+        user = (
+            await UserRepository(db).get_by_id(identity.user_id)
+            if identity
+            else await UserRepository(db).get_by_email(email)
+        )
+    except AmbiguousEmailError:
+        raise HTTPException(status_code=403, detail="Account is unavailable") from None
     invitation = None
     if user is None:
         invitation = (
@@ -2845,7 +2851,7 @@ async def entra_callback(
                 await db.execute(
                     select(Invitation)
                     .where(
-                        func.lower(Invitation.email) == email,
+                        func.lower(Invitation.email) == email.strip().lower(),
                         Invitation.company_domain == email.rsplit("@", 1)[-1],
                         Invitation.used_at.is_(None),
                         Invitation.revoked_at.is_(None),

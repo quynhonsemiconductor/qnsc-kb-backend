@@ -35,9 +35,11 @@ is refused before the REST call. The person's own RBAC, department scope, ACLs a
 row-level security still apply to every result, exactly as in the web app.
 
 The Access branch has a cheap address-keyed pre-authentication budget
-(`MCP_AUTH_RATE_LIMIT_PER_MINUTE`) before any JWKS lookup, a 60 s JWKS refresh cooldown,
-and a bounded negative cache for unknown `kid`s. A repeated bogus key never reaches the
-JWKS client.
+(`MCP_AUTH_RATE_LIMIT_PER_MINUTE`) before any JWKS lookup. The key set has its own cache;
+a miss (a new Cloudflare `kid`) is re-checked inside a lock and refreshed at most once per
+60 s cooldown, so a rotation verifies on first presentation while a burst of bogus kids
+costs one fetch. A JWKS outage is bounded to the same one fetch per cooldown; the cooldown
+is checked before the lock so a slow origin cannot park every request.
 
 Personal access tokens keep working when these settings are unset; if an Access header
 arrives while the server is not configured for Access, the answer is `503`, not a bad-token
