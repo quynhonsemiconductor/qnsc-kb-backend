@@ -254,7 +254,8 @@ jobs:
           poetry run alembic -c migrations/alembic.ini upgrade head
           export KB_RLS_TEST_REQUIRED=1
           DATABASE_URL=postgresql+asyncpg://kb_rls_test:kb-rls-test@localhost:5432/qnsc_kb_rls \
-            poetry run pytest -q tests/integration/test_provision_admin_rls.py
+            poetry run pytest -q tests/integration/test_provision_admin_rls.py \
+              tests/integration/test_retention_sweep.py
 
       # Proves the DATABASE_SSL_CA decision (src/core/db_ssl.py) against a real Postgres
       # speaking TLS with a self-signed CA (SAN localhost): verify-full connects, a CA the

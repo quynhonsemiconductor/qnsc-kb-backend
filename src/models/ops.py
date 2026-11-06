@@ -163,10 +163,15 @@ class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime, default=datetime.utcnow, nullable=False, index=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Terminal timestamps. Retention keys on these, never on created_at: a retried
+    #: event can finish days after it was enqueued.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dead_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SearchLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "search_logs"
+    __table_args__ = (Index("ix_search_logs_created_at", "created_at"),)
 
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True

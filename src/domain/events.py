@@ -271,6 +271,10 @@ class EventBus:
             if event:
                 event.status = status
                 event.last_error = error
+                if status == "completed":
+                    event.completed_at = datetime.utcnow()
+                elif status == "dead":
+                    event.dead_at = datetime.utcnow()
                 await db.commit()
 
     async def recover_outbox_once(

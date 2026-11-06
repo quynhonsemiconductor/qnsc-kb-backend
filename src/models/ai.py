@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 import uuid
 from datetime import datetime
-from sqlalchemy import ForeignKey, String, Text, Integer, DateTime, JSON
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 class AiUsageLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "ai_usage_logs"
+    __table_args__ = (Index("ix_ai_usage_logs_created_at", "created_at"),)
 
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
