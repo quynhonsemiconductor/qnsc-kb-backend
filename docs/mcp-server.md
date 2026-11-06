@@ -3,10 +3,29 @@
 The knowledge base speaks the Model Context Protocol, so Claude Desktop, Claude Code,
 Cursor and other MCP clients can search, ask and read it, and propose changes.
 
-- Endpoint: `POST /api/v1/mcp` (Streamable HTTP, stateless, JSON responses).
-- Auth: a personal access token, `Authorization: Bearer kbpat_...`.
+- Endpoint: `POST /mcp` (Streamable HTTP, stateless, JSON responses). The versioned
+  `/api/v1/mcp` path serves the same endpoint for personal access tokens; `/mcp` is the
+  path the edge's Access application is scoped to (portal and direct Access clients).
+- Auth: a personal access token, `Authorization: Bearer kbpat_...`, or a Cloudflare Access
+  identity through the MCP portal (`Cf-Access-Jwt-Assertion`).
 - Protocol versions: 2025-06-18, 2025-03-26, 2024-11-05.
 - Switch: `MCP_ENABLED` (default `true`).
+
+## Cloudflare Access (the MCP portal)
+
+When `MCP_CF_TEAM_DOMAIN` and `MCP_ACCESS_AUD` are both set, `/mcp` also accepts the
+Access JWT Cloudflare attaches to an authorized request. The origin verifies the signature
+against the team JWKS, `iss` (the team origin), `aud` (the Access application's AUD tag),
+RS256, `exp` and `nbf`; it then maps the token's IdP-verified **email** to an ACTIVE user.
+An unknown or deactivated account is refused, never provisioned.
+
+An Access caller is **read-only**: the write tools are neither listed nor callable,
+whatever the person's role. The person's own RBAC, department scope, ACLs and row-level
+security still apply to every result, exactly as in the web app.
+
+Personal access tokens keep working when these settings are unset; if an Access header
+arrives while the server is not configured for Access, the answer is `503`, not a bad-token
+`401`.
 
 ## Getting a token
 

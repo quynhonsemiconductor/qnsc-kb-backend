@@ -496,8 +496,15 @@ class Settings(BaseSettings):
     # the same 30 asks a minute. 30/min is one ask every two seconds — more than a person
     # following up on an answer uses, and enough that a scripted loop hits the cap fast.
     AI_RATE_LIMIT_PER_MINUTE: int = 30
-    # MCP server (POST {API_V1_STR}/mcp), authenticated with personal access tokens.
+    # MCP server (POST {API_V1_STR}/mcp), authenticated with personal access tokens
+    # and/or a Cloudflare Access identity (MCP-PLAN §5). The Access path is enabled only
+    # when both settings are present; personal access tokens keep working either way.
     MCP_ENABLED: bool = True
+    # The Access team origin, e.g. https://qnsc.cloudflareaccess.com. The token's `iss`
+    # must equal it.
+    MCP_CF_TEAM_DOMAIN: str | None = None
+    # The AUD tag of the `/mcp` Access application. A token minted for another app is rejected.
+    MCP_ACCESS_AUD: str | None = None
     MCP_RATE_LIMIT_PER_MINUTE: int = 120
     MCP_TOKEN_MAX_DAYS: int = 365
     MCP_TOKENS_PER_USER: int = 20

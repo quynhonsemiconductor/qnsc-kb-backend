@@ -1042,6 +1042,10 @@ app.include_router(
 )
 if settings.MCP_ENABLED:
     app.include_router(mcp.router, prefix=f"{settings.API_V1_STR}/mcp", tags=["mcp"])
+    # MCP-PLAN §12: the API process serves `/mcp` like any other path, so the edge's
+    # Access application is scoped to `/mcp` exactly as it is for rova. The versioned
+    # path stays for existing clients.
+    app.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
     app.include_router(
         mcp_config.router, prefix=f"{settings.API_V1_STR}/mcp-config", tags=["mcp"]
     )

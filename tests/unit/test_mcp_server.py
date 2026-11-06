@@ -651,6 +651,8 @@ def test_every_tool_targets_an_existing_endpoint(tool):
 def test_routes_are_mounted():
     main = open("src/api/main.py", encoding="utf-8").read()
     assert 'mcp.router, prefix=f"{settings.API_V1_STR}/mcp"' in main
+    # The edge's Access app is scoped to /mcp (MCP-PLAN §12), and rova serves that path.
+    assert 'mcp.router, prefix="/mcp"' in main
     assert "/auth/me/access-tokens" in main
 
 
