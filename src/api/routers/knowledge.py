@@ -244,13 +244,19 @@ async def knowledge_catalog(
     """Return database-backed hierarchy counts without loading the document corpus."""
     repo = ArticleRepository(db)
     filters = _browse_filters(repo, current_user, dept=dept, query=q)
+    # The department column must always span the whole library: grouping it by
+    # the scoped filters collapsed it to the selected department alone, and once
+    # HR was chosen there was no way to switch to any other one. The department
+    # scope applies to the topic drill-down and the visible total only, so the
+    # counts here stay what the query would find in each department.
+    department_filters = _browse_filters(repo, current_user, dept=None, query=q)
     total = int(
         await db.scalar(select(func.count(Article.id)).where(and_(*filters))) or 0
     )
 
     department_rows = await db.execute(
         select(Article.dept, func.count(Article.id))
-        .where(and_(*filters))
+        .where(and_(*department_filters))
         .group_by(Article.dept)
         .order_by(func.count(Article.id).desc(), Article.dept.asc())
     )
