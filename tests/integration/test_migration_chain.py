@@ -18,4 +18,5 @@ def test_migrations_have_one_current_head():
     # Bumped for 20261104_92, which grants the runtime role DML access to the schema
     # the chain built.
     # Bumped for 20261104_93, which retypes the lessons assistants already saved to LESSON.
-    assert script.get_heads() == ["20261104_93"]
+    # Bumped for 20261106_94, which binds a user to the first Cloudflare Access sub.
+    assert script.get_heads() == ["20261106_94"]

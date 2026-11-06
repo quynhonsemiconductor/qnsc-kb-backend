@@ -166,6 +166,36 @@ async def set_database_context(
     await db.execute(_TENANT_SQL, context)
 
 
+async def active_user_with_context(db: AsyncSession, user: User | None) -> User | None:
+    """The gate and RLS context every authenticated request shares.
+
+    `get_current_user` and the MCP Access resolver both end here, so the two cannot drift
+    on what "a usable account" means: active, roles provisioned, and the tenant/flags
+    context the REST path applies. Returns None for a deactivated (or vanished) account;
+    each caller turns that into its own refusal, so the MCP path can keep its uniform 403.
+    """
+    if user is None or not user.active:
+        return None
+    if not user.roles:
+        # Same bootstrap as get_current_user: a pre-RBAC row gets roles on first use, then
+        # is reloaded so the caller sees the assignments.
+        await bootstrap_rbac(db)
+        user = await UserRepository(db).get_by_email(user.email)
+        if user is None or not user.active:
+            return None
+    await set_database_context(
+        db,
+        user.company_domain,
+        AuthorizationService.is_global_administrator(user),
+        str(user.id),
+        AuthorizationService.has_global_article_access(user),
+        AuthorizationService.has_global_identity_management(user),
+        AuthorizationService.has_global_connector_management(user),
+        AuthorizationService.has_global_governance_access(user),
+    )
+    return user
+
+
 # Cookie credentials are attached by the browser to CROSS-SITE requests as well, so an
 # authenticated non-GET route reached from a hostile page executes with the victim's
 # session unless something proves the request came from our own application. Only the
@@ -290,19 +320,14 @@ async def get_current_user(
         )
     if int(payload.get("av", 0)) != user.auth_version:
         raise credentials_exception
-    if not user.roles:
-        await bootstrap_rbac(db)
-        user = loaded_user(await user_repo.get_by_email(email))
-    await set_database_context(
-        db,
-        user.company_domain,
-        AuthorizationService.is_global_administrator(user),
-        str(user.id),
-        AuthorizationService.has_global_article_access(user),
-        AuthorizationService.has_global_identity_management(user),
-        AuthorizationService.has_global_connector_management(user),
-        AuthorizationService.has_global_governance_access(user),
-    )
+    user = await active_user_with_context(db, user)
+    if user is None:
+        # It was active a statement ago; it vanished or was deactivated during the role
+        # bootstrap. Same refusal the first check gives.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been deactivated",
+        )
     return user
 
 

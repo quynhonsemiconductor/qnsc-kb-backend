@@ -3,10 +3,83 @@
 The knowledge base speaks the Model Context Protocol, so Claude Desktop, Claude Code,
 Cursor and other MCP clients can search, ask and read it, and propose changes.
 
-- Endpoint: `POST /api/v1/mcp` (Streamable HTTP, stateless, JSON responses).
-- Auth: a personal access token, `Authorization: Bearer kbpat_...`.
+- Endpoint: `POST /mcp` (Streamable HTTP, stateless, JSON responses). The versioned
+  `/api/v1/mcp` path serves the same endpoint for personal access tokens; `/mcp` is the
+  path the edge's Access application is scoped to (portal and direct Access clients).
+- Auth: a personal access token, `Authorization: Bearer kbpat_...`, or a Cloudflare Access
+  identity through the MCP portal (`Cf-Access-Jwt-Assertion`).
 - Protocol versions: 2025-06-18, 2025-03-26, 2024-11-05.
 - Switch: `MCP_ENABLED` (default `true`).
+
+## Cloudflare Access (the MCP portal)
+
+When `MCP_CF_TEAM_DOMAIN` and `MCP_ACCESS_AUD` are both set, `/mcp` also accepts the
+Access JWT Cloudflare attaches to an authorized request. The origin verifies the signature
+against the team JWKS, `iss` (the team origin), `aud` (the Access application's AUD tag),
+RS256, `exp` and `nbf`; it then maps the token's IdP-verified **email** to an ACTIVE user.
+An unknown or deactivated account is refused, never provisioned.
+
+The account gate and tenant context are the **same helper the REST dependency uses**
+(`active_user_with_context`): active, roles provisioned, and the same `app.*` settings.
+The first verified Access `sub` is bound to the account; a later token for the same email
+with a different Access identity is refused, so a reassigned mailbox does not inherit the
+account. Clearing `users.access_subject` rebinds it. The email lookup prefers the exact
+stored address; if two rows collide case-insensitively it refuses rather than choosing one.
+
+An Access caller is **read-only**, and that is a property of the call, not only of the
+tool list: every tool it can see is GET-backed (so `ask_knowledge_base`, which POSTs to
+`/ai/ask` and records a conversation, is not offered), and a direct call to a non-GET tool
+is refused before the REST call. The person's own RBAC, department scope, ACLs and
+row-level security still apply to every result, exactly as in the web app.
+
+The Access branch has a cheap address-keyed pre-authentication budget
+(`MCP_AUTH_RATE_LIMIT_PER_MINUTE`) before any JWKS lookup, a 60 s JWKS refresh cooldown,
+and a bounded negative cache for unknown `kid`s. A repeated bogus key never reaches the
+JWKS client.
+
+Personal access tokens keep working when these settings are unset; if an Access header
+arrives while the server is not configured for Access, the answer is `503`, not a bad-token
+`401`.
+
+## Surface and middleware
+
+`/mcp` is mounted outside `API_V1_STR`, so it is worth naming what still covers it. The
+production app's global chain is:
+
+- `CORSMiddleware` — applies to every route; an allowed `Origin` gets the expected
+  `Access-Control-Allow-Origin` on `/mcp` (pinned by `test_mcp_asgi.py`).
+- `unhandled_error_boundary` — a 500 on `/mcp` still passes back through CORS.
+- `request_logging_middleware` — request id, security headers (`nosniff`, `DENY`,
+  `no-referrer`, permissions policy), `no-store, private` (extended to `/mcp`), metrics
+  and the `X-Request-ID` header.
+
+There is no global authentication dependency: `/mcp` authenticates itself (Access JWT or
+personal token) and then acts through the app's own REST route, whose `get_current_user`
+re-checks the account per call. There is no global body-size middleware either: the route
+enforces `MAX_BODY_BYTES` (2.5 MB) on `Content-Length` and on the bytes read, and the test
+suite posts an oversized body to `/mcp` to prove it.
+
+## What authorizes a read
+
+Both read tools that take an article ID and the source list call routes that enforce the
+same predicate, not department visibility alone.
+
+- `GET /api/v1/articles/{id}` — route `src/api/routers/articles.py:2176` →
+  `ArticleService.get_article` (`src/domain/articles.py:407`) → `ArticleRepository.get_by_id`
+  (`src/repositories/article.py:234`, filter applied at `:239`) →
+  `_authorized_article_filters` (`src/repositories/article.py:62`). That predicate evaluates
+  `article_user_permissions` explicit deny first (`:88`, `:104`), tenant (`:113`),
+  department/owner/public scope (`:115`-`:160`), and the provider-ACL intersection
+  (`:167`-`:181`). `PermissionService.can_view_article` checks again at
+  `src/domain/articles.py:422`.
+- `GET /api/v1/knowledge/sources` — route `src/api/routers/knowledge.py:295` applies
+  `ArticleRepository._authorized_article_filters(current_user)` at `:303`, then joins
+  `DocumentSource` to `Article`; a source row is only reachable through an article the
+  caller may read.
+
+The tool layer keeps a denial opaque: on a 4xx it returns only the REST `detail` text, never
+the payload, so a rejected article cannot leak its title or body and a rejected source cannot
+leak its filename (`test_mcp_read_tools.py`).
 
 ## Getting a token
 
@@ -49,7 +122,10 @@ You do not need to learn the tool names: the server tells the client how to use 
   with citations (article, page).
 - "Find where the boot sequence is documented and quote it" runs `search_knowledge`,
   then `get_article`.
-- "What documents do we have about onboarding?" runs `list_articles`.
+- "Read just the Setup section of the VPN article" runs `get_article_section`, so a
+  long document does not have to be paged through whole.
+- "What documents do we have about onboarding?" runs `list_articles`; `list_sources`
+  answers where a document came from and finds one by its original filename.
 - In Claude Code, type `/` and pick a prompt from `qnsc-kb`. Start with
   `explore_knowledge_base`: it tours what is in the knowledge base and suggests
   questions.
@@ -60,7 +136,8 @@ your own permissions.
 
 ## What it offers
 
-Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`, `list_articles`,
+Read tools: `search_knowledge`, `ask_knowledge_base`, `get_article`,
+`get_article_section`, `list_sources`, `list_articles`,
 `get_related_articles`, `list_article_versions`, `get_article_version`,
 `get_article_changes`, `list_recent_changes`, `list_conversations`, `get_conversation`, `list_lessons`, `list_my_drafts`, `list_departments`,
 `list_tags`, `get_glossary`, `get_project_config` (the team's standing instructions, versioned by the

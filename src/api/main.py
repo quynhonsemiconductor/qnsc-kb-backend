@@ -973,8 +973,12 @@ async def request_logging_middleware(request, call_next):
         response.headers["Permissions-Policy"] = (
             "camera=(), microphone=(), geolocation=()"
         )
-        if request.url.path.startswith(settings.API_V1_STR + "/"):
-            # API responses can contain private article and AI content.  Do
+        if (
+            request.url.path.startswith(settings.API_V1_STR + "/")
+            or request.url.path == "/mcp"
+            or request.url.path.startswith("/mcp/")
+        ):
+            # API and MCP responses can contain private article and AI content. Do
             # not let browsers or shared proxies retain them after logout.
             response.headers["Cache-Control"] = "no-store, private"
         if settings.ENVIRONMENT.lower() in {"production", "prod"}:
@@ -1042,6 +1046,10 @@ app.include_router(
 )
 if settings.MCP_ENABLED:
     app.include_router(mcp.router, prefix=f"{settings.API_V1_STR}/mcp", tags=["mcp"])
+    # MCP-PLAN §12: the API process serves `/mcp` like any other path, so the edge's
+    # Access application is scoped to `/mcp` exactly as it is for rova. The versioned
+    # path stays for existing clients.
+    app.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
     app.include_router(
         mcp_config.router, prefix=f"{settings.API_V1_STR}/mcp-config", tags=["mcp"]
     )

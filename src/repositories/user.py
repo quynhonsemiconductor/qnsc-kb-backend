@@ -1,11 +1,20 @@
 import uuid
 from typing import Sequence
-from sqlalchemy import select, and_, false
+from sqlalchemy import select, and_, false, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from src.models.user import User, Department, DepartmentManager
 from src.models.rbac import Role, RolePermission
 from src.domain.rbac import AuthorizationService
+
+
+class AmbiguousEmailError(ValueError):
+    """More than one account matches the same address case-insensitively.
+
+    Raised instead of letting SQLAlchemy's ``MultipleResultsFound`` escape: an Access
+    token can only be mapped to one person, and a data collision must be an explicit,
+    logged refusal rather than an opaque 500 from the ORM.
+    """
 
 
 class UserRepository:
@@ -70,10 +79,9 @@ class UserRepository:
         result = await self.db.execute(stmt)
         return result.scalars().all()
 
-    async def get_by_email(self, email: str) -> User | None:
-        result = await self.db.execute(
+    def _user_select(self):
+        return (
             select(User)
-            .where(User.email == email)
             .options(selectinload(User.departments))
             .options(
                 selectinload(User.department_ownerships).selectinload(
@@ -86,7 +94,45 @@ class UserRepository:
                 .selectinload(RolePermission.permission)
             )
         )
-        return result.scalar_one_or_none()
+
+    async def get_by_email(self, email: str) -> User | None:
+        """Find one account by address, deterministically.
+
+        The exact comparison runs first, so a normal lower-case row uses the unique index
+        and wins even if a differently-cased duplicate exists. Only a miss falls back to
+        ``lower(email)``; if that finds more than one row the lookup fails explicitly.
+        """
+        raw = email.strip()
+        normalized = raw.lower()
+        # Prefer the address exactly as given (so an exact mixed-case row wins), then the
+        # normalised form, before the case-insensitive fallback.
+        for candidate in dict.fromkeys((raw, normalized)):
+            if not candidate:
+                continue
+            exact = (
+                await self.db.execute(
+                    self._user_select().where(User.email == candidate)
+                )
+            ).scalar_one_or_none()
+            if exact is not None:
+                return exact
+
+        matches = (
+            (
+                await self.db.execute(
+                    self._user_select()
+                    .where(func.lower(User.email) == normalized)
+                    .limit(2)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(matches) > 1:
+            raise AmbiguousEmailError(
+                "more than one account matches this email case-insensitively"
+            )
+        return matches[0] if matches else None
 
     async def create(self, user: User) -> User:
         self.db.add(user)

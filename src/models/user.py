@@ -116,6 +116,12 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Incrementing this invalidates every signed access/refresh token issued
     # before a password or account-security change.
     auth_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: The first Cloudflare Access `sub` seen for this account. It binds the account to one
+    #: Access identity, so a reassigned mailbox cannot inherit it through the email
+    #: fallback. NULL until the first Access login; an administrator clears it to rebind.
+    access_subject: Mapped[str | None] = mapped_column(
+        String(255), unique=True, index=True, nullable=True
+    )
 
     departments: Mapped[list[Department]] = relationship(
         "Department",
