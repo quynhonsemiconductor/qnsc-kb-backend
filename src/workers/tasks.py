@@ -9,10 +9,12 @@ from sqlalchemy import (
     JSON,
     DateTime,
     Uuid,
+    and_,
     delete,
     exists,
     func,
     literal,
+    or_,
     select,
     update,
 )
@@ -35,20 +37,24 @@ from src.core.config import settings
 from src.services import email as email_service
 from src.models.ops import (
     ApiRequestMetric,
-    OutboxEvent,
-    IndexReprocessJob,
-    NotificationQueue,
     ConnectorJob,
     Connector,
+    DeadLetterJob,
+    IndexReprocessJob,
+    NotificationQueue,
+    OutboxEvent,
+    SearchLog,
 )
-from src.models.connectors import SyncRequest
+from src.models.access_token import PersonalAccessToken
+from src.models.connectors import ConnectorNotification, SyncError, SyncRequest
+from src.models.sessions import PasswordResetToken, RefreshSession
 from src.domain.connector_providers import (
     REMOTE_PROVIDERS,
     cursor_type as provider_cursor_type,
 )
-from src.models.governance import PendingDraft
+from src.models.governance import AuditLog, PendingDraft
 from src.models.user import User
-from src.models.ai import AiCache
+from src.models.ai import AiCache, AiUsageLog
 from src.workers.loop import reset_worker_loop, sync_run
 
 logger = structlog.get_logger()
@@ -290,26 +296,117 @@ def prune_operational_metrics() -> None:
             )
             async with factory() as db:
                 await set_database_context(db, None, True)
-                cutoff = datetime.utcnow() - timedelta(
-                    days=settings.METRICS_RETENTION_DAYS
+                now = datetime.utcnow()
+                metrics_cutoff = now - timedelta(days=settings.METRICS_RETENTION_DAYS)
+                telemetry_cutoff = now - timedelta(
+                    days=settings.RETENTION_TELEMETRY_DAYS
                 )
-                metrics_removed = await prune_batched(
-                    db,
-                    ApiRequestMetric.__table__,
-                    ApiRequestMetric.created_at < cutoff,
+                audit_cutoff = now - timedelta(days=settings.RETENTION_AUDIT_DAYS)
+                credential_cutoff = now - timedelta(
+                    days=settings.RETENTION_SESSION_GRACE_DAYS
                 )
-                # Cache answers can contain authorized document passages. Their
-                # six-hour expiry must remove storage as well as disable reads.
-                cache_removed = await prune_batched(
-                    db,
-                    AiCache.__table__,
-                    AiCache.expires_at < datetime.utcnow(),
+                outbox_cutoff = now - timedelta(days=settings.RETENTION_OUTBOX_DAYS)
+                notification_cutoff = now - timedelta(
+                    days=settings.RETENTION_NOTIFICATION_DAYS
                 )
-            logger.info(
-                "Operational retention sweep completed",
-                api_request_metrics_deleted=metrics_removed,
-                ai_cache_deleted=cache_removed,
-            )
+                connector_cutoff = now - timedelta(
+                    days=settings.RETENTION_CONNECTOR_DAYS
+                )
+
+                targets = [
+                    (
+                        "api_request_metrics",
+                        ApiRequestMetric.__table__,
+                        ApiRequestMetric.created_at < metrics_cutoff,
+                    ),
+                    # Cache answers can contain authorized document passages. Their
+                    # expiry must remove storage as well as disable reads.
+                    ("ai_cache", AiCache.__table__, AiCache.expires_at < now),
+                    # Security audit: one year, never less than RETENTION_AUDIT_DAYS.
+                    (
+                        "audit_logs",
+                        AuditLog.__table__,
+                        AuditLog.created_at < audit_cutoff,
+                    ),
+                    # AI/search telemetry can contain question text; keep 90 days.
+                    (
+                        "ai_usage_logs",
+                        AiUsageLog.__table__,
+                        AiUsageLog.created_at < telemetry_cutoff,
+                    ),
+                    (
+                        "search_logs",
+                        SearchLog.__table__,
+                        SearchLog.created_at < telemetry_cutoff,
+                    ),
+                    # Expired credentials: expiry + 7 days. Revoked tokens are also
+                    # removable after the same grace, without waiting for their expiry.
+                    (
+                        "refresh_sessions",
+                        RefreshSession.__table__,
+                        RefreshSession.expires_at < credential_cutoff,
+                    ),
+                    (
+                        "personal_access_tokens",
+                        PersonalAccessToken.__table__,
+                        or_(
+                            PersonalAccessToken.expires_at < credential_cutoff,
+                            PersonalAccessToken.revoked_at < credential_cutoff,
+                        ),
+                    ),
+                    (
+                        "password_reset_tokens",
+                        PasswordResetToken.__table__,
+                        PasswordResetToken.expires_at < credential_cutoff,
+                    ),
+                    # Terminal work only: a pending or running row is never deleted by age.
+                    (
+                        "outbox_events",
+                        OutboxEvent.__table__,
+                        and_(
+                            OutboxEvent.status.in_(["completed", "dead"]),
+                            OutboxEvent.created_at < outbox_cutoff,
+                        ),
+                    ),
+                    (
+                        "notification_queue",
+                        NotificationQueue.__table__,
+                        and_(
+                            NotificationQueue.status.in_(["sent", "dead"]),
+                            NotificationQueue.created_at < notification_cutoff,
+                        ),
+                    ),
+                    (
+                        "connector_jobs",
+                        ConnectorJob.__table__,
+                        and_(
+                            ConnectorJob.status.in_(["completed", "failed"]),
+                            ConnectorJob.created_at < connector_cutoff,
+                        ),
+                    ),
+                    (
+                        "sync_errors",
+                        SyncError.__table__,
+                        SyncError.created_at < connector_cutoff,
+                    ),
+                    (
+                        "dead_letter_jobs",
+                        DeadLetterJob.__table__,
+                        DeadLetterJob.failed_at < connector_cutoff,
+                    ),
+                    (
+                        "connector_notifications",
+                        ConnectorNotification.__table__,
+                        and_(
+                            ConnectorNotification.status == "processed",
+                            ConnectorNotification.received_at < connector_cutoff,
+                        ),
+                    ),
+                ]
+                removed: dict[str, int] = {}
+                for label, table, predicate in targets:
+                    removed[label] = await prune_batched(db, table, predicate)
+            logger.info("Operational retention sweep completed", deleted=removed)
         finally:
             await prune_engine.dispose()
 
@@ -780,7 +877,7 @@ async def _run_orphan_source_cleanup() -> int:
     from src.domain.source_storage import delete_source, list_source_objects
     from src.models.article import DocumentSource
     from src.models.connectors import DocumentVersion
-    from src.models.governance import PendingDraft
+    from src.models.governance import AuditLog, PendingDraft
 
     if not settings.SOURCE_STORAGE_BUCKET:
         logger.warning("Skipping R2 orphan sweep because no bucket is configured")

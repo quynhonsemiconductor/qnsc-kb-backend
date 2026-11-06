@@ -288,6 +288,7 @@ class ConflictRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class AuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
 
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True

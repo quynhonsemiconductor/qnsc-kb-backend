@@ -138,6 +138,11 @@ class NotificationQueue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "created_at",
             postgresql_where=text("type = 'email' AND status IN ('pending', 'failed')"),
         ),
+        Index(
+            "ix_notification_queue_terminal_created",
+            "created_at",
+            postgresql_where=text("status IN ('sent', 'dead')"),
+        ),
     )
 
 
@@ -152,6 +157,13 @@ class DeadLetterJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "outbox_events"
+    __table_args__ = (
+        Index(
+            "ix_outbox_events_terminal_created",
+            "created_at",
+            postgresql_where=text("status IN ('completed', 'dead')"),
+        ),
+    )
 
     event_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -167,6 +179,7 @@ class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class SearchLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "search_logs"
+    __table_args__ = (Index("ix_search_logs_created_at", "created_at"),)
 
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True

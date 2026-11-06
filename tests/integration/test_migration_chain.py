@@ -19,5 +19,6 @@ def test_migrations_have_one_current_head():
     # the chain built.
     # Bumped for 20261104_93, which retypes the lessons assistants already saved to LESSON.
     # Bumped for 20261106_94, which binds a user to the first Cloudflare Access sub,
-    # and 20261106_95, the lower(email) expression index for that lookup.
-    assert script.get_heads() == ["20261106_95"]
+    # 20261106_95, the lower(email) expression index for that lookup, and 20261106_96,
+    # the indexes the scheduled retention sweep uses.
+    assert script.get_heads() == ["20261106_96"]
