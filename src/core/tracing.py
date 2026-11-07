@@ -19,6 +19,10 @@ _provider: Any = None
 
 def configure_tracing() -> None:
     global _provider
+    if _provider is not None:
+        # Idempotent: the worker calls it from worker_process_init and again from
+        # task_prerun for a solo pool; a second provider would duplicate every span.
+        return
     endpoint = signal_endpoint("traces")
     # The same switch the metrics half honours: OTEL_ENABLED=false silences ALL
     # telemetry, not only the metrics that had no gate before.

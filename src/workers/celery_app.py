@@ -4,6 +4,7 @@ import time
 from celery import Celery
 from celery.schedules import crontab
 from celery.signals import (
+    task_failure,
     task_postrun,
     task_prerun,
     worker_process_init,
@@ -11,11 +12,15 @@ from celery.signals import (
 )
 from src.core import otel_metrics
 from src.core.config import settings
+from src.core.tracing import configure_tracing, get_tracer, shutdown_tracing
 from src.lib import log_redaction
+from src.lib.observability import setup_logging
 
-# The worker never calls setup_logging(), and it is the process that downloads from SharePoint/OneDrive:
-# a pre-authenticated download URL (`tempauth=...`) is a bearer credential and was being logged in full by
-# httpx's INFO line. Applies to the worker, beat and anything that imports this module.
+# Applied at import for the worker, beat and anything else that imports this module: the worker is
+# the process that downloads from SharePoint/OneDrive, and a pre-authenticated download URL
+# (`tempauth=...`) is a bearer credential that httpx's INFO line logged in full. setup_logging()
+# (worker_process_init / task_prerun) installs the same redactor plus the JSON renderer and
+# trace_id processor; this early install covers logs emitted before the first task.
 log_redaction.install()
 
 celery_app = Celery(
@@ -189,25 +194,79 @@ celery_app.conf.update(
 # kb's deployments use the Dockerfile's prefork `--concurrency=1`; the fallback
 # means a solo-pool dev/local run still reports instead of silently no-op'ing.
 _task_started_at: dict[str, float] = {}
+#: setup_logging() is process-wide and idempotent only by this flag; calling it per
+#: task would rebuild the chain each time. Tracing has its own idempotence.
+_worker_logging_ready = False
+#: Active span context managers keyed by Celery task id; task_postrun ends them.
+_task_spans: dict[str, tuple[object, object]] = {}
+
+
+def _ensure_worker_logging() -> None:
+    global _worker_logging_ready
+    configure_tracing()
+    if _worker_logging_ready:
+        return
+    setup_logging()
+    _worker_logging_ready = True
 
 
 @worker_process_init.connect
 def _init_worker_metrics(**_kwargs: object) -> None:
     otel_metrics.configure_metrics(process_instance_id=True)
+    # Tracing is configured in the CHILD for the same fork reason as metrics, and
+    # setup_logging installs the trace_id/span_id processor the worker never had.
+    _ensure_worker_logging()
 
 
 @worker_process_shutdown.connect
 def _flush_worker_metrics(**_kwargs: object) -> None:
+    for context, _span in list(_task_spans.values()):
+        context.__exit__(None, None, None)  # type: ignore[attr-defined]
+    _task_spans.clear()
     otel_metrics.shutdown_metrics()
+    shutdown_tracing()
 
 
 @task_prerun.connect
-def _task_started(task_id: str | None = None, **_kwargs: object) -> None:
+def _task_started(
+    task_id: str | None = None, task: object = None, **_kwargs: object
+) -> None:
     # Idempotent: covers --pool=solo (and any pool where the init signal did
     # not fire for this process) without creating a second provider.
     otel_metrics.configure_metrics(process_instance_id=True)
+    _ensure_worker_logging()
     if task_id:
         _task_started_at[task_id] = time.monotonic()
+        tracer = get_tracer()
+        if tracer is not None:
+            context = tracer.start_as_current_span(getattr(task, "name", "celery.task"))
+            span = context.__enter__()
+            _task_spans[task_id] = (context, span)
+
+
+@task_failure.connect
+def _task_failed(
+    task_id: str | None = None,
+    exception: BaseException | None = None,
+    **_kwargs: object,
+) -> None:
+    """Mark the task's span ERROR and record the exception before postrun closes it."""
+    entry = _task_spans.get(task_id) if task_id else None
+    if entry is None:
+        return
+    _context, span = entry
+    from src.core.tracing import trace as otel_trace
+
+    record = getattr(span, "record_exception", None)
+    if callable(record) and exception is not None:
+        record(exception)
+    set_status = getattr(span, "set_status", None)
+    if callable(set_status) and otel_trace is not None:
+        set_status(
+            otel_trace.Status(
+                otel_trace.StatusCode.ERROR, str(exception) if exception else "failed"
+            )
+        )
 
 
 @task_postrun.connect
@@ -215,8 +274,11 @@ def _task_finished(
     sender: object = None,
     task_id: str | None = None,
     state: str | None = None,
-    **_kwargs: object
+    **_kwargs: object,
 ) -> None:
+    context = _task_spans.pop(task_id, None) if task_id else None
+    if context is not None:
+        context[0].__exit__(None, None, None)  # type: ignore[attr-defined]
     started = _task_started_at.pop(task_id, None) if task_id else None
     if started is None:
         return
