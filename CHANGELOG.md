@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.5](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.4...v0.1.5) (2026-11-07)
+
+
+### ✨ Features
+
+* **mcp:** add section and source read tools, pin the tool budget ([#389](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/389)) ([84fa2ea](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/84fa2ea58bb63a41f004ba0fb5011fa1dae45229))
+* **retention:** bound the KB's append-only tables with a daily sweep ([#391](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/391)) ([430ae30](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/430ae30e468d0e49e836f10b006f18bf5aad8740))
+* **worker:** enable tracing and trace_id/span_id on JSON logs ([#393](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/393)) ([3ad97b9](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/3ad97b9b5ab6ee089ca84fe71e5115b60502f775))
+
+
+### 🐛 Bug Fixes
+
+* **browse:** the department column stays switchable after picking one ([#387](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/387)) ([2fd2b12](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/2fd2b12271fdff22596d1cbabca7bfdc1fd56a40))
+* **logging:** compact JSON so Loki links trace_id to Tempo ([#394](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/394)) ([0f4fdb7](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/0f4fdb76d30079cd459c6efda921bd769d083679))
+* **mcp:** rotation refresh, deterministic email lookup, real bind race guard ([#390](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/390)) ([4be7929](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/4be7929500ce4adb0b571e4f1f2d04a933be77be))
+* **release:** let release-please title the release PR with its version ([#396](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/396)) ([c7d9fa9](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/c7d9fa95459f5b1232224697dc58c73477ee2fa3))
+* **retention:** dry-run must not stop the pre-existing metrics/cache cleanup ([#392](https://github.com/quynhonsemiconductor/qnsc-kb-backend/issues/392)) ([d9d0328](https://github.com/quynhonsemiconductor/qnsc-kb-backend/commit/d9d032896632d7979055a1cd89818e7583e18f0b))
+
 ## [0.1.4](https://github.com/quynhonsemiconductor/qnsc-kb-backend/compare/v0.1.3...v0.1.4) (2026-11-05)
 
 
