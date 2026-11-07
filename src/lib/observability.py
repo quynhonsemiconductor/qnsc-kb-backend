@@ -42,7 +42,10 @@ def setup_logging():
             # LAST before the renderer: after contextvars are merged and the traceback is text, so both are
             # redacted. Placed first, it never saw either.
             structlog_processor,
-            structlog.processors.JSONRenderer(),
+            # Compact separators, like rova/opshub (pino): `"trace_id":"<hex>"` with no space.
+            # Grafana Cloud's provisioned Loki derived field (read-only, not ours to edit)
+            # matches `trace_id"?[:=]"?(\w+)`, so a space after the colon broke log → trace links.
+            structlog.processors.JSONRenderer(separators=(",", ":")),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         logger_factory=structlog.PrintLoggerFactory(),
